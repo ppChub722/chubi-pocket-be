@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/ppChub722/finna-bbear-be/internal/modules/accounting"
 	"github.com/ppChub722/finna-bbear-be/internal/modules/auth"
 	"github.com/ppChub722/finna-bbear-be/internal/platform/config"
 	"github.com/ppChub722/finna-bbear-be/internal/platform/database"
@@ -51,6 +52,10 @@ func main() {
 	authStore := auth.NewStore(dbPool)
 	authService := auth.NewService(authStore, cfg)
 	authHandler := auth.NewHandler(authService)
+	// Accounting Module
+	acctStore := accounting.NewStore(dbPool)
+	acctService := accounting.NewService(acctStore)
+	acctHandler := accounting.NewHandler(acctService)
 
 	// 5. Setup Router
 	if cfg.App.Env == "production" {
@@ -86,6 +91,17 @@ func main() {
 				username, _ := c.Get("username")
 				c.JSON(http.StatusOK, gin.H{"message": "Authorized", "user_id": userID, "username": username})
 			})
+			// Accounts
+			protected.POST("/accounts", acctHandler.CreateAccount)
+			protected.GET("/accounts", acctHandler.GetAccounts)
+
+			// Categories
+			protected.POST("/categories", acctHandler.CreateCategory)
+			protected.GET("/categories", acctHandler.GetCategories)
+
+			// Transactions
+			protected.POST("/transactions", acctHandler.CreateTransaction)
+			protected.GET("/transactions", acctHandler.GetTransactions)
 		}
 	}
 
