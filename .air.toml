@@ -1,0 +1,33 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  # 1. The command to build your app
+  # We output to ./tmp/main.exe because you are on Windows
+  cmd = "go build -o ./tmp/main.exe ./cmd/api/main.go"
+
+  # 2. The binary file to run after build
+  bin = "./tmp/main.exe"
+
+  # 3. Watch these file extensions (Restart if these change)
+  include_ext = ["go", "tpl", "tmpl", "html", "env"]
+
+  # 4. Ignore these folders (Don't restart for these)
+  exclude_dir = ["assets", "tmp", "vendor", "docs", "migrations"]
+
+  # 5. Delay to prevent rapid restarts (in milliseconds)
+  delay = 1000
+
+  # 6. Stop the old process when restarting
+  stop_on_error = true
+
+[log]
+  # Show logs nicely
+  time = true
+
+[color]
+  # Terminal colors
+  main = "magenta"
+  watcher = "cyan"
+  build = "yellow"
+  runner = "green"

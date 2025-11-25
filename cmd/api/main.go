@@ -3,80 +3,93 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/ppChub722/finna-bbear-be/internal/auth"
-	"github.com/ppChub722/finna-bbear-be/internal/config"
-	"github.com/ppChub722/finna-bbear-be/internal/store"
+
+	"github.com/ppChub722/finna-bbear-be/internal/modules/auth"
+	"github.com/ppChub722/finna-bbear-be/internal/platform/config"
+	"github.com/ppChub722/finna-bbear-be/internal/platform/database"
+	"github.com/ppChub722/finna-bbear-be/internal/platform/logger"
 )
 
 func main() {
-	fmt.Println("🐻 FinaBBear is waking up...")
-
-	// 1. Load Configuration
+	// 1. Load Config
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("❌ Failed to load configuration: %v\n", err)
+		panic(fmt.Errorf("failed to load config: %w", err))
 	}
-	fmt.Printf("✅ Configuration loaded (Environment: %s)\n", cfg.App.Env)
 
-	// 2. Connect to Database
-	dbpool, err := pgxpool.New(context.Background(), cfg.GetDatabaseURL())
+	// 2. Initialize Logger
+	log := logger.New(cfg.App.Env)
+
+	// ---------------------------------------------------------
+	// ✨ PRETTY STARTUP BANNER
+	// ---------------------------------------------------------
+	log.Info("🐻 FinaBBear Backend Starting...")
+	log.Info("------------------------------------------------")
+	log.Info("Configuration Loaded",
+		"App Name", cfg.App.Name,
+		"Environment", cfg.App.Env,
+		"Port", cfg.App.Port,
+	)
+	log.Info("------------------------------------------------")
+
+	// 3. Connect to Database (Logs are handled inside database.New)
+	dbPool, err := database.New(cfg.GetDatabaseURL(), log)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Unable to connect to database: %v\n", err)
+		log.Error("❌ Failed to connect to database", "error", err)
 		os.Exit(1)
 	}
-	defer dbpool.Close()
+	defer dbPool.Close()
 
-	if err := dbpool.Ping(context.Background()); err != nil {
-		log.Fatal("❌ Failed to ping database:", err)
-	}
-	fmt.Printf("✅ Database connected successfully! (%s:%s/%s)\n", 
-		cfg.Database.Host, cfg.Database.Port, cfg.Database.DBName)
+	// 4. Initialize Modules
+	authStore := auth.NewStore(dbPool)
+	authService := auth.NewService(authStore, cfg)
+	authHandler := auth.NewHandler(authService)
 
-	store := store.New(dbpool)
-	authHandler := auth.New(store, cfg)
-
-	// 3. Set up Gin Server
-	// Set Gin mode based on environment
+	// 5. Setup Router
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
+	} else {
+		// Optional: Hide the noisy [GIN-debug] startup logs if you want
+		// gin.SetMode(gin.ReleaseMode) 
 	}
+
+	r := gin.New()
 	
-	r := gin.Default()
+	// ✅ USE OUR CUSTOM LOGGER instead of gin.Logger()
+	r.Use(logger.GinLoggerMiddleware(log)) 
+	r.Use(gin.Recovery())
 
-	// Health check endpoint
-	r.GET("/ping", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "pong (FinaBBear is ready!)",
-			"app":     cfg.App.Name,
-			"env":     cfg.App.Env,
-		})
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "up", "db": "connected"})
 	})
 
-	// API info endpoint
-	r.GET("/", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"app":     cfg.App.Name,
-			"version": "1.0.0",
-			"status":  "running",
-		})
-	})
-
-	authRoutes := r.Group("/auth")
+	api := r.Group("/api/v1")
 	{
-		authRoutes.POST("/register", authHandler.Register)
-		authRoutes.POST("/login", authHandler.Login)
-		authRoutes.POST("/logout", authHandler.Logout)
+		authRoutes := api.Group("/auth")
+		{
+			authRoutes.POST("/register", authHandler.Register)
+			authRoutes.POST("/login", authHandler.Login)
+		}
+
+		protected := api.Group("/")
+		protected.Use(auth.Middleware(cfg))
+		{
+			protected.GET("/me", func(c *gin.Context) {
+				userID, _ := c.Get("userID")
+				username, _ := c.Get("username")
+				c.JSON(http.StatusOK, gin.H{"message": "Authorized", "user_id": userID, "username": username})
+			})
+		}
 	}
 
-    // (Future API routes will go here)
-
-	// 4. Start Server with configured timeouts
+	// 6. Start Server
 	server := &http.Server{
 		Addr:         ":" + cfg.App.Port,
 		Handler:      r,
@@ -85,10 +98,25 @@ func main() {
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
-	fmt.Printf("🚀 Server is running on http://localhost:%s\n", cfg.App.Port)
-	fmt.Printf("📚 API Documentation: http://localhost:%s/\n", cfg.App.Port)
-	
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal("❌ Failed to start server:", err)
+	shutdownCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		log.Info("🚀 Server is ready to handle requests", "url", "http://localhost:"+cfg.App.Port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("Server startup failed", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-shutdownCtx.Done()
+	log.Info("🛑 Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Error("Server forced to shutdown", "error", err)
 	}
+	log.Info("✅ Server exited successfully")
 }

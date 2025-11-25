@@ -1,290 +1,88 @@
-# finna-bbear-be
+# 🐻 FinaBBear Backend
 
-🐻 **FinaBBear Backend** - Personal Finance Management API
+FinaBBear is a Finance/Accounting application backend built with **Go (Golang)** and **Gin**. It features a **Modular Monolith** architecture, separating infrastructure ("Platform") from features ("Modules") like Authentication.
 
-> A comprehensive personal finance management system built with Go, PostgreSQL, and Gin framework.
+---
 
-## 📚 Documentation
+## 🚀 Quick Start Guide
 
-- **[Quick Reference](./QUICK-REFERENCE.md)** ⚡ - One-page cheat sheet for common commands and patterns
-  - Quick commands for development
-  - Common code patterns
-  - Troubleshooting quick fixes
+Follow these steps to get the server running locally.
 
-- **[Developer Guide](./DEVELOPER-GUIDE.md)** 👨‍💻 - Complete development guide including:
-  - Project structure explanation
-  - How to create new modules
-  - Running locally
-  - Database connection guide
-  - Best practices and troubleshooting
+### 1. Database Setup
+You need a PostgreSQL database running. We use Docker for this.
+* 👉 **[Read the Database Setup Guide](docs/SETUP_LOCAL_DB.md)**
+* *Includes scripts to start Postgres, create the user/db, and run migrations.*
 
-- **[Deployment Guide](./DEPLOYMENT-GUIDE.md)** 🚀 - Production deployment instructions:
-  - Docker deployment
-  - Traditional server setup
-  - Cloud platform deployment
-  - Security hardening
-  - Monitoring and backups
+### 2. Configuration
+Create a `.env` file in the root directory with your passwords and settings.
+* 👉 **[Read the Configuration Guide](docs/SETUP_CONFIGURATION.md)**
+* 📄 **[View Example Environment File](docs/env.example)**
 
-## Prerequisites
-
-- Go 1.25.3+
-- PostgreSQL 18
-- golang-migrate CLI
-
-## Installation
-
-### 1. Install golang-migrate
+### 3. Run the Server
+Once the Database is up and `.env` is created:
 
 ```bash
-go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
-```
+# 1. Download dependencies
+go mod tidy
 
-Make sure `$GOPATH/bin` is in your PATH.
-
-### 2. Set Up Environment Variables
-
-**On Windows:**
-```cmd
-setup-env.bat
-```
-
-**On Linux/Mac:**
-```bash
-./setup-env.sh
-```
-
-This will create a `.env` file from the template. Edit `.env` and update your configuration:
-
-```env
-# Database Configuration
-DB_HOST=localhost
-DB_PORT=5432
-DB_USER=chubadmin
-DB_PASSWORD=admin1234
-DB_NAME=finna_bbear_db
-
-# JWT Secret (CHANGE THIS!)
-JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
-
-# App Configuration
-APP_PORT=8080
-APP_ENV=development
-```
-
-**⚠️ IMPORTANT:** Never commit `.env` file to git! It contains sensitive information.
-
-### 3. Database Setup
-
-Create the database and user:
-
-```sql
-CREATE DATABASE finna_bbear_db;
-CREATE USER chubadmin WITH PASSWORD 'admin1234';
-GRANT ALL PRIVILEGES ON DATABASE finna_bbear_db TO chubadmin;
--- Connect to the database first
-\c finna_bbear_db
-GRANT ALL ON SCHEMA public TO chubadmin;
-```
-
-### 4. Run Migrations
-
-**On Windows:**
-```cmd
-migrate.bat up
-```
-
-**On Linux/Mac:**
-```bash
-make migrate-up
-```
-
-**Or manually:**
-```bash
-migrate -path migrations -database "postgres://chubadmin:admin1234@localhost:5432/finna_bbear_db?sslmode=disable" up
-```
-
-## Running the Application
-
-**On Windows:**
-```cmd
-run.bat
-```
-
-**On Linux/Mac:**
-```bash
-make run
-```
-
-**Or directly:**
-```bash
+# 2. Run the API
 go run cmd/api/main.go
 ```
 
-The server will start on `http://localhost:8080` (or the port specified in `.env`)
+The server will start at: `http://localhost:8080` (or the port defined in your .env).
 
-## Configuration
+-----
 
-All configuration is managed through environment variables. See `env.example` for all available options:
+## 📚 Developer Documentation
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `APP_NAME` | Application name | FinaBBear |
-| `APP_ENV` | Environment (development/production) | development |
-| `APP_PORT` | Server port | 8080 |
-| `DB_HOST` | Database host | localhost |
-| `DB_PORT` | Database port | 5432 |
-| `DB_USER` | Database user | chubadmin |
-| `DB_PASSWORD` | Database password | admin1234 |
-| `DB_NAME` | Database name | finna_bbear_db |
-| `DB_SSLMODE` | SSL mode | disable |
-| `JWT_SECRET` | JWT signing secret | *must be changed* |
-| `JWT_EXPIRATION_HOURS` | JWT token expiration | 24 |
-| `SERVER_READ_TIMEOUT` | HTTP read timeout (seconds) | 10 |
-| `SERVER_WRITE_TIMEOUT` | HTTP write timeout (seconds) | 10 |
-| `SERVER_IDLE_TIMEOUT` | HTTP idle timeout (seconds) | 120 |
-| `LOG_LEVEL` | Logging level | debug |
+We have detailed guides to help you understand the codebase:
 
-## API Endpoints
+| Topic | Description |
+| :--- | :--- |
+| **[Project Structure](https://www.google.com/search?q=docs/PROJECT_STRUCTURE.md)** | Explains the folder layout (`internal/`, `cmd/`, `platform/`) and architecture. |
+| **[Auth Module Guide](https://www.google.com/search?q=docs/GUIDE_AUTH_MODULE.md)** | Step-by-step tutorial on how we built the Login/Register system. |
+| **[Setup Local DB](https://www.google.com/search?q=docs/SETUP_LOCAL_DB.md)** | Instructions for Docker, Postgres, and Migrations. |
+| **[Setup Config](https://www.google.com/search?q=docs/SETUP_CONFIGURATION.md)** | How environment variables and the config loader work. |
 
-- `GET /` - API information and status
-- `GET /ping` - Health check endpoint
+-----
 
-**Example Response:**
-```json
-{
-  "app": "FinaBBear",
-  "version": "1.0.0",
-  "status": "running"
-}
+## 🛠️ Tech Stack
+
+  * **Language:** Go (1.23+)
+  * **Framework:** Gin (HTTP Web Framework)
+  * **Database:** PostgreSQL 15+
+  * **Driver:** pgx/v5 (Connection Pool)
+  * **Authentication:** JWT (JSON Web Tokens)
+  * **Security:** bcrypt (Password Hashing)
+  * **Migrations:** golang-migrate
+  * **Logging:** slog (Structured Logging)
+
+-----
+
+## 🔌 API Endpoints
+
+### 🔐 Auth Module
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/api/v1/auth/register` | Create a new user account. |
+| `POST` | `/api/v1/auth/login` | Login and receive a Bearer Token. |
+
+*(More feature modules like Accounting and Wallets will be added here...)*
+
+-----
+
+## 📂 Folder Overview
+
+```text
+.
+├── cmd/api/            # Application entry point (main.go)
+├── docs/               # Documentation & Setup Guides
+├── internal/
+│   ├── modules/        # Feature Modules (Auth, Accounting, etc.)
+│   └── platform/       # Core Infrastructure (Database, Logger, Config)
+├── migrations/         # SQL Migration files
+├── .env                # Local secrets (Not in Git)
+├── go.mod              # Dependencies
+└── README.md           # This file
 ```
-
-## Database Schema
-
-The application includes 13 tables across 5 modules:
-
-### Module 1: Core Accounting
-- `users` - User authentication and profiles
-- `accounts` - Financial accounts (bank, cash, credit cards, etc.)
-- `categories` - Transaction categories
-- `transactions` - All financial transactions
-
-### Module 2: Fast Input
-- `pending_transactions` - Transactions awaiting confirmation
-
-### Module 3: Social Splitting
-- `connections` - User connections for expense sharing
-- `projects` - Shared expense projects
-- `shared_expenses` - Expenses split among users
-- `expense_splits` - Individual split amounts
-
-### Module 4: Forecasting & Planning
-- `budgets` - Budget allocations by category
-- `recurring_transactions` - Scheduled recurring transactions
-
-### Module 5: Loan Management
-- `loans` - Loan information and tracking
-- `loan_payments` - Individual loan payment records
-
-## Available Commands
-
-### Windows (Batch Scripts)
-- `run.bat` - Run the application
-- `migrate.bat up` - Run database migrations
-- `migrate.bat down` - Rollback last migration
-- `migrate.bat status` - Check current migration version
-- `migrate.bat force 1` - Force specific migration version
-
-### Linux/Mac (Makefile)
-- `make run` - Run the application
-- `make migrate-up` - Run database migrations
-- `make migrate-down` - Rollback last migration
-- `make db-status` - Check current migration version
-- `make migrate-force V=1` - Force specific migration version
-
-## Troubleshooting
-
-### Tables not created?
-
-If tables aren't being created automatically, run:
-
-**Windows:**
-```cmd
-migrate.bat up
-```
-
-**Linux/Mac:**
-```bash
-make migrate-up
-```
-
-### Migration stuck in dirty state?
-
-**Windows:**
-```cmd
-migrate.bat force 1
-migrate.bat up
-```
-
-**Linux/Mac:**
-```bash
-make migrate-force V=1
-make migrate-up
-```
-
-### Check current database state
-
-**Windows:**
-```cmd
-migrate.bat status
-```
-
-**Linux/Mac:**
-```bash
-make db-status
-```
-
----
-
-## 📖 Quick Links
-
-### For Developers
-- **Getting Started:** See [Developer Guide - Getting Started](./DEVELOPER-GUIDE.md#getting-started)
-- **Create New Module:** See [Developer Guide - Creating New Modules](./DEVELOPER-GUIDE.md#creating-new-modules)
-- **Folder Structure:** See [Developer Guide - Folder Structure Explained](./DEVELOPER-GUIDE.md#folder-structure-explained)
-- **Common Tasks:** See [Developer Guide - Common Tasks](./DEVELOPER-GUIDE.md#common-tasks)
-
-### For Deployment
-- **Docker Deployment:** See [Deployment Guide - Docker](./DEPLOYMENT-GUIDE.md#docker-deployment)
-- **Server Deployment:** See [Deployment Guide - Traditional Server](./DEPLOYMENT-GUIDE.md#traditional-server-deployment)
-- **Security:** See [Deployment Guide - Security Hardening](./DEPLOYMENT-GUIDE.md#security-hardening)
-- **Monitoring:** See [Deployment Guide - Monitoring & Logging](./DEPLOYMENT-GUIDE.md#monitoring--logging)
-
----
-
-## 🎯 Quick Start Summary
-
-```bash
-# 1. Clone repository
-git clone https://github.com/ppChub722/finna-bbear-be.git
-cd finna-bbear-be
-
-# 2. Setup environment
-setup-env.bat  # Windows
-# or
-./setup-env.sh  # Linux/Mac
-
-# 3. Install dependencies
-go mod download
-
-# 4. Run migrations
-migrate.bat up  # Windows
-# or
-make migrate-up  # Linux/Mac
-
-# 5. Start server
-run.bat  # Windows
-# or
-make run  # Linux/Mac
-```
-
-Visit: `http://localhost:8080/`
