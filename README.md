@@ -2,6 +2,29 @@
 
 🐻 **FinaBBear Backend** - Personal Finance Management API
 
+> A comprehensive personal finance management system built with Go, PostgreSQL, and Gin framework.
+
+## 📚 Documentation
+
+- **[Quick Reference](./QUICK-REFERENCE.md)** ⚡ - One-page cheat sheet for common commands and patterns
+  - Quick commands for development
+  - Common code patterns
+  - Troubleshooting quick fixes
+
+- **[Developer Guide](./DEVELOPER-GUIDE.md)** 👨‍💻 - Complete development guide including:
+  - Project structure explanation
+  - How to create new modules
+  - Running locally
+  - Database connection guide
+  - Best practices and troubleshooting
+
+- **[Deployment Guide](./DEPLOYMENT-GUIDE.md)** 🚀 - Production deployment instructions:
+  - Docker deployment
+  - Traditional server setup
+  - Cloud platform deployment
+  - Security hardening
+  - Monitoring and backups
+
 ## Prerequisites
 
 - Go 1.25.3+
@@ -219,3 +242,49 @@ migrate.bat status
 ```bash
 make db-status
 ```
+
+---
+
+## 📖 Quick Links
+
+### For Developers
+- **Getting Started:** See [Developer Guide - Getting Started](./DEVELOPER-GUIDE.md#getting-started)
+- **Create New Module:** See [Developer Guide - Creating New Modules](./DEVELOPER-GUIDE.md#creating-new-modules)
+- **Folder Structure:** See [Developer Guide - Folder Structure Explained](./DEVELOPER-GUIDE.md#folder-structure-explained)
+- **Common Tasks:** See [Developer Guide - Common Tasks](./DEVELOPER-GUIDE.md#common-tasks)
+
+### For Deployment
+- **Docker Deployment:** See [Deployment Guide - Docker](./DEPLOYMENT-GUIDE.md#docker-deployment)
+- **Server Deployment:** See [Deployment Guide - Traditional Server](./DEPLOYMENT-GUIDE.md#traditional-server-deployment)
+- **Security:** See [Deployment Guide - Security Hardening](./DEPLOYMENT-GUIDE.md#security-hardening)
+- **Monitoring:** See [Deployment Guide - Monitoring & Logging](./DEPLOYMENT-GUIDE.md#monitoring--logging)
+
+---
+
+## 🎯 Quick Start Summary
+
+```bash
+# 1. Clone repository
+git clone https://github.com/ppChub722/finna-bbear-be.git
+cd finna-bbear-be
+
+# 2. Setup environment
+setup-env.bat  # Windows
+# or
+./setup-env.sh  # Linux/Mac
+
+# 3. Install dependencies
+go mod download
+
+# 4. Run migrations
+migrate.bat up  # Windows
+# or
+make migrate-up  # Linux/Mac
+
+# 5. Start server
+run.bat  # Windows
+# or
+make run  # Linux/Mac
+```
+
+Visit: `http://localhost:8080/`
