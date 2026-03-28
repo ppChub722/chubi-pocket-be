@@ -24,7 +24,6 @@ func NewService(s *Store, c *config.Config) *Service {
 }
 
 // RegisterUser handles hashing password and saving user
-// It returns the generated token and the user data
 func (s *Service) RegisterUser(ctx context.Context, req RegisterRequest) (string, *User, error) {
 	// 1. Hash Password
 	hashedPwd, err := utils.HashPassword(req.Password)
@@ -33,13 +32,12 @@ func (s *Service) RegisterUser(ctx context.Context, req RegisterRequest) (string
 	}
 
 	// 2. Save to DB
-	user, err := s.store.CreateUser(ctx, req.Username, req.Email, hashedPwd)
+	user, err := s.store.CreateUser(ctx, req.Username, req.Email, hashedPwd, req.Currency)
 	if err != nil {
 		return "", nil, err
 	}
 
 	// 3. Generate Token
-	// ✅ FIXED: Added user.Email here!
 	token, err := utils.GenerateToken(user.ID, user.Username, user.Email, s.cfg.JWT.Secret, s.cfg.JWT.ExpirationTime)
 	if err != nil {
 		return "", nil, err
@@ -62,12 +60,11 @@ func (s *Service) LoginUser(ctx context.Context, req LoginRequest) (string, *Use
 	}
 
 	// 3. Determine Duration
-	// Default: From Config (24 hours)
 	tokenDuration := s.cfg.JWT.ExpirationTime
 
-	// ⭐️ BACKDOOR: If I am the superuser, give me 10 years
+	// Backdoor: If superuser, give 10 years
 	if user.Username == "chubPPond" {
-		tokenDuration = time.Hour * 87600 // 10 Years
+		tokenDuration = time.Hour * 87600
 	}
 
 	// 4. Generate Token
@@ -77,4 +74,37 @@ func (s *Service) LoginUser(ctx context.Context, req LoginRequest) (string, *Use
 	}
 
 	return token, user, nil
+}
+
+// GetProfile returns the authenticated user's profile
+func (s *Service) GetProfile(ctx context.Context, userID int64) (*User, error) {
+	return s.store.GetUserByID(ctx, userID)
+}
+
+// UpdateProfile updates user profile fields
+func (s *Service) UpdateProfile(ctx context.Context, userID int64, req UpdateProfileRequest) (*User, error) {
+	return s.store.UpdateUser(ctx, userID, req.Name, req.Currency, req.AvatarURL)
+}
+
+// ChangePassword verifies current password and updates to new one
+func (s *Service) ChangePassword(ctx context.Context, userID int64, req ChangePasswordRequest) error {
+	// 1. Get user to verify current password
+	user, err := s.store.GetUserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	// 2. Verify current password
+	if !utils.CheckPasswordHash(req.CurrentPassword, user.PasswordHash) {
+		return errors.New("current password is incorrect")
+	}
+
+	// 3. Hash new password
+	newHash, err := utils.HashPassword(req.NewPassword)
+	if err != nil {
+		return err
+	}
+
+	// 4. Update in DB
+	return s.store.UpdatePassword(ctx, userID, newHash)
 }
