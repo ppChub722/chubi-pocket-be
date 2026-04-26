@@ -1,42 +1,58 @@
 services:
   db:
     image: postgres:15-alpine
-    container_name: finna_bbear_db
+    container_name: chubi_pocket_db
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_USER=chubadmin
-      - POSTGRES_PASSWORD=admin1234
-      - POSTGRES_DB=finna_bbear_db
+      POSTGRES_USER: chubadmin
+      POSTGRES_PASSWORD: admin1234
+      POSTGRES_DB: chubi_pocket_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U chubadmin -d finna_bbear_db"]
+      test: ["CMD-SHELL", "pg_isready -U chubadmin -d chubi_pocket_db"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  app:
-    build: .
-    container_name: finna_bbear_app
-    ports:
-      - "8080:8080"
-    environment:
-      - APP_NAME=FinaBBear
-      - APP_ENV=development
-      - APP_PORT=8080
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_USER=chubadmin
-      - DB_PASSWORD=admin1234
-      - DB_NAME=finna_bbear_db
-      - DB_SSLMODE=disable
-      - JWT_SECRET=local-secret-key
-      - JWT_EXPIRATION_HOURS=24
+  migrate:
+    image: migrate/migrate
+    container_name: chubi_pocket_migrate
+    volumes:
+      - ./migrations:/migrations
+    command:
+      - "-path=/migrations"
+      - "-database"
+      - "postgres://chubadmin:admin1234@db:5432/chubi_pocket_db?sslmode=disable"
+      - "up"
     depends_on:
       db:
         condition: service_healthy
-    entrypoint: ["/bin/sh", "-c", "migrate -path ./migrations -database 'postgres://chubadmin:admin1234@db:5432/finna_bbear_db?sslmode=disable' up && ./server"]
+    restart: "no"
+
+  app:
+    build: .
+    container_name: chubi_pocket_app
+    ports:
+      - "8080:8080"
+    environment:
+      APP_NAME: chubipocket
+      APP_ENV: development
+      APP_PORT: "8080"
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: chubadmin
+      DB_PASSWORD: admin1234
+      DB_NAME: chubi_pocket_db
+      DB_SSLMODE: disable
+      JWT_SECRET: local-secret-key-change-in-production
+      JWT_EXPIRATION_HOURS: "720"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   postgres_data:

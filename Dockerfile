@@ -1,26 +1,28 @@
+# --- Build stage ---
 FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
-# Install migrate CLI for running migrations
-RUN go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
-
+# Cache deps separately from source
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN go build -o server cmd/api/main.go
+# Static binary, stripped — keeps the runtime image small and portable.
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/server ./cmd/api
 
-# ---
-
+# --- Runtime stage ---
 FROM alpine:3.20
 
 WORKDIR /app
 
-COPY --from=builder /app/server .
-COPY --from=builder /app/migrations ./migrations
-COPY --from=builder /go/bin/migrate /usr/local/bin/migrate
+# CA certs for any outbound HTTPS (Phase 2+ email/OAuth/etc.)
+RUN apk add --no-cache ca-certificates && \
+    adduser -D -H -u 10001 app
 
+COPY --from=builder /out/server .
+RUN chown app:app /app/server
+
+USER app
 EXPOSE 8080
-
 CMD ["./server"]

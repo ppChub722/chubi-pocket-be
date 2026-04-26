@@ -39,3 +39,9 @@ bin/
 dist/
 build/
 
+# Air hot-reload output
+tmp/
+
+# Database backups (may contain real user data)
+backups/
+

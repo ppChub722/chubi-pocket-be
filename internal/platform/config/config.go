@@ -55,7 +55,7 @@ func Load() (*Config, error) {
 
 	config := &Config{
 		App: AppConfig{
-			Name: getEnv("APP_NAME", "FinaBBear"),
+			Name: getEnv("APP_NAME", "chubipocket"),
 			Env:  getEnv("APP_ENV", "development"),
 			Port: getEnv("APP_PORT", "8080"),
 		},
@@ -64,7 +64,7 @@ func Load() (*Config, error) {
 			Port:     getEnv("DB_PORT", "5432"),
 			User:     getEnv("DB_USER", "chubadmin"),
 			Password: getEnv("DB_PASSWORD", "admin1234"),
-			DBName:   getEnv("DB_NAME", "finna_bbear_db"),
+			DBName:   getEnv("DB_NAME", "chubi_pocket_db"),
 			SSLMode:  getEnv("DB_SSLMODE", "disable"),
 		},
 		JWT: JWTConfig{
