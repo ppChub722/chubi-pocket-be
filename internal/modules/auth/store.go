@@ -38,45 +38,43 @@ func scanUser(row pgx.Row) (*User, error) {
 	return &u, err
 }
 
-// CreateUser inserts users + user_preferences in one transaction.
-// Auto-creates the preferences row with Phase 0 defaults per phase0/be.md.
-func (s *Store) CreateUser(ctx context.Context, u *User) (*User, error) {
+// Pool exposes the underlying connection pool to the Service so it can
+// orchestrate multi-store transactions (register flow composes user insert,
+// preferences insert, and the categories seed in one tx).
+func (s *Store) Pool() *pgxpool.Pool { return s.db }
+
+// InsertUserTx inserts the users row inside caller's tx. Does NOT insert
+// user_preferences — Service.Register composes that and the categories seed.
+func (s *Store) InsertUserTx(ctx context.Context, tx pgx.Tx, u *User) (*User, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("generate user id: %w", err)
 	}
 	u.ID = id
 
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	insertUser := `
+	q := `
 		INSERT INTO users (id, username, email, display_name, password_hash, currency, avatar_url, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
 		RETURNING ` + userColumns
-
-	created, err := scanUser(tx.QueryRow(ctx, insertUser,
+	created, err := scanUser(tx.QueryRow(ctx, q,
 		u.ID, u.Username, u.Email, u.DisplayName, u.PasswordHash, u.Currency, u.AvatarURL,
 	))
 	if err != nil {
 		return nil, mapInsertError(err)
 	}
-
-	insertPrefs := `
-		INSERT INTO user_preferences (user_id, preferences)
-		VALUES ($1, $2::jsonb)`
-	defaults := `{"timezone":"Asia/Bangkok","theme":"system","language":"th"}`
-	if _, err := tx.Exec(ctx, insertPrefs, created.ID, defaults); err != nil {
-		return nil, fmt.Errorf("insert user_preferences: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit tx: %w", err)
-	}
 	return created, nil
+}
+
+// InsertPreferencesTx inserts the user_preferences row inside caller's tx
+// with Phase 0 defaults. created_by_user_id is left NULL (system-created).
+func (s *Store) InsertPreferencesTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
+	const defaults = `{"timezone":"Asia/Bangkok","theme":"system","language":"th"}`
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO user_preferences (user_id, preferences) VALUES ($1, $2::jsonb)`,
+		userID, defaults); err != nil {
+		return fmt.Errorf("insert user_preferences: %w", err)
+	}
+	return nil
 }
 
 func mapInsertError(err error) error {

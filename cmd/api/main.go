@@ -12,7 +12,11 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/accounts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/users"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/database"
@@ -40,7 +44,30 @@ func main() {
 
 	// --- Modules ---
 	authStore := auth.NewStore(dbPool)
-	authService := auth.NewService(authStore, cfg)
+
+	categoriesStore := categories.NewStore(dbPool)
+	categoriesService := categories.NewService(categoriesStore)
+	categoriesHandler := categories.NewHandler(categoriesService)
+
+	tagsStore := tags.NewStore(dbPool)
+	tagsService := tags.NewService(tagsStore)
+	tagsHandler := tags.NewHandler(tagsService)
+
+	transactionsStore := transactions.NewStore(dbPool)
+	transactionsService := transactions.NewService(transactionsStore, categoriesService)
+	transactionsHandler := transactions.NewHandler(transactionsService)
+
+	// Wire categories <-> transactions cross-module count callback. Categories
+	// uses this to decide DELETE = archive vs hard delete.
+	categoriesService.WithTransactionCounter(transactionsService.CountByCategory)
+
+	accountsStore := accounts.NewStore(dbPool)
+	accountsService := accounts.NewService(accountsStore, transactionsService, categoriesService)
+	accountsHandler := accounts.NewHandler(accountsService)
+
+	// Auth registration hooks: seed 6 system + starter user categories on
+	// every new user, atomic with the user insert.
+	authService := auth.NewService(authStore, cfg, categoriesService.SeedForUser)
 	authHandler := auth.NewHandler(authService)
 
 	usersStore := users.NewStore(dbPool)
@@ -86,6 +113,42 @@ func main() {
 			protected.PUT("/users/me/password", usersHandler.ChangePassword)
 			protected.POST("/users/me/deactivate", usersHandler.Deactivate)
 			protected.POST("/users/me/reactivate", usersHandler.Reactivate)
+
+			// Categories (Phase 1a)
+			protected.POST("/categories", categoriesHandler.Create)
+			protected.GET("/categories", categoriesHandler.List)
+			protected.GET("/categories/:id", categoriesHandler.Get)
+			protected.PUT("/categories/:id", categoriesHandler.Update)
+			protected.DELETE("/categories/:id", categoriesHandler.Delete)
+			protected.POST("/categories/:id/restore", categoriesHandler.Restore)
+			protected.DELETE("/categories/:id/permanent", categoriesHandler.PermanentDelete)
+
+			// Tags (Phase 1a)
+			protected.POST("/tags", tagsHandler.Create)
+			protected.GET("/tags", tagsHandler.List)
+			protected.GET("/tags/:id", tagsHandler.Get)
+			protected.PUT("/tags/:id", tagsHandler.Update)
+			protected.DELETE("/tags/:id", tagsHandler.Delete)
+
+			// Accounts (Phase 1a.2)
+			protected.POST("/accounts", accountsHandler.Create)
+			protected.GET("/accounts", accountsHandler.List)
+			protected.GET("/accounts/:id", accountsHandler.Get)
+			protected.PUT("/accounts/:id", accountsHandler.Update)
+			protected.DELETE("/accounts/:id", accountsHandler.Delete)
+			protected.POST("/accounts/:id/adjust-balance", accountsHandler.AdjustBalance)
+			protected.GET("/accounts/:id/summary", accountsHandler.Summary)
+
+			// Transactions (Phase 1a.3). /summary registered before /:id so the
+			// literal path doesn't get swallowed by the param.
+			protected.POST("/transactions", transactionsHandler.Create)
+			protected.GET("/transactions", transactionsHandler.List)
+			protected.GET("/transactions/summary", transactionsHandler.Summary)
+			protected.GET("/transactions/:id", transactionsHandler.Get)
+			protected.PUT("/transactions/:id", transactionsHandler.Update)
+			protected.DELETE("/transactions/:id", transactionsHandler.Delete)
+			protected.POST("/transactions/:id/tags", tagsHandler.Attach)
+			protected.DELETE("/transactions/:id/tags/:tag_id", tagsHandler.Detach)
 		}
 	}
 

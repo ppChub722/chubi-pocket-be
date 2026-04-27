@@ -3,25 +3,39 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth/utils"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 )
 
+// RegistrationHook is invoked inside the Register tx after the user +
+// preferences rows are inserted. Hooks seed per-user data (e.g., categories
+// in Phase 1a; notification settings in 1b). Func-typed instead of an
+// interface to avoid a categories↔auth import cycle.
+type RegistrationHook func(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error
+
 type Service struct {
 	store *Store
 	cfg   *config.Config
+	hooks []RegistrationHook
 }
 
-func NewService(s *Store, c *config.Config) *Service {
-	return &Service{store: s, cfg: c}
+// NewService accepts zero or more registration hooks. main.go composes the
+// hook list (categories seeder is the only one in 1a).
+func NewService(s *Store, c *config.Config, hooks ...RegistrationHook) *Service {
+	return &Service{store: s, cfg: c, hooks: hooks}
 }
 
 var ErrWrongPassword = errors.New("current password is incorrect")
 var ErrSamePassword = errors.New("new password must differ from current")
 
+// Register orchestrates the full registration tx: user insert + preferences
+// insert + every registration hook (e.g., categories seed). Atomic — any
+// failure rolls back the whole thing.
 func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthResponse, error) {
 	hash, err := utils.HashPassword(req.Password)
 	if err != nil {
@@ -33,7 +47,13 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthRespo
 		currency = "THB"
 	}
 
-	user, err := s.store.CreateUser(ctx, &User{
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin register tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	user, err := s.store.InsertUserTx(ctx, tx, &User{
 		Username:     req.Username,
 		Email:        req.Email,
 		DisplayName:  req.DisplayName,
@@ -42,6 +62,17 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthRespo
 	})
 	if err != nil {
 		return nil, err
+	}
+	if err := s.store.InsertPreferencesTx(ctx, tx, user.ID); err != nil {
+		return nil, err
+	}
+	for _, hook := range s.hooks {
+		if err := hook(ctx, tx, user.ID); err != nil {
+			return nil, fmt.Errorf("registration hook: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit register tx: %w", err)
 	}
 
 	return s.issueAuthResponse(user)
