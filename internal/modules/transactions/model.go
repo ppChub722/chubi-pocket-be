@@ -16,21 +16,35 @@ const (
 	TypeTransfer TxType = "transfer"
 )
 
-// Transaction is the DB row. Phase 1a omits 4 columns (project_id,
-// source_split_id, source_project_transaction_id, scheduled_transaction_id) —
-// see migration 000006 + product/phase1a/overview.md.
+// Transaction is the DB row. 1b.1 added `source_split_id`; columns deferred to
+// 1b.2 / 1c are `project_id`, `source_project_transaction_id`,
+// `scheduled_transaction_id` — see migrations 000006 + 000013 +
+// product/phase1b/db.md.
 type Transaction struct {
-	ID              uuid.UUID  `json:"id"`
-	UserID          uuid.UUID  `json:"user_id"`
-	AccountID       uuid.UUID  `json:"account_id"`
-	Type            TxType     `json:"type"`
-	Amount          float64    `json:"amount"`
-	CategoryID      *uuid.UUID `json:"category_id"`
-	Date            string     `json:"date"` // YYYY-MM-DD; calendar date in user's tz
-	Note            *string    `json:"note"`
-	TransferGroupID *uuid.UUID `json:"transfer_group_id"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID                         uuid.UUID  `json:"id"`
+	UserID                     uuid.UUID  `json:"user_id"`
+	AccountID                  uuid.UUID  `json:"account_id"`
+	Type                       TxType     `json:"type"`
+	Amount                     float64    `json:"amount"`
+	CategoryID                 *uuid.UUID `json:"category_id"`
+	Date                       string     `json:"date"` // YYYY-MM-DD; calendar date in user's tz
+	Note                       *string    `json:"note"`
+	TransferGroupID            *uuid.UUID `json:"transfer_group_id"`
+	SourcePersonalDebtID       *uuid.UUID `json:"source_personal_debt_id"`
+	SourceProjectTransactionID *uuid.UUID `json:"source_project_transaction_id"`
+	ProjectID                  *uuid.UUID `json:"project_id"`
+	CreatedAt                  time.Time  `json:"created_at"`
+	UpdatedAt                  time.Time  `json:"updated_at"`
+}
+
+// SplitInput is the per-debtor row inside POST /v1/transactions{splits:[...]}.
+// Each entry materializes as one personal_debts row on the splitter's side
+// (direction='owed_to_me') + one mirror row on each linked debtor's side
+// (direction='i_owe'). See design/spec/12-personal-debts.md.
+type SplitInput struct {
+	PersonName string     `json:"person_name" binding:"required,min=1,max=100"`
+	ContactID  *uuid.UUID `json:"contact_id"  binding:"omitempty"`
+	OwedAmount float64    `json:"owed_amount" binding:"required,gt=0"`
 }
 
 // EmbeddedRef is a {id, name} pair used in list/get responses to embed the
@@ -40,32 +54,43 @@ type EmbeddedRef struct {
 	Name string    `json:"name"`
 }
 
+// EmbeddedTag enriches a tag ref with color + icon so the FE can render
+// chips inline (a small dot or rounded label) without a second lookup
+// against its own tags cache. Tag color is `#RRGGBB`, icon is the
+// free-form id agreed in spec §05/§3.8.
+type EmbeddedTag struct {
+	ID    uuid.UUID `json:"id"`
+	Name  string    `json:"name"`
+	Color *string   `json:"color"`
+	Icon  *string   `json:"icon"`
+}
+
 // TransactionDetail mirrors `Transaction` plus embedded refs + derived flags.
 // Used by GET /v1/transactions and GET /v1/transactions/:id.
 type TransactionDetail struct {
 	Transaction
-	Account      *EmbeddedRef `json:"account,omitempty"`
-	Category     *EmbeddedRef `json:"category,omitempty"`
-	HasSplits    bool         `json:"has_splits"`
-	IsRecurring  bool         `json:"is_recurring"`
-	IsResolve    bool         `json:"is_resolve"`
+	Account      *EmbeddedRef  `json:"account,omitempty"`
+	Category     *EmbeddedRef  `json:"category,omitempty"`
+	Tags         []EmbeddedTag `json:"tags"`
+	HasSplits    bool          `json:"has_splits"`
+	IsRecurring  bool          `json:"is_recurring"`
+	IsResolve    bool          `json:"is_resolve"`
 	// Set on POST response only — not returned in lists.
 	AccountBalanceAfter *float64 `json:"account_balance_after,omitempty"`
 }
 
-// TransferRow is one of the two transactions created by a transfer.
-type TransferRow struct {
-	ID        uuid.UUID `json:"id"`
-	AccountID uuid.UUID `json:"account_id"`
-	Category  string    `json:"category"`
-	Amount    float64   `json:"amount"`
-}
-
-// TransferResponse is returned by POST /v1/transactions when type=transfer.
-// Spec §3.1: "for transfers, response includes both rows".
+// TransferResponse is returned by `POST /v1/transactions` (and
+// `PUT /v1/transactions/:id` when the targeted row is a transfer).
+//
+// Both rows are returned in full TransactionDetail shape so the client
+// can patch its cache surgically — every transfer mutation touches two
+// rows and two account balances; without both rows the destination's
+// balance display would lag until the next list refresh.
+//
+// Spec §3.1: "for transfers, response includes both rows."
 type TransferResponse struct {
-	TransferGroupID uuid.UUID     `json:"transfer_group_id"`
-	Rows            []TransferRow `json:"rows"`
+	TransferGroupID uuid.UUID           `json:"transfer_group_id"`
+	Rows            []TransactionDetail `json:"rows"`
 }
 
 type CreateRequest struct {
@@ -77,11 +102,14 @@ type CreateRequest struct {
 	Note                *string    `json:"note"                    binding:"omitempty"`
 	TransferToAccountID *uuid.UUID `json:"transfer_to_account_id"  binding:"omitempty"`
 
-	// 1a-deferred fields. Reject explicitly so 1b can introduce them without
-	// silently changing the contract.
-	Splits    []map[string]any `json:"splits"     binding:"omitempty"`
-	MyShare   *float64         `json:"my_share"   binding:"omitempty"`
-	ProjectID *uuid.UUID       `json:"project_id" binding:"omitempty"`
+	// 1b.1 wires Splits + MyShare. ProjectID stays rejected from clients —
+	// it's auto-derived from SourceProjectTransactionID when set (project
+	// resolve flow). Direct project_id from the body would let any caller
+	// link a personal row to any project they don't belong to.
+	Splits                     []SplitInput `json:"splits"                         binding:"omitempty,dive"`
+	MyShare                    *float64     `json:"my_share"                       binding:"omitempty,gt=0"`
+	ProjectID                  *uuid.UUID   `json:"project_id"                     binding:"omitempty"`
+	SourceProjectTransactionID *uuid.UUID   `json:"source_project_transaction_id"  binding:"omitempty"`
 }
 
 // UpdateRequest — partial. Editable per spec §3.4: amount, date, category_id,

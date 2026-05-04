@@ -22,11 +22,47 @@ func NewStore(db *pgxpool.Pool) *Store {
 func (s *Store) Pool() *pgxpool.Pool { return s.db }
 
 var (
-	ErrTxNotFound = errors.New("transaction not found")
+	ErrTxNotFound          = errors.New("transaction not found")
+	ErrSourcePTNotFound    = errors.New("source project transaction not found")
+	ErrSourcePTNotForUser  = errors.New("caller is not a member of the source project")
 )
+
+// LookupSourcePTTx resolves a project_transaction by id and confirms the
+// caller is an active member of its project. Returns the project_id used to
+// stamp the personal-mirror row's project_id column.
+//
+// Inlined here (instead of calling the projects module) to avoid an import
+// cycle: projects already depends on transactions semantics being stable.
+func (s *Store) LookupSourcePTTx(
+	ctx context.Context, tx pgx.Tx, ptID, userID uuid.UUID,
+) (uuid.UUID, error) {
+	var projectID uuid.UUID
+	err := tx.QueryRow(ctx,
+		`SELECT project_id FROM project_transactions WHERE id = $1`, ptID,
+	).Scan(&projectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrSourcePTNotFound
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("source PT lookup: %w", err)
+	}
+	var n int
+	if err := tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM project_members
+		WHERE project_id = $1 AND user_id = $2 AND status = 'active'`,
+		projectID, userID,
+	).Scan(&n); err != nil {
+		return uuid.Nil, fmt.Errorf("source PT membership: %w", err)
+	}
+	if n == 0 {
+		return uuid.Nil, ErrSourcePTNotForUser
+	}
+	return projectID, nil
+}
 
 const txColumns = `id, user_id, account_id, type, amount, category_id,
 	to_char(date, 'YYYY-MM-DD') AS date, note, transfer_group_id,
+	source_personal_debt_id, source_project_transaction_id, project_id,
 	created_at, updated_at`
 
 func scanTx(row pgx.Row) (*Transaction, error) {
@@ -34,6 +70,7 @@ func scanTx(row pgx.Row) (*Transaction, error) {
 	err := row.Scan(
 		&t.ID, &t.UserID, &t.AccountID, &t.Type, &t.Amount, &t.CategoryID,
 		&t.Date, &t.Note, &t.TransferGroupID,
+		&t.SourcePersonalDebtID, &t.SourceProjectTransactionID, &t.ProjectID,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
 	return &t, err
@@ -138,6 +175,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	q := fmt.Sprintf(`
 		SELECT t.id, t.user_id, t.account_id, t.type, t.amount, t.category_id,
 		       to_char(t.date, 'YYYY-MM-DD') AS date, t.note, t.transfer_group_id,
+		       t.source_personal_debt_id, t.source_project_transaction_id, t.project_id,
 		       t.created_at, t.updated_at,
 		       a.id, a.name,
 		       c.id, c.name
@@ -166,6 +204,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		err := rows.Scan(
 			&d.ID, &d.UserID, &d.AccountID, &d.Type, &d.Amount, &d.CategoryID,
 			&d.Date, &d.Note, &d.TransferGroupID,
+			&d.SourcePersonalDebtID, &d.SourceProjectTransactionID, &d.ProjectID,
 			&d.CreatedAt, &d.UpdatedAt,
 			&accID, &accName,
 			&catID, &catName,
@@ -177,9 +216,110 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		if catID != nil && catName != nil {
 			d.Category = &EmbeddedRef{ID: *catID, Name: *catName}
 		}
+		// Init empty slice so JSON serializes as [] not null. Filled in
+		// the batch-tag query below.
+		d.Tags = []EmbeddedTag{}
+		d.IsResolve = d.SourcePersonalDebtID != nil
 		out = append(out, d)
 	}
-	return out, total, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	// Batch-fetch tags for the page in a single query, then patch onto
+	// each row by id. Avoids N+1 against the page; with per_page <= 100
+	// this stays a small in-memory join.
+	if err := s.fillTagsForList(ctx, userID, out); err != nil {
+		return nil, 0, fmt.Errorf("fill tags: %w", err)
+	}
+	if err := s.fillHasSplitsForList(ctx, out); err != nil {
+		return nil, 0, fmt.Errorf("fill has_splits: %w", err)
+	}
+	return out, total, nil
+}
+
+// fillHasSplitsForList flags every row that has any debts attached
+// (i.e. the splitter's side of a split-bill transaction). Single batch
+// query against the personal_debts.source_transaction_id index.
+func (s *Store) fillHasSplitsForList(ctx context.Context, details []TransactionDetail) error {
+	if len(details) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(details))
+	for i := range details {
+		ids[i] = details[i].ID
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT DISTINCT source_transaction_id
+		FROM personal_debts
+		WHERE source_transaction_id = ANY($1)`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasByID := make(map[uuid.UUID]struct{}, len(details))
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		hasByID[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range details {
+		if _, ok := hasByID[details[i].ID]; ok {
+			details[i].HasSplits = true
+		}
+	}
+	return nil
+}
+
+// fillTagsForList populates `d.Tags` for every row in `details` via one
+// query against the transaction_tags junction. No-op when the slice is
+// empty.
+func (s *Store) fillTagsForList(ctx context.Context, userID uuid.UUID, details []TransactionDetail) error {
+	if len(details) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(details))
+	for i := range details {
+		ids[i] = details[i].ID
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT tt.transaction_id, t.id, t.name, t.color, t.icon
+		FROM tags t
+		JOIN transaction_tags tt ON tt.tag_id = t.id
+		WHERE tt.transaction_id = ANY($1) AND t.user_id = $2
+		ORDER BY tt.transaction_id, LOWER(t.name)`,
+		ids, userID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	tagsByTx := make(map[uuid.UUID][]EmbeddedTag, len(details))
+	for rows.Next() {
+		var (
+			txID uuid.UUID
+			tag  EmbeddedTag
+		)
+		if err := rows.Scan(&txID, &tag.ID, &tag.Name, &tag.Color, &tag.Icon); err != nil {
+			return err
+		}
+		tagsByTx[txID] = append(tagsByTx[txID], tag)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for i := range details {
+		if t := tagsByTx[details[i].ID]; t != nil {
+			details[i].Tags = t
+		}
+	}
+	return nil
 }
 
 // --- Tx-aware writes (called via balance helper) ---
@@ -229,12 +369,15 @@ func (s *Store) InsertRowTx(ctx context.Context, tx pgx.Tx, t *Transaction) (*Tr
 	t.ID = id
 
 	q := `INSERT INTO transactions
-		(id, user_id, account_id, type, amount, category_id, date, note, transfer_group_id, created_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $2)
+		(id, user_id, account_id, type, amount, category_id, date, note,
+		 transfer_group_id, source_personal_debt_id, source_project_transaction_id, project_id,
+		 created_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $2)
 		RETURNING ` + txColumns
 	created, err := scanTx(tx.QueryRow(ctx, q,
 		t.ID, t.UserID, t.AccountID, string(t.Type), t.Amount, t.CategoryID,
-		t.Date, t.Note, t.TransferGroupID))
+		t.Date, t.Note, t.TransferGroupID,
+		t.SourcePersonalDebtID, t.SourceProjectTransactionID, t.ProjectID))
 	if err != nil {
 		return nil, fmt.Errorf("insert tx: %w", err)
 	}
@@ -280,6 +423,7 @@ func (s *Store) UpdateRowTx(
 	}
 	return t, nil
 }
+
 
 // DeleteRowTx removes a single transactions row by id. Caller (service)
 // already reversed the balance.

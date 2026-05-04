@@ -31,13 +31,15 @@ var (
 )
 
 const categoryColumns = `id, user_id, name, type, parent_id, is_system, system_kind,
-	icon, color, status, created_at, updated_at`
+	icon, color, sort_order, include_in_report, description, note,
+	status, created_at, updated_at`
 
 func scanCategory(row pgx.Row) (*Category, error) {
 	var c Category
 	err := row.Scan(
 		&c.ID, &c.UserID, &c.Name, &c.Type, &c.ParentID, &c.IsSystem, &c.SystemKind,
-		&c.Icon, &c.Color, &c.Status, &c.CreatedAt, &c.UpdatedAt,
+		&c.Icon, &c.Color, &c.SortOrder, &c.IncludeInReport, &c.Description, &c.Note,
+		&c.Status, &c.CreatedAt, &c.UpdatedAt,
 	)
 	return &c, err
 }
@@ -78,7 +80,10 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Cat
 	if !f.IncludeSystem {
 		q += " AND is_system = FALSE"
 	}
-	q += " ORDER BY type, COALESCE(parent_id::text, ''), LOWER(name)"
+	// Stable client-side ordering: type → parent group → user's manual sort
+	// (sort_order ASC) → fall back to creation time when sort_order ties.
+	// Clients reconstruct the tree from this flat list and trust the order.
+	q += " ORDER BY type, COALESCE(parent_id::text, ''), sort_order, created_at"
 
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
@@ -194,13 +199,38 @@ func (s *Store) Create(ctx context.Context, c *Category) (*Category, error) {
 	}
 	c.ID = id
 
+	// Resolve next sort_order. Newly-created categories slot in at the
+	// FRONT of their sibling group (sort_order = MIN-1) so the user sees
+	// what they just made without scrolling. Negative values are fine —
+	// sort_order is just an ordering key, never displayed.
+	//
+	// Done as a separate query rather than inlined as a subquery in the
+	// INSERT VALUES list: inlining caused Postgres prepared-statement
+	// parameter inference to fail (SQLSTATE 42P08) because the same
+	// positional param appeared in both an INSERT column position and a
+	// subquery comparison.
+	var nextSort int
+	err = s.db.QueryRow(ctx, `
+		SELECT COALESCE(MIN(sort_order), 0) - 1
+		  FROM categories
+		 WHERE user_id = $1 AND type = $2
+		   AND parent_id IS NOT DISTINCT FROM $3`,
+		c.UserID, c.Type, c.ParentID,
+	).Scan(&nextSort)
+	if err != nil {
+		return nil, fmt.Errorf("compute sort_order: %w", err)
+	}
+
 	q := `INSERT INTO categories
-		(id, user_id, name, type, parent_id, is_system, system_kind, icon, color, status, created_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', $2)
+		(id, user_id, name, type, parent_id, is_system, system_kind, icon, color,
+		 sort_order, include_in_report, description, note,
+		 status, created_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+			'active', $2)
 		RETURNING ` + categoryColumns
 	created, err := scanCategory(s.db.QueryRow(ctx, q,
 		c.ID, c.UserID, c.Name, c.Type, c.ParentID, c.IsSystem, c.SystemKind,
-		c.Icon, c.Color))
+		c.Icon, c.Color, nextSort, c.IncludeInReport, c.Description, c.Note))
 	if err != nil {
 		return nil, mapInsertError(err)
 	}
@@ -217,28 +247,55 @@ func (s *Store) Create(ctx context.Context, c *Category) (*Category, error) {
 // (empty string clears the column). Spec §3.4 allows partial updates; this
 // pragmatic 1a convention avoids adding more presence flags for fields that
 // are rarely cleared.
+// UpdateFields carries the partial-update payload for a single row. Pointer
+// fields encode "leave alone" (nil) vs "set to value"; the *Change bools
+// distinguish "leave alone" from "explicitly clear" for nullable text columns.
+type UpdateFields struct {
+	Name              *string
+	ParentID          *uuid.UUID
+	ParentIDChange    bool
+	Icon              *string
+	Color             *string
+	IncludeInReport   *bool
+	Description       *string
+	DescriptionChange bool
+	Note              *string
+	NoteChange        bool
+}
+
 func (s *Store) Update(
 	ctx context.Context, userID, id uuid.UUID,
-	name *string, parentID *uuid.UUID, parentChange bool,
-	icon, color *string,
+	f UpdateFields,
 ) (*Category, error) {
 	q := `UPDATE categories SET updated_by_user_id = $1`
 	args := []any{userID}
-	if name != nil {
-		args = append(args, *name)
+	if f.Name != nil {
+		args = append(args, *f.Name)
 		q += fmt.Sprintf(", name = $%d", len(args))
 	}
-	if parentChange {
-		args = append(args, parentID)
+	if f.ParentIDChange {
+		args = append(args, f.ParentID)
 		q += fmt.Sprintf(", parent_id = $%d", len(args))
 	}
-	if icon != nil {
-		args = append(args, *icon)
+	if f.Icon != nil {
+		args = append(args, *f.Icon)
 		q += fmt.Sprintf(", icon = $%d", len(args))
 	}
-	if color != nil {
-		args = append(args, *color)
+	if f.Color != nil {
+		args = append(args, *f.Color)
 		q += fmt.Sprintf(", color = $%d", len(args))
+	}
+	if f.IncludeInReport != nil {
+		args = append(args, *f.IncludeInReport)
+		q += fmt.Sprintf(", include_in_report = $%d", len(args))
+	}
+	if f.DescriptionChange {
+		args = append(args, f.Description)
+		q += fmt.Sprintf(", description = $%d", len(args))
+	}
+	if f.NoteChange {
+		args = append(args, f.Note)
+		q += fmt.Sprintf(", note = $%d", len(args))
 	}
 	args = append(args, id)
 	q += fmt.Sprintf(" WHERE id = $%d AND user_id = $1 RETURNING ", len(args)) + categoryColumns
@@ -331,56 +388,163 @@ func (s *Store) FindNearestActiveAncestor(ctx context.Context, from uuid.UUID) (
 	return nil, nil
 }
 
+// --- Reorder (PATCH /v1/categories/reorder) ---
+
+// ReorderTx applies a batch of (parent_id, sort_order) updates atomically.
+// All entries belong to one user; the caller (Service) is responsible for
+// validating ownership, depth, cycles, and same-type parents BEFORE calling
+// this. Store-side this is just the write — wrap in a tx so a partial apply
+// never leaks.
+//
+// Returns the user's full active category list (post-reorder) so the client
+// can replace its cache without a follow-up GET.
+func (s *Store) ReorderTx(ctx context.Context, userID uuid.UUID, entries []ReorderEntry) ([]Category, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	for _, e := range entries {
+		tag, err := tx.Exec(ctx, `
+			UPDATE categories
+			SET parent_id = $1, sort_order = $2, updated_by_user_id = $3
+			WHERE id = $4 AND user_id = $3 AND status = 'active'`,
+			e.ParentID, e.SortOrder, userID, e.ID)
+		if err != nil {
+			return nil, fmt.Errorf("reorder %s: %w", e.ID, err)
+		}
+		if tag.RowsAffected() == 0 {
+			// Either the row doesn't exist, isn't owned by user, or is archived.
+			// All of these are spec-§3.13 errors; Service layer already prevalidated
+			// so reaching here means the tree shifted underneath us.
+			return nil, ErrCategoryNotFound
+		}
+	}
+
+	// Re-read inside the same tx so the response reflects the post-write state.
+	rows, err := tx.Query(ctx, `SELECT `+categoryColumns+`
+		FROM categories
+		WHERE user_id = $1 AND status = 'active'
+		ORDER BY type, COALESCE(parent_id::text, ''), sort_order, created_at`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list after reorder: %w", err)
+	}
+	out := make([]Category, 0)
+	for rows.Next() {
+		c, err := scanCategory(rows)
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		out = append(out, *c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit reorder: %w", err)
+	}
+	return out, nil
+}
+
 // --- Seed (called inside auth.Service.Register tx) ---
 
 // SeedForUser inserts the 6 system + starter user categories for a freshly
 // registered user. Caller passes a pgx.Tx so it composes with the user insert.
+//
+// `sort_order` is sequential within each (type, parent_id) sibling group:
+// system rows first (0..N), then starter roots, then per-parent children
+// from 0. `Store.Create` later inserts new user-created rows at MIN-1 of
+// the visible group, surfacing them at the top.
+//
+// Icon / color / description / include_in_report mirror the Flutter mock
+// seed 1:1 — see [seed.go] for the shared catalog data.
 func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
-	// 1. System cats
+	const insertCategory = `
+		INSERT INTO categories
+			(id, user_id, name, type, parent_id, is_system, system_kind,
+			 icon, color, sort_order, include_in_report, description,
+			 status, created_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+			'active', $13)`
+
+	// 1. System cats — parent_id = NULL, no description. created_by_user_id
+	// is NULL because system rows are app-owned, not user-owned.
+	systemSortByType := map[string]int{"income": 0, "expense": 0}
 	for _, sc := range systemCatalog {
 		id, err := uuid.NewV7()
 		if err != nil {
 			return fmt.Errorf("uuid: %w", err)
 		}
-		_, err = tx.Exec(ctx, `
-			INSERT INTO categories
-				(id, user_id, name, type, parent_id, is_system, system_kind, status, created_by_user_id)
-			VALUES ($1, $2, $3, $4, NULL, TRUE, $5, 'active', NULL)`,
-			id, userID, sc.Name, sc.Type, string(sc.Kind))
+		kind := string(sc.Kind)
+		_, err = tx.Exec(ctx, insertCategory,
+			id, userID, sc.Name, sc.Type, nil, true, kind,
+			sc.Icon, sc.Color, systemSortByType[sc.Type], sc.IncludeInReport, nil,
+			nil, // created_by_user_id = NULL (system row)
+		)
 		if err != nil {
 			return fmt.Errorf("seed system %s: %w", sc.Kind, err)
 		}
+		systemSortByType[sc.Type]++
 	}
 
-	// 2. Starter cats — parents first, then their children pointing at them.
+	// 2. Starter expense roots + their children. Root sort_order continues
+	// from where system rows left off so system rows surface above starters
+	// when both are visible (e.g. transaction picker with include_system=true).
+	rootSortExpense := systemSortByType["expense"]
 	for _, root := range starterCatalog {
 		rootID, err := uuid.NewV7()
 		if err != nil {
 			return fmt.Errorf("uuid: %w", err)
 		}
-		_, err = tx.Exec(ctx, `
-			INSERT INTO categories
-				(id, user_id, name, type, parent_id, is_system, system_kind, status, created_by_user_id)
-			VALUES ($1, $2, $3, $4, NULL, FALSE, NULL, 'active', $2)`,
-			rootID, userID, root.Name, root.Type)
+		_, err = tx.Exec(ctx, insertCategory,
+			rootID, userID, root.Name, "expense", nil, false, nil,
+			root.Icon, root.Color, rootSortExpense, true, nil,
+			userID,
+		)
 		if err != nil {
 			return fmt.Errorf("seed root %s: %w", root.Name, err)
 		}
-		for _, childName := range root.Children {
+		rootSortExpense++
+
+		for ci, child := range root.Children {
 			childID, err := uuid.NewV7()
 			if err != nil {
 				return fmt.Errorf("uuid: %w", err)
 			}
-			_, err = tx.Exec(ctx, `
-				INSERT INTO categories
-					(id, user_id, name, type, parent_id, is_system, system_kind, status, created_by_user_id)
-				VALUES ($1, $2, $3, $4, $5, FALSE, NULL, 'active', $2)`,
-				childID, userID, childName, root.Type, rootID)
+			_, err = tx.Exec(ctx, insertCategory,
+				childID, userID, child.Name, "expense", rootID, false, nil,
+				child.Icon, root.Color, ci, child.IncludeInReport, child.Description,
+				userID,
+			)
 			if err != nil {
-				return fmt.Errorf("seed child %s/%s: %w", root.Name, childName, err)
+				return fmt.Errorf("seed child %s/%s: %w", root.Name, child.Name, err)
 			}
 		}
 	}
+
+	// 3. Starter income — flat (no parents). Sort order continues from
+	// system income rows.
+	incomeSort := systemSortByType["income"]
+	for _, in := range starterIncomeCatalog {
+		id, err := uuid.NewV7()
+		if err != nil {
+			return fmt.Errorf("uuid: %w", err)
+		}
+		_, err = tx.Exec(ctx, insertCategory,
+			id, userID, in.Name, "income", nil, false, nil,
+			in.Icon, in.Color, incomeSort, in.IncludeInReport, in.Description,
+			userID,
+		)
+		if err != nil {
+			return fmt.Errorf("seed income %s: %w", in.Name, err)
+		}
+		incomeSort++
+	}
+
 	return nil
 }
 

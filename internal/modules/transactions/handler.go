@@ -142,12 +142,15 @@ func (h *Handler) Update(c *gin.Context) {
 		return
 	}
 
-	d, err := h.service.Update(c.Request.Context(), userID, id, req)
+	res, err := h.service.Update(c.Request.Context(), userID, id, req)
 	if err != nil {
 		mapServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, d)
+	// res is either *TransactionDetail (single) or *TransferResponse
+	// (transfer pair). c.JSON marshals whichever we got — same
+	// polymorphic dispatch as the create handler.
+	c.JSON(http.StatusOK, res)
 }
 
 // DELETE /v1/transactions/:id
@@ -241,11 +244,18 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "SPLITS_NOT_SUPPORTED_YET", err.Error(), nil)
 	case errors.Is(err, ErrProjectIDNotAllowed):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, ErrSourcePTNotFound):
+		response.NotFound(c, "SOURCE_PT_NOT_FOUND", err.Error())
+	case errors.Is(err, ErrSourcePTNotForUser):
+		response.Fail(c, http.StatusForbidden, "SOURCE_PT_NOT_FOR_USER", err.Error(), nil)
 	case errors.Is(err, ErrTransferToAccountRequired),
 		errors.Is(err, ErrTransferFieldsOnNonTransfer),
 		errors.Is(err, ErrCategoryRequiredForTransfer),
+		errors.Is(err, ErrCategoryRequired),
 		errors.Is(err, ErrTransferCategoryEdit):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, ErrSystemTransactionImmutable):
+		response.BadRequest(c, "SYSTEM_TRANSACTION_IMMUTABLE", err.Error(), nil)
 	case errors.Is(err, ErrAmountInvalid):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	default:

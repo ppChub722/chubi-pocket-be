@@ -15,6 +15,10 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/accounts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/contacts"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/users"
@@ -65,9 +69,50 @@ func main() {
 	accountsService := accounts.NewService(accountsStore, transactionsService, categoriesService)
 	accountsHandler := accounts.NewHandler(accountsService)
 
-	// Auth registration hooks: seed 6 system + starter user categories on
-	// every new user, atomic with the user insert.
-	authService := auth.NewService(authStore, cfg, categoriesService.SeedForUser)
+	contactsStore := contacts.NewStore(dbPool)
+	contactsService := contacts.NewService(contactsStore)
+	contactsHandler := contacts.NewHandler(contactsService)
+
+	// Personal debts — unified bidirectional table (replaces shared_expense_splits).
+	personalDebtsStore := personal_debts.NewStore(dbPool)
+	personalDebtsService := personal_debts.NewService(personalDebtsStore, transactionsService)
+	personalDebtsHandler := personal_debts.NewHandler(personalDebtsService)
+
+	// Notifications — fan-in target.
+	notificationsStore := notifications.NewStore(dbPool)
+	notificationsService := notifications.NewService(notificationsStore)
+	notificationsHandler := notifications.NewHandler(notificationsService)
+
+	// Projects. Project transactions support splits (parent + child rows in
+	// project_transactions). Personal-book mirror creation is FE-side via
+	// the regular POST /transactions endpoint — no cross-module claim hook.
+	projectsStore := projects.NewStore(dbPool)
+	projectsService := projects.NewService(projectsStore)
+	projectsHandler := projects.NewHandler(projectsService)
+
+	// --- Cross-module wiring (breaks cycles). Same pattern as 1a's
+	// categoriesService.WithTransactionCounter.
+
+	// transactions ↔ personal_debts.
+	transactionsService.WithDebtsCreator(personalDebtsService.CreateForTransactionTx)
+	transactionsService.WithDebtValidator(personalDebtsService.ValidateOwnership)
+	transactionsService.WithDebtAutoBumper(personalDebtsService.AutoBumpInTx)
+
+	// contacts ↔ notifications (link-request flow only — splits-related hooks
+	// removed with the splits module).
+	contactsService.WithNotificationService(notificationsService)
+
+	// projects ↔ notifications (project_invite, project_tx_recorded_for_you,
+	// project_tx_changed). No claim hook — resolve flow uses /transactions
+	// directly with source_project_transaction_id set client-side.
+	projectsService.WithNotificationService(notificationsService)
+
+	// Auth registration hooks: seed 6 system + starter user categories AND
+	// the user's notification settings row, atomic with the user insert.
+	authService := auth.NewService(authStore, cfg,
+		categoriesService.SeedForUser,
+		notificationsService.SeedSettings,
+	)
 	authHandler := auth.NewHandler(authService)
 
 	usersStore := users.NewStore(dbPool)
@@ -117,6 +162,7 @@ func main() {
 			// Categories (Phase 1a)
 			protected.POST("/categories", categoriesHandler.Create)
 			protected.GET("/categories", categoriesHandler.List)
+			protected.PATCH("/categories/reorder", categoriesHandler.Reorder)
 			protected.GET("/categories/:id", categoriesHandler.Get)
 			protected.PUT("/categories/:id", categoriesHandler.Update)
 			protected.DELETE("/categories/:id", categoriesHandler.Delete)
@@ -149,6 +195,65 @@ func main() {
 			protected.DELETE("/transactions/:id", transactionsHandler.Delete)
 			protected.POST("/transactions/:id/tags", tagsHandler.Attach)
 			protected.DELETE("/transactions/:id/tags/:tag_id", tagsHandler.Detach)
+
+			// Contacts (Phase 1b.1 + 1b.2 link-request endpoints).
+			// Static-path-before-param: /unlinked-names AND /link-requests/...
+			// must come before /:id to avoid path collision.
+			protected.POST("/contacts", contactsHandler.Create)
+			protected.GET("/contacts", contactsHandler.List)
+			protected.POST("/contacts/link-requests/:notification_id/accept", contactsHandler.AcceptLinkRequest)
+			protected.POST("/contacts/link-requests/:notification_id/reject", contactsHandler.RejectLinkRequest)
+			protected.GET("/contacts/:id", contactsHandler.Get)
+			protected.PUT("/contacts/:id", contactsHandler.Update)
+			protected.POST("/contacts/:id/archive", contactsHandler.Archive)
+			protected.POST("/contacts/:id/restore", contactsHandler.Restore)
+			protected.POST("/contacts/:id/request-link", contactsHandler.RequestLink)
+			protected.POST("/contacts/:id/unlink", contactsHandler.Unlink)
+			protected.DELETE("/contacts/:id", contactsHandler.Delete)
+
+			// Personal debts (bidirectional, replaces splits + old debts).
+			// /people view aggregates by counterparty with net positions.
+			protected.GET("/personal-debts/people", personalDebtsHandler.People)
+			protected.GET("/personal-debts", personalDebtsHandler.List)
+			protected.POST("/personal-debts", personalDebtsHandler.Create)
+			protected.GET("/personal-debts/:id", personalDebtsHandler.Get)
+			protected.PUT("/personal-debts/:id", personalDebtsHandler.Update)
+			protected.DELETE("/personal-debts/:id", personalDebtsHandler.Delete)
+			protected.POST("/personal-debts/:id/cancel", personalDebtsHandler.Cancel)
+			protected.POST("/personal-debts/:id/settle", personalDebtsHandler.Settle)
+
+			// Notifications (Phase 1b.2). Static paths first.
+			protected.GET("/notifications", notificationsHandler.List)
+			protected.POST("/notifications/read-all", notificationsHandler.ReadAll)
+			protected.GET("/notifications/settings", notificationsHandler.GetSettings)
+			protected.PUT("/notifications/settings", notificationsHandler.UpdateSettings)
+			protected.POST("/notifications/:id/read", notificationsHandler.MarkRead)
+			protected.POST("/notifications/:id/actioned", notificationsHandler.MarkActioned)
+			protected.POST("/notifications/:id/dismiss", notificationsHandler.MarkDismissed)
+			protected.DELETE("/notifications/:id", notificationsHandler.Delete)
+
+			// Projects (Phase 1b.2). Static-path-before-param applies:
+			// /link-requests/... must come before /:id.
+			protected.POST("/projects", projectsHandler.Create)
+			protected.GET("/projects", projectsHandler.List)
+			protected.POST("/projects/link-requests/:notification_id/accept", projectsHandler.AcceptLinkRequest)
+			protected.POST("/projects/link-requests/:notification_id/reject", projectsHandler.RejectLinkRequest)
+			protected.GET("/projects/:id", projectsHandler.Get)
+			protected.PUT("/projects/:id", projectsHandler.Update)
+			protected.DELETE("/projects/:id", projectsHandler.Delete)
+			protected.GET("/projects/:id/members", projectsHandler.ListMembers)
+			protected.POST("/projects/:id/members", projectsHandler.AddMember)
+			protected.PUT("/projects/:id/members/:member_id", projectsHandler.UpdateMember)
+			protected.DELETE("/projects/:id/members/:member_id", projectsHandler.RemoveMember)
+			protected.POST("/projects/:id/members/:member_id/request-link", projectsHandler.RequestLink)
+			protected.POST("/projects/:id/transfer-ownership", projectsHandler.TransferOwnership)
+			protected.POST("/projects/:id/leave", projectsHandler.Leave)
+			protected.GET("/projects/:id/transactions", projectsHandler.ListPT)
+			protected.POST("/projects/:id/project-transactions", projectsHandler.CreatePT)
+			protected.PUT("/projects/:id/project-transactions/:pt_id", projectsHandler.UpdatePT)
+			protected.DELETE("/projects/:id/project-transactions/:pt_id", projectsHandler.DeletePT)
+			protected.PUT("/projects/:id/project-transactions/:pt_id/mark", projectsHandler.ToggleMark)
+			protected.GET("/projects/:id/summary", projectsHandler.Summary)
 		}
 	}
 

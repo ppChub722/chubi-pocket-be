@@ -25,29 +25,29 @@ var (
 	ErrTransactionNotOwned = errors.New("transaction not found or not owned")
 )
 
-const tagColumns = `id, user_id, name, color, created_at, updated_at`
+const tagColumns = `id, user_id, name, color, icon, created_at, updated_at`
 
 func scanTag(row pgx.Row) (*Tag, error) {
 	var t Tag
-	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.Color, &t.CreatedAt, &t.UpdatedAt)
+	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.Color, &t.Icon, &t.CreatedAt, &t.UpdatedAt)
 	return &t, err
 }
 
 func scanTagWithCount(row pgx.Row) (*Tag, error) {
 	var t Tag
-	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.Color, &t.CreatedAt, &t.UpdatedAt, &t.UsageCount)
+	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.Color, &t.Icon, &t.CreatedAt, &t.UpdatedAt, &t.UsageCount)
 	return &t, err
 }
 
-func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string, color *string) (*Tag, error) {
+func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string, color, icon *string) (*Tag, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
-	q := `INSERT INTO tags (id, user_id, name, color, created_by_user_id)
-		VALUES ($1, $2, $3, $4, $2)
+	q := `INSERT INTO tags (id, user_id, name, color, icon, created_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $2)
 		RETURNING ` + tagColumns
-	t, err := scanTag(s.db.QueryRow(ctx, q, id, userID, name, color))
+	t, err := scanTag(s.db.QueryRow(ctx, q, id, userID, name, color, icon))
 	if err != nil {
 		return nil, mapInsertError(err)
 	}
@@ -55,7 +55,7 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string, color
 }
 
 func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Tag, error) {
-	q := `SELECT t.id, t.user_id, t.name, t.color, t.created_at, t.updated_at,
+	q := `SELECT t.id, t.user_id, t.name, t.color, t.icon, t.created_at, t.updated_at,
 		COALESCE((SELECT COUNT(*) FROM transaction_tags WHERE tag_id = t.id), 0)
 		FROM tags t WHERE t.id = $1 AND t.user_id = $2`
 	t, err := scanTagWithCount(s.db.QueryRow(ctx, q, id, userID))
@@ -69,14 +69,16 @@ func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Tag, error)
 }
 
 func (s *Store) List(ctx context.Context, userID uuid.UUID) ([]Tag, error) {
-	q := `SELECT t.id, t.user_id, t.name, t.color, t.created_at, t.updated_at,
+	// Spec §3.9 — server sorts by usage_count DESC, then name ASC, so the
+	// user's most-used tags surface first in pickers.
+	q := `SELECT t.id, t.user_id, t.name, t.color, t.icon, t.created_at, t.updated_at,
 		COALESCE(c.cnt, 0) AS usage_count
 		FROM tags t
 		LEFT JOIN (
 			SELECT tag_id, COUNT(*) AS cnt FROM transaction_tags GROUP BY tag_id
 		) c ON c.tag_id = t.id
 		WHERE t.user_id = $1
-		ORDER BY LOWER(t.name)`
+		ORDER BY COALESCE(c.cnt, 0) DESC, LOWER(t.name)`
 	rows, err := s.db.Query(ctx, q, userID)
 	if err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
@@ -144,7 +146,7 @@ func (s *Store) DetachTag(ctx context.Context, txID, tagID uuid.UUID) error {
 
 // TagsForTransaction returns all tags attached to a single transaction.
 func (s *Store) TagsForTransaction(ctx context.Context, txID, userID uuid.UUID) ([]Tag, error) {
-	q := `SELECT t.id, t.user_id, t.name, t.color, t.created_at, t.updated_at, 0
+	q := `SELECT t.id, t.user_id, t.name, t.color, t.icon, t.created_at, t.updated_at, 0
 		FROM tags t
 		JOIN transaction_tags tt ON tt.tag_id = t.id
 		WHERE tt.transaction_id = $1 AND t.user_id = $2
@@ -184,7 +186,7 @@ func (s *Store) VerifyOwnership(ctx context.Context, userID uuid.UUID, tagIDs []
 	return nil
 }
 
-func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, name *string, color *string) (*Tag, error) {
+func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, name, color, icon *string) (*Tag, error) {
 	q := `UPDATE tags SET updated_by_user_id = $1`
 	args := []any{userID}
 	if name != nil {
@@ -194,6 +196,10 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, name *string, 
 	if color != nil {
 		args = append(args, *color)
 		q += fmt.Sprintf(", color = $%d", len(args))
+	}
+	if icon != nil {
+		args = append(args, *icon)
+		q += fmt.Sprintf(", icon = $%d", len(args))
 	}
 	args = append(args, id)
 	q += fmt.Sprintf(" WHERE id = $%d AND user_id = $1 RETURNING ", len(args)) + tagColumns

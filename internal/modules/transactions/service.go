@@ -21,23 +21,64 @@ var (
 	ErrTransferCurrencyMismatch    = errors.New("transfer source and destination must share currency")
 	ErrSystemCategoryNotAllowed    = errors.New("user category required (system categories are auto-assigned)")
 	ErrSplitsNotSupportedYet       = errors.New("splits are not supported in Phase 1a; ships in Phase 1b")
+	ErrSplitsOnTransfer            = errors.New("transfer transactions cannot have splits")
 	ErrProjectIDNotAllowed         = errors.New("project_id is auto-managed; cannot be set on POST /v1/transactions")
 	ErrTransferToAccountRequired   = errors.New("transfer_to_account_id is required for type=transfer")
 	ErrTransferFieldsOnNonTransfer = errors.New("transfer_to_account_id is only valid for type=transfer")
 	ErrAmountInvalid               = errors.New("amount must be > 0")
 	ErrCategoryRequiredForTransfer = errors.New("transfer category is auto-set; do not pass category_id")
+	ErrCategoryRequired            = errors.New("category_id is required for expense and income transactions")
 	ErrTransferEditCurrency        = errors.New("cannot edit currency on a transfer; delete and recreate")
 	ErrTransferCategoryEdit        = errors.New("cannot change category on a transfer; delete and recreate")
+	// System-category rows (Opening Balance, Adjustment) are bookkeeping
+	// reflections of account-level operations and aren't user-mutable
+	// directly — see spec §03/§3.4 (account edit), §03/§2.5 (adjust),
+	// §04/§4.16 (transfer pair). Transfer rows are NOT blocked here:
+	// they have their own cascade path in updateTransferInTx + Delete.
+	ErrSystemTransactionImmutable = errors.New("transactions in a system category cannot be edited or deleted directly; use the account-level operation that created them")
+)
+
+// Cross-module hooks. Wired post-construction in main.go to break the
+// transactions ↔ personal_debts cycle. Each hook is optional in the
+// sense that "feature off" = nil callback; the service rejects requests
+// that need the missing hook with a clear error rather than silently no-op.
+type (
+	// DebtsCreator inserts one personal_debts row per split entry on the
+	// splitter's side ('owed_to_me') AND one mirror row on each linked
+	// debtor's side ('i_owe'). Called inside Create's tx after the parent
+	// transaction row lands. Implemented by
+	// personal_debts.Service.CreateForTransactionTx.
+	DebtsCreator func(ctx context.Context, tx pgx.Tx, parentTxID, userID uuid.UUID, parentCurrency string, splits []SplitInput) error
+
+	// DebtValidator confirms the caller owns the debt and returns its
+	// direction ('i_owe' | 'owed_to_me') and outstanding. Used when a
+	// transaction is being created with source_personal_debt_id set
+	// (settling a debt). Implemented by
+	// personal_debts.Service.ValidateOwnership.
+	DebtValidator func(ctx context.Context, tx pgx.Tx, userID, debtID uuid.UUID) (direction string, outstanding float64, err error)
+
+	// DebtAutoBumper bumps a personal_debt's settled_amount when a
+	// transaction with source_personal_debt_id lands. The debt's
+	// validation is done by DebtValidator; this hook just bumps.
+	// Implemented by personal_debts.Service.AutoBumpInTx.
+	DebtAutoBumper func(ctx context.Context, tx pgx.Tx, userID, debtID uuid.UUID, deltaAmount float64) error
 )
 
 type Service struct {
-	store *Store
-	cats  *categories.Service
+	store        *Store
+	cats         *categories.Service
+	debtsCreator DebtsCreator
+	debtValid    DebtValidator
+	debtBumper   DebtAutoBumper
 }
 
 func NewService(s *Store, cats *categories.Service) *Service {
 	return &Service{store: s, cats: cats}
 }
+
+func (s *Service) WithDebtsCreator(fn DebtsCreator)     { s.debtsCreator = fn }
+func (s *Service) WithDebtValidator(fn DebtValidator)   { s.debtValid = fn }
+func (s *Service) WithDebtAutoBumper(fn DebtAutoBumper) { s.debtBumper = fn }
 
 // CountByCategory exposes the underlying count to categories.Service via the
 // TransactionCounter func wired in main.go.
@@ -139,7 +180,15 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*Li
 
 // hydrate fills the embedded account + category names for a single Transaction.
 func (s *Service) hydrate(ctx context.Context, userID uuid.UUID, t *Transaction) (*TransactionDetail, error) {
-	d := &TransactionDetail{Transaction: *t}
+	d := &TransactionDetail{Transaction: *t, Tags: []EmbeddedTag{}, IsResolve: t.SourcePersonalDebtID != nil}
+	if t.SourcePersonalDebtID == nil {
+		var n int
+		if err := s.store.db.QueryRow(ctx,
+			`SELECT COUNT(*) FROM personal_debts WHERE source_transaction_id = $1`,
+			t.ID).Scan(&n); err == nil && n > 0 {
+			d.HasSplits = true
+		}
+	}
 	// Account ref — bare query rather than importing accounts module.
 	var accName string
 	err := s.store.db.QueryRow(ctx,
@@ -154,7 +203,47 @@ func (s *Service) hydrate(ctx context.Context, userID uuid.UUID, t *Transaction)
 			d.Category = &EmbeddedRef{ID: c.ID, Name: c.Name}
 		}
 	}
+	// Tags — bare query against the junction. Avoids importing the tags
+	// module purely for an embedded ref slice; the data we need is just
+	// id / name / color / icon.
+	rows, err := s.store.db.Query(ctx, `
+		SELECT t.id, t.name, t.color, t.icon
+		FROM tags t
+		JOIN transaction_tags tt ON tt.tag_id = t.id
+		WHERE tt.transaction_id = $1 AND t.user_id = $2
+		ORDER BY LOWER(t.name)`,
+		t.ID, userID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var tag EmbeddedTag
+			if err := rows.Scan(&tag.ID, &tag.Name, &tag.Color, &tag.Icon); err == nil {
+				d.Tags = append(d.Tags, tag)
+			}
+		}
+	}
 	return d, nil
+}
+
+// buildTransferResponse hydrates both rows of a transfer (OUT first, IN
+// second by convention) and wraps them in a TransferResponse. Used by
+// both create and update so the client always sees the same envelope
+// for transfer mutations.
+func (s *Service) buildTransferResponse(
+	ctx context.Context, userID, groupID uuid.UUID, outRow, inRow *Transaction,
+) (*TransferResponse, error) {
+	outDetail, err := s.hydrate(ctx, userID, outRow)
+	if err != nil {
+		return nil, err
+	}
+	inDetail, err := s.hydrate(ctx, userID, inRow)
+	if err != nil {
+		return nil, err
+	}
+	return &TransferResponse{
+		TransferGroupID: groupID,
+		Rows:            []TransactionDetail{*outDetail, *inDetail},
+	}, nil
 }
 
 // --- Create (the atomic balance flow) ---
@@ -202,10 +291,22 @@ func (s *Service) CreateInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, r
 
 func (s *Service) validateCreateCommon(req CreateRequest) error {
 	if len(req.Splits) > 0 || req.MyShare != nil {
-		return ErrSplitsNotSupportedYet
+		// Splits create personal_debts rows in the same tx. Reject upfront
+		// when the hook isn't wired so we don't silently lose split data.
+		if s.debtsCreator == nil {
+			return ErrSplitsNotSupportedYet
+		}
+		if req.Type == TypeTransfer {
+			return ErrSplitsOnTransfer
+		}
 	}
 	if req.ProjectID != nil {
+		// Direct project_id is still rejected; the project resolve flow
+		// uses source_project_transaction_id and the BE auto-derives.
 		return ErrProjectIDNotAllowed
+	}
+	if req.SourceProjectTransactionID != nil && req.Type == TypeTransfer {
+		return ErrSplitsOnTransfer
 	}
 	if req.Amount <= 0 {
 		return ErrAmountInvalid
@@ -224,6 +325,14 @@ func (s *Service) validateCreateCommon(req CreateRequest) error {
 		if req.TransferToAccountID != nil {
 			return ErrTransferFieldsOnNonTransfer
 		}
+		// Phase 1c+: category is required on expense/income. Drives clean
+		// reports (no "—" rows on dashboards) and forces user intent.
+		// System categories are auto-assigned (opening balance, adjustment,
+		// transfer, etc.) so this only affects POST /v1/transactions —
+		// where the user is creating a real expense/income.
+		if req.CategoryID == nil {
+			return ErrCategoryRequired
+		}
 	}
 	return nil
 }
@@ -233,7 +342,7 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{req.AccountID}); err != nil {
 		return nil, err
 	}
-	balance, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, req.AccountID)
+	balance, currency, err := s.store.GetAccountBalanceTx(ctx, tx, userID, req.AccountID)
 	if err != nil {
 		return nil, err
 	}
@@ -257,16 +366,32 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 		categoryID = &c.ID
 	}
 
+	// Project resolve flow: when the caller passes
+	// source_project_transaction_id, derive project_id from it and stamp
+	// both columns on the personal-mirror row. The lookup also enforces
+	// caller ∈ project members (else any user could link their book to any
+	// project).
+	var projectID *uuid.UUID
+	if req.SourceProjectTransactionID != nil {
+		pid, err := s.store.LookupSourcePTTx(ctx, tx, *req.SourceProjectTransactionID, userID)
+		if err != nil {
+			return nil, err
+		}
+		projectID = &pid
+	}
+
 	delta := signedDelta(req.Type, req.Amount, false)
 
 	row := &Transaction{
-		UserID:     userID,
-		AccountID:  req.AccountID,
-		Type:       req.Type,
-		Amount:     req.Amount,
-		CategoryID: categoryID,
-		Date:       req.Date,
-		Note:       req.Note,
+		UserID:                     userID,
+		AccountID:                  req.AccountID,
+		Type:                       req.Type,
+		Amount:                     req.Amount,
+		CategoryID:                 categoryID,
+		Date:                       req.Date,
+		Note:                       req.Note,
+		ProjectID:                  projectID,
+		SourceProjectTransactionID: req.SourceProjectTransactionID,
 	}
 	created, err := s.store.InsertRowTx(ctx, tx, row)
 	if err != nil {
@@ -278,7 +403,23 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	}
 	_ = balance // currentBalance not needed beyond ownership confirmation
 
-	d := &TransactionDetail{Transaction: *created, AccountBalanceAfter: &newBalance}
+	// Insert one personal_debts row per split entry on the splitter's side
+	// (direction='owed_to_me'), plus mirror rows for linked partners.
+	// Hook is wired in main.go after personal_debts is constructed.
+	if len(req.Splits) > 0 {
+		if err := s.debtsCreator(ctx, tx, created.ID, userID, currency, req.Splits); err != nil {
+			return nil, err
+		}
+	}
+
+	d := &TransactionDetail{Transaction: *created, AccountBalanceAfter: &newBalance, HasSplits: len(req.Splits) > 0}
+	// Embed account name inline (locked in this tx, so a tx-aware lookup
+	// is the cheapest path). Without this, the FE's surgical-update inserts
+	// the new row with an empty account label until the next list refresh.
+	var accName string
+	_ = tx.QueryRow(ctx,
+		`SELECT name FROM accounts WHERE id = $1`, req.AccountID).Scan(&accName)
+	d.Account = &EmbeddedRef{ID: req.AccountID, Name: accName}
 	if categoryID != nil {
 		c, _ := s.cats.GetCategoryRow(ctx, userID, *categoryID)
 		if c != nil {
@@ -287,6 +428,98 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	}
 	return d, nil
 }
+
+// CreateInTxWithSourceDebt is called by personal_debts.Service.Settle when
+// the user records a real money movement against a debt. Validates the
+// caller owns the debt + direction matches transaction type, creates the
+// row with source_personal_debt_id set, and bumps settled_amount via the
+// auto-bumper. For 'i_owe' debts we expect TypeExpense; for 'owed_to_me'
+// we expect TypeIncome.
+func (s *Service) CreateInTxWithSourceDebt(
+	ctx context.Context, tx pgx.Tx, userID, debtID uuid.UUID,
+	req CreateRequest,
+) (*TransactionDetail, error) {
+	if s.debtValid == nil || s.debtBumper == nil {
+		return nil, ErrSplitsNotSupportedYet
+	}
+	if req.Type != TypeExpense && req.Type != TypeIncome {
+		return nil, ErrSplitsOnTransfer
+	}
+
+	direction, outstanding, err := s.debtValid(ctx, tx, userID, debtID)
+	if err != nil {
+		return nil, err
+	}
+	switch direction {
+	case "i_owe":
+		if req.Type != TypeExpense {
+			return nil, fmt.Errorf("settling 'i_owe' requires expense, got %s", req.Type)
+		}
+	case "owed_to_me":
+		if req.Type != TypeIncome {
+			return nil, fmt.Errorf("settling 'owed_to_me' requires income, got %s", req.Type)
+		}
+	}
+	if req.Amount > outstanding {
+		return nil, fmt.Errorf("amount %.2f exceeds outstanding %.2f", req.Amount, outstanding)
+	}
+
+	if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{req.AccountID}); err != nil {
+		return nil, err
+	}
+	if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, req.AccountID); err != nil {
+		return nil, err
+	}
+
+	// Auto-assign the matching system category (Debt Received / Debt Paid)
+	// so the transaction is never uncategorized. include_in_report=false on
+	// both, so spending reports don't double-count debt repayments.
+	var sysKind categories.SystemKind
+	switch direction {
+	case "i_owe":
+		sysKind = categories.SystemDebtPaid
+	case "owed_to_me":
+		sysKind = categories.SystemDebtReceived
+	}
+	sysCat, err := s.cats.SystemFor(ctx, userID, sysKind)
+	if err != nil {
+		return nil, fmt.Errorf("lookup system category %s: %w", sysKind, err)
+	}
+
+	delta := signedDelta(req.Type, req.Amount, false)
+	row := &Transaction{
+		UserID:               userID,
+		AccountID:            req.AccountID,
+		Type:                 req.Type,
+		Amount:               req.Amount,
+		CategoryID:           &sysCat.ID,
+		Date:                 req.Date,
+		Note:                 req.Note,
+		SourcePersonalDebtID: &debtID,
+	}
+	created, err := s.store.InsertRowTx(ctx, tx, row)
+	if err != nil {
+		return nil, err
+	}
+	newBalance, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, req.AccountID, delta)
+	if err != nil {
+		return nil, err
+	}
+
+	// Bump settled_amount on the personal_debt.
+	if err := s.debtBumper(ctx, tx, userID, debtID, req.Amount); err != nil {
+		return nil, err
+	}
+
+	d := &TransactionDetail{
+		Transaction:         *created,
+		AccountBalanceAfter: &newBalance,
+		IsResolve:           true,
+		Category:            &EmbeddedRef{ID: sysCat.ID, Name: sysCat.Name},
+	}
+	return d, nil
+}
+
 
 func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, req CreateRequest) (*TransferResponse, error) {
 	dst := *req.TransferToAccountID
@@ -361,18 +594,21 @@ func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 		return nil, err
 	}
 
-	return &TransferResponse{
-		TransferGroupID: groupID,
-		Rows: []TransferRow{
-			{ID: outRow.ID, AccountID: src, Category: transferOutCat.Name, Amount: req.Amount},
-			{ID: inRow.ID, AccountID: dst, Category: transferInCat.Name, Amount: req.Amount},
-		},
-	}, nil
+	resp, err := s.buildTransferResponse(ctx, userID, groupID, outRow, inRow)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // --- Update ---
 
-func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (*TransactionDetail, error) {
+// Update returns either *TransactionDetail (single row) or
+// *TransferResponse (transfer pair). The handler marshals whichever it
+// gets — same polymorphic-return shape as Create. Mirrors the spec §3.1
+// "for transfers, response includes both rows" rule and lets the FE
+// surgically refresh both rows + both account balances after one PUT.
+func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (any, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -385,14 +621,22 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 	}
 
 	if current.Type == TypeTransfer {
-		updated, err := s.updateTransferInTx(ctx, tx, userID, current, req)
+		outRow, inRow, err := s.updateTransferInTx(ctx, tx, userID, current, req)
 		if err != nil {
 			return nil, err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit: %w", err)
 		}
-		return s.hydrate(ctx, userID, updated)
+		return s.buildTransferResponse(ctx, userID, *outRow.TransferGroupID, outRow, inRow)
+	}
+
+	// Non-transfer with a system category (Opening Balance / Adjustment)
+	// is read-only — the user can't directly edit the auto-created
+	// bookkeeping row. They mutate the account-level state instead
+	// (account edit / adjust-balance), which writes new transactions.
+	if err := s.checkNotSystemRow(ctx, userID, current); err != nil {
+		return nil, err
 	}
 
 	updated, err := s.updateSingleInTx(ctx, tx, userID, current, req)
@@ -449,30 +693,34 @@ func (s *Service) updateSingleInTx(
 	return updated, nil
 }
 
+// updateTransferInTx applies amount/date/note changes to both rows of
+// a transfer in one tx, re-balancing both accounts atomically. Returns
+// (outRow, inRow) so the caller can build a TransferResponse — both
+// rows are needed by the client to refresh its cache surgically.
 func (s *Service) updateTransferInTx(
 	ctx context.Context, tx pgx.Tx, userID uuid.UUID,
 	current *Transaction, req UpdateRequest,
-) (*Transaction, error) {
+) (*Transaction, *Transaction, error) {
 	if _, catChange := req.CategoryIDChange(); catChange {
-		return nil, ErrTransferCategoryEdit
+		return nil, nil, ErrTransferCategoryEdit
 	}
 	if current.TransferGroupID == nil {
-		return nil, fmt.Errorf("transfer row has no transfer_group_id")
+		return nil, nil, fmt.Errorf("transfer row has no transfer_group_id")
 	}
 
 	// Fetch both rows
 	pair, err := s.store.GetByGroupID(ctx, userID, *current.TransferGroupID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(pair) != 2 {
-		return nil, fmt.Errorf("transfer pair has %d rows; expected 2", len(pair))
+		return nil, nil, fmt.Errorf("transfer pair has %d rows; expected 2", len(pair))
 	}
 
 	// Identify OUT vs IN by category
 	outCat, err := s.cats.SystemFor(ctx, userID, categories.SystemTransferOut)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var outRow, inRow *Transaction
 	for i := range pair {
@@ -483,14 +731,14 @@ func (s *Service) updateTransferInTx(
 		}
 	}
 	if outRow == nil || inRow == nil {
-		return nil, fmt.Errorf("could not identify OUT/IN rows of transfer")
+		return nil, nil, fmt.Errorf("could not identify OUT/IN rows of transfer")
 	}
 
 	// Lock both accounts (lowest UUID first)
 	lockIDs := []uuid.UUID{outRow.AccountID, inRow.AccountID}
 	sort.Slice(lockIDs, func(i, j int) bool { return uuidLess(lockIDs[i], lockIDs[j]) })
 	if err := s.store.LockAccountsForUpdate(ctx, tx, lockIDs); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Amount change → reverse old, apply new on both rows
@@ -499,11 +747,11 @@ func (s *Service) updateTransferInTx(
 		new := *req.Amount
 		// OUT side: was -old, now -new → delta = old - new (positive when shrinking)
 		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, outRow.AccountID, old-new); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// IN side: was +old, now +new → delta = new - old
 		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, inRow.AccountID, new-old); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
@@ -513,19 +761,15 @@ func (s *Service) updateTransferInTx(
 	updatedOut, err := s.store.UpdateRowTx(ctx, tx, userID, outRow.ID,
 		req.Amount, req.Date, nil, false, noteVal, noteChanged)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	updatedIn, err := s.store.UpdateRowTx(ctx, tx, userID, inRow.ID,
 		req.Amount, req.Date, nil, false, noteVal, noteChanged)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Return whichever one the caller asked about
-	if current.ID == updatedOut.ID {
-		return updatedOut, nil
-	}
-	return updatedIn, nil
+	return updatedOut, updatedIn, nil
 }
 
 // --- Delete ---
@@ -547,11 +791,39 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 			return err
 		}
 	} else {
+		// Non-transfer with a system category (Opening Balance,
+		// Adjustment) is undeletable — silently dropping it would
+		// leave the cached `accounts.balance` honest but the audit
+		// trail would lie. Reverse via the account-level operation.
+		if err := s.checkNotSystemRow(ctx, userID, current); err != nil {
+			return err
+		}
 		if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
 			return err
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// checkNotSystemRow rejects mutations on transactions whose category
+// is a system kind (Opening Balance, Adjustment). Transfer rows have
+// system categories too, but they're handled by the dedicated transfer
+// path above this check; callers must gate by `current.Type !=
+// TypeTransfer` themselves.
+func (s *Service) checkNotSystemRow(ctx context.Context, userID uuid.UUID, current *Transaction) error {
+	if current.CategoryID == nil {
+		return nil
+	}
+	cat, err := s.cats.GetCategoryRow(ctx, userID, *current.CategoryID)
+	if err != nil {
+		// If the category was hard-deleted out from under the row,
+		// the FK is set NULL — we can't tell what kind it was. Allow.
+		return nil
+	}
+	if cat.IsSystem {
+		return ErrSystemTransactionImmutable
+	}
+	return nil
 }
 
 func (s *Service) deleteSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) error {

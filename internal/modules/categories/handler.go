@@ -164,6 +164,29 @@ func (h *Handler) Restore(c *gin.Context) {
 	c.JSON(http.StatusOK, cat)
 }
 
+// PATCH /v1/categories/reorder — bulk-rewrites (parent_id, sort_order) for
+// the user's category tree atomically. Spec §3.13.
+func (h *Handler) Reorder(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+
+	var req ReorderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+
+	updated, err := h.service.Reorder(c.Request.Context(), userID, req.Categories)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, ListResponse{Data: updated})
+}
+
 // DELETE /v1/categories/:id/permanent
 func (h *Handler) PermanentDelete(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)

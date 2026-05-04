@@ -25,14 +25,16 @@ var (
 	ErrAccountNotFound = errors.New("account not found")
 )
 
-const accountColumns = `id, user_id, name, type, balance, currency, icon, color, status,
+const accountColumns = `id, user_id, name, type, balance, currency, icon, color,
+	description, note, status,
 	credit_limit, statement_date, payment_due_date, minimum_payment,
 	sort_order, created_at, updated_at`
 
 func scanAccount(row pgx.Row) (*Account, error) {
 	var a Account
 	err := row.Scan(
-		&a.ID, &a.UserID, &a.Name, &a.Type, &a.Balance, &a.Currency, &a.Icon, &a.Color, &a.Status,
+		&a.ID, &a.UserID, &a.Name, &a.Type, &a.Balance, &a.Currency, &a.Icon, &a.Color,
+		&a.Description, &a.Note, &a.Status,
 		&a.CreditLimit, &a.StatementDate, &a.PaymentDueDate, &a.MinimumPayment,
 		&a.SortOrder, &a.CreatedAt, &a.UpdatedAt,
 	)
@@ -83,23 +85,33 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, status, accType stri
 	return out, rows.Err()
 }
 
-// SummaryAggregate returns income / expense totals for an account in a date
-// range. Per spec §2.7: transfers DO count for per-account summaries
-// (transfer-out as expense, transfer-in as income for that account).
-func (s *Store) SummaryAggregate(ctx context.Context, userID, accountID uuid.UUID, from, to string, transferInCatID, transferOutCatID uuid.UUID) (income, expense float64, count int, err error) {
+// SummaryAggregate returns income / expense / count for an account in
+// a date range, filtered to **reportable** transactions only — per
+// spec §03/§2.7 + §05/§4.14c, the rule is single: include the row
+// when its category has `include_in_report = TRUE`, OR the row has no
+// category (uncategorized expense/income — still real activity).
+//
+// Structurally this excludes every row whose category is system
+// (Opening Balance, Adjustment, Transfer In/Out — all seeded with
+// include_in_report = FALSE) plus any user-flagged starter rows
+// (Lending, Reimbursements). Transfers in particular drop out without
+// a special branch — they always carry a system category.
+//
+// LEFT JOIN keeps uncategorized rows in the aggregate; COALESCE
+// treats NULL category as include-by-default.
+func (s *Store) SummaryAggregate(ctx context.Context, userID, accountID uuid.UUID, from, to string) (income, expense float64, count int, err error) {
 	q := `SELECT
-		COALESCE(SUM(amount) FILTER (
-			WHERE type = 'income'
-			   OR (type = 'transfer' AND category_id = $5)
-		), 0),
-		COALESCE(SUM(amount) FILTER (
-			WHERE type = 'expense'
-			   OR (type = 'transfer' AND category_id = $6)
-		), 0),
+		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'income'), 0),
+		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0),
 		COUNT(*)
-		FROM transactions
-		WHERE user_id = $1 AND account_id = $2 AND date >= $3::date AND date <= $4::date`
-	err = s.db.QueryRow(ctx, q, userID, accountID, from, to, transferInCatID, transferOutCatID).
+		FROM transactions t
+		LEFT JOIN categories c ON c.id = t.category_id
+		WHERE t.user_id = $1
+		  AND t.account_id = $2
+		  AND t.date >= $3::date
+		  AND t.date <= $4::date
+		  AND COALESCE(c.include_in_report, TRUE) = TRUE`
+	err = s.db.QueryRow(ctx, q, userID, accountID, from, to).
 		Scan(&income, &expense, &count)
 	return
 }
@@ -117,14 +129,17 @@ func (s *Store) InsertTx(ctx context.Context, tx pgx.Tx, a *Account) (*Account, 
 	}
 	a.ID = id
 	q := `INSERT INTO accounts
-		(id, user_id, name, type, balance, currency, icon, color, status,
+		(id, user_id, name, type, balance, currency, icon, color,
+		 description, note, status,
 		 credit_limit, statement_date, payment_due_date, minimum_payment,
 		 sort_order, created_by_user_id)
-		VALUES ($1, $2, $3, $4, 0, $5, $6, $7, 'active',
-		        $8, $9, $10, $11, $12, $2)
+		VALUES ($1, $2, $3, $4, 0, $5, $6, $7,
+		        $8, $9, 'active',
+		        $10, $11, $12, $13, $14, $2)
 		RETURNING ` + accountColumns
 	created, err := scanAccount(tx.QueryRow(ctx, q,
 		a.ID, a.UserID, a.Name, a.Type, a.Currency, a.Icon, a.Color,
+		a.Description, a.Note,
 		a.CreditLimit, a.StatementDate, a.PaymentDueDate, a.MinimumPayment,
 		a.SortOrder))
 	if err != nil {
@@ -158,6 +173,15 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequ
 	}
 	if req.Color != nil {
 		add("color", *req.Color)
+	}
+	// description / note presence-tracked: explicit null clears, missing
+	// field leaves the column alone. The presence bools were captured by
+	// UpdateRequest.UnmarshalJSON.
+	if desc, present := req.DescriptionChange(); present {
+		add("description", desc)
+	}
+	if note, present := req.NoteChange(); present {
+		add("note", note)
 	}
 	if req.Status != nil {
 		add("status", *req.Status)

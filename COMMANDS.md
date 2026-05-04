@@ -139,6 +139,21 @@ air
 
 ---
 
+## End-to-end test scripts
+
+```bash
+# Phase 1a end-to-end smoke (register → accounts → tx → tag → summary → transfer edit)
+bash scripts/smoke_phase1a.sh
+
+# Concurrent balance-cache invariant check (50 workers × 20 transfers by default)
+bash scripts/test_balance_invariant.sh
+```
+
+Full docs: [`scripts/README.md`](scripts/README.md). Both run against
+the live BE container; `python` is required on PATH.
+
+---
+
 ## Cleanup / fresh start
 
 ```powershell

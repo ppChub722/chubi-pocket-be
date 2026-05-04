@@ -69,14 +69,21 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateCatego
 	if depth > maxDepth {
 		return nil, ErrMaxDepth
 	}
+	includeInReport := true
+	if req.IncludeInReport != nil {
+		includeInReport = *req.IncludeInReport
+	}
 	c := &Category{
-		UserID:   userID,
-		Name:     strings.TrimSpace(req.Name),
-		Type:     req.Type,
-		ParentID: req.ParentID,
-		IsSystem: false,
-		Icon:     req.Icon,
-		Color:    req.Color,
+		UserID:          userID,
+		Name:            strings.TrimSpace(req.Name),
+		Type:            req.Type,
+		ParentID:        req.ParentID,
+		IsSystem:        false,
+		Icon:            req.Icon,
+		Color:           req.Color,
+		IncludeInReport: includeInReport,
+		Description:     req.Description,
+		Note:            req.Note,
 	}
 	return s.store.Create(ctx, c)
 }
@@ -179,8 +186,21 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCa
 		name = &trimmed
 	}
 
-	return s.store.Update(ctx, userID, id, name, newParent, parentChanged,
-		req.Icon, req.Color)
+	desc, descChanged := req.DescriptionChange()
+	note, noteChanged := req.NoteChange()
+
+	return s.store.Update(ctx, userID, id, UpdateFields{
+		Name:              name,
+		ParentID:          newParent,
+		ParentIDChange:    parentChanged,
+		Icon:              req.Icon,
+		Color:             req.Color,
+		IncludeInReport:   req.IncludeInReport,
+		Description:       desc,
+		DescriptionChange: descChanged,
+		Note:              note,
+		NoteChange:        noteChanged,
+	})
 }
 
 // Delete archives or hard-deletes per spec §3.5.
@@ -237,7 +257,10 @@ func (s *Service) Restore(ctx context.Context, userID, id uuid.UUID) (*Category,
 				return nil, err
 			}
 			// active may be nil → becomes root
-			if _, err := s.store.Update(ctx, userID, id, nil, active, true, nil, nil); err != nil {
+			if _, err := s.store.Update(ctx, userID, id, UpdateFields{
+				ParentID:       active,
+				ParentIDChange: true,
+			}); err != nil {
 				return nil, err
 			}
 		}
@@ -247,6 +270,114 @@ func (s *Service) Restore(ctx context.Context, userID, id uuid.UUID) (*Category,
 		return nil, err
 	}
 	return s.store.GetByID(ctx, userID, id)
+}
+
+// Reorder applies a batch (parent_id, sort_order) rewrite to the user's
+// category tree. Spec §3.13.
+//
+// Validation runs ENTIRELY before any writes:
+//  1. Every id is owned by the user, active, and resolvable.
+//  2. Every entry's `parent_id` is either NULL, a system category staying as
+//     root, or another non-system active category of the SAME type.
+//  3. Cycles: against the post-batch parent map (so dragging A under B and B
+//     under A in the same batch is rejected).
+//  4. Depth ≤ 3 anywhere in the post-batch tree.
+//  5. Sibling-name uniqueness within each (type, parent_id) group.
+//
+// On any failure → no rows change.
+func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []ReorderEntry) ([]Category, error) {
+	if len(entries) == 0 {
+		return s.store.List(ctx, userID, ListFilter{Status: "active"})
+	}
+
+	// 1. Pre-load the user's full active set so we can validate without
+	// chatty per-entry round trips. Includes system rows since they may
+	// appear in the batch (sort_order is editable for them).
+	all, err := s.store.List(ctx, userID, ListFilter{
+		Status: "active", IncludeSystem: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("preload: %w", err)
+	}
+	byID := make(map[uuid.UUID]*Category, len(all))
+	for i := range all {
+		byID[all[i].ID] = &all[i]
+	}
+
+	// 2. Build the post-batch parent map for cycle / depth checks. Rows the
+	// payload doesn't mention keep their existing parent_id.
+	postParent := make(map[uuid.UUID]*uuid.UUID, len(all))
+	for i := range all {
+		postParent[all[i].ID] = all[i].ParentID
+	}
+
+	// 3. Validate each entry against ownership / type / parent rules and
+	// stage the parent overrides.
+	for _, e := range entries {
+		c, ok := byID[e.ID]
+		if !ok {
+			return nil, ErrCategoryNotFound
+		}
+		// System cats: must remain roots (parent_id null). sort_order is fine.
+		if c.IsSystem {
+			if e.ParentID != nil {
+				return nil, fmt.Errorf("%w: system categories must remain roots", ErrSystemImmutable)
+			}
+		}
+		// Validate parent: same user, same type, not archived, not system.
+		if e.ParentID != nil {
+			parent, ok := byID[*e.ParentID]
+			if !ok {
+				return nil, ErrInvalidParent
+			}
+			if parent.UserID != userID || parent.Type != c.Type ||
+				parent.Status != "active" || parent.IsSystem {
+				return nil, ErrInvalidParent
+			}
+		}
+		postParent[e.ID] = e.ParentID
+	}
+
+	// 4. Cycle + depth check on the post-batch graph. With 3-level cap and
+	// per-user data the entire tree is small; an O(N·depth) walk is fine.
+	for id := range postParent {
+		seen := make(map[uuid.UUID]struct{})
+		seen[id] = struct{}{}
+		curr := postParent[id]
+		hops := 1 // self counts as level 1
+		for curr != nil {
+			if _, dup := seen[*curr]; dup {
+				return nil, ErrCycleDetected
+			}
+			seen[*curr] = struct{}{}
+			hops++
+			if hops > maxDepth {
+				return nil, ErrMaxDepth
+			}
+			curr = postParent[*curr]
+		}
+	}
+
+	// 5. Sibling-name uniqueness post-batch. Build (type, parent_id, lower(name)) groups.
+	type sibKey struct {
+		typ      string
+		parentID string // "" for null
+		nameLow  string
+	}
+	groups := make(map[sibKey]int, len(all))
+	for i := range all {
+		c := &all[i]
+		key := sibKey{typ: c.Type, nameLow: strings.ToLower(c.Name)}
+		if p := postParent[c.ID]; p != nil {
+			key.parentID = p.String()
+		}
+		groups[key]++
+		if groups[key] > 1 {
+			return nil, ErrDuplicateName
+		}
+	}
+
+	return s.store.ReorderTx(ctx, userID, entries)
 }
 
 // PermanentDelete hard-deletes from archived state with 0 transactions.

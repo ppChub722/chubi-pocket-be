@@ -43,23 +43,17 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, accType st
 	return s.store.List(ctx, userID, status, accType)
 }
 
-// Summary computes income/expense totals for an account in a date range,
-// counting transfers as income (Transfer IN) or expense (Transfer OUT) for
-// THIS account. Per spec §2.7.
+// Summary computes income/expense/net for an account in a date range,
+// filtered to **reportable** transactions only — categories with
+// `include_in_report = false` (Opening Balance, Adjustment, Transfer
+// In/Out, Lending, Reimbursements) are excluded. Spec §03/§2.7 +
+// §05/§4.14c. Uncategorized rows count (still real activity).
 func (s *Service) Summary(ctx context.Context, userID, accountID uuid.UUID, from, to string) (*SummaryResponse, error) {
 	a, err := s.store.GetByID(ctx, userID, accountID)
 	if err != nil {
 		return nil, err
 	}
-	transferIn, err := s.cats.SystemFor(ctx, userID, categories.SystemTransferIn)
-	if err != nil {
-		return nil, err
-	}
-	transferOut, err := s.cats.SystemFor(ctx, userID, categories.SystemTransferOut)
-	if err != nil {
-		return nil, err
-	}
-	income, expense, count, err := s.store.SummaryAggregate(ctx, userID, accountID, from, to, transferIn.ID, transferOut.ID)
+	income, expense, count, err := s.store.SummaryAggregate(ctx, userID, accountID, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -101,6 +95,8 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, userCurrency str
 		Currency:       currency,
 		Icon:           req.Icon,
 		Color:          req.Color,
+		Description:    req.Description,
+		Note:           req.Note,
 		CreditLimit:    req.CreditLimit,
 		StatementDate:  req.StatementDate,
 		PaymentDueDate: req.PaymentDueDate,

@@ -1,0 +1,2 @@
+DROP TRIGGER IF EXISTS set_timestamp_user_notification_settings ON user_notification_settings;
+DROP TABLE IF EXISTS user_notification_settings;
