@@ -208,6 +208,10 @@ func main() {
 			// must come before /:id to avoid path collision.
 			protected.POST("/contacts", contactsHandler.Create)
 			protected.GET("/contacts", contactsHandler.List)
+			// Static-path-before-param: `/unlinked-names` and
+			// `/link-requests/...` MUST come before `/:id` so Gin's tree
+			// doesn't match them as a UUID parameter.
+			protected.GET("/contacts/unlinked-names", contactsHandler.UnlinkedNames)
 			protected.POST("/contacts/link-requests/:notification_id/accept", contactsHandler.AcceptLinkRequest)
 			protected.POST("/contacts/link-requests/:notification_id/reject", contactsHandler.RejectLinkRequest)
 			protected.GET("/contacts/:id", contactsHandler.Get)
@@ -216,6 +220,7 @@ func main() {
 			protected.POST("/contacts/:id/restore", contactsHandler.Restore)
 			protected.POST("/contacts/:id/request-link", contactsHandler.RequestLink)
 			protected.POST("/contacts/:id/unlink", contactsHandler.Unlink)
+			protected.POST("/contacts/:id/absorb", contactsHandler.Absorb)
 			protected.DELETE("/contacts/:id", contactsHandler.Delete)
 
 			// Personal debts (bidirectional, replaces splits + old debts).
