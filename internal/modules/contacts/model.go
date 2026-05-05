@@ -11,11 +11,12 @@ const (
 	StatusArchived = "archived"
 )
 
+// Contact: nickname column was retired in migration 29. The user's chosen
+// label for a person is now display_name only.
 type Contact struct {
 	ID           uuid.UUID  `json:"id"`
 	UserID       uuid.UUID  `json:"user_id"`
 	DisplayName  string     `json:"display_name"`
-	Nickname     *string    `json:"nickname"`
 	Email        *string    `json:"email"`
 	Phone        *string    `json:"phone"`
 	Notes        *string    `json:"notes"`
@@ -32,19 +33,18 @@ type Contact struct {
 
 type CreateContactRequest struct {
 	DisplayName string  `json:"display_name" binding:"required,min=1,max=100"`
-	Nickname    *string `json:"nickname"     binding:"omitempty,min=1,max=100"`
 	Email       *string `json:"email"        binding:"omitempty,email,max=255"`
 	Phone       *string `json:"phone"        binding:"omitempty,max=50"`
 	Notes       *string `json:"notes"`
 	Icon        *string `json:"icon"         binding:"omitempty,max=50"`
-	// AbsorbNames is accepted in 1b.1 but is a no-op until shared_expense_splits
-	// exists (1b.1.b). Wire path is preserved so the wizard UX won't break.
+	// AbsorbNames wires existing free-text person_names from the caller's
+	// personal_debts to the new contact in the same call. Case-insensitive
+	// exact match against counterparty_person_name.
 	AbsorbNames []string `json:"absorb_names"`
 }
 
 type UpdateContactRequest struct {
 	DisplayName *string `json:"display_name" binding:"omitempty,min=1,max=100"`
-	Nickname    *string `json:"nickname"     binding:"omitempty,min=1,max=100"`
 	Email       *string `json:"email"        binding:"omitempty,email,max=255"`
 	Phone       *string `json:"phone"        binding:"omitempty,max=50"`
 	Notes       *string `json:"notes"`

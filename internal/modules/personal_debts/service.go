@@ -222,7 +222,7 @@ func (s *Service) CreateForTransactionTx(
 			var partnerContactID *uuid.UUID
 			var partnerPersonName string
 			row := tx.QueryRow(ctx,
-				`SELECT id, COALESCE(nickname, display_name) FROM contacts
+				`SELECT id, display_name FROM contacts
 				 WHERE user_id = $1 AND linked_user_id = $2 LIMIT 1`,
 				*linkedUserID, userID)
 			var pcID uuid.UUID

@@ -136,9 +136,22 @@ func main() {
 	// Phase 0/1: permissive — Flutter web + Android emulator + LAN devices all allowed.
 	// Phase 3: restrict AllowAllOrigins → AllowOrigins with the prod web/app hostnames.
 	r.Use(cors.New(cors.Config{
-		AllowAllOrigins:  true,
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		AllowAllOrigins: true,
+		AllowMethods:    []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders: []string{
+			"Origin",
+			"Content-Type",
+			"Authorization",
+			// FE generates a UUID per outbound request and sends it as
+			// X-Request-ID for log correlation. Browsers preflight any
+			// non-CORS-safelisted request header — must be explicitly
+			// allowed here or the OPTIONS response 403s and the actual
+			// request never fires.
+			"X-Request-ID",
+		},
+		// Echo X-Request-ID back so the FE can read it from the response
+		// (ApiException pulls it from this header for error UIs).
+		ExposeHeaders:    []string{"X-Request-ID"},
 		AllowCredentials: false,
 		MaxAge:           12 * time.Hour,
 	}))

@@ -30,13 +30,13 @@ var (
 	ErrCannotLinkSelf  = errors.New("cannot link a contact to yourself")
 )
 
-const contactColumns = `id, user_id, display_name, nickname, email, phone, notes, icon,
+const contactColumns = `id, user_id, display_name, email, phone, notes, icon,
 	linked_user_id, status, last_used_at, created_at, updated_at`
 
 func scanContact(row pgx.Row) (*Contact, error) {
 	var c Contact
 	err := row.Scan(
-		&c.ID, &c.UserID, &c.DisplayName, &c.Nickname, &c.Email, &c.Phone, &c.Notes, &c.Icon,
+		&c.ID, &c.UserID, &c.DisplayName, &c.Email, &c.Phone, &c.Notes, &c.Icon,
 		&c.LinkedUserID, &c.Status, &c.LastUsedAt, &c.CreatedAt, &c.UpdatedAt,
 	)
 	return &c, err
@@ -48,12 +48,12 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, req CreateContactR
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
 	q := `INSERT INTO contacts
-		(id, user_id, display_name, nickname, email, phone, notes, icon, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $2, $2)
+		(id, user_id, display_name, email, phone, notes, icon, created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $2, $2)
 		RETURNING ` + contactColumns
 
 	c, err := scanContact(s.db.QueryRow(ctx, q,
-		id, userID, strings.TrimSpace(req.DisplayName), req.Nickname,
+		id, userID, strings.TrimSpace(req.DisplayName),
 		req.Email, req.Phone, req.Notes, req.Icon,
 	))
 	if err != nil {
@@ -110,14 +110,13 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Con
 
 	if s := strings.TrimSpace(f.Search); s != "" {
 		args = append(args, "%"+strings.ToLower(s)+"%")
-		q += fmt.Sprintf(` AND (LOWER(display_name) LIKE $%d OR LOWER(COALESCE(nickname, '')) LIKE $%d)`,
-			len(args), len(args))
+		q += fmt.Sprintf(` AND LOWER(display_name) LIKE $%d`, len(args))
 	}
 
 	// Recent-first ranking: contacts the user just split with float to the
 	// top of the typeahead. Alphabetical falls in for ties / never-used.
 	q += ` ORDER BY last_used_at DESC NULLS LAST,
-		LOWER(COALESCE(nickname, display_name))`
+		LOWER(display_name)`
 
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
@@ -145,10 +144,6 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCont
 	if req.DisplayName != nil {
 		args = append(args, strings.TrimSpace(*req.DisplayName))
 		q += fmt.Sprintf(", display_name = $%d", len(args))
-	}
-	if req.Nickname != nil {
-		args = append(args, *req.Nickname)
-		q += fmt.Sprintf(", nickname = $%d", len(args))
 	}
 	if req.Email != nil {
 		args = append(args, *req.Email)

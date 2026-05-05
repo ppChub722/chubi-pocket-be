@@ -469,12 +469,12 @@ func (s *Store) People(ctx context.Context, userID uuid.UUID) ([]PersonRow, floa
 			SELECT
 				counterparty_contact_id,
 				LOWER(COALESCE(
-					(SELECT COALESCE(c.nickname, c.display_name) FROM contacts c
+					(SELECT c.display_name FROM contacts c
 					 WHERE c.id = pd.counterparty_contact_id),
 					pd.counterparty_person_name
 				)) AS group_key,
 				COALESCE(
-					(SELECT COALESCE(c.nickname, c.display_name) FROM contacts c
+					(SELECT c.display_name FROM contacts c
 					 WHERE c.id = pd.counterparty_contact_id),
 					pd.counterparty_person_name
 				) AS display_name,
