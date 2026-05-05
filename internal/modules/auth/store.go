@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Store struct {
@@ -27,15 +30,25 @@ var (
 )
 
 const userColumns = `id, username, email, email_verified_at, display_name,
-	password_hash, currency, avatar_url, status, created_at, updated_at`
+	password_hash, currency, icon_code, status, created_at, updated_at`
 
 func scanUser(row pgx.Row) (*User, error) {
 	var u User
+	var iconBytes []byte
 	err := row.Scan(
 		&u.ID, &u.Username, &u.Email, &u.EmailVerifiedAt, &u.DisplayName,
-		&u.PasswordHash, &u.Currency, &u.AvatarURL, &u.Status, &u.CreatedAt, &u.UpdatedAt,
+		&u.PasswordHash, &u.Currency, &iconBytes, &u.Status, &u.CreatedAt, &u.UpdatedAt,
 	)
-	return &u, err
+	if err != nil {
+		return nil, err
+	}
+	if iconBytes != nil {
+		u.IconCode = new(shared.IconCode)
+		if err := json.Unmarshal(iconBytes, u.IconCode); err != nil {
+			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
+		}
+	}
+	return &u, nil
 }
 
 // Pool exposes the underlying connection pool to the Service so it can
@@ -53,11 +66,11 @@ func (s *Store) InsertUserTx(ctx context.Context, tx pgx.Tx, u *User) (*User, er
 	u.ID = id
 
 	q := `
-		INSERT INTO users (id, username, email, display_name, password_hash, currency, avatar_url, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+		INSERT INTO users (id, username, email, display_name, password_hash, currency, status)
+		VALUES ($1, $2, $3, $4, $5, $6, 'active')
 		RETURNING ` + userColumns
 	created, err := scanUser(tx.QueryRow(ctx, q,
-		u.ID, u.Username, u.Email, u.DisplayName, u.PasswordHash, u.Currency, u.AvatarURL,
+		u.ID, u.Username, u.Email, u.DisplayName, u.PasswordHash, u.Currency,
 	))
 	if err != nil {
 		return nil, mapInsertError(err)

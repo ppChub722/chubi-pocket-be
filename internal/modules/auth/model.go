@@ -4,6 +4,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // User is the canonical identity object. Owned by the auth module per
@@ -16,7 +18,7 @@ type User struct {
 	DisplayName     string     `json:"display_name"`
 	PasswordHash    string     `json:"-"`
 	Currency        string     `json:"currency"`
-	AvatarURL       *string    `json:"avatar_url"`
+	IconCode        *shared.IconCode `json:"icon_code"`
 	Status          string     `json:"status"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`

@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // SystemKind names the 8 reserved system categories. The DB column
@@ -31,22 +33,21 @@ const (
 // Category mirrors the row in `categories`. system_kind is omitted from JSON
 // (it's a backend implementation detail; clients see is_system + display name).
 type Category struct {
-	ID              uuid.UUID  `json:"id"`
-	UserID          uuid.UUID  `json:"user_id"`
-	Name            string     `json:"name"`
-	Type            string     `json:"type"`
-	ParentID        *uuid.UUID `json:"parent_id"`
-	IsSystem        bool       `json:"is_system"`
-	SystemKind      *string    `json:"-"`
-	Icon            *string    `json:"icon"`
-	Color           *string    `json:"color"`
-	SortOrder       int        `json:"sort_order"`
-	IncludeInReport bool       `json:"include_in_report"`
-	Description     *string    `json:"description"`
-	Note            *string    `json:"note"`
-	Status          string     `json:"status"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID              uuid.UUID        `json:"id"`
+	UserID          uuid.UUID        `json:"user_id"`
+	Name            string           `json:"name"`
+	Type            string           `json:"type"`
+	ParentID        *uuid.UUID       `json:"parent_id"`
+	IsSystem        bool             `json:"is_system"`
+	SystemKind      *string          `json:"-"`
+	IconCode        *shared.IconCode `json:"icon_code"`
+	SortOrder       int              `json:"sort_order"`
+	IncludeInReport bool             `json:"include_in_report"`
+	Description     *string          `json:"description"`
+	Note            *string          `json:"note"`
+	Status          string           `json:"status"`
+	CreatedAt       time.Time        `json:"created_at"`
+	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
 // CategoryDetail is the response shape for GET /v1/categories/:id —
@@ -61,21 +62,20 @@ type CategoryDetail struct {
 }
 
 type CreateCategoryRequest struct {
-	Name            string     `json:"name"              binding:"required,min=1,max=100"`
-	Type            string     `json:"type"              binding:"required,oneof=income expense"`
-	ParentID        *uuid.UUID `json:"parent_id"         binding:"omitempty"`
-	Icon            *string    `json:"icon"              binding:"omitempty,max=50"`
-	Color           *string    `json:"color"             binding:"omitempty,len=7"`
-	IncludeInReport *bool      `json:"include_in_report" binding:"omitempty"`
-	Description     *string    `json:"description"       binding:"omitempty,max=280"`
-	Note            *string    `json:"note"              binding:"omitempty,max=280"`
+	Name            string           `json:"name"              binding:"required,min=1,max=100"`
+	Type            string           `json:"type"              binding:"required,oneof=income expense"`
+	ParentID        *uuid.UUID       `json:"parent_id"         binding:"omitempty"`
+	IconCode        *shared.IconCode `json:"icon_code"         binding:"omitempty"`
+	IncludeInReport *bool            `json:"include_in_report" binding:"omitempty"`
+	Description     *string          `json:"description"       binding:"omitempty,max=280"`
+	Note            *string          `json:"note"              binding:"omitempty,max=280"`
 }
 
 // UpdateCategoryRequest — partial update. `type` and `is_system` are
 // immutable per spec §3.4; `status` flows through DELETE / restore;
 // `sort_order` flows through PATCH /v1/categories/reorder (§3.13).
 //
-// Presence semantics for `parent_id`, `description`, `note`:
+// Presence semantics for `parent_id`, `description`, `note`, `icon_code`:
 //   - field absent → leave unchanged
 //   - field explicitly `null` → clear (set NULL / make root for parent_id)
 //   - field with a value → set
@@ -83,15 +83,15 @@ type CreateCategoryRequest struct {
 // Custom UnmarshalJSON tracks the presence flags so the service layer can
 // distinguish "leave alone" from "clear".
 type UpdateCategoryRequest struct {
-	Name            *string    `json:"name"              binding:"omitempty,min=1,max=100"`
-	ParentID        *uuid.UUID `json:"parent_id"`
-	Icon            *string    `json:"icon"              binding:"omitempty,max=50"`
-	Color           *string    `json:"color"             binding:"omitempty,len=7"`
-	IncludeInReport *bool      `json:"include_in_report" binding:"omitempty"`
-	Description     *string    `json:"description"       binding:"omitempty,max=280"`
-	Note            *string    `json:"note"              binding:"omitempty,max=280"`
+	Name            *string          `json:"name"              binding:"omitempty,min=1,max=100"`
+	ParentID        *uuid.UUID       `json:"parent_id"`
+	IconCode        *shared.IconCode `json:"icon_code"`
+	IncludeInReport *bool            `json:"include_in_report" binding:"omitempty"`
+	Description     *string          `json:"description"       binding:"omitempty,max=280"`
+	Note            *string          `json:"note"              binding:"omitempty,max=280"`
 
 	parentIDPresent    bool
+	iconCodePresent    bool
 	descriptionPresent bool
 	notePresent        bool
 }
@@ -106,6 +106,7 @@ func (r *UpdateCategoryRequest) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	_, r.parentIDPresent = probe["parent_id"]
+	_, r.iconCodePresent = probe["icon_code"]
 	_, r.descriptionPresent = probe["description"]
 	_, r.notePresent = probe["note"]
 	return nil
@@ -116,6 +117,12 @@ func (r *UpdateCategoryRequest) UnmarshalJSON(data []byte) error {
 // Returns (nil, false) when the field was absent.
 func (r *UpdateCategoryRequest) ParentIDChange() (*uuid.UUID, bool) {
 	return r.ParentID, r.parentIDPresent
+}
+
+// IconCodeChange returns (iconCode, true) when icon_code was present in the
+// request (even if null). Returns (nil, false) when absent (leave unchanged).
+func (r *UpdateCategoryRequest) IconCodeChange() (*shared.IconCode, bool) {
+	return r.IconCode, r.iconCodePresent
 }
 
 // DescriptionChange / NoteChange follow the same convention as

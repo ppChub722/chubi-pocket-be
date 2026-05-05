@@ -9,8 +9,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Store struct {
@@ -31,19 +33,20 @@ var (
 func (s *Store) GetProfile(ctx context.Context, id uuid.UUID) (*Profile, error) {
 	q := `
 		SELECT u.id, u.username, u.email, u.email_verified_at, u.display_name,
-		       u.currency, u.avatar_url, u.status, u.created_at, u.updated_at,
+		       u.currency, u.icon_code, u.status, u.created_at, u.updated_at,
 		       COALESCE(p.preferences, '{}'::jsonb)
 		FROM users u
 		LEFT JOIN user_preferences p ON p.user_id = u.id
 		WHERE u.id = $1`
 
 	var (
-		prof    Profile
-		prefRaw []byte
+		prof         Profile
+		iconBytes    []byte
+		prefRaw      []byte
 	)
 	err := s.db.QueryRow(ctx, q, id).Scan(
 		&prof.ID, &prof.Username, &prof.Email, &prof.EmailVerifiedAt, &prof.DisplayName,
-		&prof.Currency, &prof.AvatarURL, &prof.Status, &prof.CreatedAt, &prof.UpdatedAt,
+		&prof.Currency, &iconBytes, &prof.Status, &prof.CreatedAt, &prof.UpdatedAt,
 		&prefRaw,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -51,6 +54,12 @@ func (s *Store) GetProfile(ctx context.Context, id uuid.UUID) (*Profile, error) 
 	}
 	if err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
+	}
+	if iconBytes != nil {
+		prof.IconCode = new(shared.IconCode)
+		if err := json.Unmarshal(iconBytes, prof.IconCode); err != nil {
+			return nil, fmt.Errorf("decode icon_code: %w", err)
+		}
 	}
 	if err := json.Unmarshal(prefRaw, &prof.Preferences); err != nil {
 		return nil, fmt.Errorf("decode preferences: %w", err)
@@ -67,17 +76,33 @@ func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfi
 	}
 	defer tx.Rollback(ctx)
 
-	if req.DisplayName != nil || req.AvatarURL != nil || req.Currency != nil || req.Email != nil {
-		_, err := tx.Exec(ctx, `
-			UPDATE users SET
-				display_name = COALESCE($2, display_name),
-				avatar_url   = COALESCE($3, avatar_url),
-				currency     = COALESCE($4, currency),
-				email        = COALESCE($5, email),
-				updated_by_user_id = $1
-			WHERE id = $1`,
-			id, req.DisplayName, req.AvatarURL, req.Currency, req.Email)
-		if err != nil {
+	if req.DisplayName != nil || req.IconCode != nil || req.Currency != nil || req.Email != nil {
+		q := `UPDATE users SET updated_by_user_id = $1`
+		args := []any{id}
+
+		if req.DisplayName != nil {
+			args = append(args, *req.DisplayName)
+			q += fmt.Sprintf(", display_name = $%d", len(args))
+		}
+		if req.IconCode != nil {
+			b, err := json.Marshal(req.IconCode)
+			if err != nil {
+				return fmt.Errorf("marshal icon_code: %w", err)
+			}
+			args = append(args, b)
+			q += fmt.Sprintf(", icon_code = $%d::jsonb", len(args))
+		}
+		if req.Currency != nil {
+			args = append(args, *req.Currency)
+			q += fmt.Sprintf(", currency = $%d", len(args))
+		}
+		if req.Email != nil {
+			args = append(args, *req.Email)
+			q += fmt.Sprintf(", email = $%d", len(args))
+		}
+		q += " WHERE id = $1"
+
+		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" &&
 				strings.Contains(pgErr.ConstraintName, "email") {

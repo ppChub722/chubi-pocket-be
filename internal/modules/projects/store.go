@@ -2,6 +2,7 @@ package projects
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Store struct {
@@ -43,16 +46,26 @@ var (
 const projectColumns = `id, owner_user_id, name, type, description,
 	to_char(start_date, 'YYYY-MM-DD') AS start_date,
 	to_char(end_date, 'YYYY-MM-DD')   AS end_date,
-	status, icon_id, color_id, created_at, updated_at`
+	status, icon_code, created_at, updated_at`
 
 func scanProject(row pgx.Row) (*Project, error) {
 	var p Project
+	var iconBytes []byte
 	err := row.Scan(
 		&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description,
-		&p.StartDate, &p.EndDate, &p.Status, &p.IconID, &p.ColorID,
+		&p.StartDate, &p.EndDate, &p.Status, &iconBytes,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
-	return &p, err
+	if err != nil {
+		return nil, err
+	}
+	if iconBytes != nil {
+		p.IconCode = new(shared.IconCode)
+		if err := json.Unmarshal(iconBytes, p.IconCode); err != nil {
+			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
+		}
+	}
+	return &p, nil
 }
 
 func (s *Store) Create(ctx context.Context, ownerUserID uuid.UUID, req CreateProjectRequest) (*Project, error) {
@@ -60,14 +73,20 @@ func (s *Store) Create(ctx context.Context, ownerUserID uuid.UUID, req CreatePro
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
+	var iconJSON []byte
+	if req.IconCode != nil {
+		if iconJSON, err = json.Marshal(req.IconCode); err != nil {
+			return nil, fmt.Errorf("marshal icon_code: %w", err)
+		}
+	}
 	q := `INSERT INTO projects
 		(id, owner_user_id, name, type, description, start_date, end_date,
-		 icon_id, color_id, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8, $9, $2, $2)
+		 icon_code, created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8::jsonb, $2, $2)
 		RETURNING ` + projectColumns
 	return scanProject(s.db.QueryRow(ctx, q,
 		id, ownerUserID, strings.TrimSpace(req.Name), req.Type, req.Description,
-		req.StartDate, req.EndDate, req.IconID, req.ColorID,
+		req.StartDate, req.EndDate, iconJSON,
 	))
 }
 
@@ -78,14 +97,20 @@ func (s *Store) CreateInTx(ctx context.Context, tx pgx.Tx, ownerUserID uuid.UUID
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
+	var iconJSON []byte
+	if req.IconCode != nil {
+		if iconJSON, err = json.Marshal(req.IconCode); err != nil {
+			return nil, fmt.Errorf("marshal icon_code: %w", err)
+		}
+	}
 	q := `INSERT INTO projects
 		(id, owner_user_id, name, type, description, start_date, end_date,
-		 icon_id, color_id, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8, $9, $2, $2)
+		 icon_code, created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8::jsonb, $2, $2)
 		RETURNING ` + projectColumns
 	return scanProject(tx.QueryRow(ctx, q,
 		id, ownerUserID, strings.TrimSpace(req.Name), req.Type, req.Description,
-		req.StartDate, req.EndDate, req.IconID, req.ColorID,
+		req.StartDate, req.EndDate, iconJSON,
 	))
 }
 
@@ -97,18 +122,25 @@ func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (*Project, error) {
 	q := `SELECT p.id, p.owner_user_id, p.name, p.type, p.description,
 	             to_char(p.start_date, 'YYYY-MM-DD'),
 	             to_char(p.end_date, 'YYYY-MM-DD'),
-	             p.status, p.icon_id, p.color_id, p.created_at, p.updated_at,
+	             p.status, p.icon_code, p.created_at, p.updated_at,
 	             (SELECT COUNT(*) FROM project_members
 	              WHERE project_id = p.id AND status != 'left') AS members_count
 	      FROM projects p WHERE p.id = $1`
 	row := s.db.QueryRow(ctx, q, id)
 	var p Project
+	var iconBytes []byte
 	err := row.Scan(
 		&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description,
-		&p.StartDate, &p.EndDate, &p.Status, &p.IconID, &p.ColorID,
+		&p.StartDate, &p.EndDate, &p.Status, &iconBytes,
 		&p.CreatedAt, &p.UpdatedAt,
 		&p.MembersCount,
 	)
+	if iconBytes != nil {
+		p.IconCode = new(shared.IconCode)
+		if err2 := json.Unmarshal(iconBytes, p.IconCode); err2 != nil && err == nil {
+			err = fmt.Errorf("unmarshal icon_code: %w", err2)
+		}
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrProjectNotFound
 	}
@@ -186,7 +218,7 @@ func (s *Store) ListForUser(ctx context.Context, userID uuid.UUID, f ListFilter)
 		SELECT p.id, p.owner_user_id, p.name, p.type, p.description,
 		       to_char(p.start_date, 'YYYY-MM-DD'),
 		       to_char(p.end_date, 'YYYY-MM-DD'),
-		       p.status, p.icon_id, p.color_id, p.created_at, p.updated_at,
+		       p.status, p.icon_code, p.created_at, p.updated_at,
 		       (SELECT COUNT(*) FROM project_members WHERE project_id = p.id AND status != 'left')
 		FROM projects p
 		WHERE %s
@@ -202,13 +234,20 @@ func (s *Store) ListForUser(ctx context.Context, userID uuid.UUID, f ListFilter)
 	out := make([]Project, 0, f.PerPage)
 	for rows.Next() {
 		var p Project
+		var iconBytes []byte
 		if err := rows.Scan(
 			&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description,
-			&p.StartDate, &p.EndDate, &p.Status, &p.IconID, &p.ColorID,
+			&p.StartDate, &p.EndDate, &p.Status, &iconBytes,
 			&p.CreatedAt, &p.UpdatedAt,
 			&p.MembersCount,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan: %w", err)
+		}
+		if iconBytes != nil {
+			p.IconCode = new(shared.IconCode)
+			if err := json.Unmarshal(iconBytes, p.IconCode); err != nil {
+				return nil, 0, fmt.Errorf("unmarshal icon_code: %w", err)
+			}
 		}
 		out = append(out, p)
 	}
@@ -243,13 +282,13 @@ func (s *Store) Update(ctx context.Context, ownerUserID, id uuid.UUID, req Updat
 		args = append(args, *req.Status)
 		q += fmt.Sprintf(", status = $%d", len(args))
 	}
-	if req.IconID != nil {
-		args = append(args, *req.IconID)
-		q += fmt.Sprintf(", icon_id = $%d", len(args))
-	}
-	if req.ColorID != nil {
-		args = append(args, *req.ColorID)
-		q += fmt.Sprintf(", color_id = $%d", len(args))
+	if req.IconCode != nil {
+		b, err := json.Marshal(req.IconCode)
+		if err != nil {
+			return nil, fmt.Errorf("marshal icon_code: %w", err)
+		}
+		args = append(args, b)
+		q += fmt.Sprintf(", icon_code = $%d::jsonb", len(args))
 	}
 	args = append(args, id)
 	q += fmt.Sprintf(" WHERE id = $%d AND owner_user_id = $1 RETURNING ", len(args)) + projectColumns

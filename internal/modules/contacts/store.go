@@ -2,6 +2,7 @@ package contacts
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Store struct {
@@ -30,16 +33,26 @@ var (
 	ErrCannotLinkSelf  = errors.New("cannot link a contact to yourself")
 )
 
-const contactColumns = `id, user_id, display_name, email, phone, notes, icon,
+const contactColumns = `id, user_id, display_name, email, phone, notes, icon_code,
 	linked_user_id, status, last_used_at, created_at, updated_at`
 
 func scanContact(row pgx.Row) (*Contact, error) {
 	var c Contact
+	var iconBytes []byte
 	err := row.Scan(
-		&c.ID, &c.UserID, &c.DisplayName, &c.Email, &c.Phone, &c.Notes, &c.Icon,
+		&c.ID, &c.UserID, &c.DisplayName, &c.Email, &c.Phone, &c.Notes, &iconBytes,
 		&c.LinkedUserID, &c.Status, &c.LastUsedAt, &c.CreatedAt, &c.UpdatedAt,
 	)
-	return &c, err
+	if err != nil {
+		return nil, err
+	}
+	if iconBytes != nil {
+		c.IconCode = new(shared.IconCode)
+		if err := json.Unmarshal(iconBytes, c.IconCode); err != nil {
+			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
+		}
+	}
+	return &c, nil
 }
 
 func (s *Store) Create(ctx context.Context, userID uuid.UUID, req CreateContactRequest) (*Contact, error) {
@@ -47,14 +60,22 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, req CreateContactR
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
+	var iconJSON []byte
+	if req.IconCode != nil {
+		var err error
+		if iconJSON, err = json.Marshal(req.IconCode); err != nil {
+			return nil, fmt.Errorf("marshal icon_code: %w", err)
+		}
+	}
+
 	q := `INSERT INTO contacts
-		(id, user_id, display_name, email, phone, notes, icon, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $2, $2)
+		(id, user_id, display_name, email, phone, notes, icon_code, created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $2, $2)
 		RETURNING ` + contactColumns
 
 	c, err := scanContact(s.db.QueryRow(ctx, q,
 		id, userID, strings.TrimSpace(req.DisplayName),
-		req.Email, req.Phone, req.Notes, req.Icon,
+		req.Email, req.Phone, req.Notes, iconJSON,
 	))
 	if err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
@@ -157,9 +178,13 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCont
 		args = append(args, *req.Notes)
 		q += fmt.Sprintf(", notes = $%d", len(args))
 	}
-	if req.Icon != nil {
-		args = append(args, *req.Icon)
-		q += fmt.Sprintf(", icon = $%d", len(args))
+	if req.IconCode != nil {
+		b, err := json.Marshal(req.IconCode)
+		if err != nil {
+			return nil, fmt.Errorf("marshal icon_code: %w", err)
+		}
+		args = append(args, b)
+		q += fmt.Sprintf(", icon_code = $%d::jsonb", len(args))
 	}
 
 	args = append(args, id)

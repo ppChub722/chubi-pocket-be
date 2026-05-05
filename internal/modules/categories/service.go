@@ -79,8 +79,7 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateCatego
 		Type:            req.Type,
 		ParentID:        req.ParentID,
 		IsSystem:        false,
-		Icon:            req.Icon,
-		Color:           req.Color,
+		IconCode:        req.IconCode,
 		IncludeInReport: includeInReport,
 		Description:     req.Description,
 		Note:            req.Note,
@@ -189,12 +188,14 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCa
 	desc, descChanged := req.DescriptionChange()
 	note, noteChanged := req.NoteChange()
 
+	iconCode, iconCodeChanged := req.IconCodeChange()
+
 	return s.store.Update(ctx, userID, id, UpdateFields{
 		Name:              name,
 		ParentID:          newParent,
 		ParentIDChange:    parentChanged,
-		Icon:              req.Icon,
-		Color:             req.Color,
+		IconCode:          iconCode,
+		IconCodeChange:    iconCodeChanged,
 		IncludeInReport:   req.IncludeInReport,
 		Description:       desc,
 		DescriptionChange: descChanged,

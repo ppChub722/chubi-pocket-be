@@ -2,6 +2,7 @@ package categories
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -9,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Store struct {
@@ -31,17 +34,27 @@ var (
 )
 
 const categoryColumns = `id, user_id, name, type, parent_id, is_system, system_kind,
-	icon, color, sort_order, include_in_report, description, note,
+	icon_code, sort_order, include_in_report, description, note,
 	status, created_at, updated_at`
 
 func scanCategory(row pgx.Row) (*Category, error) {
 	var c Category
+	var iconBytes []byte
 	err := row.Scan(
 		&c.ID, &c.UserID, &c.Name, &c.Type, &c.ParentID, &c.IsSystem, &c.SystemKind,
-		&c.Icon, &c.Color, &c.SortOrder, &c.IncludeInReport, &c.Description, &c.Note,
+		&iconBytes, &c.SortOrder, &c.IncludeInReport, &c.Description, &c.Note,
 		&c.Status, &c.CreatedAt, &c.UpdatedAt,
 	)
-	return &c, err
+	if err != nil {
+		return nil, err
+	}
+	if iconBytes != nil {
+		c.IconCode = new(shared.IconCode)
+		if err := json.Unmarshal(iconBytes, c.IconCode); err != nil {
+			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
+		}
+	}
+	return &c, nil
 }
 
 // --- Read ---
@@ -221,16 +234,23 @@ func (s *Store) Create(ctx context.Context, c *Category) (*Category, error) {
 		return nil, fmt.Errorf("compute sort_order: %w", err)
 	}
 
+	var iconJSON []byte
+	if c.IconCode != nil {
+		if iconJSON, err = json.Marshal(c.IconCode); err != nil {
+			return nil, fmt.Errorf("marshal icon_code: %w", err)
+		}
+	}
+
 	q := `INSERT INTO categories
-		(id, user_id, name, type, parent_id, is_system, system_kind, icon, color,
+		(id, user_id, name, type, parent_id, is_system, system_kind, icon_code,
 		 sort_order, include_in_report, description, note,
 		 status, created_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12,
 			'active', $2)
 		RETURNING ` + categoryColumns
 	created, err := scanCategory(s.db.QueryRow(ctx, q,
 		c.ID, c.UserID, c.Name, c.Type, c.ParentID, c.IsSystem, c.SystemKind,
-		c.Icon, c.Color, nextSort, c.IncludeInReport, c.Description, c.Note))
+		iconJSON, nextSort, c.IncludeInReport, c.Description, c.Note))
 	if err != nil {
 		return nil, mapInsertError(err)
 	}
@@ -249,13 +269,13 @@ func (s *Store) Create(ctx context.Context, c *Category) (*Category, error) {
 // are rarely cleared.
 // UpdateFields carries the partial-update payload for a single row. Pointer
 // fields encode "leave alone" (nil) vs "set to value"; the *Change bools
-// distinguish "leave alone" from "explicitly clear" for nullable text columns.
+// distinguish "leave alone" from "explicitly clear" for nullable columns.
 type UpdateFields struct {
 	Name              *string
 	ParentID          *uuid.UUID
 	ParentIDChange    bool
-	Icon              *string
-	Color             *string
+	IconCode          *shared.IconCode
+	IconCodeChange    bool
 	IncludeInReport   *bool
 	Description       *string
 	DescriptionChange bool
@@ -277,13 +297,16 @@ func (s *Store) Update(
 		args = append(args, f.ParentID)
 		q += fmt.Sprintf(", parent_id = $%d", len(args))
 	}
-	if f.Icon != nil {
-		args = append(args, *f.Icon)
-		q += fmt.Sprintf(", icon = $%d", len(args))
-	}
-	if f.Color != nil {
-		args = append(args, *f.Color)
-		q += fmt.Sprintf(", color = $%d", len(args))
+	if f.IconCodeChange {
+		var iconJSON []byte
+		if f.IconCode != nil {
+			var err error
+			if iconJSON, err = json.Marshal(f.IconCode); err != nil {
+				return nil, fmt.Errorf("marshal icon_code: %w", err)
+			}
+		}
+		args = append(args, iconJSON)
+		q += fmt.Sprintf(", icon_code = $%d::jsonb", len(args))
 	}
 	if f.IncludeInReport != nil {
 		args = append(args, *f.IncludeInReport)
@@ -466,10 +489,10 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 	const insertCategory = `
 		INSERT INTO categories
 			(id, user_id, name, type, parent_id, is_system, system_kind,
-			 icon, color, sort_order, include_in_report, description,
+			 icon_code, sort_order, include_in_report, description,
 			 status, created_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-			'active', $13)`
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11,
+			'active', $12)`
 
 	// 1. System cats — parent_id = NULL, no description. created_by_user_id
 	// is NULL because system rows are app-owned, not user-owned.
@@ -480,9 +503,13 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 			return fmt.Errorf("uuid: %w", err)
 		}
 		kind := string(sc.Kind)
+		iconJSON, err := json.Marshal(seedIconCode(sc.Icon, sc.Color))
+		if err != nil {
+			return fmt.Errorf("marshal icon_code: %w", err)
+		}
 		_, err = tx.Exec(ctx, insertCategory,
 			id, userID, sc.Name, sc.Type, nil, true, kind,
-			sc.Icon, sc.Color, systemSortByType[sc.Type], sc.IncludeInReport, nil,
+			iconJSON, systemSortByType[sc.Type], sc.IncludeInReport, nil,
 			nil, // created_by_user_id = NULL (system row)
 		)
 		if err != nil {
@@ -500,9 +527,13 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 		if err != nil {
 			return fmt.Errorf("uuid: %w", err)
 		}
+		rootIconJSON, err := json.Marshal(seedIconCode(root.Icon, root.Color))
+		if err != nil {
+			return fmt.Errorf("marshal icon_code: %w", err)
+		}
 		_, err = tx.Exec(ctx, insertCategory,
 			rootID, userID, root.Name, "expense", nil, false, nil,
-			root.Icon, root.Color, rootSortExpense, true, nil,
+			rootIconJSON, rootSortExpense, true, nil,
 			userID,
 		)
 		if err != nil {
@@ -515,9 +546,14 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 			if err != nil {
 				return fmt.Errorf("uuid: %w", err)
 			}
+			// Children inherit root's background color; only icon differs.
+			childIconJSON, err := json.Marshal(seedIconCode(child.Icon, root.Color))
+			if err != nil {
+				return fmt.Errorf("marshal icon_code: %w", err)
+			}
 			_, err = tx.Exec(ctx, insertCategory,
 				childID, userID, child.Name, "expense", rootID, false, nil,
-				child.Icon, root.Color, ci, child.IncludeInReport, child.Description,
+				childIconJSON, ci, child.IncludeInReport, child.Description,
 				userID,
 			)
 			if err != nil {
@@ -534,9 +570,13 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 		if err != nil {
 			return fmt.Errorf("uuid: %w", err)
 		}
+		iconJSON, err := json.Marshal(seedIconCode(in.Icon, in.Color))
+		if err != nil {
+			return fmt.Errorf("marshal icon_code: %w", err)
+		}
 		_, err = tx.Exec(ctx, insertCategory,
 			id, userID, in.Name, "income", nil, false, nil,
-			in.Icon, in.Color, incomeSort, in.IncludeInReport, in.Description,
+			iconJSON, incomeSort, in.IncludeInReport, in.Description,
 			userID,
 		)
 		if err != nil {
@@ -546,6 +586,27 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 	}
 
 	return nil
+}
+
+// seedIconCode converts old-style Icon (art ID) + Color (hex bg) seed fields
+// into an IconCode JSONB value. Color is the circle background; icon is always
+// white on the colored background, matching the legacy app rendering.
+func seedIconCode(icon, color string) shared.IconCode {
+	white := "#FFFFFF"
+	ic := shared.IconCode{
+		IconColors:   []string{white},
+		BgColors:     []string{},
+		BorderColors: []string{},
+	}
+	if icon != "" {
+		ic.Icon = &icon
+	}
+	if color != "" {
+		solid := "solid"
+		ic.Background = &solid
+		ic.BgColors = []string{color}
+	}
+	return ic
 }
 
 // --- Helpers ---
