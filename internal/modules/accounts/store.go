@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Store struct {
@@ -25,20 +28,30 @@ var (
 	ErrAccountNotFound = errors.New("account not found")
 )
 
-const accountColumns = `id, user_id, name, type, balance, currency, icon, color,
+const accountColumns = `id, user_id, name, type, balance, currency, icon_code, logo_url,
 	description, note, status,
 	credit_limit, statement_date, payment_due_date, minimum_payment,
 	sort_order, created_at, updated_at`
 
 func scanAccount(row pgx.Row) (*Account, error) {
 	var a Account
+	var iconBytes []byte
 	err := row.Scan(
-		&a.ID, &a.UserID, &a.Name, &a.Type, &a.Balance, &a.Currency, &a.Icon, &a.Color,
+		&a.ID, &a.UserID, &a.Name, &a.Type, &a.Balance, &a.Currency, &iconBytes, &a.LogoURL,
 		&a.Description, &a.Note, &a.Status,
 		&a.CreditLimit, &a.StatementDate, &a.PaymentDueDate, &a.MinimumPayment,
 		&a.SortOrder, &a.CreatedAt, &a.UpdatedAt,
 	)
-	return &a, err
+	if err != nil {
+		return nil, err
+	}
+	if iconBytes != nil {
+		a.IconCode = new(shared.IconCode)
+		if err := json.Unmarshal(iconBytes, a.IconCode); err != nil {
+			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
+		}
+	}
+	return &a, nil
 }
 
 // --- Reads ---
@@ -128,17 +141,25 @@ func (s *Store) InsertTx(ctx context.Context, tx pgx.Tx, a *Account) (*Account, 
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
 	a.ID = id
+
+	var iconJSON []byte
+	if a.IconCode != nil {
+		if iconJSON, err = json.Marshal(a.IconCode); err != nil {
+			return nil, fmt.Errorf("marshal icon_code: %w", err)
+		}
+	}
+
 	q := `INSERT INTO accounts
-		(id, user_id, name, type, balance, currency, icon, color,
+		(id, user_id, name, type, balance, currency, icon_code, logo_url,
 		 description, note, status,
 		 credit_limit, statement_date, payment_due_date, minimum_payment,
 		 sort_order, created_by_user_id)
-		VALUES ($1, $2, $3, $4, 0, $5, $6, $7,
+		VALUES ($1, $2, $3, $4, 0, $5, $6::jsonb, $7,
 		        $8, $9, 'active',
 		        $10, $11, $12, $13, $14, $2)
 		RETURNING ` + accountColumns
 	created, err := scanAccount(tx.QueryRow(ctx, q,
-		a.ID, a.UserID, a.Name, a.Type, a.Currency, a.Icon, a.Color,
+		a.ID, a.UserID, a.Name, a.Type, a.Currency, iconJSON, a.LogoURL,
 		a.Description, a.Note,
 		a.CreditLimit, a.StatementDate, a.PaymentDueDate, a.MinimumPayment,
 		a.SortOrder))
@@ -168,11 +189,19 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequ
 	if req.Currency != nil {
 		add("currency", *req.Currency)
 	}
-	if req.Icon != nil {
-		add("icon", *req.Icon)
+	if iconCode, present := req.IconCodeChange(); present {
+		var iconJSON []byte
+		if iconCode != nil {
+			var err error
+			if iconJSON, err = json.Marshal(iconCode); err != nil {
+				return nil, fmt.Errorf("marshal icon_code: %w", err)
+			}
+		}
+		args = append(args, iconJSON)
+		q += fmt.Sprintf(", icon_code = $%d::jsonb", len(args))
 	}
-	if req.Color != nil {
-		add("color", *req.Color)
+	if logoURL, present := req.LogoURLChange(); present {
+		add("logo_url", logoURL)
 	}
 	// description / note presence-tracked: explicit null clears, missing
 	// field leaves the column alone. The presence bools were captured by

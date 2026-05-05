@@ -2,6 +2,7 @@ package tags
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -9,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Store struct {
@@ -25,29 +28,55 @@ var (
 	ErrTransactionNotOwned = errors.New("transaction not found or not owned")
 )
 
-const tagColumns = `id, user_id, name, color, icon, created_at, updated_at`
+const tagColumns = `id, user_id, name, icon_code, created_at, updated_at`
 
 func scanTag(row pgx.Row) (*Tag, error) {
 	var t Tag
-	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.Color, &t.Icon, &t.CreatedAt, &t.UpdatedAt)
-	return &t, err
+	var iconBytes []byte
+	err := row.Scan(&t.ID, &t.UserID, &t.Name, &iconBytes, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if iconBytes != nil {
+		t.IconCode = new(shared.IconCode)
+		if err := json.Unmarshal(iconBytes, t.IconCode); err != nil {
+			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
+		}
+	}
+	return &t, nil
 }
 
 func scanTagWithCount(row pgx.Row) (*Tag, error) {
 	var t Tag
-	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.Color, &t.Icon, &t.CreatedAt, &t.UpdatedAt, &t.UsageCount)
-	return &t, err
+	var iconBytes []byte
+	err := row.Scan(&t.ID, &t.UserID, &t.Name, &iconBytes, &t.CreatedAt, &t.UpdatedAt, &t.UsageCount)
+	if err != nil {
+		return nil, err
+	}
+	if iconBytes != nil {
+		t.IconCode = new(shared.IconCode)
+		if err := json.Unmarshal(iconBytes, t.IconCode); err != nil {
+			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
+		}
+	}
+	return &t, nil
 }
 
-func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string, color, icon *string) (*Tag, error) {
+func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string, iconCode *shared.IconCode) (*Tag, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
-	q := `INSERT INTO tags (id, user_id, name, color, icon, created_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $2)
+	var iconJSON []byte
+	if iconCode != nil {
+		if iconJSON, err = json.Marshal(iconCode); err != nil {
+			return nil, fmt.Errorf("marshal icon_code: %w", err)
+		}
+	}
+	q := `INSERT INTO tags (id, user_id, name, icon_code, created_by_user_id)
+		VALUES ($1, $2, $3, $4::jsonb, $2)
 		RETURNING ` + tagColumns
-	t, err := scanTag(s.db.QueryRow(ctx, q, id, userID, name, color, icon))
+	t, err := scanTag(s.db.QueryRow(ctx, q, id, userID, name, iconJSON))
 	if err != nil {
 		return nil, mapInsertError(err)
 	}
@@ -55,7 +84,7 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string, color
 }
 
 func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Tag, error) {
-	q := `SELECT t.id, t.user_id, t.name, t.color, t.icon, t.created_at, t.updated_at,
+	q := `SELECT t.id, t.user_id, t.name, t.icon_code, t.created_at, t.updated_at,
 		COALESCE((SELECT COUNT(*) FROM transaction_tags WHERE tag_id = t.id), 0)
 		FROM tags t WHERE t.id = $1 AND t.user_id = $2`
 	t, err := scanTagWithCount(s.db.QueryRow(ctx, q, id, userID))
@@ -71,7 +100,7 @@ func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Tag, error)
 func (s *Store) List(ctx context.Context, userID uuid.UUID) ([]Tag, error) {
 	// Spec §3.9 — server sorts by usage_count DESC, then name ASC, so the
 	// user's most-used tags surface first in pickers.
-	q := `SELECT t.id, t.user_id, t.name, t.color, t.icon, t.created_at, t.updated_at,
+	q := `SELECT t.id, t.user_id, t.name, t.icon_code, t.created_at, t.updated_at,
 		COALESCE(c.cnt, 0) AS usage_count
 		FROM tags t
 		LEFT JOIN (
@@ -146,7 +175,7 @@ func (s *Store) DetachTag(ctx context.Context, txID, tagID uuid.UUID) error {
 
 // TagsForTransaction returns all tags attached to a single transaction.
 func (s *Store) TagsForTransaction(ctx context.Context, txID, userID uuid.UUID) ([]Tag, error) {
-	q := `SELECT t.id, t.user_id, t.name, t.color, t.icon, t.created_at, t.updated_at, 0
+	q := `SELECT t.id, t.user_id, t.name, t.icon_code, t.created_at, t.updated_at, 0
 		FROM tags t
 		JOIN transaction_tags tt ON tt.tag_id = t.id
 		WHERE tt.transaction_id = $1 AND t.user_id = $2
@@ -186,20 +215,20 @@ func (s *Store) VerifyOwnership(ctx context.Context, userID uuid.UUID, tagIDs []
 	return nil
 }
 
-func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, name, color, icon *string) (*Tag, error) {
+func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, name *string, iconCode *shared.IconCode) (*Tag, error) {
 	q := `UPDATE tags SET updated_by_user_id = $1`
 	args := []any{userID}
 	if name != nil {
 		args = append(args, *name)
 		q += fmt.Sprintf(", name = $%d", len(args))
 	}
-	if color != nil {
-		args = append(args, *color)
-		q += fmt.Sprintf(", color = $%d", len(args))
-	}
-	if icon != nil {
-		args = append(args, *icon)
-		q += fmt.Sprintf(", icon = $%d", len(args))
+	if iconCode != nil {
+		b, err := json.Marshal(iconCode)
+		if err != nil {
+			return nil, fmt.Errorf("marshal icon_code: %w", err)
+		}
+		args = append(args, b)
+		q += fmt.Sprintf(", icon_code = $%d::jsonb", len(args))
 	}
 	args = append(args, id)
 	q += fmt.Sprintf(" WHERE id = $%d AND user_id = $1 RETURNING ", len(args)) + tagColumns

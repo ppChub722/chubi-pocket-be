@@ -2,6 +2,7 @@ package transactions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -10,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // Service errors — mapped to HTTP codes by the handler.
@@ -207,7 +209,7 @@ func (s *Service) hydrate(ctx context.Context, userID uuid.UUID, t *Transaction)
 	// module purely for an embedded ref slice; the data we need is just
 	// id / name / color / icon.
 	rows, err := s.store.db.Query(ctx, `
-		SELECT t.id, t.name, t.color, t.icon
+		SELECT t.id, t.name, t.icon_code
 		FROM tags t
 		JOIN transaction_tags tt ON tt.tag_id = t.id
 		WHERE tt.transaction_id = $1 AND t.user_id = $2
@@ -216,8 +218,15 @@ func (s *Service) hydrate(ctx context.Context, userID uuid.UUID, t *Transaction)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var tag EmbeddedTag
-			if err := rows.Scan(&tag.ID, &tag.Name, &tag.Color, &tag.Icon); err == nil {
+			var (
+				tag       EmbeddedTag
+				iconBytes []byte
+			)
+			if err := rows.Scan(&tag.ID, &tag.Name, &iconBytes); err == nil {
+				if iconBytes != nil {
+					tag.IconCode = new(shared.IconCode)
+					_ = json.Unmarshal(iconBytes, tag.IconCode)
+				}
 				d.Tags = append(d.Tags, tag)
 			}
 		}

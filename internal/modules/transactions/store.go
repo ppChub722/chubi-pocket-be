@@ -2,6 +2,7 @@ package transactions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Store struct {
@@ -288,7 +291,7 @@ func (s *Store) fillTagsForList(ctx context.Context, userID uuid.UUID, details [
 		ids[i] = details[i].ID
 	}
 	rows, err := s.db.Query(ctx, `
-		SELECT tt.transaction_id, t.id, t.name, t.color, t.icon
+		SELECT tt.transaction_id, t.id, t.name, t.icon_code
 		FROM tags t
 		JOIN transaction_tags tt ON tt.tag_id = t.id
 		WHERE tt.transaction_id = ANY($1) AND t.user_id = $2
@@ -302,11 +305,18 @@ func (s *Store) fillTagsForList(ctx context.Context, userID uuid.UUID, details [
 	tagsByTx := make(map[uuid.UUID][]EmbeddedTag, len(details))
 	for rows.Next() {
 		var (
-			txID uuid.UUID
-			tag  EmbeddedTag
+			txID      uuid.UUID
+			tag       EmbeddedTag
+			iconBytes []byte
 		)
-		if err := rows.Scan(&txID, &tag.ID, &tag.Name, &tag.Color, &tag.Icon); err != nil {
+		if err := rows.Scan(&txID, &tag.ID, &tag.Name, &iconBytes); err != nil {
 			return err
+		}
+		if iconBytes != nil {
+			tag.IconCode = new(shared.IconCode)
+			if err := json.Unmarshal(iconBytes, tag.IconCode); err != nil {
+				return fmt.Errorf("unmarshal tag icon_code: %w", err)
+			}
 		}
 		tagsByTx[txID] = append(tagsByTx[txID], tag)
 	}

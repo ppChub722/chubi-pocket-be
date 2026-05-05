@@ -21,7 +21,7 @@ func NewService(s *Store) *Service {
 }
 
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateTagRequest) (*Tag, error) {
-	return s.store.Create(ctx, userID, strings.TrimSpace(req.Name), req.Color, req.Icon)
+	return s.store.Create(ctx, userID, strings.TrimSpace(req.Name), req.IconCode)
 }
 
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Tag, error) {
@@ -38,7 +38,7 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateTa
 		trimmed := strings.TrimSpace(*req.Name)
 		name = &trimmed
 	}
-	if _, err := s.store.Update(ctx, userID, id, name, req.Color, req.Icon); err != nil {
+	if _, err := s.store.Update(ctx, userID, id, name, req.IconCode); err != nil {
 		return nil, err
 	}
 	// Return via GetByID so usage_count is populated consistently.

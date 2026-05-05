@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // --- Service / wiring ---
@@ -46,7 +47,7 @@ func (s *Service) Create(ctx context.Context, ownerUserID uuid.UUID, req CreateP
 		ownerName = "Owner"
 	}
 	if _, err := s.store.InsertMemberTx(ctx, tx,
-		p.ID, &ownerUserID, ownerName, RoleOwner, MemberStatusActive, ownerUserID,
+		p.ID, &ownerUserID, ownerName, RoleOwner, MemberStatusActive, ownerUserID, nil,
 	); err != nil {
 		return nil, err
 	}
@@ -206,10 +207,10 @@ func (s *Service) AddMember(ctx context.Context, callerUserID, projectID uuid.UU
 
 	switch {
 	case req.Email != nil && req.DisplayName != nil:
-		member, err = s.addMemberByEmailTx(ctx, tx, projectID, callerUserID, *req.DisplayName, *req.Email, role)
+		member, err = s.addMemberByEmailTx(ctx, tx, projectID, callerUserID, *req.DisplayName, *req.Email, role, req.IconCode)
 	case req.AdHoc && req.DisplayName != nil:
 		member, err = s.store.InsertMemberTx(ctx, tx,
-			projectID, nil, *req.DisplayName, role, MemberStatusActive, callerUserID,
+			projectID, nil, *req.DisplayName, role, MemberStatusActive, callerUserID, req.IconCode,
 		)
 	default:
 		return nil, errors.New("AddMember requires one of: (email + display_name), or (ad_hoc=true + display_name)")
@@ -226,7 +227,7 @@ func (s *Service) AddMember(ctx context.Context, callerUserID, projectID uuid.UU
 
 func (s *Service) addMemberByEmailTx(
 	ctx context.Context, tx pgx.Tx, projectID, callerUserID uuid.UUID,
-	displayName, email, role string,
+	displayName, email, role string, iconCode *shared.IconCode,
 ) (*ProjectMember, error) {
 	// Always-execute lookup. Privacy preservation.
 	var matchedUser *uuid.UUID
@@ -238,7 +239,7 @@ func (s *Service) addMemberByEmailTx(
 		}
 	}
 	member, err := s.store.InsertMemberTx(ctx, tx,
-		projectID, nil, displayName, role, MemberStatusPending, callerUserID,
+		projectID, nil, displayName, role, MemberStatusPending, callerUserID, iconCode,
 	)
 	if err != nil {
 		return nil, err
@@ -277,7 +278,14 @@ func (s *Service) UpdateMember(
 		return nil, errors.New("use transfer-ownership to change owner")
 	}
 	if req.Role != nil {
-		return s.store.UpdateMemberRole(ctx, projectID, memberID, *req.Role, callerUserID)
+		if _, err := s.store.UpdateMemberRole(ctx, projectID, memberID, *req.Role, callerUserID); err != nil {
+			return nil, err
+		}
+	}
+	if req.IconCode != nil {
+		if _, err := s.store.UpdateMemberIconCode(ctx, projectID, memberID, req.IconCode, callerUserID); err != nil {
+			return nil, err
+		}
 	}
 	return s.store.GetMember(ctx, memberID)
 }

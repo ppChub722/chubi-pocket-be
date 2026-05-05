@@ -4,6 +4,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // Project status enum values.
@@ -35,18 +37,17 @@ const (
 )
 
 type Project struct {
-	ID            uuid.UUID `json:"id"`
-	OwnerUserID   uuid.UUID `json:"owner_user_id"`
-	Name          string    `json:"name"`
-	Type          *string   `json:"type"`
-	Description   *string   `json:"description"`
-	StartDate     *string   `json:"start_date"`
-	EndDate       *string   `json:"end_date"`
-	Status        string    `json:"status"`
-	IconID        *string   `json:"icon_id"`
-	ColorID       *string   `json:"color_id"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID           uuid.UUID        `json:"id"`
+	OwnerUserID  uuid.UUID        `json:"owner_user_id"`
+	Name         string           `json:"name"`
+	Type         *string          `json:"type"`
+	Description  *string          `json:"description"`
+	StartDate    *string          `json:"start_date"`
+	EndDate      *string          `json:"end_date"`
+	Status       string           `json:"status"`
+	IconCode     *shared.IconCode `json:"icon_code"`
+	CreatedAt    time.Time        `json:"created_at"`
+	UpdatedAt    time.Time        `json:"updated_at"`
 	// Hydrated for list/get views.
 	MembersCount int `json:"members_count,omitempty"`
 }
@@ -61,18 +62,18 @@ type Project struct {
 // resolves contact -> linked user_id (via contacts.linked_user_id) before
 // calling AddMember.
 type ProjectMember struct {
-	ID           uuid.UUID  `json:"id"`
-	ProjectID    uuid.UUID  `json:"project_id"`
-	UserID       *uuid.UUID `json:"user_id"`
-	DisplayName  string     `json:"display_name"`
-	Role         string     `json:"role"`
-	Status       string     `json:"status"`
-	InvitedAt    *time.Time `json:"invited_at"`
-	JoinedAt     *time.Time `json:"joined_at"`
-	LeftAt       *time.Time `json:"left_at"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	AvatarURL    *string    `json:"avatar_url,omitempty"`
+	ID          uuid.UUID        `json:"id"`
+	ProjectID   uuid.UUID        `json:"project_id"`
+	UserID      *uuid.UUID       `json:"user_id"`
+	DisplayName string           `json:"display_name"`
+	Role        string           `json:"role"`
+	Status      string           `json:"status"`
+	IconCode    *shared.IconCode `json:"icon_code"`
+	InvitedAt   *time.Time       `json:"invited_at"`
+	JoinedAt    *time.Time       `json:"joined_at"`
+	LeftAt      *time.Time       `json:"left_at"`
+	CreatedAt   time.Time        `json:"created_at"`
+	UpdatedAt   time.Time        `json:"updated_at"`
 }
 
 // ProjectTransaction. Splits are represented as child rows linked via
@@ -81,66 +82,66 @@ type ProjectMember struct {
 // project_member ids who have flagged this row "resolved on the board"; it
 // is independent of personal-book actions.
 type ProjectTransaction struct {
-	ID                          uuid.UUID   `json:"id"`
-	ProjectID                   uuid.UUID   `json:"project_id"`
-	ParentProjectTransactionID  *uuid.UUID  `json:"parent_project_transaction_id"`
-	TransactionMemberID         uuid.UUID   `json:"transaction_member_id"`
-	RecordUserID                uuid.UUID   `json:"record_user_id"`
-	Type                        string      `json:"type"`
-	Amount                      float64     `json:"amount"`
-	Currency                    string      `json:"currency"`
-	Date                        string      `json:"date"`
-	Note                        *string     `json:"note"`
-	Description                 *string     `json:"description"`
-	CategoryName                *string     `json:"category_name"`
-	CategoryIconID              *string     `json:"category_icon_id"`
-	CategoryColorID             *string     `json:"category_color_id"`
-	Marks                       []uuid.UUID `json:"marks"`
-	CreatedAt                   time.Time   `json:"created_at"`
-	UpdatedAt                   time.Time   `json:"updated_at"`
+	ID                         uuid.UUID        `json:"id"`
+	ProjectID                  uuid.UUID        `json:"project_id"`
+	ParentProjectTransactionID *uuid.UUID       `json:"parent_project_transaction_id"`
+	TransactionMemberID        uuid.UUID        `json:"transaction_member_id"`
+	RecordUserID               uuid.UUID        `json:"record_user_id"`
+	Type                       string           `json:"type"`
+	Amount                     float64          `json:"amount"`
+	Currency                   string           `json:"currency"`
+	Date                       string           `json:"date"`
+	Note                       *string          `json:"note"`
+	Description                *string          `json:"description"`
+	CategoryName               *string          `json:"category_name"`
+	CategoryIconCode           *shared.IconCode `json:"category_icon_code"`
+	Marks                      []uuid.UUID      `json:"marks"`
+	CreatedAt                  time.Time        `json:"created_at"`
+	UpdatedAt                  time.Time        `json:"updated_at"`
 }
 
 // --- Request bodies ---
 
 type CreateProjectRequest struct {
-	Name        string  `json:"name"        binding:"required,min=1,max=100"`
-	Type        *string `json:"type"        binding:"omitempty,max=30"`
-	Description *string `json:"description"`
-	StartDate   *string `json:"start_date"  binding:"omitempty,datetime=2006-01-02"`
-	EndDate     *string `json:"end_date"    binding:"omitempty,datetime=2006-01-02"`
-	IconID      *string `json:"icon_id"`
-	ColorID     *string `json:"color_id"`
+	Name        string           `json:"name"        binding:"required,min=1,max=100"`
+	Type        *string          `json:"type"        binding:"omitempty,max=30"`
+	Description *string          `json:"description"`
+	StartDate   *string          `json:"start_date"  binding:"omitempty,datetime=2006-01-02"`
+	EndDate     *string          `json:"end_date"    binding:"omitempty,datetime=2006-01-02"`
+	IconCode    *shared.IconCode `json:"icon_code"   binding:"omitempty"`
 }
 
 type UpdateProjectRequest struct {
-	Name        *string `json:"name"        binding:"omitempty,min=1,max=100"`
-	Type        *string `json:"type"        binding:"omitempty,max=30"`
-	Description *string `json:"description"`
-	StartDate   *string `json:"start_date"  binding:"omitempty,datetime=2006-01-02"`
-	EndDate     *string `json:"end_date"    binding:"omitempty,datetime=2006-01-02"`
-	Status      *string `json:"status"      binding:"omitempty,oneof=active completed cancelled archived"`
-	IconID      *string `json:"icon_id"`
-	ColorID     *string `json:"color_id"`
+	Name        *string          `json:"name"        binding:"omitempty,min=1,max=100"`
+	Type        *string          `json:"type"        binding:"omitempty,max=30"`
+	Description *string          `json:"description"`
+	StartDate   *string          `json:"start_date"  binding:"omitempty,datetime=2006-01-02"`
+	EndDate     *string          `json:"end_date"    binding:"omitempty,datetime=2006-01-02"`
+	Status      *string          `json:"status"      binding:"omitempty,oneof=active completed cancelled archived"`
+	IconCode    *shared.IconCode `json:"icon_code"   binding:"omitempty"`
 }
 
 // AddMemberRequest carries one of two variants. Caller picks by setting
 // the discriminator fields:
-//   (a) Email + DisplayName            → invite-by-email (status=pending)
-//   (b) AdHoc=true + DisplayName       → ad-hoc (status=active, no user link)
+//
+//	(a) Email + DisplayName            → invite-by-email (status=pending)
+//	(b) AdHoc=true + DisplayName       → ad-hoc (status=active, no user link)
 //
 // The from-contact variant is gone: project_members no longer stores
 // contact_id (user-scoped resource on a shared table = ambiguous). FE looks
 // up the contact's linked_user_id locally and either calls (a) with the
 // contact's email or (b) ad-hoc.
 type AddMemberRequest struct {
-	Email       *string `json:"email"        binding:"omitempty,email"`
-	DisplayName *string `json:"display_name" binding:"omitempty,min=1,max=100"`
-	Role        string  `json:"role"         binding:"omitempty,oneof=owner contributor viewer"`
-	AdHoc       bool    `json:"ad_hoc"`
+	Email       *string          `json:"email"        binding:"omitempty,email"`
+	DisplayName *string          `json:"display_name" binding:"omitempty,min=1,max=100"`
+	Role        string           `json:"role"         binding:"omitempty,oneof=owner contributor viewer"`
+	AdHoc       bool             `json:"ad_hoc"`
+	IconCode    *shared.IconCode `json:"icon_code"    binding:"omitempty"`
 }
 
 type UpdateMemberRequest struct {
-	Role *string `json:"role" binding:"omitempty,oneof=owner contributor viewer"`
+	Role     *string          `json:"role"      binding:"omitempty,oneof=owner contributor viewer"`
+	IconCode *shared.IconCode `json:"icon_code" binding:"omitempty"`
 }
 
 // ProjectSplitInput — one share line on a CreateProjectTransactionRequest.
@@ -162,8 +163,7 @@ type CreateProjectTransactionRequest struct {
 	Note                *string             `json:"note"`
 	Description         *string             `json:"description"`
 	CategoryName        *string             `json:"category_name"`
-	CategoryIconID      *string             `json:"category_icon_id"`
-	CategoryColorID     *string             `json:"category_color_id"`
+	CategoryIconCode    *shared.IconCode    `json:"category_icon_code"    binding:"omitempty"`
 	Splits              []ProjectSplitInput `json:"splits"                binding:"omitempty,dive"`
 }
 
@@ -172,14 +172,13 @@ type CreateProjectTransactionRequest struct {
 // (possibly empty) slice, all existing children are deleted and the slice
 // is re-inserted.
 type UpdateProjectTransactionRequest struct {
-	Amount          *float64             `json:"amount"           binding:"omitempty,gt=0"`
-	Date            *string              `json:"date"             binding:"omitempty,datetime=2006-01-02"`
-	Note            *string              `json:"note"`
-	Description     *string              `json:"description"`
-	CategoryName    *string              `json:"category_name"`
-	CategoryIconID  *string              `json:"category_icon_id"`
-	CategoryColorID *string              `json:"category_color_id"`
-	Splits          *[]ProjectSplitInput `json:"splits"           binding:"omitempty,dive"`
+	Amount           *float64             `json:"amount"            binding:"omitempty,gt=0"`
+	Date             *string              `json:"date"              binding:"omitempty,datetime=2006-01-02"`
+	Note             *string              `json:"note"`
+	Description      *string              `json:"description"`
+	CategoryName     *string              `json:"category_name"`
+	CategoryIconCode *shared.IconCode     `json:"category_icon_code" binding:"omitempty"`
+	Splits           *[]ProjectSplitInput `json:"splits"             binding:"omitempty,dive"`
 }
 
 // MarkRequest — body for PUT /projects/:id/project-transactions/:pt_id/mark.
@@ -190,9 +189,9 @@ type MarkRequest struct {
 // --- List filters / responses ---
 
 type ListFilter struct {
-	Status string
-	Type   *string
-	Page   int
+	Status  string
+	Type    *string
+	Page    int
 	PerPage int
 }
 
@@ -219,10 +218,10 @@ type ListPTResponse struct {
 
 // SummaryResponse — high-level project summary.
 type SummaryResponse struct {
-	ProjectID       uuid.UUID            `json:"project_id"`
-	TotalExpense    float64              `json:"total_expense"`
-	TotalIncome     float64              `json:"total_income"`
-	TransactionCount int                 `json:"transaction_count"`
-	MemberCount     int                  `json:"member_count"`
-	MyPosition      *float64             `json:"my_position,omitempty"`
+	ProjectID        uuid.UUID `json:"project_id"`
+	TotalExpense     float64   `json:"total_expense"`
+	TotalIncome      float64   `json:"total_income"`
+	TransactionCount int       `json:"transaction_count"`
+	MemberCount      int       `json:"member_count"`
+	MyPosition       *float64  `json:"my_position,omitempty"`
 }

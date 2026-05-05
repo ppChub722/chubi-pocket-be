@@ -21,6 +21,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/user_pack_permissions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/users"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/database"
@@ -126,6 +127,9 @@ func main() {
 	usersService := users.NewService(usersStore)
 	usersHandler := users.NewHandler(usersService, authService)
 
+	packPermsStore := user_pack_permissions.NewStore(dbPool)
+	packPermsHandler := user_pack_permissions.NewHandler(packPermsStore)
+
 	// --- Router ---
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -178,6 +182,7 @@ func main() {
 			protected.PUT("/users/me/password", usersHandler.ChangePassword)
 			protected.POST("/users/me/deactivate", usersHandler.Deactivate)
 			protected.POST("/users/me/reactivate", usersHandler.Reactivate)
+			protected.GET("/users/me/packs", packPermsHandler.ListMyPacks)
 
 			// Categories (Phase 1a)
 			protected.POST("/categories", categoriesHandler.Create)

@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // TxType is the discriminator for the `type` enum.
@@ -54,15 +56,12 @@ type EmbeddedRef struct {
 	Name string    `json:"name"`
 }
 
-// EmbeddedTag enriches a tag ref with color + icon so the FE can render
-// chips inline (a small dot or rounded label) without a second lookup
-// against its own tags cache. Tag color is `#RRGGBB`, icon is the
-// free-form id agreed in spec §05/§3.8.
+// EmbeddedTag enriches a tag ref with icon_code so the FE can render
+// chips inline without a second lookup against its own tags cache.
 type EmbeddedTag struct {
-	ID    uuid.UUID `json:"id"`
-	Name  string    `json:"name"`
-	Color *string   `json:"color"`
-	Icon  *string   `json:"icon"`
+	ID       uuid.UUID        `json:"id"`
+	Name     string           `json:"name"`
+	IconCode *shared.IconCode `json:"icon_code"`
 }
 
 // TransactionDetail mirrors `Transaction` plus embedded refs + derived flags.
