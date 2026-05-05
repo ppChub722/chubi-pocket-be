@@ -43,6 +43,8 @@ type Project struct {
 	StartDate     *string   `json:"start_date"`
 	EndDate       *string   `json:"end_date"`
 	Status        string    `json:"status"`
+	IconID        *string   `json:"icon_id"`
+	ColorID       *string   `json:"color_id"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 	// Hydrated for list/get views.
@@ -70,6 +72,7 @@ type ProjectMember struct {
 	LeftAt       *time.Time `json:"left_at"`
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
+	AvatarURL    *string    `json:"avatar_url,omitempty"`
 }
 
 // ProjectTransaction. Splits are represented as child rows linked via
@@ -88,6 +91,10 @@ type ProjectTransaction struct {
 	Currency                    string      `json:"currency"`
 	Date                        string      `json:"date"`
 	Note                        *string     `json:"note"`
+	Description                 *string     `json:"description"`
+	CategoryName                *string     `json:"category_name"`
+	CategoryIconID              *string     `json:"category_icon_id"`
+	CategoryColorID             *string     `json:"category_color_id"`
 	Marks                       []uuid.UUID `json:"marks"`
 	CreatedAt                   time.Time   `json:"created_at"`
 	UpdatedAt                   time.Time   `json:"updated_at"`
@@ -101,6 +108,8 @@ type CreateProjectRequest struct {
 	Description *string `json:"description"`
 	StartDate   *string `json:"start_date"  binding:"omitempty,datetime=2006-01-02"`
 	EndDate     *string `json:"end_date"    binding:"omitempty,datetime=2006-01-02"`
+	IconID      *string `json:"icon_id"`
+	ColorID     *string `json:"color_id"`
 }
 
 type UpdateProjectRequest struct {
@@ -110,6 +119,8 @@ type UpdateProjectRequest struct {
 	StartDate   *string `json:"start_date"  binding:"omitempty,datetime=2006-01-02"`
 	EndDate     *string `json:"end_date"    binding:"omitempty,datetime=2006-01-02"`
 	Status      *string `json:"status"      binding:"omitempty,oneof=active completed cancelled archived"`
+	IconID      *string `json:"icon_id"`
+	ColorID     *string `json:"color_id"`
 }
 
 // AddMemberRequest carries one of two variants. Caller picks by setting
@@ -149,6 +160,10 @@ type CreateProjectTransactionRequest struct {
 	Currency            string              `json:"currency"              binding:"required,len=3"`
 	Date                string              `json:"date"                  binding:"required,datetime=2006-01-02"`
 	Note                *string             `json:"note"`
+	Description         *string             `json:"description"`
+	CategoryName        *string             `json:"category_name"`
+	CategoryIconID      *string             `json:"category_icon_id"`
+	CategoryColorID     *string             `json:"category_color_id"`
 	Splits              []ProjectSplitInput `json:"splits"                binding:"omitempty,dive"`
 }
 
@@ -157,10 +172,14 @@ type CreateProjectTransactionRequest struct {
 // (possibly empty) slice, all existing children are deleted and the slice
 // is re-inserted.
 type UpdateProjectTransactionRequest struct {
-	Amount *float64             `json:"amount" binding:"omitempty,gt=0"`
-	Date   *string              `json:"date"   binding:"omitempty,datetime=2006-01-02"`
-	Note   *string              `json:"note"`
-	Splits *[]ProjectSplitInput `json:"splits" binding:"omitempty,dive"`
+	Amount          *float64             `json:"amount"           binding:"omitempty,gt=0"`
+	Date            *string              `json:"date"             binding:"omitempty,datetime=2006-01-02"`
+	Note            *string              `json:"note"`
+	Description     *string              `json:"description"`
+	CategoryName    *string              `json:"category_name"`
+	CategoryIconID  *string              `json:"category_icon_id"`
+	CategoryColorID *string              `json:"category_color_id"`
+	Splits          *[]ProjectSplitInput `json:"splits"           binding:"omitempty,dive"`
 }
 
 // MarkRequest — body for PUT /projects/:id/project-transactions/:pt_id/mark.

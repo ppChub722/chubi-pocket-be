@@ -43,13 +43,14 @@ var (
 const projectColumns = `id, owner_user_id, name, type, description,
 	to_char(start_date, 'YYYY-MM-DD') AS start_date,
 	to_char(end_date, 'YYYY-MM-DD')   AS end_date,
-	status, created_at, updated_at`
+	status, icon_id, color_id, created_at, updated_at`
 
 func scanProject(row pgx.Row) (*Project, error) {
 	var p Project
 	err := row.Scan(
 		&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description,
-		&p.StartDate, &p.EndDate, &p.Status, &p.CreatedAt, &p.UpdatedAt,
+		&p.StartDate, &p.EndDate, &p.Status, &p.IconID, &p.ColorID,
+		&p.CreatedAt, &p.UpdatedAt,
 	)
 	return &p, err
 }
@@ -60,12 +61,13 @@ func (s *Store) Create(ctx context.Context, ownerUserID uuid.UUID, req CreatePro
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
 	q := `INSERT INTO projects
-		(id, owner_user_id, name, type, description, start_date, end_date, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $2, $2)
+		(id, owner_user_id, name, type, description, start_date, end_date,
+		 icon_id, color_id, created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8, $9, $2, $2)
 		RETURNING ` + projectColumns
 	return scanProject(s.db.QueryRow(ctx, q,
 		id, ownerUserID, strings.TrimSpace(req.Name), req.Type, req.Description,
-		req.StartDate, req.EndDate,
+		req.StartDate, req.EndDate, req.IconID, req.ColorID,
 	))
 }
 
@@ -77,12 +79,13 @@ func (s *Store) CreateInTx(ctx context.Context, tx pgx.Tx, ownerUserID uuid.UUID
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
 	q := `INSERT INTO projects
-		(id, owner_user_id, name, type, description, start_date, end_date, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $2, $2)
+		(id, owner_user_id, name, type, description, start_date, end_date,
+		 icon_id, color_id, created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8, $9, $2, $2)
 		RETURNING ` + projectColumns
 	return scanProject(tx.QueryRow(ctx, q,
 		id, ownerUserID, strings.TrimSpace(req.Name), req.Type, req.Description,
-		req.StartDate, req.EndDate,
+		req.StartDate, req.EndDate, req.IconID, req.ColorID,
 	))
 }
 
@@ -94,15 +97,16 @@ func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (*Project, error) {
 	q := `SELECT p.id, p.owner_user_id, p.name, p.type, p.description,
 	             to_char(p.start_date, 'YYYY-MM-DD'),
 	             to_char(p.end_date, 'YYYY-MM-DD'),
-	             p.status, p.created_at, p.updated_at,
+	             p.status, p.icon_id, p.color_id, p.created_at, p.updated_at,
 	             (SELECT COUNT(*) FROM project_members
-	              WHERE project_id = p.id AND status = 'active') AS members_count
+	              WHERE project_id = p.id AND status != 'left') AS members_count
 	      FROM projects p WHERE p.id = $1`
 	row := s.db.QueryRow(ctx, q, id)
 	var p Project
 	err := row.Scan(
 		&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description,
-		&p.StartDate, &p.EndDate, &p.Status, &p.CreatedAt, &p.UpdatedAt,
+		&p.StartDate, &p.EndDate, &p.Status, &p.IconID, &p.ColorID,
+		&p.CreatedAt, &p.UpdatedAt,
 		&p.MembersCount,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -182,8 +186,8 @@ func (s *Store) ListForUser(ctx context.Context, userID uuid.UUID, f ListFilter)
 		SELECT p.id, p.owner_user_id, p.name, p.type, p.description,
 		       to_char(p.start_date, 'YYYY-MM-DD'),
 		       to_char(p.end_date, 'YYYY-MM-DD'),
-		       p.status, p.created_at, p.updated_at,
-		       (SELECT COUNT(*) FROM project_members WHERE project_id = p.id AND status = 'active')
+		       p.status, p.icon_id, p.color_id, p.created_at, p.updated_at,
+		       (SELECT COUNT(*) FROM project_members WHERE project_id = p.id AND status != 'left')
 		FROM projects p
 		WHERE %s
 		ORDER BY p.updated_at DESC
@@ -200,7 +204,8 @@ func (s *Store) ListForUser(ctx context.Context, userID uuid.UUID, f ListFilter)
 		var p Project
 		if err := rows.Scan(
 			&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description,
-			&p.StartDate, &p.EndDate, &p.Status, &p.CreatedAt, &p.UpdatedAt,
+			&p.StartDate, &p.EndDate, &p.Status, &p.IconID, &p.ColorID,
+			&p.CreatedAt, &p.UpdatedAt,
 			&p.MembersCount,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan: %w", err)
@@ -237,6 +242,14 @@ func (s *Store) Update(ctx context.Context, ownerUserID, id uuid.UUID, req Updat
 	if req.Status != nil {
 		args = append(args, *req.Status)
 		q += fmt.Sprintf(", status = $%d", len(args))
+	}
+	if req.IconID != nil {
+		args = append(args, *req.IconID)
+		q += fmt.Sprintf(", icon_id = $%d", len(args))
+	}
+	if req.ColorID != nil {
+		args = append(args, *req.ColorID)
+		q += fmt.Sprintf(", color_id = $%d", len(args))
 	}
 	args = append(args, id)
 	q += fmt.Sprintf(" WHERE id = $%d AND owner_user_id = $1 RETURNING ", len(args)) + projectColumns

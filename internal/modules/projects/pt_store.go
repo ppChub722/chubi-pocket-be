@@ -13,7 +13,8 @@ const ptColumns = `id, project_id, parent_project_transaction_id,
 	transaction_member_id, record_user_id,
 	type, amount, currency,
 	to_char(date, 'YYYY-MM-DD') AS date,
-	note, marks, created_at, updated_at`
+	note, description, category_name, category_icon_id, category_color_id,
+	marks, created_at, updated_at`
 
 func scanPT(row pgx.Row) (*ProjectTransaction, error) {
 	var pt ProjectTransaction
@@ -21,7 +22,9 @@ func scanPT(row pgx.Row) (*ProjectTransaction, error) {
 		&pt.ID, &pt.ProjectID, &pt.ParentProjectTransactionID,
 		&pt.TransactionMemberID, &pt.RecordUserID,
 		&pt.Type, &pt.Amount, &pt.Currency,
-		&pt.Date, &pt.Note, &pt.Marks, &pt.CreatedAt, &pt.UpdatedAt,
+		&pt.Date, &pt.Note, &pt.Description,
+		&pt.CategoryName, &pt.CategoryIconID, &pt.CategoryColorID,
+		&pt.Marks, &pt.CreatedAt, &pt.UpdatedAt,
 	)
 	return &pt, err
 }
@@ -48,12 +51,14 @@ func (s *Store) InsertPTTx(
 	}
 	q := `INSERT INTO project_transactions
 		(id, project_id, transaction_member_id, record_user_id, type, amount, currency,
-		 date, note, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9, $4, $4)
+		 date, note, description, category_name, category_icon_id, category_color_id,
+		 created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9, $10, $11, $12, $13, $4, $4)
 		RETURNING ` + ptColumns
 	parent, err := scanPT(tx.QueryRow(ctx, q,
 		id, projectID, req.TransactionMemberID, recordUserID,
-		req.Type, req.Amount, req.Currency, req.Date, req.Note,
+		req.Type, req.Amount, req.Currency, req.Date, req.Note, req.Description,
+		req.CategoryName, req.CategoryIconID, req.CategoryColorID,
 	))
 	if err != nil {
 		return nil, fmt.Errorf("insert parent PT: %w", err)
@@ -124,9 +129,10 @@ func (s *Store) insertSplitChildrenTx(
 ) error {
 	q := `INSERT INTO project_transactions
 		(id, project_id, parent_project_transaction_id, transaction_member_id,
-		 record_user_id, type, amount, currency, date, note,
+		 record_user_id, type, amount, currency, date, note, description,
+		 category_name, category_icon_id, category_color_id,
 		 created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $5, $5)`
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13, $14, $5, $5)`
 	for _, sp := range splits {
 		childID, err := uuid.NewV7()
 		if err != nil {
@@ -134,7 +140,8 @@ func (s *Store) insertSplitChildrenTx(
 		}
 		if _, err := tx.Exec(ctx, q,
 			childID, parent.ProjectID, parent.ID, sp.MemberID,
-			recordUserID, parent.Type, sp.Amount, parent.Currency, parent.Date, parent.Note,
+			recordUserID, parent.Type, sp.Amount, parent.Currency, parent.Date, parent.Note, parent.Description,
+			parent.CategoryName, parent.CategoryIconID, parent.CategoryColorID,
 		); err != nil {
 			return fmt.Errorf("insert split child: %w", err)
 		}
@@ -188,6 +195,22 @@ func (s *Store) UpdatePTTx(
 	if req.Note != nil {
 		args = append(args, *req.Note)
 		q += fmt.Sprintf(", note = $%d", len(args))
+	}
+	if req.Description != nil {
+		args = append(args, *req.Description)
+		q += fmt.Sprintf(", description = $%d", len(args))
+	}
+	if req.CategoryName != nil {
+		args = append(args, *req.CategoryName)
+		q += fmt.Sprintf(", category_name = $%d", len(args))
+	}
+	if req.CategoryIconID != nil {
+		args = append(args, *req.CategoryIconID)
+		q += fmt.Sprintf(", category_icon_id = $%d", len(args))
+	}
+	if req.CategoryColorID != nil {
+		args = append(args, *req.CategoryColorID)
+		q += fmt.Sprintf(", category_color_id = $%d", len(args))
 	}
 	args = append(args, ptID)
 	q += fmt.Sprintf(" WHERE id = $%d AND project_id = ", len(args))

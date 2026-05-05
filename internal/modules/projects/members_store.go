@@ -105,10 +105,24 @@ func (s *Store) IsActiveMember(ctx context.Context, projectID, userID uuid.UUID)
 	return n > 0, nil
 }
 
+func scanMemberWithAvatar(row pgx.Row) (*ProjectMember, error) {
+	var m ProjectMember
+	err := row.Scan(
+		&m.ID, &m.ProjectID, &m.UserID, &m.DisplayName, &m.Role, &m.Status,
+		&m.InvitedAt, &m.JoinedAt, &m.LeftAt, &m.CreatedAt, &m.UpdatedAt,
+		&m.AvatarURL,
+	)
+	return &m, err
+}
+
 func (s *Store) ListMembers(ctx context.Context, projectID uuid.UUID) ([]ProjectMember, error) {
-	q := `SELECT ` + memberColumns + `
-		FROM project_members WHERE project_id = $1
-		ORDER BY (role = 'owner') DESC, status, LOWER(display_name)`
+	q := `SELECT pm.id, pm.project_id, pm.user_id, pm.display_name, pm.role, pm.status,
+		pm.invited_at, pm.joined_at, pm.left_at, pm.created_at, pm.updated_at,
+		u.avatar_url
+		FROM project_members pm
+		LEFT JOIN users u ON u.id = pm.user_id
+		WHERE pm.project_id = $1
+		ORDER BY (pm.role = 'owner') DESC, pm.status, LOWER(pm.display_name)`
 	rows, err := s.db.Query(ctx, q, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list members: %w", err)
@@ -116,7 +130,7 @@ func (s *Store) ListMembers(ctx context.Context, projectID uuid.UUID) ([]Project
 	defer rows.Close()
 	out := make([]ProjectMember, 0)
 	for rows.Next() {
-		m, err := scanMember(rows)
+		m, err := scanMemberWithAvatar(rows)
 		if err != nil {
 			return nil, err
 		}
