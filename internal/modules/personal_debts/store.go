@@ -87,11 +87,157 @@ func (s *Store) CreateAttachedTx(
 		 amount, currency, note, created_by_user_id, updated_by_user_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $2, $2)
 		RETURNING ` + debtColumns
-	return scanDebt(tx.QueryRow(ctx, q,
+	row, err := scanDebt(tx.QueryRow(ctx, q,
 		id, userID, direction, contactID, strings.TrimSpace(personName),
 		sourceTxID, sourceProjectTxID, projectID,
 		amount, strings.ToUpper(currency), note,
 	))
+	if err != nil {
+		return nil, err
+	}
+	// Recency bump: bump contacts.last_used_at so the FE typeahead can
+	// surface this contact first next time. Best-effort — failure here
+	// is logged via the err shadow but doesn't roll back the debt.
+	if contactID != nil {
+		_, _ = tx.Exec(ctx,
+			`UPDATE contacts SET last_used_at = NOW()
+			WHERE id = $1 AND user_id = $2`,
+			*contactID, userID)
+	}
+	return row, nil
+}
+
+// UnlinkedNames returns (counterparty_person_name, count) pairs for every
+// personal_debts row owned by `userID` whose counterparty_contact_id is
+// NULL. Powers the contacts.UnlinkedNamesProvider hook (the wire-up surface
+// on contact detail). Sorted by count DESC so the highest-impact name shows
+// first.
+func (s *Store) UnlinkedNames(ctx context.Context, userID uuid.UUID) ([]struct {
+	Name  string
+	Count int
+}, error) {
+	q := `SELECT counterparty_person_name, COUNT(*)
+		FROM personal_debts
+		WHERE user_id = $1
+		  AND counterparty_contact_id IS NULL
+		  AND counterparty_person_name <> ''
+		GROUP BY counterparty_person_name
+		ORDER BY COUNT(*) DESC, LOWER(counterparty_person_name)`
+	rows, err := s.db.Query(ctx, q, userID)
+	if err != nil {
+		return nil, fmt.Errorf("unlinked names: %w", err)
+	}
+	defer rows.Close()
+	out := make([]struct {
+		Name  string
+		Count int
+	}, 0)
+	for rows.Next() {
+		var name string
+		var count int
+		if err := rows.Scan(&name, &count); err != nil {
+			return nil, err
+		}
+		out = append(out, struct {
+			Name  string
+			Count int
+		}{name, count})
+	}
+	return out, rows.Err()
+}
+
+// AbsorbForContact wires every personal_debts row whose counterparty_person_name
+// matches one of `names` (case-insensitive exact) and whose
+// counterparty_contact_id is currently NULL to `contactID`. Also snapshots
+// the contact's display_name into counterparty_person_name so the wired
+// rows display consistently. Returns the count of rows rewritten + bumps
+// contacts.last_used_at.
+func (s *Store) AbsorbForContact(
+	ctx context.Context, userID, contactID uuid.UUID, names []string,
+) (int, error) {
+	if len(names) == 0 {
+		return 0, nil
+	}
+	// Lowercase normalize the input set for comparison; LOWER(person_name)
+	// in WHERE matches each row case-insensitively against the same set.
+	lowered := make([]string, len(names))
+	for i, n := range names {
+		lowered[i] = strings.ToLower(strings.TrimSpace(n))
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Resolve the contact's display name + verify ownership in one shot.
+	var displayName string
+	if err := tx.QueryRow(ctx,
+		`SELECT display_name FROM contacts WHERE id = $1 AND user_id = $2`,
+		contactID, userID).Scan(&displayName); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("contact not found or not owned: %s", contactID)
+		}
+		return 0, fmt.Errorf("contact lookup: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE personal_debts
+		SET counterparty_contact_id = $1,
+		    counterparty_person_name = $2,
+		    updated_by_user_id = $3
+		WHERE user_id = $3
+		  AND counterparty_contact_id IS NULL
+		  AND LOWER(counterparty_person_name) = ANY($4::text[])`,
+		contactID, displayName, userID, lowered)
+	if err != nil {
+		return 0, fmt.Errorf("absorb: %w", err)
+	}
+
+	// Recency bump — same rationale as CreateAttachedTx.
+	if tag.RowsAffected() > 0 {
+		_, _ = tx.Exec(ctx,
+			`UPDATE contacts SET last_used_at = NOW()
+			WHERE id = $1 AND user_id = $2`,
+			contactID, userID)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// RestoreOnContactDeleteTx snapshots the contact's display_name into
+// counterparty_person_name on every personal_debts row that references this
+// contact, BEFORE the FK ON DELETE SET NULL fires. Without this, deleting a
+// contact would leave behind rows with NULL contact_id AND a possibly stale
+// person_name (or worse — empty string). Called inside the contact-delete tx.
+func (s *Store) RestoreOnContactDeleteTx(
+	ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID,
+) (int, error) {
+	// Snapshot the display name once.
+	var displayName string
+	if err := tx.QueryRow(ctx,
+		`SELECT display_name FROM contacts WHERE id = $1 AND user_id = $2`,
+		contactID, userID).Scan(&displayName); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Contact already gone — nothing to snapshot. Caller may proceed.
+			return 0, nil
+		}
+		return 0, fmt.Errorf("contact lookup: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE personal_debts
+		SET counterparty_person_name = $1, updated_by_user_id = $2
+		WHERE user_id = $2 AND counterparty_contact_id = $3`,
+		displayName, userID, contactID)
+	if err != nil {
+		return 0, fmt.Errorf("restore on delete: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*PersonalDebt, error) {

@@ -22,8 +22,12 @@ type Contact struct {
 	Icon         *string    `json:"icon"`
 	LinkedUserID *uuid.UUID `json:"linked_user_id"`
 	Status       string     `json:"status"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// LastUsedAt is bumped whenever this contact is referenced by a new
+	// personal_debts row. Drives the FE typeahead "recent first" sort.
+	// Nullable: contacts that haven't been used yet sort last.
+	LastUsedAt *time.Time `json:"last_used_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 type CreateContactRequest struct {

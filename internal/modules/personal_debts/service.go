@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/contacts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
@@ -290,4 +291,50 @@ func (s *Service) DebtsForTransaction(
 	ctx context.Context, userID, txID uuid.UUID,
 ) ([]PersonalDebt, error) {
 	return s.store.DebtsForTransaction(ctx, userID, txID)
+}
+
+// --- contacts hooks (wired in main.go) ---
+//
+// The contacts module declares three function-typed hooks:
+// SplitsAbsorber, SplitsRestorer, UnlinkedNamesProvider. The original
+// "splits" module that implemented them was retired in 1b.2 when
+// shared_expense_splits was rebuilt as personal_debts. These methods
+// re-point the same hooks at the new schema — same intent, new table.
+
+// UnlinkedNames implements contacts.UnlinkedNamesProvider against
+// personal_debts. Lists every (counterparty_person_name, count) pair the
+// caller has typed without wiring to a contact yet — the wire-up surface
+// on contact detail consumes this.
+func (s *Service) UnlinkedNames(
+	ctx context.Context, userID uuid.UUID,
+) ([]contacts.UnlinkedName, error) {
+	rows, err := s.store.UnlinkedNames(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]contacts.UnlinkedName, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, contacts.UnlinkedName{Name: r.Name, Count: r.Count})
+	}
+	return out, nil
+}
+
+// AbsorbForContact implements contacts.SplitsAbsorber. Wires every
+// counterparty_person_name in `names` (case-insensitive exact) to
+// `contactID` on the caller's personal_debts. Snapshots contact.display_name
+// onto the rewritten rows. Bumps contacts.last_used_at.
+func (s *Service) AbsorbForContact(
+	ctx context.Context, userID, contactID uuid.UUID, names []string,
+) (int, error) {
+	return s.store.AbsorbForContact(ctx, userID, contactID, names)
+}
+
+// RestoreOnContactDeleteTx implements contacts.SplitsRestorer. Called inside
+// the contact-delete tx — snapshots display_name into counterparty_person_name
+// for every personal_debts row referencing this contact, BEFORE the FK
+// ON DELETE SET NULL fires.
+func (s *Service) RestoreOnContactDeleteTx(
+	ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID,
+) (int, error) {
+	return s.store.RestoreOnContactDeleteTx(ctx, tx, userID, contactID)
 }

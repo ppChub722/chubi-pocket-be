@@ -31,13 +31,13 @@ var (
 )
 
 const contactColumns = `id, user_id, display_name, nickname, email, phone, notes, icon,
-	linked_user_id, status, created_at, updated_at`
+	linked_user_id, status, last_used_at, created_at, updated_at`
 
 func scanContact(row pgx.Row) (*Contact, error) {
 	var c Contact
 	err := row.Scan(
 		&c.ID, &c.UserID, &c.DisplayName, &c.Nickname, &c.Email, &c.Phone, &c.Notes, &c.Icon,
-		&c.LinkedUserID, &c.Status, &c.CreatedAt, &c.UpdatedAt,
+		&c.LinkedUserID, &c.Status, &c.LastUsedAt, &c.CreatedAt, &c.UpdatedAt,
 	)
 	return &c, err
 }
@@ -114,7 +114,10 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Con
 			len(args), len(args))
 	}
 
-	q += ` ORDER BY LOWER(COALESCE(nickname, display_name))`
+	// Recent-first ranking: contacts the user just split with float to the
+	// top of the typeahead. Alphabetical falls in for ties / never-used.
+	q += ` ORDER BY last_used_at DESC NULLS LAST,
+		LOWER(COALESCE(nickname, display_name))`
 
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {

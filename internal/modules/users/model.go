@@ -26,6 +26,12 @@ type UpdateProfileRequest struct {
 	DisplayName *string        `json:"display_name" binding:"omitempty,min=1,max=100"`
 	AvatarURL   *string        `json:"avatar_url"   binding:"omitempty,url,max=2048"`
 	Currency    *string        `json:"currency"     binding:"omitempty,len=3"`
+	// Email is editable post-registration. When set, it must be a valid
+	// address; uniqueness is enforced by the DB index on `users.email` —
+	// duplicates surface as ErrEmailExists at the service layer. Pass nil
+	// (omit the field) to leave the email unchanged. Clearing back to
+	// NULL isn't supported through this endpoint.
+	Email       *string        `json:"email"        binding:"omitempty,email,max=255"`
 	Preferences map[string]any `json:"preferences"  binding:"omitempty"`
 }
 

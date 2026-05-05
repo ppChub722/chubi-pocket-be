@@ -98,9 +98,16 @@ func main() {
 	transactionsService.WithDebtValidator(personalDebtsService.ValidateOwnership)
 	transactionsService.WithDebtAutoBumper(personalDebtsService.AutoBumpInTx)
 
-	// contacts ↔ notifications (link-request flow only — splits-related hooks
-	// removed with the splits module).
+	// contacts ↔ notifications (link-request flow).
 	contactsService.WithNotificationService(notificationsService)
+
+	// contacts ↔ personal_debts (re-pointing post-1b.2 — the original splits
+	// module that owned these hooks was retired; personal_debts now backs
+	// the same surfaces: unlinked-names list on contact detail, absorb on
+	// wire-up, snapshot-on-contact-delete).
+	contactsService.WithUnlinkedNamesProvider(personalDebtsService.UnlinkedNames)
+	contactsService.WithSplitsAbsorber(personalDebtsService.AbsorbForContact)
+	contactsService.WithSplitsRestorer(personalDebtsService.RestoreOnContactDeleteTx)
 
 	// projects ↔ notifications (project_invite, project_tx_recorded_for_you,
 	// project_tx_changed). No claim hook — resolve flow uses /transactions

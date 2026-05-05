@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type Store struct {
@@ -22,6 +24,7 @@ func NewStore(db *pgxpool.Pool) *Store {
 var (
 	ErrUserNotFound  = errors.New("user not found")
 	ErrAlreadyActive = errors.New("account is already active")
+	ErrEmailExists   = errors.New("email already registered to another account")
 )
 
 // GetProfile joins users + user_preferences for the GET /v1/users/me payload.
@@ -64,16 +67,22 @@ func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfi
 	}
 	defer tx.Rollback(ctx)
 
-	if req.DisplayName != nil || req.AvatarURL != nil || req.Currency != nil {
+	if req.DisplayName != nil || req.AvatarURL != nil || req.Currency != nil || req.Email != nil {
 		_, err := tx.Exec(ctx, `
 			UPDATE users SET
 				display_name = COALESCE($2, display_name),
 				avatar_url   = COALESCE($3, avatar_url),
 				currency     = COALESCE($4, currency),
+				email        = COALESCE($5, email),
 				updated_by_user_id = $1
 			WHERE id = $1`,
-			id, req.DisplayName, req.AvatarURL, req.Currency)
+			id, req.DisplayName, req.AvatarURL, req.Currency, req.Email)
 		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" &&
+				strings.Contains(pgErr.ConstraintName, "email") {
+				return ErrEmailExists
+			}
 			return fmt.Errorf("update users: %w", err)
 		}
 	}

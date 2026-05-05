@@ -53,11 +53,15 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 
 	prof, err := h.service.UpdateProfile(c.Request.Context(), id, req)
 	if err != nil {
-		if errors.Is(err, ErrUnknownPreferenceKey) {
+		switch {
+		case errors.Is(err, ErrUnknownPreferenceKey):
 			response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-			return
+		case errors.Is(err, ErrEmailExists):
+			response.Fail(c, http.StatusConflict, "EMAIL_EXISTS",
+				"Email already registered", nil)
+		default:
+			response.InternalError(c, "Failed to update profile", err.Error())
 		}
-		response.InternalError(c, "Failed to update profile", err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, prof)
