@@ -33,15 +33,21 @@ var (
 	ErrCannotLinkSelf  = errors.New("cannot link a contact to yourself")
 )
 
+// linked_user_icon_code is projected via scalar subquery so it works in both
+// SELECT and INSERT/UPDATE ... RETURNING. NULL when the contact isn't linked
+// or the linked user has no icon set. Spec §4.4: client picks
+// linked_user_icon_code over the contact's own icon_code when present.
 const contactColumns = `id, user_id, display_name, email, phone, notes, icon_code,
-	linked_user_id, status, last_used_at, created_at, updated_at`
+	linked_user_id, status, last_used_at, created_at, updated_at,
+	(SELECT icon_code FROM users WHERE id = contacts.linked_user_id) AS linked_user_icon_code`
 
 func scanContact(row pgx.Row) (*Contact, error) {
 	var c Contact
-	var iconBytes []byte
+	var iconBytes, linkedIconBytes []byte
 	err := row.Scan(
 		&c.ID, &c.UserID, &c.DisplayName, &c.Email, &c.Phone, &c.Notes, &iconBytes,
 		&c.LinkedUserID, &c.Status, &c.LastUsedAt, &c.CreatedAt, &c.UpdatedAt,
+		&linkedIconBytes,
 	)
 	if err != nil {
 		return nil, err
@@ -50,6 +56,12 @@ func scanContact(row pgx.Row) (*Contact, error) {
 		c.IconCode = new(shared.IconCode)
 		if err := json.Unmarshal(iconBytes, c.IconCode); err != nil {
 			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
+		}
+	}
+	if linkedIconBytes != nil {
+		c.LinkedUserIconCode = new(shared.IconCode)
+		if err := json.Unmarshal(linkedIconBytes, c.LinkedUserIconCode); err != nil {
+			return nil, fmt.Errorf("unmarshal linked_user_icon_code: %w", err)
 		}
 	}
 	return &c, nil

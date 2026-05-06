@@ -24,7 +24,11 @@ type Contact struct {
 	Notes        *string          `json:"notes"`
 	IconCode     *shared.IconCode `json:"icon_code"`
 	LinkedUserID *uuid.UUID       `json:"linked_user_id"`
-	Status       string           `json:"status"`
+	// LinkedUserIconCode mirrors the linked user's profile icon at read time.
+	// NULL when the contact isn't linked or the linked user has no icon set.
+	// Spec §4.4: client renders this in preference to icon_code when present.
+	LinkedUserIconCode *shared.IconCode `json:"linked_user_icon_code"`
+	Status             string           `json:"status"`
 	// LastUsedAt is bumped whenever this contact is referenced by a new
 	// personal_debts row. Drives the FE typeahead "recent first" sort.
 	// Nullable: contacts that haven't been used yet sort last.
