@@ -258,6 +258,100 @@ func (h *Handler) RejectLinkRequest(c *gin.Context) {
 	response.OK(c, "Link request rejected", nil)
 }
 
+// GET /v1/contacts/link-requests/:notification_id/sender-profile
+//
+// Returns the sender's public profile (display_name, email, icon_code)
+// for pre-filling the create-contact form during the inbox tap flow.
+// Gated to "caller is the recipient and the request is still pending".
+func (h *Handler) SenderProfile(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	notifID, err := uuid.Parse(c.Param("notification_id"))
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		return
+	}
+	out, err := h.service.GetSenderProfile(c.Request.Context(), userID, notifID)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// POST /v1/contacts/link-requests/:notification_id/create-linked-contact
+//
+// Post-accept "no existing contact, create one" path. The notification
+// must already be actioned (Accept was tapped). BE pulls display_name +
+// email from the sender so the contact's snapshot stays correct as a
+// fallback if it's later unlinked.
+func (h *Handler) CreateLinkedContact(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	notifID, err := uuid.Parse(c.Param("notification_id"))
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		return
+	}
+	var req CreateLinkedContactRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	out, err := h.service.CreateLinkedContactFromLinkRequest(
+		c.Request.Context(), userID, notifID, req,
+	)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// POST /v1/contacts/link-requests/:notification_id/link-existing-contact/:contact_id
+//
+// Post-accept "I already have a contact for them, just wire the link"
+// path. The notification must be actioned; the contact must be caller-
+// owned. display_name + email are NOT touched on the contact (those
+// project from the linked user once linked); phone / notes / icon are
+// optional B-side updates.
+func (h *Handler) LinkExistingContact(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	notifID, err := uuid.Parse(c.Param("notification_id"))
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		return
+	}
+	contactID, err := uuid.Parse(c.Param("contact_id"))
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid contact id", nil)
+		return
+	}
+	var req LinkExistingContactRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	out, err := h.service.LinkExistingContactFromLinkRequest(
+		c.Request.Context(), userID, notifID, contactID, req,
+	)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
 // POST /v1/contacts/:id/unlink
 func (h *Handler) Unlink(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)

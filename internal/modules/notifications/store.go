@@ -44,6 +44,42 @@ func scanNotification(row pgx.Row) (*Notification, error) {
 	return &n, err
 }
 
+// HasPendingByPayloadKey reports whether the recipient already has an
+// **unresolved** notification of [notifType] from [actorUserID] whose
+// payload contains [payloadKey] = [payloadValue].
+//
+// "Unresolved" = `actioned_at IS NULL AND dismissed_at IS NULL` —
+// matches the user-visible "still in the inbox awaiting action" state.
+// Read-but-not-acted rows still count as pending.
+//
+// Used by producers (e.g. contacts.RequestLink) to make their dispatch
+// idempotent without duplicating tile rows when the same trigger fires
+// twice. Hard-deleted rows are gone from the table, so a deletion
+// followed by a fresh request correctly creates a new notification.
+func (s *Store) HasPendingByPayloadKey(
+	ctx context.Context, notifType string,
+	recipientUserID, actorUserID uuid.UUID,
+	payloadKey, payloadValue string,
+) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM notifications
+			 WHERE type = $1
+			   AND recipient_user_id = $2
+			   AND actor_user_id = $3
+			   AND payload->>$4 = $5
+			   AND actioned_at IS NULL
+			   AND dismissed_at IS NULL
+		)`,
+		notifType, recipientUserID, actorUserID, payloadKey, payloadValue,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check pending notification: %w", err)
+	}
+	return exists, nil
+}
+
 // InsertTx inserts one notification row inside the producer's tx. Returns
 // the created row's id; the producer rarely needs the full row so we keep
 // the call site small.
