@@ -32,6 +32,22 @@ func (s *Service) LookupUserByUsername(ctx context.Context, username string) (*u
 	return s.store.LookupUserByUsername(ctx, username)
 }
 
+// HasPendingContactLinkRequest reports whether [recipientUserID] still
+// has an unresolved `contact_link_request` notification from
+// [actorUserID] for the same [contactID]. Used by contacts.RequestLink
+// to make a re-send a no-op while the previous request is still in the
+// inbox awaiting Accept / Reject / Dismiss. Resolved (or hard-deleted)
+// rows don't count, so a follow-up request after rejection works.
+func (s *Service) HasPendingContactLinkRequest(
+	ctx context.Context, recipientUserID, actorUserID, contactID uuid.UUID,
+) (bool, error) {
+	return s.store.HasPendingByPayloadKey(
+		ctx, TypeContactLinkRequest,
+		recipientUserID, actorUserID,
+		"contact_id", contactID.String(),
+	)
+}
+
 // GetSettings returns the caller's settings row.
 func (s *Service) GetSettings(ctx context.Context, userID uuid.UUID) (*Settings, error) {
 	return s.store.GetSettings(ctx, userID)

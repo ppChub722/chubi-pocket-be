@@ -14,11 +14,14 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/accounts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/budgets"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/contacts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/scheduled_transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/user_pack_permissions"
@@ -90,6 +93,22 @@ func main() {
 	projectsStore := projects.NewStore(dbPool)
 	projectsService := projects.NewService(projectsStore)
 	projectsHandler := projects.NewHandler(projectsService)
+
+	// Saving goals (Phase 1c).
+	savingGoalsStore := saving_goals.NewStore(dbPool)
+	savingGoalsService := saving_goals.NewService(savingGoalsStore)
+	savingGoalsHandler := saving_goals.NewHandler(savingGoalsService)
+
+	// Budgets (Phase 1c).
+	budgetsStore := budgets.NewStore(dbPool)
+	budgetsService := budgets.NewService(budgetsStore)
+	budgetsHandler := budgets.NewHandler(budgetsService)
+
+	// Scheduled transactions (Phase 1c). generate-now is the dev/dogfood
+	// trigger; Phase 3 wires the same logic into an hourly cron.
+	scheduledStore := scheduled_transactions.NewStore(dbPool)
+	scheduledService := scheduled_transactions.NewService(scheduledStore)
+	scheduledHandler := scheduled_transactions.NewHandler(scheduledService)
 
 	// --- Cross-module wiring (breaks cycles). Same pattern as 1a's
 	// categoriesService.WithTransactionCounter.
@@ -209,6 +228,9 @@ func main() {
 			protected.DELETE("/accounts/:id", accountsHandler.Delete)
 			protected.POST("/accounts/:id/adjust-balance", accountsHandler.AdjustBalance)
 			protected.GET("/accounts/:id/summary", accountsHandler.Summary)
+			// Saving-goals helper lives under /accounts so the FE can fetch
+			// the per-account allocation pie without an extra round-trip.
+			protected.GET("/accounts/:id/saving-allocations", savingGoalsHandler.AccountAllocations)
 
 			// Transactions (Phase 1a.3). /summary registered before /:id so the
 			// literal path doesn't get swallowed by the param.
@@ -230,8 +252,11 @@ func main() {
 			// `/link-requests/...` MUST come before `/:id` so Gin's tree
 			// doesn't match them as a UUID parameter.
 			protected.GET("/contacts/unlinked-names", contactsHandler.UnlinkedNames)
+			protected.GET("/contacts/link-requests/:notification_id/sender-profile", contactsHandler.SenderProfile)
 			protected.POST("/contacts/link-requests/:notification_id/accept", contactsHandler.AcceptLinkRequest)
 			protected.POST("/contacts/link-requests/:notification_id/reject", contactsHandler.RejectLinkRequest)
+			protected.POST("/contacts/link-requests/:notification_id/create-linked-contact", contactsHandler.CreateLinkedContact)
+			protected.POST("/contacts/link-requests/:notification_id/link-existing-contact/:contact_id", contactsHandler.LinkExistingContact)
 			protected.GET("/contacts/:id", contactsHandler.Get)
 			protected.PUT("/contacts/:id", contactsHandler.Update)
 			protected.POST("/contacts/:id/archive", contactsHandler.Archive)
@@ -284,6 +309,41 @@ func main() {
 			protected.DELETE("/projects/:id/project-transactions/:pt_id", projectsHandler.DeletePT)
 			protected.PUT("/projects/:id/project-transactions/:pt_id/mark", projectsHandler.ToggleMark)
 			protected.GET("/projects/:id/summary", projectsHandler.Summary)
+
+			// Saving goals (Phase 1c). All paths under /saving-goals are
+			// param-only — no static-vs-param ordering hazard.
+			protected.POST("/saving-goals", savingGoalsHandler.Create)
+			protected.GET("/saving-goals", savingGoalsHandler.List)
+			protected.GET("/saving-goals/:id", savingGoalsHandler.Get)
+			protected.PUT("/saving-goals/:id", savingGoalsHandler.Update)
+			protected.DELETE("/saving-goals/:id", savingGoalsHandler.Delete)
+			protected.POST("/saving-goals/:id/archive", savingGoalsHandler.Archive)
+			protected.POST("/saving-goals/:id/restore", savingGoalsHandler.Restore)
+
+			// Budgets (Phase 1c). Static path /overview registered before
+			// /:id so Gin's tree doesn't match it as a UUID param.
+			protected.POST("/budgets", budgetsHandler.Create)
+			protected.GET("/budgets", budgetsHandler.List)
+			protected.GET("/budgets/overview", budgetsHandler.Overview)
+			protected.GET("/budgets/:id", budgetsHandler.Get)
+			protected.PUT("/budgets/:id", budgetsHandler.Update)
+			protected.DELETE("/budgets/:id", budgetsHandler.Delete)
+			protected.POST("/budgets/:id/archive", budgetsHandler.Archive)
+			protected.POST("/budgets/:id/restore", budgetsHandler.Restore)
+
+			// Scheduled transactions (Phase 1c). /upcoming registered
+			// before /:id so Gin doesn't match it as a UUID param.
+			protected.POST("/scheduled-transactions", scheduledHandler.Create)
+			protected.GET("/scheduled-transactions", scheduledHandler.List)
+			protected.GET("/scheduled-transactions/upcoming", scheduledHandler.Upcoming)
+			protected.GET("/scheduled-transactions/:id", scheduledHandler.Get)
+			protected.PUT("/scheduled-transactions/:id", scheduledHandler.Update)
+			protected.DELETE("/scheduled-transactions/:id", scheduledHandler.Delete)
+			protected.POST("/scheduled-transactions/:id/pause", scheduledHandler.Pause)
+			protected.POST("/scheduled-transactions/:id/resume", scheduledHandler.Resume)
+			protected.POST("/scheduled-transactions/:id/cancel", scheduledHandler.Cancel)
+			protected.POST("/scheduled-transactions/:id/generate-now", scheduledHandler.GenerateNow)
+			protected.GET("/scheduled-transactions/:id/history", scheduledHandler.History)
 		}
 	}
 

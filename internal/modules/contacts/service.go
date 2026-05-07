@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // SplitsAbsorber rewrites person_name + contact_id on caller-owned splits
@@ -190,6 +191,22 @@ func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) 
 
 	// Fire the notification iff hit AND not self.
 	if matchedUser != nil && *matchedUser != userID {
+		// Idempotency: if the recipient already has an unresolved
+		// `contact_link_request` from this sender for this same contact,
+		// silently skip the dispatch. Once they Accept / Reject /
+		// Dismiss the previous one (or hard-delete it), a new request
+		// will create a fresh row again. The response stays "sent" so
+		// the timing channel doesn't leak the dedup decision either.
+		pending, err := s.notifs.HasPendingContactLinkRequest(
+			ctx, *matchedUser, userID, contactID,
+		)
+		if err != nil {
+			return RequestLinkResponse{}, err
+		}
+		if pending {
+			return RequestLinkResponse{Message: "Link request sent"}, nil
+		}
+
 		// Look up sender's display name for the payload.
 		var senderName string
 		_ = s.store.Pool().QueryRow(ctx,
@@ -283,23 +300,12 @@ func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID 
 		return nil, err
 	}
 
-	// Reciprocal auto-link: try to make A discoverable in B's contact book.
-	// Edge cases (per the agreed plan, all = "skip and leave it"):
-	//   - A has no email                        → skip (no key to match on)
-	//   - 0 matches in B's contacts             → create new contact for B
-	//   - 1 match, currently un-linked          → set linked_user_id = A
-	//   - 1 match, already linked to A          → skip (idempotent)
-	//   - 1 match, linked to a different user   → skip (ambiguous)
-	//   - 2+ matches                            → skip (ambiguous)
-	//
-	// All best-effort — failure here logs but does NOT roll back A's side
-	// of the link (it would be perverse to undo a successful accept just
-	// because the convenience auto-create failed).
-	if err := s.autoLinkReciprocalTx(ctx, tx, userID, p.SenderUserID); err != nil {
-		// Swallow: A's link is committed regardless. We could surface this
-		// as a non-fatal warning, but there's no log channel here.
-		_ = err
-	}
+	// Spec change: the FE owns reciprocal contact creation now via
+	// `AcceptWithContact` — the recipient picks (existing contact vs
+	// create-with-prefill). The old auto-create-on-server path was
+	// dropped along with `autoLinkReciprocalTx`. This endpoint is kept
+	// for legacy callers that just want to link the sender's side
+	// without touching their own contact book.
 
 	if _, err := s.notifs.MarkActionedTx(ctx, tx, userID, notificationID); err != nil {
 		return nil, err
@@ -311,98 +317,10 @@ func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID 
 	return updated, nil
 }
 
-// autoLinkReciprocalTx implements the "create or wire B's contact for A"
-// step described above. Runs inside the AcceptLinkRequest tx so it gets
-// rolled back if commit fails.
-func (s *Service) autoLinkReciprocalTx(
-	ctx context.Context, tx pgx.Tx, recipientUserID, senderUserID uuid.UUID,
-) error {
-	// Lookup A's email + display_name. We don't have a users module dep
-	// here; raw SQL keeps it cheap and avoids cross-module imports.
-	var aEmail *string
-	var aDisplayName string
-	if err := tx.QueryRow(ctx,
-		`SELECT email, display_name FROM users WHERE id = $1`, senderUserID,
-	).Scan(&aEmail, &aDisplayName); err != nil {
-		return fmt.Errorf("sender lookup: %w", err)
-	}
-
-	if aEmail == nil || strings.TrimSpace(*aEmail) == "" {
-		return nil // skip: nothing to match on
-	}
-
-	// Count B's contacts with the same email (case-insensitive). Returns
-	// up to 2 ids — if there's a 2+ ambiguity we don't need exact count
-	// to decide "skip", just "more than one".
-	rows, err := tx.Query(ctx,
-		`SELECT id, linked_user_id FROM contacts
-		WHERE user_id = $1 AND LOWER(email) = LOWER($2)
-		LIMIT 2`,
-		recipientUserID, *aEmail,
-	)
-	if err != nil {
-		return fmt.Errorf("recipient contacts lookup: %w", err)
-	}
-	defer rows.Close()
-
-	type match struct {
-		id           uuid.UUID
-		linkedUserID *uuid.UUID
-	}
-	var matches []match
-	for rows.Next() {
-		var m match
-		if err := rows.Scan(&m.id, &m.linkedUserID); err != nil {
-			return err
-		}
-		matches = append(matches, m)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	switch len(matches) {
-	case 0:
-		// No existing contact on B's side → create one pointing at A.
-		id, err := uuid.NewV7()
-		if err != nil {
-			return fmt.Errorf("uuid: %w", err)
-		}
-		_, err = tx.Exec(ctx,
-			`INSERT INTO contacts
-			(id, user_id, display_name, email, linked_user_id,
-			 created_by_user_id, updated_by_user_id)
-			VALUES ($1, $2, $3, $4, $5, $2, $2)`,
-			id, recipientUserID, aDisplayName, *aEmail, senderUserID,
-		)
-		if err != nil {
-			// Most likely cause: race against the unique
-			// (user_id, linked_user_id) partial index — fine, treat as a
-			// success no-op.
-			return nil
-		}
-	case 1:
-		m := matches[0]
-		if m.linkedUserID != nil {
-			// Already linked (to A or someone else) → skip.
-			return nil
-		}
-		_, err := tx.Exec(ctx,
-			`UPDATE contacts SET linked_user_id = $1, updated_by_user_id = $2
-			WHERE id = $3 AND user_id = $2`,
-			senderUserID, recipientUserID, m.id,
-		)
-		if err != nil {
-			return nil // best-effort
-		}
-	default:
-		// 2+ matches with the same email → ambiguous, skip.
-		return nil
-	}
-	return nil
-}
-
-// RejectLinkRequest marks the notification dismissed; no link change.
+// RejectLinkRequest marks the notification dismissed — the inbox hides
+// dismissed rows entirely (different from Accept, which leaves the row
+// visible-but-actioned for the post-accept tap flow). The sender is
+// not notified; rejection is silent on the sender's side.
 func (s *Service) RejectLinkRequest(ctx context.Context, userID, notificationID uuid.UUID) error {
 	if s.notifs == nil {
 		return errors.New("notifications module not wired")
@@ -430,4 +348,209 @@ func (s *Service) RejectLinkRequest(ctx context.Context, userID, notificationID 
 // user simply loses visibility into the splits.
 func (s *Service) Unlink(ctx context.Context, userID, contactID uuid.UUID) (*Contact, error) {
 	return s.store.ClearLinkedUserID(ctx, userID, contactID)
+}
+
+// GetSenderProfile returns the public-profile fields of the actor on a
+// `contact_link_request` notification owned by the caller. Used by the
+// post-accept tap flow to render locked display_name / email fields on
+// the link-mode contact form.
+//
+// Gated to `caller is the recipient` AND `notification not dismissed`.
+// Allowed even when the request is already actioned (post-accept tap
+// still needs the data). Returns an error when dismissed (rejected
+// requests don't expose the sender).
+func (s *Service) GetSenderProfile(
+	ctx context.Context, userID, notificationID uuid.UUID,
+) (*SenderProfile, error) {
+	if s.notifs == nil {
+		return nil, errors.New("notifications module not wired")
+	}
+	n, err := s.notifs.Get(ctx, userID, notificationID)
+	if err != nil {
+		return nil, err
+	}
+	if n.Type != notifications.TypeContactLinkRequest {
+		return nil, errors.New("notification is not a contact_link_request")
+	}
+	if n.DismissedAt != nil {
+		return nil, errors.New("notification was rejected")
+	}
+	if n.ActorUserID == nil {
+		return nil, errors.New("notification has no actor")
+	}
+
+	var p SenderProfile
+	var iconBytes []byte
+	err = s.store.Pool().QueryRow(ctx,
+		`SELECT id, display_name, email, icon_code FROM users WHERE id = $1`,
+		*n.ActorUserID,
+	).Scan(&p.ID, &p.DisplayName, &p.Email, &iconBytes)
+	if err != nil {
+		return nil, fmt.Errorf("sender lookup: %w", err)
+	}
+	if iconBytes != nil {
+		p.IconCode = new(shared.IconCode)
+		if err := json.Unmarshal(iconBytes, p.IconCode); err != nil {
+			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
+		}
+	}
+	return &p, nil
+}
+
+// CreateLinkedContactFromLinkRequest is the post-accept "I have no
+// existing contact for them, create a fresh one" path. The notification
+// must already be actioned (caller previously hit Accept). BE pulls
+// display_name + email from the sender's user record so they're frozen
+// at create time as the contact's snapshot fallback; phone / notes /
+// icon come from the form.
+func (s *Service) CreateLinkedContactFromLinkRequest(
+	ctx context.Context, userID, notificationID uuid.UUID, req CreateLinkedContactRequest,
+) (*Contact, error) {
+	if s.notifs == nil {
+		return nil, errors.New("notifications module not wired")
+	}
+
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	senderUserID, err := s.verifyAcceptedLinkRequestTx(ctx, tx, userID, notificationID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Pull sender's name + email; both are required snapshot values
+	// for the contact row even though the FE displays them live.
+	var senderName string
+	var senderEmail *string
+	if err := tx.QueryRow(ctx,
+		`SELECT display_name, email FROM users WHERE id = $1`, senderUserID,
+	).Scan(&senderName, &senderEmail); err != nil {
+		return nil, fmt.Errorf("sender lookup: %w", err)
+	}
+
+	created, err := s.store.CreateLinkedTx(
+		ctx, tx, userID, senderUserID,
+		senderName, senderEmail, req.Phone, req.Notes, req.IconCode,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return created, nil
+}
+
+// LinkExistingContactFromLinkRequest is the post-accept "I already have
+// a contact for them, just wire the link" path. Notification must be
+// actioned. The contact must be caller-owned and unlinked (or already
+// linked to the same sender — idempotent).
+//
+// `display_name` and `email` are NOT touched on the contact row — the
+// FE pulls them from the linked user once linked. Phone / notes / icon
+// are optional B-side updates.
+func (s *Service) LinkExistingContactFromLinkRequest(
+	ctx context.Context, userID, notificationID, contactID uuid.UUID,
+	req LinkExistingContactRequest,
+) (*Contact, error) {
+	if s.notifs == nil {
+		return nil, errors.New("notifications module not wired")
+	}
+
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	senderUserID, err := s.verifyAcceptedLinkRequestTx(ctx, tx, userID, notificationID)
+	if err != nil {
+		return nil, err
+	}
+
+	existing, err := s.store.GetByIDTx(ctx, tx, userID, contactID)
+	if err != nil {
+		return nil, err
+	}
+	if existing.LinkedUserID != nil && *existing.LinkedUserID != senderUserID {
+		return nil, ErrAlreadyLinked
+	}
+
+	// Apply optional B-side field updates first (so they're persisted
+	// regardless of whether the link write below is a no-op). Only
+	// phone / notes / icon — display_name / email are linked-driven.
+	if req.Phone != nil || req.Notes != nil || req.IconCode != nil {
+		setClauses := []string{"updated_by_user_id = $1"}
+		args := []any{userID}
+		if req.Phone != nil {
+			args = append(args, *req.Phone)
+			setClauses = append(setClauses,
+				fmt.Sprintf("phone = $%d", len(args)))
+		}
+		if req.Notes != nil {
+			args = append(args, *req.Notes)
+			setClauses = append(setClauses,
+				fmt.Sprintf("notes = $%d", len(args)))
+		}
+		if req.IconCode != nil {
+			iconJSON, err := json.Marshal(req.IconCode)
+			if err != nil {
+				return nil, fmt.Errorf("marshal icon_code: %w", err)
+			}
+			args = append(args, iconJSON)
+			setClauses = append(setClauses,
+				fmt.Sprintf("icon_code = $%d::jsonb", len(args)))
+		}
+		args = append(args, contactID)
+		q := "UPDATE contacts SET " + strings.Join(setClauses, ", ") +
+			fmt.Sprintf(" WHERE id = $%d AND user_id = $1", len(args))
+		if _, err := tx.Exec(ctx, q, args...); err != nil {
+			return nil, fmt.Errorf("update b-side fields: %w", err)
+		}
+	}
+
+	updated, err := s.store.SetLinkedUserIDTx(ctx, tx, userID, contactID, senderUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return updated, nil
+}
+
+// verifyAcceptedLinkRequestTx is the shared gate for both post-accept
+// linking paths. The notification must:
+//   - exist for the caller,
+//   - be a contact_link_request,
+//   - be actioned (caller previously hit Accept),
+//   - not be dismissed,
+//   - have an actor.
+//
+// Returns the sender's user_id on success.
+func (s *Service) verifyAcceptedLinkRequestTx(
+	ctx context.Context, tx pgx.Tx, userID, notificationID uuid.UUID,
+) (uuid.UUID, error) {
+	n, err := s.notifs.GetByIDForCallerTx(ctx, tx, userID, notificationID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if n.Type != notifications.TypeContactLinkRequest {
+		return uuid.Nil, errors.New("notification is not a contact_link_request")
+	}
+	if n.ActionedAt == nil {
+		return uuid.Nil, errors.New("notification has not been accepted")
+	}
+	if n.DismissedAt != nil {
+		return uuid.Nil, errors.New("notification was rejected")
+	}
+	if n.ActorUserID == nil {
+		return uuid.Nil, errors.New("notification has no actor")
+	}
+	return *n.ActorUserID, nil
 }

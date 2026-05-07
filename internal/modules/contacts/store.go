@@ -33,13 +33,16 @@ var (
 	ErrCannotLinkSelf  = errors.New("cannot link a contact to yourself")
 )
 
-// linked_user_icon_code is projected via scalar subquery so it works in both
-// SELECT and INSERT/UPDATE ... RETURNING. NULL when the contact isn't linked
-// or the linked user has no icon set. Spec §4.4: client picks
-// linked_user_icon_code over the contact's own icon_code when present.
+// linked_user_* are projected via scalar subqueries so they work in both
+// SELECT and INSERT/UPDATE ... RETURNING. NULL when the contact isn't
+// linked. Spec §4.4 + post-1c policy: client picks linked_user_* fields
+// over the contact's own stored copies when present, so the linked
+// person's name / email / icon stays in sync with their account.
 const contactColumns = `id, user_id, display_name, email, phone, notes, icon_code,
 	linked_user_id, status, last_used_at, created_at, updated_at,
-	(SELECT icon_code FROM users WHERE id = contacts.linked_user_id) AS linked_user_icon_code`
+	(SELECT icon_code    FROM users WHERE id = contacts.linked_user_id) AS linked_user_icon_code,
+	(SELECT display_name FROM users WHERE id = contacts.linked_user_id) AS linked_user_display_name,
+	(SELECT email        FROM users WHERE id = contacts.linked_user_id) AS linked_user_email`
 
 func scanContact(row pgx.Row) (*Contact, error) {
 	var c Contact
@@ -47,7 +50,7 @@ func scanContact(row pgx.Row) (*Contact, error) {
 	err := row.Scan(
 		&c.ID, &c.UserID, &c.DisplayName, &c.Email, &c.Phone, &c.Notes, &iconBytes,
 		&c.LinkedUserID, &c.Status, &c.LastUsedAt, &c.CreatedAt, &c.UpdatedAt,
-		&linkedIconBytes,
+		&linkedIconBytes, &c.LinkedUserDisplayName, &c.LinkedUserEmail,
 	)
 	if err != nil {
 		return nil, err
@@ -88,6 +91,44 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, req CreateContactR
 	c, err := scanContact(s.db.QueryRow(ctx, q,
 		id, userID, strings.TrimSpace(req.DisplayName),
 		req.Email, req.Phone, req.Notes, iconJSON,
+	))
+	if err != nil {
+		return nil, fmt.Errorf("db error: %w", err)
+	}
+	return c, nil
+}
+
+// CreateLinkedTx inserts a new contact already linked to [linkedUserID]
+// inside the producer's tx. Used by the AcceptWithContact flow when the
+// recipient creates a fresh contact for the requesting user.
+//
+// Skips the absorb-names step (the recipient form doesn't surface that —
+// it's a quick prefill). Display name is required by the caller.
+func (s *Store) CreateLinkedTx(
+	ctx context.Context, tx pgx.Tx,
+	userID, linkedUserID uuid.UUID,
+	displayName string,
+	email, phone, notes *string,
+	iconCode *shared.IconCode,
+) (*Contact, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return nil, fmt.Errorf("uuid: %w", err)
+	}
+	var iconJSON []byte
+	if iconCode != nil {
+		if iconJSON, err = json.Marshal(iconCode); err != nil {
+			return nil, fmt.Errorf("marshal icon_code: %w", err)
+		}
+	}
+	q := `INSERT INTO contacts
+		(id, user_id, display_name, email, phone, notes, icon_code, linked_user_id,
+		 created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $2, $2)
+		RETURNING ` + contactColumns
+	c, err := scanContact(tx.QueryRow(ctx, q,
+		id, userID, strings.TrimSpace(displayName),
+		email, phone, notes, iconJSON, linkedUserID,
 	))
 	if err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
