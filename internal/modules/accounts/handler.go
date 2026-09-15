@@ -217,6 +217,22 @@ func mapServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrAccountNotFound):
 		response.NotFound(c, "NOT_FOUND", "Account not found")
+	case errors.Is(err, ErrMemberNotFound):
+		response.NotFound(c, "NOT_FOUND", "Member not found")
+	case errors.Is(err, ErrUserNotFound):
+		response.NotFound(c, "USER_NOT_FOUND", "No user matches that email")
+	case errors.Is(err, ErrAlreadyMember):
+		response.Fail(c, http.StatusConflict, "USER_ALREADY_MEMBER", "User is already a member of this account", nil)
+	case errors.Is(err, ErrNotMember):
+		response.Fail(c, http.StatusForbidden, "NOT_MEMBER", "Caller is not an active member of this account", nil)
+	case errors.Is(err, ErrNotOwner):
+		response.Fail(c, http.StatusForbidden, "NOT_OWNER", "Only the account owner can perform this action", nil)
+	case errors.Is(err, ErrOwnerMustTransfer):
+		response.Fail(c, http.StatusConflict, "OWNER_MUST_TRANSFER", err.Error(), nil)
+	case errors.Is(err, ErrAccountHasMembers):
+		response.Fail(c, http.StatusConflict, "ACCOUNT_HAS_MEMBERS", err.Error(), nil)
+	case errors.Is(err, ErrScopeNotAllowed):
+		response.BadRequest(c, "SCOPE_NOT_ALLOWED", err.Error(), nil)
 	case errors.Is(err, ErrCreditFieldMismatch):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, ErrTypeChangeNeedsLimit):

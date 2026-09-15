@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
@@ -24,6 +25,8 @@ type Service struct {
 	store *Store
 	txs   *transactions.Service
 	cats  *categories.Service
+	// Wired post-construction via WithNotificationService (wallet invites).
+	notifs *notifications.Service
 }
 
 func NewService(s *Store, txs *transactions.Service, cats *categories.Service) *Service {
@@ -53,7 +56,7 @@ func (s *Service) Summary(ctx context.Context, userID, accountID uuid.UUID, from
 	if err != nil {
 		return nil, err
 	}
-	income, expense, count, err := s.store.SummaryAggregate(ctx, userID, accountID, from, to)
+	income, expense, count, err := s.store.SummaryAggregate(ctx, accountID, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -107,6 +110,18 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, userCurrency str
 		return nil, err
 	}
 
+	// Owner auto-membership (spec §14/1.1): account_members exists for
+	// EVERY account; a personal account is simply a single owner row with
+	// report_scope='all' (fully counts in the owner's reports). Must land
+	// before the opening-balance transaction — the transaction service
+	// authorizes writes by active membership.
+	now := time.Now()
+	if _, err := s.store.InsertMemberTx(ctx, tx,
+		created.ID, userID, MemberRoleOwner, ReportScopeAll, &now, userID,
+	); err != nil {
+		return nil, err
+	}
+
 	// Opening balance auto-transaction
 	if req.Balance != 0 {
 		kind := categories.SystemOpeningIn
@@ -127,7 +142,10 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, userCurrency str
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return created, nil
+	// Re-fetch so the response carries members[] / my_report_scope /
+	// is_shared (pinned §14 shape) — same re-fetch pattern as
+	// projects.Create for members_count.
+	return s.store.GetByID(ctx, userID, created.ID)
 }
 
 // --- Update ---
@@ -164,7 +182,11 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		}
 	}
 
-	return s.store.Update(ctx, userID, id, req, clearCreditFields)
+	if _, err := s.store.Update(ctx, userID, id, req, clearCreditFields); err != nil {
+		return nil, err
+	}
+	// Re-fetch for the members[] / my_report_scope / is_shared shape.
+	return s.store.GetByID(ctx, userID, id)
 }
 
 // --- Adjust balance ---
@@ -219,7 +241,20 @@ func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID
 
 // --- Archive ---
 
+// Archive soft-deletes (status='archived'). Spec §14/2 rule 5: a wallet
+// with other active members cannot be deleted or archived away — the
+// owner must be the only active member.
 func (s *Service) Archive(ctx context.Context, userID, id uuid.UUID) error {
+	if _, err := s.store.GetByID(ctx, userID, id); err != nil {
+		return err
+	}
+	n, err := s.store.CountActiveMembers(ctx, id)
+	if err != nil {
+		return err
+	}
+	if n > 1 {
+		return ErrAccountHasMembers
+	}
 	return s.store.Archive(ctx, userID, id)
 }
 

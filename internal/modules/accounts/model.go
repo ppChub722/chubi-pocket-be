@@ -26,6 +26,19 @@ func IsCreditType(t string) bool {
 	return t == TypeCreditCard || t == TypePayLater
 }
 
+// Member role enum (account_members.role).
+const (
+	MemberRoleOwner  = "owner"
+	MemberRoleMember = "member"
+)
+
+// Report scope enum (account_members.report_scope) — spec §14/5.
+const (
+	ReportScopeNone = "none"
+	ReportScopeOwn  = "own"
+	ReportScopeAll  = "all"
+)
+
 type Account struct {
 	ID             uuid.UUID        `json:"id"`
 	UserID         uuid.UUID        `json:"user_id"`
@@ -45,6 +58,74 @@ type Account struct {
 	SortOrder      int              `json:"sort_order"`
 	CreatedAt      time.Time        `json:"created_at"`
 	UpdatedAt      time.Time        `json:"updated_at"`
+	// Shared-wallet fields (spec §14, pinned contract). `members` holds
+	// ACTIVE members only, always including the caller. `is_shared` =
+	// active member count > 1. `my_report_scope` is the caller's own
+	// membership setting.
+	Members       []MemberView `json:"members"`
+	MyReportScope string       `json:"my_report_scope"`
+	IsShared      bool         `json:"is_shared"`
+}
+
+// AccountMember is the account_members DB row. A pending invite has
+// JoinedAt == nil; active = JoinedAt set + LeftAt nil.
+type AccountMember struct {
+	ID          uuid.UUID  `json:"id"`
+	AccountID   uuid.UUID  `json:"account_id"`
+	UserID      uuid.UUID  `json:"user_id"`
+	Role        string     `json:"role"`
+	ReportScope string     `json:"report_scope"`
+	JoinedAt    *time.Time `json:"joined_at"`
+	LeftAt      *time.Time `json:"left_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// MemberView is the pinned members[] entry shape on GET /v1/accounts —
+// membership row + denormalized user display fields.
+type MemberView struct {
+	ID          uuid.UUID        `json:"id"`
+	UserID      uuid.UUID        `json:"user_id"`
+	DisplayName string           `json:"display_name"`
+	IconCode    *shared.IconCode `json:"icon_code"`
+	Role        string           `json:"role"`
+	JoinedAt    time.Time        `json:"joined_at"`
+}
+
+// MemberHistoryView is one row of GET /v1/accounts/:id/members — the full
+// membership history for the members screen: active members, pending
+// invites, and past members (left_at set). Voided invites (never joined,
+// already closed) are excluded by the store query.
+type MemberHistoryView struct {
+	ID          uuid.UUID        `json:"id"`
+	UserID      uuid.UUID        `json:"user_id"`
+	DisplayName string           `json:"display_name"`
+	IconCode    *shared.IconCode `json:"icon_code"`
+	Role        string           `json:"role"`
+	Status      string           `json:"status"` // 'pending' | 'active' | 'left'
+	JoinedAt    *time.Time       `json:"joined_at"`
+	LeftAt      *time.Time       `json:"left_at"`
+}
+
+type ListMembersResponse struct {
+	Data []MemberHistoryView `json:"data"`
+}
+
+type InviteMemberRequest struct {
+	Email string `json:"email" binding:"required,email"`
+}
+
+type TransferOwnershipRequest struct {
+	NewOwnerUserID uuid.UUID `json:"new_owner_user_id" binding:"required"`
+}
+
+type ReportScopeRequest struct {
+	ReportScope string `json:"report_scope" binding:"required,oneof=none own all"`
+}
+
+type ReportScopeResponse struct {
+	AccountID   uuid.UUID `json:"account_id"`
+	ReportScope string    `json:"report_scope"`
 }
 
 type CreateRequest struct {

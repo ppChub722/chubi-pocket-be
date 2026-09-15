@@ -134,6 +134,10 @@ func main() {
 	// directly with source_project_transaction_id set client-side.
 	projectsService.WithNotificationService(notificationsService)
 
+	// accounts ↔ notifications (account_invite — shared-wallet member
+	// invites ride the same notification pattern as project invites).
+	accountsService.WithNotificationService(notificationsService)
+
 	// Auth registration hooks: seed 6 system + starter user categories AND
 	// the user's notification settings row, atomic with the user insert.
 	authService := auth.NewService(authStore, cfg,
@@ -220,14 +224,23 @@ func main() {
 			protected.PUT("/tags/:id", tagsHandler.Update)
 			protected.DELETE("/tags/:id", tagsHandler.Delete)
 
-			// Accounts (Phase 1a.2)
+			// Accounts (Phase 1a.2 + §14 shared wallets).
+			// Static-path-before-param: /invites/... must come before /:id.
 			protected.POST("/accounts", accountsHandler.Create)
 			protected.GET("/accounts", accountsHandler.List)
+			protected.POST("/accounts/invites/:notification_id/accept", accountsHandler.AcceptInvite)
+			protected.POST("/accounts/invites/:notification_id/reject", accountsHandler.RejectInvite)
 			protected.GET("/accounts/:id", accountsHandler.Get)
 			protected.PUT("/accounts/:id", accountsHandler.Update)
 			protected.DELETE("/accounts/:id", accountsHandler.Delete)
 			protected.POST("/accounts/:id/adjust-balance", accountsHandler.AdjustBalance)
 			protected.GET("/accounts/:id/summary", accountsHandler.Summary)
+			// Shared-wallet membership (spec §14).
+			protected.GET("/accounts/:id/members", accountsHandler.ListMembers)
+			protected.POST("/accounts/:id/members", accountsHandler.InviteMember)
+			protected.DELETE("/accounts/:id/members/:member_id", accountsHandler.RemoveMember)
+			protected.POST("/accounts/:id/transfer-ownership", accountsHandler.TransferOwnership)
+			protected.PUT("/accounts/:id/report-scope", accountsHandler.UpdateReportScope)
 			// Saving-goals helper lives under /accounts so the FE can fetch
 			// the per-account allocation pie without an extra round-trip.
 			protected.GET("/accounts/:id/saving-allocations", savingGoalsHandler.AccountAllocations)

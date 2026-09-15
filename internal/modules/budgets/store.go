@@ -331,6 +331,12 @@ func (s *Store) ComputeSpent(
 		projectClause = "AND t.project_id = $5"
 	}
 
+	// Shared wallets: the central report-scope predicate (spec §14/5
+	// guardrail) replaces the old bare `t.user_id = $1` — a wallet row
+	// only rolls into the viewer's budgets when their membership scope
+	// says so ('own'/'all'; 'none' hides the wallet from budgets). The
+	// category-descendants filter already restricts sums to the viewer's
+	// own taxonomy, so other members' rows can never match anyway.
 	q := `
 		WITH RECURSIVE descendants AS (
 			SELECT id, name FROM categories WHERE id = $2
@@ -341,7 +347,7 @@ func (s *Store) ComputeSpent(
 		sums AS (
 			SELECT t.category_id, COALESCE(SUM(t.amount), 0) AS spent
 			FROM transactions t
-			WHERE t.user_id = $1
+			WHERE ` + shared.ReportScopePredicate("t", "$1") + `
 			  AND t.type = 'expense'
 			  AND t.category_id IN (SELECT id FROM descendants)
 			  AND t.date BETWEEN $3::date AND $4::date

@@ -256,6 +256,10 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, ErrSystemTransactionImmutable):
 		response.BadRequest(c, "SYSTEM_TRANSACTION_IMMUTABLE", err.Error(), nil)
+	case errors.Is(err, ErrCategoryAuthorOnly):
+		response.Fail(c, http.StatusForbidden, "CATEGORY_AUTHOR_ONLY", err.Error(), nil)
+	case errors.Is(err, ErrRowLocked):
+		response.Fail(c, http.StatusForbidden, "ROW_LOCKED", err.Error(), nil)
 	case errors.Is(err, ErrAmountInvalid):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	default:

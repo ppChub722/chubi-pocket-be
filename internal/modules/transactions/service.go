@@ -38,6 +38,12 @@ var (
 	// §04/§4.16 (transfer pair). Transfer rows are NOT blocked here:
 	// they have their own cascade path in updateTransferInTx + Delete.
 	ErrSystemTransactionImmutable = errors.New("transactions in a system category cannot be edited or deleted directly; use the account-level operation that created them")
+	// Shared wallets (spec §14/2). Rule 2: only the row's author may
+	// change category_id (their taxonomy). Rule 3: leaving locks your
+	// rows — an ex-member can no longer edit/delete their old rows on
+	// the wallet they left.
+	ErrCategoryAuthorOnly = errors.New("only the row's author may change its category")
+	ErrRowLocked          = errors.New("membership on this account has ended; the row is read-only for you")
 )
 
 // Cross-module hooks. Wired post-construction in main.go to break the
@@ -191,19 +197,31 @@ func (s *Service) hydrate(ctx context.Context, userID uuid.UUID, t *Transaction)
 			d.HasSplits = true
 		}
 	}
-	// Account ref — bare query rather than importing accounts module.
+	// Account ref — bare query rather than importing accounts module. No
+	// owner filter: on shared wallets the caller may not be the account's
+	// owner; row visibility was already authorized upstream.
 	var accName string
 	err := s.store.db.QueryRow(ctx,
-		`SELECT name FROM accounts WHERE id = $1 AND user_id = $2`,
-		t.AccountID, userID).Scan(&accName)
+		`SELECT name FROM accounts WHERE id = $1`,
+		t.AccountID).Scan(&accName)
 	if err == nil {
 		d.Account = &EmbeddedRef{ID: t.AccountID, Name: accName}
 	}
 	if t.CategoryID != nil {
-		c, err := s.cats.GetCategoryRow(ctx, userID, *t.CategoryID)
+		// Author-scoped lookup: the category belongs to the row's author,
+		// not necessarily the caller (shared wallets). Callers who aren't
+		// the author get the read-only CategoryRender instead.
+		c, err := s.cats.GetCategoryRow(ctx, t.UserID, *t.CategoryID)
 		if err == nil {
 			d.Category = &EmbeddedRef{ID: c.ID, Name: c.Name}
 		}
+	}
+	// Shared-wallet decorations (created_by / category_render / is_locked /
+	// can_edit_category). Same batch filler as the list path, on a
+	// single-row slice.
+	single := []TransactionDetail{*d}
+	if err := s.store.fillSharedInfoForList(ctx, userID, single); err == nil {
+		*d = single[0]
 	}
 	// Tags — bare query against the junction. Avoids importing the tags
 	// module purely for an embedded ref slice; the data we need is just
@@ -429,11 +447,41 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	_ = tx.QueryRow(ctx,
 		`SELECT name FROM accounts WHERE id = $1`, req.AccountID).Scan(&accName)
 	d.Account = &EmbeddedRef{ID: req.AccountID, Name: accName}
+	var cat *categories.Category
 	if categoryID != nil {
-		c, _ := s.cats.GetCategoryRow(ctx, userID, *categoryID)
-		if c != nil {
-			d.Category = &EmbeddedRef{ID: c.ID, Name: c.Name}
+		cat, _ = s.cats.GetCategoryRow(ctx, userID, *categoryID)
+		if cat != nil {
+			d.Category = &EmbeddedRef{ID: cat.ID, Name: cat.Name}
 		}
+	}
+	// Shared-wallet decorations on the POST response (pinned §14
+	// contract). The row is still uncommitted, so the list-path batch
+	// filler can't see it — decorate from what's in hand: the author is
+	// the caller (active member by definition, or the write would have
+	// been rejected above).
+	var activeMembers int
+	_ = tx.QueryRow(ctx, `
+		SELECT COUNT(*) FROM account_members
+		WHERE account_id = $1 AND joined_at IS NOT NULL AND left_at IS NULL`,
+		req.AccountID).Scan(&activeMembers)
+	if activeMembers > 1 {
+		var authorName string
+		var authorIcon *shared.IconCode
+		var iconBytes []byte
+		_ = tx.QueryRow(ctx,
+			`SELECT display_name, icon_code FROM users WHERE id = $1`,
+			userID).Scan(&authorName, &iconBytes)
+		if iconBytes != nil {
+			authorIcon = new(shared.IconCode)
+			_ = json.Unmarshal(iconBytes, authorIcon)
+		}
+		d.CreatedBy = &AuthorRef{UserID: userID, DisplayName: authorName, IconCode: authorIcon}
+		if cat != nil {
+			d.CategoryRender = &CategoryRender{Name: cat.Name, IconCode: cat.IconCode}
+		}
+		isLocked, canEdit := false, true
+		d.IsLocked = &isLocked
+		d.CanEditCategory = &canEdit
 	}
 	return d, nil
 }
@@ -640,11 +688,18 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		return s.buildTransferResponse(ctx, userID, *outRow.TransferGroupID, outRow, inRow)
 	}
 
+	// Shared-wallet authz (spec §14/2): active members may edit any
+	// member's rows EXCEPT category_id (author-only); ex-members can no
+	// longer touch their own old rows on the wallet they left.
+	if err := s.authorizeRowMutation(ctx, userID, current, req); err != nil {
+		return nil, err
+	}
+
 	// Non-transfer with a system category (Opening Balance / Adjustment)
 	// is read-only — the user can't directly edit the auto-created
 	// bookkeeping row. They mutate the account-level state instead
 	// (account edit / adjust-balance), which writes new transactions.
-	if err := s.checkNotSystemRow(ctx, userID, current); err != nil {
+	if err := s.checkNotSystemRow(ctx, current); err != nil {
 		return nil, err
 	}
 
@@ -656,6 +711,39 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return s.hydrate(ctx, userID, updated)
+}
+
+// authorizeRowMutation applies the shared-wallet co-ownership rules
+// (spec §14/2) for edit/delete of a non-transfer row the caller can see:
+//
+//   - author + active member    → full edit (incl. category)
+//   - author + membership ended → ROW_LOCKED (rule 3)
+//   - other active member       → allowed EXCEPT category_id (rule 2)
+//
+// Non-members never reach here — GetByID's visibility already 404'd.
+// Pass a zero-value UpdateRequest for delete (no category change).
+func (s *Service) authorizeRowMutation(
+	ctx context.Context, userID uuid.UUID, current *Transaction, req UpdateRequest,
+) error {
+	active, err := s.store.IsActiveMember(ctx, current.AccountID, userID)
+	if err != nil {
+		return err
+	}
+	isAuthor := current.UserID == userID
+	if isAuthor {
+		if !active {
+			return ErrRowLocked
+		}
+		return nil
+	}
+	// Non-author: visibility guaranteed membership, but keep the guard.
+	if !active {
+		return ErrTxNotFound
+	}
+	if _, catChange := req.CategoryIDChange(); catChange {
+		return ErrCategoryAuthorOnly
+	}
+	return nil
 }
 
 func (s *Service) updateSingleInTx(
@@ -718,7 +806,7 @@ func (s *Service) updateTransferInTx(
 	}
 
 	// Fetch both rows
-	pair, err := s.store.GetByGroupID(ctx, userID, *current.TransferGroupID)
+	pair, err := s.store.GetByGroupID(ctx, *current.TransferGroupID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -726,8 +814,9 @@ func (s *Service) updateTransferInTx(
 		return nil, nil, fmt.Errorf("transfer pair has %d rows; expected 2", len(pair))
 	}
 
-	// Identify OUT vs IN by category
-	outCat, err := s.cats.SystemFor(ctx, userID, categories.SystemTransferOut)
+	// Identify OUT vs IN by category — the pair carries the AUTHOR's
+	// Transfer OUT/IN system categories (per-user), not the caller's.
+	outCat, err := s.cats.SystemFor(ctx, current.UserID, categories.SystemTransferOut)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -741,6 +830,13 @@ func (s *Service) updateTransferInTx(
 	}
 	if outRow == nil || inRow == nil {
 		return nil, nil, fmt.Errorf("could not identify OUT/IN rows of transfer")
+	}
+
+	// A transfer mutation moves money on BOTH accounts — the caller needs
+	// active membership on both (shared-wallet rules §14/2; ex-author →
+	// ROW_LOCKED, foreign non-member side → not found).
+	if err := s.authorizePairMutation(ctx, userID, current, outRow, inRow); err != nil {
+		return nil, nil, err
 	}
 
 	// Lock both accounts (lowest UUID first)
@@ -800,11 +896,16 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 			return err
 		}
 	} else {
+		// Shared-wallet authz: same matrix as Update (delete never
+		// carries a category change, hence the zero-value request).
+		if err := s.authorizeRowMutation(ctx, userID, current, UpdateRequest{}); err != nil {
+			return err
+		}
 		// Non-transfer with a system category (Opening Balance,
 		// Adjustment) is undeletable — silently dropping it would
 		// leave the cached `accounts.balance` honest but the audit
 		// trail would lie. Reverse via the account-level operation.
-		if err := s.checkNotSystemRow(ctx, userID, current); err != nil {
+		if err := s.checkNotSystemRow(ctx, current); err != nil {
 			return err
 		}
 		if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
@@ -814,16 +915,45 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	return tx.Commit(ctx)
 }
 
+// authorizePairMutation is the transfer-pair variant of
+// authorizeRowMutation: the caller must hold active membership on BOTH
+// accounts of the pair. The row's author whose membership ended gets
+// ROW_LOCKED; a non-author without membership on either side gets
+// not-found (they shouldn't learn the pair exists).
+func (s *Service) authorizePairMutation(
+	ctx context.Context, userID uuid.UUID, current, outRow, inRow *Transaction,
+) error {
+	activeOut, err := s.store.IsActiveMember(ctx, outRow.AccountID, userID)
+	if err != nil {
+		return err
+	}
+	activeIn, err := s.store.IsActiveMember(ctx, inRow.AccountID, userID)
+	if err != nil {
+		return err
+	}
+	if activeOut && activeIn {
+		return nil
+	}
+	if current.UserID == userID {
+		return ErrRowLocked
+	}
+	return ErrTxNotFound
+}
+
 // checkNotSystemRow rejects mutations on transactions whose category
 // is a system kind (Opening Balance, Adjustment). Transfer rows have
 // system categories too, but they're handled by the dedicated transfer
 // path above this check; callers must gate by `current.Type !=
 // TypeTransfer` themselves.
-func (s *Service) checkNotSystemRow(ctx context.Context, userID uuid.UUID, current *Transaction) error {
+//
+// The lookup is AUTHOR-scoped — categories belong to the row's author,
+// so a shared-wallet co-member editing the owner's row must still trip
+// on the owner's system categories.
+func (s *Service) checkNotSystemRow(ctx context.Context, current *Transaction) error {
 	if current.CategoryID == nil {
 		return nil
 	}
-	cat, err := s.cats.GetCategoryRow(ctx, userID, *current.CategoryID)
+	cat, err := s.cats.GetCategoryRow(ctx, current.UserID, *current.CategoryID)
 	if err != nil {
 		// If the category was hard-deleted out from under the row,
 		// the FK is set NULL — we can't tell what kind it was. Allow.
@@ -843,14 +973,14 @@ func (s *Service) deleteSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, current.AccountID, -delta); err != nil {
 		return err
 	}
-	return s.store.DeleteRowTx(ctx, tx, userID, current.ID)
+	return s.store.DeleteRowTx(ctx, tx, current.ID)
 }
 
 func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) error {
 	if current.TransferGroupID == nil {
 		return fmt.Errorf("transfer row missing transfer_group_id")
 	}
-	pair, err := s.store.GetByGroupID(ctx, userID, *current.TransferGroupID)
+	pair, err := s.store.GetByGroupID(ctx, *current.TransferGroupID)
 	if err != nil {
 		return err
 	}
@@ -858,7 +988,8 @@ func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 		return fmt.Errorf("transfer pair has %d rows; expected 2", len(pair))
 	}
 
-	outCat, err := s.cats.SystemFor(ctx, userID, categories.SystemTransferOut)
+	// Author-scoped system-category lookup — see updateTransferInTx.
+	outCat, err := s.cats.SystemFor(ctx, current.UserID, categories.SystemTransferOut)
 	if err != nil {
 		return err
 	}
@@ -872,6 +1003,10 @@ func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 	}
 	if outRow == nil || inRow == nil {
 		return fmt.Errorf("could not identify OUT/IN rows")
+	}
+
+	if err := s.authorizePairMutation(ctx, userID, current, outRow, inRow); err != nil {
+		return err
 	}
 
 	lockIDs := []uuid.UUID{outRow.AccountID, inRow.AccountID}
@@ -889,10 +1024,10 @@ func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 	}
 
 	// Delete both rows
-	if err := s.store.DeleteRowTx(ctx, tx, userID, outRow.ID); err != nil {
+	if err := s.store.DeleteRowTx(ctx, tx, outRow.ID); err != nil {
 		return err
 	}
-	if err := s.store.DeleteRowTx(ctx, tx, userID, inRow.ID); err != nil {
+	if err := s.store.DeleteRowTx(ctx, tx, inRow.ID); err != nil {
 		return err
 	}
 	return nil
@@ -901,16 +1036,22 @@ func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 // --- Summary ---
 
 func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequest) (*SummaryResponse, error) {
-	whereClauses := []string{"user_id = $1", "date >= $2::date", "date <= $3::date"}
+	// The central report-scope predicate (spec §14/5 guardrail) replaces
+	// the old bare `user_id = $1` — every personal aggregate must go
+	// through shared.ReportScopePredicate, never an inlined filter.
+	whereClauses := []string{
+		shared.ReportScopePredicate("t", "$1"),
+		"t.date >= $2::date", "t.date <= $3::date",
+	}
 	args := []any{userID, req.From, req.To}
 
 	if req.AccountID != nil {
 		args = append(args, *req.AccountID)
-		whereClauses = append(whereClauses, fmt.Sprintf("account_id = $%d", len(args)))
+		whereClauses = append(whereClauses, fmt.Sprintf("t.account_id = $%d", len(args)))
 	}
 	if req.CategoryID != nil {
 		args = append(args, *req.CategoryID)
-		whereClauses = append(whereClauses, fmt.Sprintf("category_id = $%d", len(args)))
+		whereClauses = append(whereClauses, fmt.Sprintf("t.category_id = $%d", len(args)))
 	}
 	where := joinAnd(whereClauses)
 
@@ -920,10 +1061,10 @@ func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequ
 		count        int
 	)
 	q := `SELECT
-		COALESCE(SUM(amount) FILTER (WHERE type = 'income'),  0),
-		COALESCE(SUM(amount) FILTER (WHERE type = 'expense'), 0),
-		COUNT(*) FILTER (WHERE type IN ('income', 'expense'))
-		FROM transactions WHERE ` + where
+		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'income'),  0),
+		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0),
+		COUNT(*) FILTER (WHERE t.type IN ('income', 'expense'))
+		FROM transactions t WHERE ` + where
 	if err := s.store.db.QueryRow(ctx, q, args...).Scan(&totalIncome, &totalExpense, &count); err != nil {
 		return nil, fmt.Errorf("summary: %w", err)
 	}

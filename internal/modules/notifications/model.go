@@ -17,6 +17,7 @@ const (
 	TypeProjectTxChanged         = "project_tx_changed"
 	TypeProjectInvite            = "project_invite"
 	TypeContactLinkRequest       = "contact_link_request"
+	TypeAccountInvite            = "account_invite"
 )
 
 // Notification is the DB row.
@@ -145,4 +146,15 @@ type ContactLinkRequestPayload struct {
 	ContactID         uuid.UUID `json:"contact_id"`
 	SenderUserID      uuid.UUID `json:"sender_user_id"`
 	SenderDisplayName string    `json:"sender_display_name"`
+}
+
+// AccountInvitePayload — shared-wallet invite (spec §14/4). Accepting
+// activates the pending account_members row; rejecting dismisses the
+// notification and voids the pending row.
+type AccountInvitePayload struct {
+	AccountMemberID    uuid.UUID `json:"account_member_id"`
+	AccountID          uuid.UUID `json:"account_id"`
+	AccountName        string    `json:"account_name"`
+	InviterUserID      uuid.UUID `json:"inviter_user_id"`
+	InviterDisplayName string    `json:"inviter_display_name"`
 }

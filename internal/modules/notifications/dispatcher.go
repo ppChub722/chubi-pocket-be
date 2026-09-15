@@ -95,6 +95,14 @@ func (s *Service) DispatchContactLinkRequest(
 	return s.dispatchTx(ctx, tx, TypeContactLinkRequest, recipientUserID, &actorUserID, p, &deepLink)
 }
 
+func (s *Service) DispatchAccountInvite(
+	ctx context.Context, tx pgx.Tx,
+	recipientUserID uuid.UUID, actorUserID uuid.UUID, p AccountInvitePayload,
+) error {
+	deepLink := fmt.Sprintf("/accounts/invites/%s", p.AccountMemberID)
+	return s.dispatchTx(ctx, tx, TypeAccountInvite, recipientUserID, &actorUserID, p, &deepLink)
+}
+
 func splitDeepLink(splitID uuid.UUID, projectID *uuid.UUID) string {
 	if projectID != nil {
 		return fmt.Sprintf("/projects/%s/splits/%s", *projectID, splitID)

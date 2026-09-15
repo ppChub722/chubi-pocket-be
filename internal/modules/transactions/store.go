@@ -81,8 +81,19 @@ func scanTx(row pgx.Row) (*Transaction, error) {
 
 // --- Read ---
 
+// txVisible is the read-visibility rule for transactions (spec §14): the
+// caller sees a row when they authored it (their book, incl. locked
+// history on wallets they left) OR they hold an ACTIVE membership on the
+// row's account (shared-wallet ledger, all authors). Backfilled owner
+// rows make personal accounts behave exactly as the old `user_id = $1`.
+func txVisible(txAlias, userParam string) string {
+	return "(" + txAlias + ".user_id = " + userParam + " OR " +
+		shared.ActiveMembershipPredicate(txAlias+".account_id", userParam) + ")"
+}
+
 func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Transaction, error) {
-	q := `SELECT ` + txColumns + ` FROM transactions WHERE id = $1 AND user_id = $2`
+	q := `SELECT ` + txColumns + ` FROM transactions t
+		WHERE t.id = $1 AND ` + txVisible("t", "$2")
 	t, err := scanTx(s.db.QueryRow(ctx, q, id, userID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrTxNotFound
@@ -93,11 +104,28 @@ func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Transaction
 	return t, nil
 }
 
-func (s *Store) GetByGroupID(ctx context.Context, userID, groupID uuid.UUID) ([]Transaction, error) {
+// IsActiveMember reports whether userID holds an active membership on
+// accountID. Inlined here (not calling the accounts module) to avoid an
+// import cycle — same reasoning as LookupSourcePTTx above.
+func (s *Store) IsActiveMember(ctx context.Context, accountID, userID uuid.UUID) (bool, error) {
+	var ok bool
+	err := s.db.QueryRow(ctx,
+		`SELECT `+shared.ActiveMembershipPredicate("$1", "$2"),
+		accountID, userID).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("is member: %w", err)
+	}
+	return ok, nil
+}
+
+// GetByGroupID loads both rows of a transfer pair. No author filter —
+// on shared wallets a member may operate on another member's transfer;
+// the service authorizes via membership on both accounts.
+func (s *Store) GetByGroupID(ctx context.Context, groupID uuid.UUID) ([]Transaction, error) {
 	q := `SELECT ` + txColumns + ` FROM transactions
-		WHERE user_id = $1 AND transfer_group_id = $2
+		WHERE transfer_group_id = $1
 		ORDER BY type, account_id`
-	rows, err := s.db.Query(ctx, q, userID, groupID)
+	rows, err := s.db.Query(ctx, q, groupID)
 	if err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
 	}
@@ -126,7 +154,7 @@ func (s *Store) CountByCategory(ctx context.Context, categoryID uuid.UUID) (int,
 // List returns a page of TransactionDetail rows joined with embedded
 // account + category refs. Sort = date_desc by default.
 func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]TransactionDetail, int, error) {
-	whereClauses := []string{"t.user_id = $1"}
+	whereClauses := []string{txVisible("t", "$1")}
 	args := []any{userID}
 
 	if f.AccountID != nil {
@@ -238,7 +266,105 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	if err := s.fillHasSplitsForList(ctx, out); err != nil {
 		return nil, 0, fmt.Errorf("fill has_splits: %w", err)
 	}
+	if err := s.fillSharedInfoForList(ctx, userID, out); err != nil {
+		return nil, 0, fmt.Errorf("fill shared info: %w", err)
+	}
 	return out, total, nil
+}
+
+// fillSharedInfoForList decorates rows that live on SHARED wallets
+// (active member count > 1) with the pinned-contract fields: denormalized
+// created_by author, category_render (the author's category, read-only
+// for other members), is_locked (caller can no longer move this wallet's
+// numbers — ex-member) and can_edit_category (caller is the row's author
+// and still active). Rows on personal accounts are left untouched.
+// Single batch query per page.
+func (s *Store) fillSharedInfoForList(ctx context.Context, userID uuid.UUID, details []TransactionDetail) error {
+	if len(details) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(details))
+	for i := range details {
+		ids[i] = details[i].ID
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT t.id, t.user_id, u.display_name, u.icon_code,
+		       c.name, c.icon_code,
+		       (SELECT COUNT(*) FROM account_members am
+		         WHERE am.account_id = t.account_id
+		           AND am.joined_at IS NOT NULL AND am.left_at IS NULL) AS active_members,
+		       `+shared.ActiveMembershipPredicate("t.account_id", "$2")+` AS caller_active
+		FROM transactions t
+		JOIN users u ON u.id = t.user_id
+		LEFT JOIN categories c ON c.id = t.category_id
+		WHERE t.id = ANY($1)`, ids, userID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type sharedInfo struct {
+		createdBy       *AuthorRef
+		categoryRender  *CategoryRender
+		isLocked        bool
+		canEditCategory bool
+		shared          bool
+	}
+	infoByID := make(map[uuid.UUID]sharedInfo, len(details))
+	for rows.Next() {
+		var (
+			txID          uuid.UUID
+			authorID      uuid.UUID
+			authorName    string
+			authorIcon    []byte
+			catName       *string
+			catIcon       []byte
+			activeMembers int
+			callerActive  bool
+		)
+		if err := rows.Scan(&txID, &authorID, &authorName, &authorIcon,
+			&catName, &catIcon, &activeMembers, &callerActive); err != nil {
+			return err
+		}
+		if activeMembers <= 1 {
+			continue
+		}
+		info := sharedInfo{shared: true}
+		info.createdBy = &AuthorRef{UserID: authorID, DisplayName: authorName}
+		if authorIcon != nil {
+			info.createdBy.IconCode = new(shared.IconCode)
+			if err := json.Unmarshal(authorIcon, info.createdBy.IconCode); err != nil {
+				return fmt.Errorf("unmarshal author icon_code: %w", err)
+			}
+		}
+		if catName != nil {
+			info.categoryRender = &CategoryRender{Name: *catName}
+			if catIcon != nil {
+				info.categoryRender.IconCode = new(shared.IconCode)
+				if err := json.Unmarshal(catIcon, info.categoryRender.IconCode); err != nil {
+					return fmt.Errorf("unmarshal category icon_code: %w", err)
+				}
+			}
+		}
+		info.isLocked = !callerActive
+		info.canEditCategory = authorID == userID && callerActive
+		infoByID[txID] = info
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range details {
+		info, ok := infoByID[details[i].ID]
+		if !ok || !info.shared {
+			continue
+		}
+		details[i].CreatedBy = info.createdBy
+		details[i].CategoryRender = info.categoryRender
+		isLocked, canEdit := info.isLocked, info.canEditCategory
+		details[i].IsLocked = &isLocked
+		details[i].CanEditCategory = &canEdit
+	}
+	return nil
 }
 
 // fillHasSplitsForList flags every row that has any debts attached
@@ -349,9 +475,15 @@ func (s *Store) LockAccountsForUpdate(ctx context.Context, tx pgx.Tx, ids []uuid
 
 // GetAccountBalanceTx reads the current cached balance under lock. Returns
 // also the currency for currency-mismatch checks on transfers.
+//
+// This doubles as the WRITE authorization gate: the caller must hold an
+// ACTIVE membership on the account (spec §14/6 — "writes to an account
+// require active membership"). Personal accounts pass via the backfilled
+// owner row — no special case.
 func (s *Store) GetAccountBalanceTx(ctx context.Context, tx pgx.Tx, userID, accountID uuid.UUID) (balance float64, currency string, err error) {
 	err = tx.QueryRow(ctx,
-		`SELECT balance, currency FROM accounts WHERE id = $1 AND user_id = $2`,
+		`SELECT a.balance, a.currency FROM accounts a
+		 WHERE a.id = $1 AND `+shared.ActiveMembershipPredicate("a.id", "$2"),
 		accountID, userID).Scan(&balance, &currency)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, "", ErrAccountForbidden
@@ -360,11 +492,14 @@ func (s *Store) GetAccountBalanceTx(ctx context.Context, tx pgx.Tx, userID, acco
 }
 
 // ApplyBalanceDeltaTx adjusts accounts.balance by `delta` (positive or
-// negative). Caller has already locked the row.
+// negative). Caller has already locked the row AND verified membership
+// (GetAccountBalanceTx) — on a shared wallet the actor is not necessarily
+// the account's owner, so the WHERE matches by id only and the actor is
+// stamped as updater.
 func (s *Store) ApplyBalanceDeltaTx(ctx context.Context, tx pgx.Tx, userID, accountID uuid.UUID, delta float64) (newBalance float64, err error) {
 	err = tx.QueryRow(ctx, `
 		UPDATE accounts SET balance = balance + $1, updated_by_user_id = $2
-		WHERE id = $3 AND user_id = $2
+		WHERE id = $3
 		RETURNING balance`, delta, userID, accountID).Scan(&newBalance)
 	return
 }
@@ -422,7 +557,11 @@ func (s *Store) UpdateRowTx(
 		q += fmt.Sprintf(", note = $%d", len(args))
 	}
 	args = append(args, id)
-	q += fmt.Sprintf(" WHERE id = $%d AND user_id = $1 RETURNING ", len(args)) + txColumns
+	// WHERE by id only — on shared wallets the actor may edit another
+	// member's row (spec §14/2 rule 2); service-level authz decides who
+	// may reach this. $1 (the actor) is stamped into updated_by_user_id
+	// for the audit trail.
+	q += fmt.Sprintf(" WHERE id = $%d RETURNING ", len(args)) + txColumns
 
 	t, err := scanTx(tx.QueryRow(ctx, q, args...))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -436,10 +575,11 @@ func (s *Store) UpdateRowTx(
 
 
 // DeleteRowTx removes a single transactions row by id. Caller (service)
-// already reversed the balance.
-func (s *Store) DeleteRowTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) error {
+// already reversed the balance and authorized the actor — members may
+// delete other members' rows on shared wallets, so no author filter here.
+func (s *Store) DeleteRowTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
 	tag, err := tx.Exec(ctx,
-		`DELETE FROM transactions WHERE id = $1 AND user_id = $2`, id, userID)
+		`DELETE FROM transactions WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete tx: %w", err)
 	}

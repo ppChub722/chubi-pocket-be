@@ -426,6 +426,23 @@ func (s *Store) SummaryAggregate(ctx context.Context, projectID, callerID uuid.U
 		projectID).Scan(&resp.MemberCount); err != nil {
 		return nil, fmt.Errorf("member count: %w", err)
 	}
+	// Plan-vs-actual (spec §10/4.23): present only when planned_amount is
+	// set. spent_net = Σ expense parents − Σ income parents (parents only
+	// — the aggregate above already excludes children). remaining may be
+	// negative; the FE flips the label instead of showing a raw negative.
+	var planned *float64
+	if err := s.db.QueryRow(ctx,
+		`SELECT planned_amount FROM projects WHERE id = $1`,
+		projectID).Scan(&planned); err != nil {
+		return nil, fmt.Errorf("planned amount: %w", err)
+	}
+	if planned != nil {
+		spentNet := resp.TotalExpense - resp.TotalIncome
+		remaining := *planned - spentNet
+		resp.PlannedAmount = planned
+		resp.SpentNet = &spentNet
+		resp.Remaining = &remaining
+	}
 	return resp, nil
 }
 

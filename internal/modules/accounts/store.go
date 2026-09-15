@@ -56,8 +56,14 @@ func scanAccount(row pgx.Row) (*Account, error) {
 
 // --- Reads ---
 
+// GetByID returns the account when the caller holds an ACTIVE membership
+// on it (spec §14 — shared wallets are visible to every active member;
+// the owner's row was backfilled by migration 000039, so personal
+// accounts behave exactly as before). Non-members get ErrAccountNotFound
+// to avoid info-leak.
 func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Account, error) {
-	q := `SELECT ` + accountColumns + ` FROM accounts WHERE id = $1 AND user_id = $2`
+	q := `SELECT ` + accountColumns + ` FROM accounts a
+		WHERE a.id = $1 AND ` + shared.ActiveMembershipPredicate("a.id", "$2")
 	a, err := scanAccount(s.db.QueryRow(ctx, q, id, userID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrAccountNotFound
@@ -65,11 +71,18 @@ func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Account, er
 	if err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
 	}
-	return a, nil
+	single := []Account{*a}
+	if err := s.fillMembers(ctx, userID, single); err != nil {
+		return nil, err
+	}
+	return &single[0], nil
 }
 
+// List returns every account the caller is an ACTIVE member of — own
+// accounts (backfilled owner rows) plus shared wallets joined via invite.
 func (s *Store) List(ctx context.Context, userID uuid.UUID, status, accType string) ([]Account, error) {
-	q := `SELECT ` + accountColumns + ` FROM accounts WHERE user_id = $1`
+	q := `SELECT ` + accountColumns + ` FROM accounts a
+		WHERE ` + shared.ActiveMembershipPredicate("a.id", "$1")
 	args := []any{userID}
 	if status != "all" {
 		args = append(args, status)
@@ -95,7 +108,13 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, status, accType stri
 		}
 		out = append(out, *a)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.fillMembers(ctx, userID, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // SummaryAggregate returns income / expense / count for an account in
@@ -112,19 +131,24 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, status, accType stri
 //
 // LEFT JOIN keeps uncategorized rows in the aggregate; COALESCE
 // treats NULL category as include-by-default.
-func (s *Store) SummaryAggregate(ctx context.Context, userID, accountID uuid.UUID, from, to string) (income, expense float64, count int, err error) {
+//
+// Shared wallets (spec §14/5): the wallet's own page always shows the
+// full ledger regardless of report_scope — so this aggregates ALL rows
+// on the account, whoever authored them. Access is gated upstream by
+// Service.Summary → GetByID (active membership). On a personal account
+// the sole author is the owner, so behavior is unchanged.
+func (s *Store) SummaryAggregate(ctx context.Context, accountID uuid.UUID, from, to string) (income, expense float64, count int, err error) {
 	q := `SELECT
 		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'income'), 0),
 		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0),
 		COUNT(*)
 		FROM transactions t
 		LEFT JOIN categories c ON c.id = t.category_id
-		WHERE t.user_id = $1
-		  AND t.account_id = $2
-		  AND t.date >= $3::date
-		  AND t.date <= $4::date
+		WHERE t.account_id = $1
+		  AND t.date >= $2::date
+		  AND t.date <= $3::date
 		  AND COALESCE(c.include_in_report, TRUE) = TRUE`
-	err = s.db.QueryRow(ctx, q, userID, accountID, from, to).
+	err = s.db.QueryRow(ctx, q, accountID, from, to).
 		Scan(&income, &expense, &count)
 	return
 }

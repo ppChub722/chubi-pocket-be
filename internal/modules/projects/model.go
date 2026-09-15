@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -46,8 +47,11 @@ type Project struct {
 	EndDate      *string          `json:"end_date"`
 	Status       string           `json:"status"`
 	IconCode     *shared.IconCode `json:"icon_code"`
-	CreatedAt    time.Time        `json:"created_at"`
-	UpdatedAt    time.Time        `json:"updated_at"`
+	// Plan-vs-actual single total (spec §10/4.23). NULL = plan UI off.
+	// Display-only — never a constraint; no validation references it.
+	PlannedAmount *float64  `json:"planned_amount"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 	// Hydrated for list/get views.
 	MembersCount int `json:"members_count,omitempty"`
 }
@@ -111,14 +115,39 @@ type CreateProjectRequest struct {
 	IconCode    *shared.IconCode `json:"icon_code"   binding:"omitempty"`
 }
 
+// UpdateProjectRequest — `planned_amount` is presence-tracked (same
+// convention as accounts.UpdateRequest): field absent → leave alone;
+// explicit `null` → clear the plan; a number → set it.
 type UpdateProjectRequest struct {
-	Name        *string          `json:"name"        binding:"omitempty,min=1,max=100"`
-	Type        *string          `json:"type"        binding:"omitempty,max=30"`
-	Description *string          `json:"description"`
-	StartDate   *string          `json:"start_date"  binding:"omitempty,datetime=2006-01-02"`
-	EndDate     *string          `json:"end_date"    binding:"omitempty,datetime=2006-01-02"`
-	Status      *string          `json:"status"      binding:"omitempty,oneof=active completed cancelled archived"`
-	IconCode    *shared.IconCode `json:"icon_code"   binding:"omitempty"`
+	Name          *string          `json:"name"           binding:"omitempty,min=1,max=100"`
+	Type          *string          `json:"type"           binding:"omitempty,max=30"`
+	Description   *string          `json:"description"`
+	StartDate     *string          `json:"start_date"     binding:"omitempty,datetime=2006-01-02"`
+	EndDate       *string          `json:"end_date"       binding:"omitempty,datetime=2006-01-02"`
+	Status        *string          `json:"status"         binding:"omitempty,oneof=active completed cancelled archived"`
+	IconCode      *shared.IconCode `json:"icon_code"      binding:"omitempty"`
+	PlannedAmount *float64         `json:"planned_amount" binding:"omitempty,gt=0"`
+
+	plannedAmountPresent bool
+}
+
+func (r *UpdateProjectRequest) UnmarshalJSON(data []byte) error {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	type alias UpdateProjectRequest
+	if err := json.Unmarshal(data, (*alias)(r)); err != nil {
+		return err
+	}
+	_, r.plannedAmountPresent = probe["planned_amount"]
+	return nil
+}
+
+// PlannedAmountChange returns (newValue, true) when the request asked to
+// change planned_amount (nil = clear). (nil, false) = leave unchanged.
+func (r *UpdateProjectRequest) PlannedAmountChange() (*float64, bool) {
+	return r.PlannedAmount, r.plannedAmountPresent
 }
 
 // AddMemberRequest carries one of two variants. Caller picks by setting
@@ -216,7 +245,11 @@ type ListPTResponse struct {
 	Pagination Pagination           `json:"pagination"`
 }
 
-// SummaryResponse — high-level project summary.
+// SummaryResponse — high-level project summary. The plan-vs-actual trio
+// (spec §10/4.23) is present only when projects.planned_amount is set:
+// spent_net = Σ expense parents − Σ income parents (children are split
+// annotations of the same money — never counted); remaining may be
+// negative (FE flips the label, not the sign).
 type SummaryResponse struct {
 	ProjectID        uuid.UUID `json:"project_id"`
 	TotalExpense     float64   `json:"total_expense"`
@@ -224,4 +257,7 @@ type SummaryResponse struct {
 	TransactionCount int       `json:"transaction_count"`
 	MemberCount      int       `json:"member_count"`
 	MyPosition       *float64  `json:"my_position,omitempty"`
+	PlannedAmount    *float64  `json:"planned_amount,omitempty"`
+	SpentNet         *float64  `json:"spent_net,omitempty"`
+	Remaining        *float64  `json:"remaining,omitempty"`
 }

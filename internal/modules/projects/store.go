@@ -46,14 +46,14 @@ var (
 const projectColumns = `id, owner_user_id, name, type, description,
 	to_char(start_date, 'YYYY-MM-DD') AS start_date,
 	to_char(end_date, 'YYYY-MM-DD')   AS end_date,
-	status, icon_code, created_at, updated_at`
+	status, icon_code, planned_amount, created_at, updated_at`
 
 func scanProject(row pgx.Row) (*Project, error) {
 	var p Project
 	var iconBytes []byte
 	err := row.Scan(
 		&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description,
-		&p.StartDate, &p.EndDate, &p.Status, &iconBytes,
+		&p.StartDate, &p.EndDate, &p.Status, &iconBytes, &p.PlannedAmount,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
 	if err != nil {
@@ -122,7 +122,7 @@ func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (*Project, error) {
 	q := `SELECT p.id, p.owner_user_id, p.name, p.type, p.description,
 	             to_char(p.start_date, 'YYYY-MM-DD'),
 	             to_char(p.end_date, 'YYYY-MM-DD'),
-	             p.status, p.icon_code, p.created_at, p.updated_at,
+	             p.status, p.icon_code, p.planned_amount, p.created_at, p.updated_at,
 	             (SELECT COUNT(*) FROM project_members
 	              WHERE project_id = p.id AND status != 'left') AS members_count
 	      FROM projects p WHERE p.id = $1`
@@ -131,7 +131,7 @@ func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (*Project, error) {
 	var iconBytes []byte
 	err := row.Scan(
 		&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description,
-		&p.StartDate, &p.EndDate, &p.Status, &iconBytes,
+		&p.StartDate, &p.EndDate, &p.Status, &iconBytes, &p.PlannedAmount,
 		&p.CreatedAt, &p.UpdatedAt,
 		&p.MembersCount,
 	)
@@ -218,7 +218,7 @@ func (s *Store) ListForUser(ctx context.Context, userID uuid.UUID, f ListFilter)
 		SELECT p.id, p.owner_user_id, p.name, p.type, p.description,
 		       to_char(p.start_date, 'YYYY-MM-DD'),
 		       to_char(p.end_date, 'YYYY-MM-DD'),
-		       p.status, p.icon_code, p.created_at, p.updated_at,
+		       p.status, p.icon_code, p.planned_amount, p.created_at, p.updated_at,
 		       (SELECT COUNT(*) FROM project_members WHERE project_id = p.id AND status != 'left')
 		FROM projects p
 		WHERE %s
@@ -237,7 +237,7 @@ func (s *Store) ListForUser(ctx context.Context, userID uuid.UUID, f ListFilter)
 		var iconBytes []byte
 		if err := rows.Scan(
 			&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description,
-			&p.StartDate, &p.EndDate, &p.Status, &iconBytes,
+			&p.StartDate, &p.EndDate, &p.Status, &iconBytes, &p.PlannedAmount,
 			&p.CreatedAt, &p.UpdatedAt,
 			&p.MembersCount,
 		); err != nil {
@@ -289,6 +289,12 @@ func (s *Store) Update(ctx context.Context, ownerUserID, id uuid.UUID, req Updat
 		}
 		args = append(args, b)
 		q += fmt.Sprintf(", icon_code = $%d::jsonb", len(args))
+	}
+	// planned_amount is presence-tracked: explicit null clears the plan
+	// (spec §10/4.23 — NULL = off), missing field leaves it alone.
+	if planned, present := req.PlannedAmountChange(); present {
+		args = append(args, planned)
+		q += fmt.Sprintf(", planned_amount = $%d", len(args))
 	}
 	args = append(args, id)
 	q += fmt.Sprintf(" WHERE id = $%d AND owner_user_id = $1 RETURNING ", len(args)) + projectColumns

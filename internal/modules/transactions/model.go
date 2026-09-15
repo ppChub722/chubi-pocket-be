@@ -64,6 +64,23 @@ type EmbeddedTag struct {
 	IconCode *shared.IconCode `json:"icon_code"`
 }
 
+// AuthorRef is the denormalized row author embedded on shared-wallet
+// rows (pinned §14 contract) so the FE renders "who logged it" without a
+// second lookup.
+type AuthorRef struct {
+	UserID      uuid.UUID        `json:"user_id"`
+	DisplayName string           `json:"display_name"`
+	IconCode    *shared.IconCode `json:"icon_code"`
+}
+
+// CategoryRender is the read-only rendering of the AUTHOR's category on
+// a shared-wallet row — other members see name + icon but the category
+// itself belongs to the author's taxonomy (spec §14/1.2).
+type CategoryRender struct {
+	Name     string           `json:"name"`
+	IconCode *shared.IconCode `json:"icon_code"`
+}
+
 // TransactionDetail mirrors `Transaction` plus embedded refs + derived flags.
 // Used by GET /v1/transactions and GET /v1/transactions/:id.
 type TransactionDetail struct {
@@ -76,6 +93,12 @@ type TransactionDetail struct {
 	IsResolve    bool          `json:"is_resolve"`
 	// Set on POST response only — not returned in lists.
 	AccountBalanceAfter *float64 `json:"account_balance_after,omitempty"`
+	// Shared-wallet decorations (pinned §14 contract). Present only on
+	// rows whose account has more than one active member.
+	CreatedBy       *AuthorRef      `json:"created_by,omitempty"`
+	CategoryRender  *CategoryRender `json:"category_render,omitempty"`
+	IsLocked        *bool           `json:"is_locked,omitempty"`
+	CanEditCategory *bool           `json:"can_edit_category,omitempty"`
 }
 
 // TransferResponse is returned by `POST /v1/transactions` (and
