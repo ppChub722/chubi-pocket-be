@@ -95,6 +95,17 @@ func (s *Service) DispatchContactLinkRequest(
 	return s.dispatchTx(ctx, tx, TypeContactLinkRequest, recipientUserID, &actorUserID, p, &deepLink)
 }
 
+// DispatchProjectAdded is informational only (no accept/reject actions) —
+// quick create auto-adds members whose consent is implied by the underlying
+// splits / shared wallet (spec §10/4.24).
+func (s *Service) DispatchProjectAdded(
+	ctx context.Context, tx pgx.Tx,
+	recipientUserID uuid.UUID, actorUserID uuid.UUID, p ProjectAddedPayload,
+) error {
+	deepLink := fmt.Sprintf("/projects/%s", p.ProjectID)
+	return s.dispatchTx(ctx, tx, TypeProjectAdded, recipientUserID, &actorUserID, p, &deepLink)
+}
+
 func (s *Service) DispatchAccountInvite(
 	ctx context.Context, tx pgx.Tx,
 	recipientUserID uuid.UUID, actorUserID uuid.UUID, p AccountInvitePayload,

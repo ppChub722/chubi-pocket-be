@@ -18,6 +18,7 @@ const (
 	TypeProjectInvite            = "project_invite"
 	TypeContactLinkRequest       = "contact_link_request"
 	TypeAccountInvite            = "account_invite"
+	TypeProjectAdded             = "project_added"
 )
 
 // Notification is the DB row.
@@ -157,4 +158,16 @@ type AccountInvitePayload struct {
 	AccountName        string    `json:"account_name"`
 	InviterUserID      uuid.UUID `json:"inviter_user_id"`
 	InviterDisplayName string    `json:"inviter_display_name"`
+}
+
+// ProjectAddedPayload — quick create from bills (spec §10/4.24). Purely
+// informational "you've been added to a project" tile: consent is implied
+// by the underlying splits / shared wallet, so there is NO accept/reject
+// action (leave-project is always available from the project page).
+type ProjectAddedPayload struct {
+	ProjectMemberID   uuid.UUID `json:"project_member_id"`
+	ProjectID         uuid.UUID `json:"project_id"`
+	ProjectName       string    `json:"project_name"`
+	AdderUserID       uuid.UUID `json:"adder_user_id"`
+	AdderDisplayName  string    `json:"adder_display_name"`
 }

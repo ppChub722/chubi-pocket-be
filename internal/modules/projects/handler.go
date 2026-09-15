@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -37,6 +38,27 @@ func (h *Handler) Create(c *gin.Context) {
 	out, err := h.service.Create(c.Request.Context(), userID, req)
 	if err != nil {
 		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, out)
+}
+
+// POST /v1/projects/quick — quick create from existing bills (spec
+// §10/4.24). Atomic: project + members + auto-claimed board rows.
+func (h *Handler) QuickCreate(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	var req QuickCreateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	out, err := h.service.QuickCreate(c.Request.Context(), userID, req)
+	if err != nil {
+		mapQuickCreateError(c, err)
 		return
 	}
 	c.JSON(http.StatusCreated, out)
@@ -444,6 +466,35 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "MEMBER_NOT_IN_PROJECT", "Member does not belong to this project", nil)
 	default:
 		response.InternalError(c, "Project operation failed", err.Error())
+	}
+}
+
+// mapQuickCreateError maps the quick-create-specific errors (pinned in
+// api-document.md §10 "Quick create") plus the transactions-module errors
+// that can bubble out of the embedded personal-transaction create, then
+// falls back to the shared project error mapping.
+func mapQuickCreateError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, ErrQuickTxNotFound):
+		response.NotFound(c, "TX_NOT_FOUND", "Transaction not found or not owned")
+	case errors.Is(err, ErrQuickTxAlreadyInProject):
+		response.Fail(c, http.StatusConflict, "TX_ALREADY_IN_PROJECT", "Transaction is already in a project", nil)
+	case errors.Is(err, ErrQuickTxNotBillable):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, transactions.ErrAccountForbidden):
+		response.NotFound(c, "ACCOUNT_NOT_FOUND", "Account not found")
+	case errors.Is(err, transactions.ErrCategoryForbidden):
+		response.Fail(c, http.StatusForbidden, "FORBIDDEN", "Category not accessible", nil)
+	case errors.Is(err, transactions.ErrCategoryTypeMismatch),
+		errors.Is(err, transactions.ErrSystemCategoryNotAllowed),
+		errors.Is(err, transactions.ErrCategoryRequired),
+		errors.Is(err, transactions.ErrTransferFieldsOnNonTransfer),
+		errors.Is(err, transactions.ErrProjectIDNotAllowed),
+		errors.Is(err, transactions.ErrSplitsNotSupportedYet),
+		errors.Is(err, transactions.ErrAmountInvalid):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	default:
+		mapServiceError(c, err)
 	}
 }
 

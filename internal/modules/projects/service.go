@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -18,6 +19,7 @@ import (
 type Service struct {
 	store  *Store
 	notifs *notifications.Service
+	txs    *transactions.Service
 }
 
 func NewService(store *Store) *Service {
@@ -25,6 +27,11 @@ func NewService(store *Store) *Service {
 }
 
 func (s *Service) WithNotificationService(n *notifications.Service) { s.notifs = n }
+
+// WithTransactionsService wires the personal-book create path used by quick
+// create (spec §10/4.24). Direct import is safe — transactions does not
+// import projects (its PT lookups are inlined to avoid the cycle).
+func (s *Service) WithTransactionsService(t *transactions.Service) { s.txs = t }
 
 // --- Project CRUD ---
 

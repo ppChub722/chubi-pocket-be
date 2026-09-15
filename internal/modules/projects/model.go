@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -213,6 +214,29 @@ type UpdateProjectTransactionRequest struct {
 // MarkRequest — body for PUT /projects/:id/project-transactions/:pt_id/mark.
 type MarkRequest struct {
 	Marked bool `json:"marked"`
+}
+
+// QuickCreateRequest — POST /v1/projects/quick (spec §10/4.24, pinned in
+// api-document.md §10 "Quick create"). One atomic call: create the project,
+// create the new bill through the normal personal-transaction path, pull
+// the listed loose bills onto the board as auto-claimed parents.
+type QuickCreateRequest struct {
+	Name string `json:"name" binding:"required,min=1,max=100"`
+	// Same body as POST /v1/transactions (splits[] allowed). Processed
+	// through the normal create path: account balance moves, splits create
+	// personal_debts exactly as usual. Must be expense or income.
+	NewTransaction transactions.CreateRequest `json:"new_transaction" binding:"required"`
+	// Existing loose bills to pull in. Each must belong to the caller and
+	// have project_id IS NULL — otherwise the whole call fails (atomic).
+	TransactionIDs []uuid.UUID      `json:"transaction_ids" binding:"omitempty"`
+	IconCode       *shared.IconCode `json:"icon_code"       binding:"omitempty"`
+}
+
+// QuickCreateResponse — the created project in the same shape POST
+// /v1/projects returns, plus the number of board parents created.
+type QuickCreateResponse struct {
+	Project
+	LinkedCount int `json:"linked_count"`
 }
 
 // --- List filters / responses ---

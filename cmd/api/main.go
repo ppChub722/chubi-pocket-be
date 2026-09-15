@@ -130,9 +130,16 @@ func main() {
 	contactsService.WithSplitsRestorer(personalDebtsService.RestoreOnContactDeleteTx)
 
 	// projects ↔ notifications (project_invite, project_tx_recorded_for_you,
-	// project_tx_changed). No claim hook — resolve flow uses /transactions
-	// directly with source_project_transaction_id set client-side.
+	// project_tx_changed, project_added). No claim hook — resolve flow uses
+	// /transactions directly with source_project_transaction_id set
+	// client-side.
 	projectsService.WithNotificationService(notificationsService)
+
+	// projects ↔ transactions (quick create from bills, spec §10/4.24 —
+	// the new bill is created through the normal personal-transaction
+	// path inside the quick-create tx, so balances and split debts behave
+	// exactly like POST /v1/transactions).
+	projectsService.WithTransactionsService(transactionsService)
 
 	// accounts ↔ notifications (account_invite — shared-wallet member
 	// invites ride the same notification pattern as project invites).
@@ -301,9 +308,10 @@ func main() {
 			protected.DELETE("/notifications/:id", notificationsHandler.Delete)
 
 			// Projects (Phase 1b.2). Static-path-before-param applies:
-			// /link-requests/... must come before /:id.
+			// /quick and /link-requests/... must come before /:id.
 			protected.POST("/projects", projectsHandler.Create)
 			protected.GET("/projects", projectsHandler.List)
+			protected.POST("/projects/quick", projectsHandler.QuickCreate)
 			protected.POST("/projects/link-requests/:notification_id/accept", projectsHandler.AcceptLinkRequest)
 			protected.POST("/projects/link-requests/:notification_id/reject", projectsHandler.RejectLinkRequest)
 			protected.GET("/projects/:id", projectsHandler.Get)
