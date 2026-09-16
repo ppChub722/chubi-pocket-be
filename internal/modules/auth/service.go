@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -36,6 +37,11 @@ var ErrSamePassword = errors.New("new password must differ from current")
 // Register orchestrates the full registration tx: user insert + preferences
 // insert + every registration hook (e.g., categories seed). Atomic — any
 // failure rolls back the whole thing.
+//
+// When REGISTRATION_OPEN=false the flow runs up to the DB write, SKIPS
+// it, and returns a decoy success: registration looks open from the
+// outside, but no row exists — the returned token points at a
+// nonexistent user and a follow-up login fails like a wrong password.
 func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthResponse, error) {
 	hash, err := utils.HashPassword(req.Password)
 	if err != nil {
@@ -45,6 +51,24 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthRespo
 	currency := req.Currency
 	if currency == "" {
 		currency = "THB"
+	}
+
+	if !s.cfg.App.RegistrationOpen {
+		id, err := uuid.NewV7()
+		if err != nil {
+			return nil, err
+		}
+		now := time.Now().UTC()
+		return s.issueAuthResponse(&User{
+			ID:          id,
+			Username:    req.Username,
+			Email:       req.Email,
+			DisplayName: req.DisplayName,
+			Currency:    currency,
+			Status:      "active",
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		})
 	}
 
 	tx, err := s.store.Pool().Begin(ctx)

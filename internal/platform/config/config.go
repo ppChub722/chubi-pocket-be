@@ -22,6 +22,12 @@ type AppConfig struct {
 	Name string
 	Env  string
 	Port string
+
+	// RegistrationOpen gates POST /v1/auth/register. When false the
+	// endpoint runs the full flow but SKIPS the DB write and returns a
+	// decoy success (no user row, no token that can be used) — closed
+	// registration that doesn't reveal itself. Default true (dev).
+	RegistrationOpen bool
 }
 
 // DatabaseConfig contains database connection configuration
@@ -55,9 +61,10 @@ func Load() (*Config, error) {
 
 	config := &Config{
 		App: AppConfig{
-			Name: getEnv("APP_NAME", "chubipocket"),
-			Env:  getEnv("APP_ENV", "development"),
-			Port: getEnv("APP_PORT", "8080"),
+			Name:             getEnv("APP_NAME", "chubipocket"),
+			Env:              getEnv("APP_ENV", "development"),
+			Port:             getEnv("APP_PORT", "8080"),
+			RegistrationOpen: getEnv("REGISTRATION_OPEN", "true") != "false",
 		},
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
