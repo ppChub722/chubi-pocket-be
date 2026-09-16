@@ -181,23 +181,31 @@ func (s *Service) People(ctx context.Context, userID uuid.UUID) (*PeopleResponse
 
 // --- Hooks for transactions module ---
 
-// CreateForTransactionTx is called by transactions.Service when an
-// expense is created with `splits` array. Inserts one debt row per
-// split entry on the splitter's side ('owed_to_me'). Optionally
-// creates the partner-side row ('i_owe') for linked contacts.
+// CreateForTransactionTx is called by transactions.Service when a
+// transaction is created with a `splits` array. Inserts one debt row
+// per split entry on the splitter's side, plus a mirror row for linked
+// contacts. Direction follows the parent type:
+//   - expense — splitter fronted money: counterparties owe them
+//     (splitter 'owed_to_me', mirror 'i_owe')
+//   - income  — splitter received money that partly belongs to others
+//     (splitter 'i_owe', mirror 'owed_to_me')
 func (s *Service) CreateForTransactionTx(
 	ctx context.Context, tx pgx.Tx,
 	parentTxID, userID uuid.UUID,
-	parentCurrency string,
+	parentType, parentCurrency string,
 	inputs []transactions.SplitInput,
 ) error {
 	if len(inputs) == 0 {
 		return nil
 	}
+	splitterDir, partnerDir := DirectionOwedToMe, DirectionIOwe
+	if parentType == "income" {
+		splitterDir, partnerDir = DirectionIOwe, DirectionOwedToMe
+	}
 	for i := range inputs {
 		in := inputs[i]
 		// 1. Splitter's side — always created.
-		_, err := s.store.CreateAttachedTx(ctx, tx, userID, DirectionOwedToMe,
+		_, err := s.store.CreateAttachedTx(ctx, tx, userID, splitterDir,
 			in.ContactID, in.PersonName,
 			&parentTxID, nil, nil,
 			in.OwedAmount, parentCurrency, nil,
@@ -237,7 +245,7 @@ func (s *Service) CreateForTransactionTx(
 					partnerPersonName = "Unknown"
 				}
 			}
-			_, err := s.store.CreateAttachedTx(ctx, tx, *linkedUserID, DirectionIOwe,
+			_, err := s.store.CreateAttachedTx(ctx, tx, *linkedUserID, partnerDir,
 				partnerContactID, partnerPersonName,
 				nil, // partner has no transaction in their book
 				nil, nil,

@@ -13,7 +13,7 @@ package projects
 //     contact/free-text → ad-hoc member) plus active members of any shared
 //     wallet a bill lives on; deduped
 //  5. every included bill gets a project_transactions parent + split
-//     children mirroring its owed_to_me debts, then the personal row is
+//     children mirroring its split debts (either direction), then the personal row is
 //     linked back (project_id + source_project_transaction_id) — born
 //     auto-claimed. Settled debt state is never modified; the bills'
 //     personal_debts gain project_id only.
@@ -60,7 +60,7 @@ type quickBill struct {
 	Note      *string
 }
 
-// quickDebt is one owed_to_me personal_debts row hanging off a bill.
+// quickDebt is one of the caller's personal_debts rows hanging off a bill.
 type quickDebt struct {
 	ContactID    *uuid.UUID
 	PersonName   string
@@ -298,8 +298,9 @@ func (s *Service) loadQuickBillTx(
 	return &bill, nil
 }
 
-// loadQuickDebtsTx returns the bill's owed_to_me personal_debts (the
-// splitter's side) with the counterparty contact's linked user resolved.
+// loadQuickDebtsTx returns the caller's personal_debts hanging off the
+// bill (both directions — expense splits are 'owed_to_me', income
+// splits 'i_owe') with the counterparty contact's linked user resolved.
 func (s *Service) loadQuickDebtsTx(
 	ctx context.Context, tx pgx.Tx, callerUserID, txID uuid.UUID,
 ) ([]quickDebt, error) {
@@ -309,7 +310,6 @@ func (s *Service) loadQuickDebtsTx(
 		FROM personal_debts pd
 		LEFT JOIN contacts c ON c.id = pd.counterparty_contact_id
 		WHERE pd.user_id = $1
-		  AND pd.direction = 'owed_to_me'
 		  AND pd.source_transaction_id = $2
 		ORDER BY pd.created_at`, callerUserID, txID)
 	if err != nil {

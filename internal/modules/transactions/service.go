@@ -52,11 +52,15 @@ var (
 // that need the missing hook with a clear error rather than silently no-op.
 type (
 	// DebtsCreator inserts one personal_debts row per split entry on the
-	// splitter's side ('owed_to_me') AND one mirror row on each linked
-	// debtor's side ('i_owe'). Called inside Create's tx after the parent
-	// transaction row lands. Implemented by
+	// splitter's side AND one mirror row on each linked partner's side.
+	// Direction follows parentType ('expense' | 'income'): on an expense
+	// the splitter fronted money → counterparties owe them
+	// ('owed_to_me', mirror 'i_owe'); on an income the splitter received
+	// money that partly belongs to others → they owe the counterparties
+	// ('i_owe', mirror 'owed_to_me'). Called inside Create's tx after the
+	// parent transaction row lands. Implemented by
 	// personal_debts.Service.CreateForTransactionTx.
-	DebtsCreator func(ctx context.Context, tx pgx.Tx, parentTxID, userID uuid.UUID, parentCurrency string, splits []SplitInput) error
+	DebtsCreator func(ctx context.Context, tx pgx.Tx, parentTxID, userID uuid.UUID, parentType, parentCurrency string, splits []SplitInput) error
 
 	// DebtValidator confirms the caller owns the debt and returns its
 	// direction ('i_owe' | 'owed_to_me') and outstanding. Used when a
@@ -431,10 +435,11 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	_ = balance // currentBalance not needed beyond ownership confirmation
 
 	// Insert one personal_debts row per split entry on the splitter's side
-	// (direction='owed_to_me'), plus mirror rows for linked partners.
-	// Hook is wired in main.go after personal_debts is constructed.
+	// (direction follows the parent type — see DebtsCreator), plus mirror
+	// rows for linked partners. Hook is wired in main.go after
+	// personal_debts is constructed.
 	if len(req.Splits) > 0 {
-		if err := s.debtsCreator(ctx, tx, created.ID, userID, currency, req.Splits); err != nil {
+		if err := s.debtsCreator(ctx, tx, created.ID, userID, string(created.Type), currency, req.Splits); err != nil {
 			return nil, err
 		}
 	}
