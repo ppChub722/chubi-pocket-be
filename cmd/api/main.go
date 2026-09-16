@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -37,10 +39,11 @@ func main() {
 		panic(fmt.Errorf("failed to load config: %w", err))
 	}
 
-	log := logger.New(cfg.App.Env)
+	log := logger.New(cfg.App.Env, cfg.App.LogLevel)
 	log.Info("ChubiPocket Backend starting",
 		"env", cfg.App.Env,
 		"port", cfg.App.Port,
+		"log_bodies", cfg.App.LogBodies,
 	)
 
 	dbPool, err := database.New(cfg.GetDatabaseURL(), log)
@@ -151,7 +154,7 @@ func main() {
 		categoriesService.SeedForUser,
 		notificationsService.SeedSettings,
 	)
-	authHandler := auth.NewHandler(authService)
+	authHandler := auth.NewHandler(authService, log)
 
 	usersStore := users.NewStore(dbPool)
 	usersService := users.NewService(usersStore)
@@ -165,8 +168,19 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	r := gin.New()
-	r.Use(logger.GinLoggerMiddleware(log))
-	r.Use(gin.Recovery())
+	// Order matters: RequestID FIRST so the logger middleware (and every
+	// handler via logger.FromCtx) sees the correlation ID.
+	r.Use(logger.RequestIDMiddleware())
+	r.Use(logger.GinLoggerMiddleware(log, cfg.App.LogBodies))
+	// Same semantics as gin.Recovery() (500 + abort), but the panic is
+	// logged through slog with the request_id instead of gin's raw writer.
+	r.Use(gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, err any) {
+		logger.FromCtx(c, log).Error("panic recovered",
+			"error", fmt.Sprint(err),
+			"stack", string(debug.Stack()),
+		)
+		c.AbortWithStatus(http.StatusInternalServerError)
+	}))
 	// Phase 0/1: permissive — Flutter web + Android emulator + LAN devices all allowed.
 	// Phase 3: restrict AllowAllOrigins → AllowOrigins with the prod web/app hostnames.
 	r.Use(cors.New(cors.Config{

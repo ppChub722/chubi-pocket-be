@@ -28,6 +28,17 @@ type AppConfig struct {
 	// decoy success (no user row, no token that can be used) — closed
 	// registration that doesn't reveal itself. Default true (dev).
 	RegistrationOpen bool
+
+	// LogLevel is the minimum app log level: debug|info|warn|error.
+	// Empty/unknown falls back to debug in development, info otherwise
+	// (parsed by logger.ParseLevel). Phase dial: closed beta=debug,
+	// wider beta=info, prod=warn — see logging-plan.md.
+	LogLevel string
+
+	// LogBodies enables request/response body capture in the HTTP log
+	// (redacted, 4KB cap, JSON only). Closed beta ONLY — default false;
+	// must stay false from wider beta onward.
+	LogBodies bool
 }
 
 // DatabaseConfig contains database connection configuration
@@ -65,6 +76,8 @@ func Load() (*Config, error) {
 			Env:              getEnv("APP_ENV", "development"),
 			Port:             getEnv("APP_PORT", "8080"),
 			RegistrationOpen: getEnv("REGISTRATION_OPEN", "true") != "false",
+			LogLevel:         getEnv("LOG_LEVEL", ""),
+			LogBodies:        getEnv("LOG_BODIES", "false") == "true",
 		},
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),

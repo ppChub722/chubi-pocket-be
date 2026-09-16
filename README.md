@@ -71,3 +71,16 @@ cp .env.example .env
 ```
 
 The `.env` is gitignored. Defaults work out-of-the-box for local dev.
+
+## Logging
+
+Structured `slog` everywhere: pretty console output in dev, JSON on stdout in production. Every request gets an `X-Request-ID` (client-supplied or generated) that appears on every log line — testers paste it from error screens, we grep for the full trace. Bodies are redacted (passwords, tokens, card numbers, etc. → `[REDACTED]`) and capped at 4KB. Full plan: [logging-plan.md](../chubi-pocket-docs/engineering/logging-plan.md).
+
+Two env dials — switching phase is an `.env` edit + restart, no code changes:
+
+| Flag | Closed beta (now) | Wider beta | Production | Notes |
+|---|---|---|---|---|
+| `LOG_LEVEL` | `debug` | `info` | `warn` | Unset = `debug` in development, `info` otherwise |
+| `LOG_BODIES` | `true` | `false` | `false` | Logs redacted request/response JSON bodies (4KB cap). Default `false` |
+
+Closed-beta storage is stdout → Docker `json-file` rotation (20m × 5 files, configured in `docker-compose.yml`). Tail with `docker logs -f chubi_pocket_app`.
