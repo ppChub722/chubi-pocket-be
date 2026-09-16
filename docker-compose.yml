@@ -3,7 +3,7 @@ services:
     image: postgres:15-alpine
     container_name: chubi_pocket_db
     ports:
-      - "5432:5432"
+      - "5433:5432"
     environment:
       POSTGRES_USER: chubadmin
       POSTGRES_PASSWORD: admin1234
