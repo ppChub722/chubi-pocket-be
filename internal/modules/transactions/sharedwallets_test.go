@@ -195,7 +195,7 @@ func createExpense(t *testing.T, f *swFixture, userID, categoryID uuid.UUID, amo
 	t.Helper()
 	res, err := f.svc.Create(context.Background(), userID, CreateRequest{
 		Type:       TypeExpense,
-		AccountID:  f.wallet,
+		AccountID:  &f.wallet,
 		Amount:     amount,
 		CategoryID: &categoryID,
 		Date:       "2026-01-15",
@@ -337,7 +337,7 @@ func TestReportScopePredicateSummary(t *testing.T) {
 		t.Fatalf("member wallet row: %v", err)
 	}
 	if _, err := f.svc.Create(ctx, f.owner, CreateRequest{
-		Type: TypeExpense, AccountID: personal, Amount: 10,
+		Type: TypeExpense, AccountID: &personal, Amount: 10,
 		CategoryID: &f.ownerCat, Date: "2026-01-15",
 	}); err != nil {
 		t.Fatalf("owner personal row: %v", err)

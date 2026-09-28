@@ -95,6 +95,9 @@ func (h *Handler) List(c *gin.Context) {
 	if v := c.Query("to"); v != "" {
 		f.To = &v
 	}
+	if c.Query("no_wallet") == "true" {
+		f.NoWallet = true
+	}
 
 	resp, err := h.service.List(c.Request.Context(), userID, f)
 	if err != nil {
@@ -251,8 +254,9 @@ func mapServiceError(c *gin.Context, err error) {
 	case errors.Is(err, ErrTransferToAccountRequired),
 		errors.Is(err, ErrTransferFieldsOnNonTransfer),
 		errors.Is(err, ErrCategoryRequiredForTransfer),
-		errors.Is(err, ErrCategoryRequired),
-		errors.Is(err, ErrTransferCategoryEdit):
+		errors.Is(err, ErrTransferCategoryEdit),
+		errors.Is(err, ErrTransferRequiresAccount),
+		errors.Is(err, ErrMoveTransferNeedsToAccount):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, ErrSystemTransactionImmutable):
 		response.BadRequest(c, "SYSTEM_TRANSACTION_IMMUTABLE", err.Error(), nil)

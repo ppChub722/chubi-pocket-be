@@ -177,6 +177,9 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		args = append(args, *f.To)
 		whereClauses = append(whereClauses, fmt.Sprintf("t.date <= $%d::date", len(args)))
 	}
+	if f.NoWallet {
+		whereClauses = append(whereClauses, "t.account_id IS NULL")
+	}
 
 	where := strings.Join(whereClauses, " AND ")
 
@@ -211,7 +214,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		       a.id, a.name,
 		       c.id, c.name
 		FROM transactions t
-		JOIN accounts a   ON a.id = t.account_id
+		LEFT JOIN accounts a ON a.id = t.account_id
 		LEFT JOIN categories c ON c.id = t.category_id
 		WHERE %s
 		ORDER BY %s
@@ -226,11 +229,11 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	out := make([]TransactionDetail, 0, f.PerPage)
 	for rows.Next() {
 		var (
-			d        TransactionDetail
-			accID    uuid.UUID
-			accName  string
-			catID    *uuid.UUID
-			catName  *string
+			d       TransactionDetail
+			accID   *uuid.UUID
+			accName *string
+			catID   *uuid.UUID
+			catName *string
 		)
 		err := rows.Scan(
 			&d.ID, &d.UserID, &d.AccountID, &d.Type, &d.Amount, &d.CategoryID,
@@ -243,7 +246,9 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		if err != nil {
 			return nil, 0, fmt.Errorf("scan: %w", err)
 		}
-		d.Account = &EmbeddedRef{ID: accID, Name: accName}
+		if accID != nil && accName != nil {
+			d.Account = &EmbeddedRef{ID: *accID, Name: *accName}
+		}
 		if catID != nil && catName != nil {
 			d.Category = &EmbeddedRef{ID: *catID, Name: *catName}
 		}
@@ -537,6 +542,7 @@ func (s *Store) UpdateRowTx(
 	amount *float64, date *string,
 	categoryID *uuid.UUID, categoryChange bool,
 	note *string, noteChange bool,
+	accountID *uuid.UUID, accountIDChange bool,
 ) (*Transaction, error) {
 	q := `UPDATE transactions SET updated_by_user_id = $1`
 	args := []any{userID}
@@ -555,6 +561,10 @@ func (s *Store) UpdateRowTx(
 	if noteChange {
 		args = append(args, note)
 		q += fmt.Sprintf(", note = $%d", len(args))
+	}
+	if accountIDChange {
+		args = append(args, accountID)
+		q += fmt.Sprintf(", account_id = $%d", len(args))
 	}
 	args = append(args, id)
 	// WHERE by id only — on shared wallets the actor may edit another

@@ -244,14 +244,17 @@ func (s *Service) QuickCreate(
 func (s *Service) quickBillFromNew(
 	ctx context.Context, tx pgx.Tx, d *transactions.TransactionDetail,
 ) (*quickBill, error) {
+	if d.AccountID == nil {
+		return nil, fmt.Errorf("quick create requires a transaction with an account")
+	}
 	var currency string
 	if err := tx.QueryRow(ctx,
-		`SELECT currency FROM accounts WHERE id = $1`, d.AccountID).Scan(&currency); err != nil {
+		`SELECT currency FROM accounts WHERE id = $1`, *d.AccountID).Scan(&currency); err != nil {
 		return nil, fmt.Errorf("new bill currency: %w", err)
 	}
 	return &quickBill{
 		TxID:      d.ID,
-		AccountID: d.AccountID,
+		AccountID: *d.AccountID,
 		Type:      string(d.Type),
 		Amount:    d.Amount,
 		Currency:  currency,

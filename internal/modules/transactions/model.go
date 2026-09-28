@@ -25,7 +25,7 @@ const (
 type Transaction struct {
 	ID                         uuid.UUID  `json:"id"`
 	UserID                     uuid.UUID  `json:"user_id"`
-	AccountID                  uuid.UUID  `json:"account_id"`
+	AccountID                  *uuid.UUID `json:"account_id"` // nil = no wallet (floating)
 	Type                       TxType     `json:"type"`
 	Amount                     float64    `json:"amount"`
 	CategoryID                 *uuid.UUID `json:"category_id"`
@@ -117,7 +117,7 @@ type TransferResponse struct {
 
 type CreateRequest struct {
 	Type                TxType     `json:"type"                    binding:"required,oneof=expense income transfer"`
-	AccountID           uuid.UUID  `json:"account_id"              binding:"required"`
+	AccountID           *uuid.UUID `json:"account_id"              binding:"omitempty"` // nil = no wallet; transfer still requires account (service validates)
 	Amount              float64    `json:"amount"                  binding:"required,gt=0"`
 	CategoryID          *uuid.UUID `json:"category_id"             binding:"omitempty"`
 	Date                string     `json:"date"                    binding:"required,datetime=2006-01-02"`
@@ -134,18 +134,22 @@ type CreateRequest struct {
 	SourceProjectTransactionID *uuid.UUID   `json:"source_project_transaction_id"  binding:"omitempty"`
 }
 
-// UpdateRequest — partial. Editable per spec §3.4: amount, date, category_id,
-// note. Splits deferred to 1b. account_id / type / transfer_to_account_id /
-// transfer_group_id all immutable (delete + recreate).
+// UpdateRequest — partial. Editable: amount, date, category_id, note,
+// account_id (move wallet), transfer_to_account_id (move transfer IN side).
+// type / transfer_group_id still immutable (delete + recreate).
 type UpdateRequest struct {
-	Amount     *float64   `json:"amount"     binding:"omitempty,gt=0"`
-	Date       *string    `json:"date"       binding:"omitempty,datetime=2006-01-02"`
-	CategoryID *uuid.UUID `json:"category_id" binding:"omitempty"`
-	Note       *string    `json:"note"       binding:"omitempty"`
+	Amount              *float64   `json:"amount"                  binding:"omitempty,gt=0"`
+	Date                *string    `json:"date"                    binding:"omitempty,datetime=2006-01-02"`
+	CategoryID          *uuid.UUID `json:"category_id"             binding:"omitempty"`
+	Note                *string    `json:"note"                    binding:"omitempty"`
+	AccountID           *uuid.UUID `json:"account_id"              binding:"omitempty"`
+	TransferToAccountID *uuid.UUID `json:"transfer_to_account_id"  binding:"omitempty"`
 
-	// Track presence so user can clear category_id by sending null.
-	categoryIDPresent bool
-	notePresent       bool
+	// Track presence so callers can explicitly clear nullable fields.
+	categoryIDPresent          bool
+	notePresent                bool
+	accountIDPresent           bool
+	transferToAccountIDPresent bool
 }
 
 func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
@@ -159,12 +163,13 @@ func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
 	}
 	_, r.categoryIDPresent = probe["category_id"]
 	_, r.notePresent = probe["note"]
+	_, r.accountIDPresent = probe["account_id"]
+	_, r.transferToAccountIDPresent = probe["transfer_to_account_id"]
 	return nil
 }
 
 // CategoryIDChange returns (newID, true) when the request asked to change
-// category_id (newID may be nil → clear the category). (nil, false) means
-// "leave unchanged".
+// category_id (newID may be nil → clear). (nil, false) means "leave unchanged".
 func (r *UpdateRequest) CategoryIDChange() (*uuid.UUID, bool) {
 	return r.CategoryID, r.categoryIDPresent
 }
@@ -174,12 +179,24 @@ func (r *UpdateRequest) NoteChange() (*string, bool) {
 	return r.Note, r.notePresent
 }
 
+// AccountIDChange returns (newID, true) when account_id was present in the
+// request body (newID may be nil → clear to floating). (nil, false) = unchanged.
+func (r *UpdateRequest) AccountIDChange() (*uuid.UUID, bool) {
+	return r.AccountID, r.accountIDPresent
+}
+
+// TransferToAccountIDChange follows the same convention for the IN side of a transfer.
+func (r *UpdateRequest) TransferToAccountIDChange() (*uuid.UUID, bool) {
+	return r.TransferToAccountID, r.transferToAccountIDPresent
+}
+
 type ListFilter struct {
 	AccountID  *uuid.UUID
 	CategoryID *uuid.UUID
 	Type       *TxType
 	From       *string // YYYY-MM-DD
 	To         *string
+	NoWallet   bool // true → only rows with account_id IS NULL
 	Page       int
 	PerPage    int
 	Sort       string // date_desc | date_asc | amount_desc | amount_asc

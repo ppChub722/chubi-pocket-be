@@ -487,7 +487,6 @@ func mapQuickCreateError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusForbidden, "FORBIDDEN", "Category not accessible", nil)
 	case errors.Is(err, transactions.ErrCategoryTypeMismatch),
 		errors.Is(err, transactions.ErrSystemCategoryNotAllowed),
-		errors.Is(err, transactions.ErrCategoryRequired),
 		errors.Is(err, transactions.ErrTransferFieldsOnNonTransfer),
 		errors.Is(err, transactions.ErrProjectIDNotAllowed),
 		errors.Is(err, transactions.ErrSplitsNotSupportedYet),

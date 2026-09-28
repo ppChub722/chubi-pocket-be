@@ -133,9 +133,10 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRe
 			return nil, fmt.Errorf("unknown direction: %s", current.Direction)
 		}
 
+		accID := req.AccountID
 		createReq := transactions.CreateRequest{
 			Type:      txType,
-			AccountID: req.AccountID,
+			AccountID: &accID,
 			Amount:    amount,
 			Date:      *date,
 			Note:      req.Note,

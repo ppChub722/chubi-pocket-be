@@ -29,7 +29,8 @@ var (
 	ErrTransferFieldsOnNonTransfer = errors.New("transfer_to_account_id is only valid for type=transfer")
 	ErrAmountInvalid               = errors.New("amount must be > 0")
 	ErrCategoryRequiredForTransfer = errors.New("transfer category is auto-set; do not pass category_id")
-	ErrCategoryRequired            = errors.New("category_id is required for expense and income transactions")
+	ErrTransferRequiresAccount     = errors.New("account_id is required for type=transfer")
+	ErrMoveTransferNeedsToAccount  = errors.New("transfer_to_account_id is required when moving a transfer's account")
 	ErrTransferEditCurrency        = errors.New("cannot edit currency on a transfer; delete and recreate")
 	ErrTransferCategoryEdit        = errors.New("cannot change category on a transfer; delete and recreate")
 	// System-category rows (Opening Balance, Adjustment) are bookkeeping
@@ -129,9 +130,10 @@ func (s *Service) CreateSystemInTx(
 		txType = TypeExpense
 	}
 
+	accID := accountID // local copy for pointer
 	row := &Transaction{
 		UserID:     userID,
-		AccountID:  accountID,
+		AccountID:  &accID,
 		Type:       txType,
 		Amount:     amount,
 		CategoryID: &cat.ID,
@@ -201,15 +203,14 @@ func (s *Service) hydrate(ctx context.Context, userID uuid.UUID, t *Transaction)
 			d.HasSplits = true
 		}
 	}
-	// Account ref — bare query rather than importing accounts module. No
-	// owner filter: on shared wallets the caller may not be the account's
-	// owner; row visibility was already authorized upstream.
-	var accName string
-	err := s.store.db.QueryRow(ctx,
-		`SELECT name FROM accounts WHERE id = $1`,
-		t.AccountID).Scan(&accName)
-	if err == nil {
-		d.Account = &EmbeddedRef{ID: t.AccountID, Name: accName}
+	// Account ref — bare query rather than importing accounts module.
+	if t.AccountID != nil {
+		var accName string
+		if err := s.store.db.QueryRow(ctx,
+			`SELECT name FROM accounts WHERE id = $1`,
+			*t.AccountID).Scan(&accName); err == nil {
+			d.Account = &EmbeddedRef{ID: *t.AccountID, Name: accName}
+		}
 	}
 	if t.CategoryID != nil {
 		// Author-scoped lookup: the category belongs to the row's author,
@@ -343,10 +344,13 @@ func (s *Service) validateCreateCommon(req CreateRequest) error {
 		return ErrAmountInvalid
 	}
 	if req.Type == TypeTransfer {
+		if req.AccountID == nil {
+			return ErrTransferRequiresAccount
+		}
 		if req.TransferToAccountID == nil {
 			return ErrTransferToAccountRequired
 		}
-		if *req.TransferToAccountID == req.AccountID {
+		if *req.TransferToAccountID == *req.AccountID {
 			return ErrTransferSameAccount
 		}
 		if req.CategoryID != nil {
@@ -356,32 +360,25 @@ func (s *Service) validateCreateCommon(req CreateRequest) error {
 		if req.TransferToAccountID != nil {
 			return ErrTransferFieldsOnNonTransfer
 		}
-		// Phase 1c+: category is required on expense/income. Drives clean
-		// reports (no "—" rows on dashboards) and forces user intent.
-		// System categories are auto-assigned (opening balance, adjustment,
-		// transfer, etc.) so this only affects POST /v1/transactions —
-		// where the user is creating a real expense/income.
-		if req.CategoryID == nil {
-			return ErrCategoryRequired
-		}
 	}
 	return nil
 }
 
 func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, req CreateRequest) (*TransactionDetail, error) {
-	// Lock the account (single account → trivial sort).
-	if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{req.AccountID}); err != nil {
-		return nil, err
-	}
-	balance, currency, err := s.store.GetAccountBalanceTx(ctx, tx, userID, req.AccountID)
-	if err != nil {
-		return nil, err
+	var currency string
+	if req.AccountID != nil {
+		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*req.AccountID}); err != nil {
+			return nil, err
+		}
+		_, cur, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *req.AccountID)
+		if err != nil {
+			return nil, err
+		}
+		currency = cur
 	}
 
-	// Validate category if provided. Allowed: nil, or user category whose
-	// type matches the transaction type. System cats not allowed for
-	// expense/income (auto-assignment is for transfers / opening / adjust
-	// only — those flows go through their own paths).
+	// Validate category if provided. System cats not allowed for
+	// expense/income — those flows go through their own paths.
 	var categoryID *uuid.UUID
 	if req.CategoryID != nil {
 		c, err := s.cats.GetCategoryRow(ctx, userID, *req.CategoryID)
@@ -399,9 +396,7 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 
 	// Project resolve flow: when the caller passes
 	// source_project_transaction_id, derive project_id from it and stamp
-	// both columns on the personal-mirror row. The lookup also enforces
-	// caller ∈ project members (else any user could link their book to any
-	// project).
+	// both columns on the personal-mirror row.
 	var projectID *uuid.UUID
 	if req.SourceProjectTransactionID != nil {
 		pid, err := s.store.LookupSourcePTTx(ctx, tx, *req.SourceProjectTransactionID, userID)
@@ -410,8 +405,6 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 		}
 		projectID = &pid
 	}
-
-	delta := signedDelta(req.Type, req.Amount, false)
 
 	row := &Transaction{
 		UserID:                     userID,
@@ -428,30 +421,23 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	if err != nil {
 		return nil, err
 	}
-	newBalance, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, req.AccountID, delta)
-	if err != nil {
-		return nil, err
-	}
-	_ = balance // currentBalance not needed beyond ownership confirmation
 
-	// Insert one personal_debts row per split entry on the splitter's side
-	// (direction follows the parent type — see DebtsCreator), plus mirror
-	// rows for linked partners. Hook is wired in main.go after
-	// personal_debts is constructed.
-	if len(req.Splits) > 0 {
-		if err := s.debtsCreator(ctx, tx, created.ID, userID, string(created.Type), currency, req.Splits); err != nil {
+	d := &TransactionDetail{Transaction: *created, HasSplits: len(req.Splits) > 0}
+
+	if req.AccountID != nil {
+		delta := signedDelta(req.Type, req.Amount, false)
+		newBalance, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *req.AccountID, delta)
+		if err != nil {
 			return nil, err
 		}
+		d.AccountBalanceAfter = &newBalance
+
+		var accName string
+		_ = tx.QueryRow(ctx,
+			`SELECT name FROM accounts WHERE id = $1`, *req.AccountID).Scan(&accName)
+		d.Account = &EmbeddedRef{ID: *req.AccountID, Name: accName}
 	}
 
-	d := &TransactionDetail{Transaction: *created, AccountBalanceAfter: &newBalance, HasSplits: len(req.Splits) > 0}
-	// Embed account name inline (locked in this tx, so a tx-aware lookup
-	// is the cheapest path). Without this, the FE's surgical-update inserts
-	// the new row with an empty account label until the next list refresh.
-	var accName string
-	_ = tx.QueryRow(ctx,
-		`SELECT name FROM accounts WHERE id = $1`, req.AccountID).Scan(&accName)
-	d.Account = &EmbeddedRef{ID: req.AccountID, Name: accName}
 	var cat *categories.Category
 	if categoryID != nil {
 		cat, _ = s.cats.GetCategoryRow(ctx, userID, *categoryID)
@@ -459,34 +445,39 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 			d.Category = &EmbeddedRef{ID: cat.ID, Name: cat.Name}
 		}
 	}
-	// Shared-wallet decorations on the POST response (pinned §14
-	// contract). The row is still uncommitted, so the list-path batch
-	// filler can't see it — decorate from what's in hand: the author is
-	// the caller (active member by definition, or the write would have
-	// been rejected above).
-	var activeMembers int
-	_ = tx.QueryRow(ctx, `
-		SELECT COUNT(*) FROM account_members
-		WHERE account_id = $1 AND joined_at IS NOT NULL AND left_at IS NULL`,
-		req.AccountID).Scan(&activeMembers)
-	if activeMembers > 1 {
-		var authorName string
-		var authorIcon *shared.IconCode
-		var iconBytes []byte
-		_ = tx.QueryRow(ctx,
-			`SELECT display_name, icon_code FROM users WHERE id = $1`,
-			userID).Scan(&authorName, &iconBytes)
-		if iconBytes != nil {
-			authorIcon = new(shared.IconCode)
-			_ = json.Unmarshal(iconBytes, authorIcon)
+
+	if len(req.Splits) > 0 {
+		if err := s.debtsCreator(ctx, tx, created.ID, userID, string(created.Type), currency, req.Splits); err != nil {
+			return nil, err
 		}
-		d.CreatedBy = &AuthorRef{UserID: userID, DisplayName: authorName, IconCode: authorIcon}
-		if cat != nil {
-			d.CategoryRender = &CategoryRender{Name: cat.Name, IconCode: cat.IconCode}
+	}
+
+	// Shared-wallet decorations — only relevant when there's an account.
+	if req.AccountID != nil {
+		var activeMembers int
+		_ = tx.QueryRow(ctx, `
+			SELECT COUNT(*) FROM account_members
+			WHERE account_id = $1 AND joined_at IS NOT NULL AND left_at IS NULL`,
+			*req.AccountID).Scan(&activeMembers)
+		if activeMembers > 1 {
+			var authorName string
+			var iconBytes []byte
+			_ = tx.QueryRow(ctx,
+				`SELECT display_name, icon_code FROM users WHERE id = $1`,
+				userID).Scan(&authorName, &iconBytes)
+			var authorIcon *shared.IconCode
+			if iconBytes != nil {
+				authorIcon = new(shared.IconCode)
+				_ = json.Unmarshal(iconBytes, authorIcon)
+			}
+			d.CreatedBy = &AuthorRef{UserID: userID, DisplayName: authorName, IconCode: authorIcon}
+			if cat != nil {
+				d.CategoryRender = &CategoryRender{Name: cat.Name, IconCode: cat.IconCode}
+			}
+			isLocked, canEdit := false, true
+			d.IsLocked = &isLocked
+			d.CanEditCategory = &canEdit
 		}
-		isLocked, canEdit := false, true
-		d.IsLocked = &isLocked
-		d.CanEditCategory = &canEdit
 	}
 	return d, nil
 }
@@ -526,10 +517,10 @@ func (s *Service) CreateInTxWithSourceDebt(
 		return nil, fmt.Errorf("amount %.2f exceeds outstanding %.2f", req.Amount, outstanding)
 	}
 
-	if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{req.AccountID}); err != nil {
+	if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*req.AccountID}); err != nil {
 		return nil, err
 	}
-	if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, req.AccountID); err != nil {
+	if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *req.AccountID); err != nil {
 		return nil, err
 	}
 
@@ -563,7 +554,7 @@ func (s *Service) CreateInTxWithSourceDebt(
 	if err != nil {
 		return nil, err
 	}
-	newBalance, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, req.AccountID, delta)
+	newBalance, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *req.AccountID, delta)
 	if err != nil {
 		return nil, err
 	}
@@ -584,8 +575,8 @@ func (s *Service) CreateInTxWithSourceDebt(
 
 
 func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, req CreateRequest) (*TransferResponse, error) {
+	src := *req.AccountID
 	dst := *req.TransferToAccountID
-	src := req.AccountID
 
 	// Lock both accounts in lowest-UUID-first order (deadlock prevention).
 	lockIDs := []uuid.UUID{src, dst}
@@ -620,10 +611,13 @@ func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
 
+	srcID := src
+	dstID := dst
+
 	// OUT row → debits source
 	outRow, err := s.store.InsertRowTx(ctx, tx, &Transaction{
 		UserID:          userID,
-		AccountID:       src,
+		AccountID:       &srcID,
 		Type:            TypeTransfer,
 		Amount:          req.Amount,
 		CategoryID:      &transferOutCat.ID,
@@ -641,7 +635,7 @@ func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 	// IN row → credits destination
 	inRow, err := s.store.InsertRowTx(ctx, tx, &Transaction{
 		UserID:          userID,
-		AccountID:       dst,
+		AccountID:       &dstID,
 		Type:            TypeTransfer,
 		Amount:          req.Amount,
 		CategoryID:      &transferInCat.ID,
@@ -730,7 +724,14 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 func (s *Service) authorizeRowMutation(
 	ctx context.Context, userID uuid.UUID, current *Transaction, req UpdateRequest,
 ) error {
-	active, err := s.store.IsActiveMember(ctx, current.AccountID, userID)
+	// Floating rows (no account) are always personal — only the author may mutate.
+	if current.AccountID == nil {
+		if current.UserID != userID {
+			return ErrTxNotFound
+		}
+		return nil
+	}
+	active, err := s.store.IsActiveMember(ctx, *current.AccountID, userID)
 	if err != nil {
 		return err
 	}
@@ -755,10 +756,7 @@ func (s *Service) updateSingleInTx(
 	ctx context.Context, tx pgx.Tx, userID uuid.UUID,
 	current *Transaction, req UpdateRequest,
 ) (*Transaction, error) {
-	// Lock the account
-	if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{current.AccountID}); err != nil {
-		return nil, err
-	}
+	newAccID, accChange := req.AccountIDChange()
 
 	// Validate category if changing
 	newCatID, catChange := req.CategoryIDChange()
@@ -775,11 +773,42 @@ func (s *Service) updateSingleInTx(
 		}
 	}
 
-	// Compute amount delta if changing
-	if req.Amount != nil && *req.Amount != current.Amount {
+	effectiveAmount := current.Amount
+	if req.Amount != nil {
+		effectiveAmount = *req.Amount
+	}
+
+	if accChange {
+		// Move wallet: reverse old account balance, apply to new account.
+		if current.AccountID != nil {
+			if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*current.AccountID}); err != nil {
+				return nil, err
+			}
+			oldDelta := signedDelta(current.Type, current.Amount, false)
+			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *current.AccountID, -oldDelta); err != nil {
+				return nil, err
+			}
+		}
+		if newAccID != nil {
+			if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*newAccID}); err != nil {
+				return nil, err
+			}
+			if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *newAccID); err != nil {
+				return nil, err
+			}
+			newDelta := signedDelta(current.Type, effectiveAmount, false)
+			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *newAccID, newDelta); err != nil {
+				return nil, err
+			}
+		}
+	} else if req.Amount != nil && *req.Amount != current.Amount && current.AccountID != nil {
+		// Amount-only change on an existing account.
+		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*current.AccountID}); err != nil {
+			return nil, err
+		}
 		oldDelta := signedDelta(current.Type, current.Amount, false)
 		newDelta := signedDelta(current.Type, *req.Amount, false)
-		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, current.AccountID, newDelta-oldDelta); err != nil {
+		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *current.AccountID, newDelta-oldDelta); err != nil {
 			return nil, err
 		}
 	}
@@ -788,7 +817,8 @@ func (s *Service) updateSingleInTx(
 	updated, err := s.store.UpdateRowTx(ctx, tx, userID, current.ID,
 		req.Amount, req.Date,
 		newCatID, catChange,
-		noteVal, noteChanged)
+		noteVal, noteChanged,
+		newAccID, accChange)
 	if err != nil {
 		return nil, err
 	}
@@ -844,37 +874,91 @@ func (s *Service) updateTransferInTx(
 		return nil, nil, err
 	}
 
-	// Lock both accounts (lowest UUID first)
-	lockIDs := []uuid.UUID{outRow.AccountID, inRow.AccountID}
+	newOutAccID, outAccChange := req.AccountIDChange()
+	newInAccID, inAccChange := req.TransferToAccountIDChange()
+	if outAccChange != inAccChange {
+		return nil, nil, ErrMoveTransferNeedsToAccount
+	}
+
+	effectiveAmount := current.Amount
+	if req.Amount != nil {
+		effectiveAmount = *req.Amount
+	}
+
+	// Collect all account IDs involved (old + new) for locking.
+	lockSet := map[uuid.UUID]struct{}{}
+	if outRow.AccountID != nil {
+		lockSet[*outRow.AccountID] = struct{}{}
+	}
+	if inRow.AccountID != nil {
+		lockSet[*inRow.AccountID] = struct{}{}
+	}
+	if newOutAccID != nil {
+		lockSet[*newOutAccID] = struct{}{}
+	}
+	if newInAccID != nil {
+		lockSet[*newInAccID] = struct{}{}
+	}
+	lockIDs := make([]uuid.UUID, 0, len(lockSet))
+	for id := range lockSet {
+		lockIDs = append(lockIDs, id)
+	}
 	sort.Slice(lockIDs, func(i, j int) bool { return uuidLess(lockIDs[i], lockIDs[j]) })
 	if err := s.store.LockAccountsForUpdate(ctx, tx, lockIDs); err != nil {
 		return nil, nil, err
 	}
 
-	// Amount change → reverse old, apply new on both rows
-	if req.Amount != nil && *req.Amount != current.Amount {
-		old := current.Amount
-		new := *req.Amount
-		// OUT side: was -old, now -new → delta = old - new (positive when shrinking)
-		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, outRow.AccountID, old-new); err != nil {
-			return nil, nil, err
+	if outAccChange {
+		// Move both sides: reverse old accounts, apply to new accounts.
+		if outRow.AccountID != nil {
+			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *outRow.AccountID, current.Amount); err != nil {
+				return nil, nil, err
+			}
 		}
-		// IN side: was +old, now +new → delta = new - old
-		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, inRow.AccountID, new-old); err != nil {
-			return nil, nil, err
+		if inRow.AccountID != nil {
+			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *inRow.AccountID, -current.Amount); err != nil {
+				return nil, nil, err
+			}
+		}
+		if newOutAccID != nil {
+			if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *newOutAccID); err != nil {
+				return nil, nil, err
+			}
+			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *newOutAccID, -effectiveAmount); err != nil {
+				return nil, nil, err
+			}
+		}
+		if newInAccID != nil {
+			if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *newInAccID); err != nil {
+				return nil, nil, err
+			}
+			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *newInAccID, effectiveAmount); err != nil {
+				return nil, nil, err
+			}
+		}
+	} else if req.Amount != nil && *req.Amount != current.Amount {
+		old, new := current.Amount, *req.Amount
+		if outRow.AccountID != nil {
+			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *outRow.AccountID, old-new); err != nil {
+				return nil, nil, err
+			}
+		}
+		if inRow.AccountID != nil {
+			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *inRow.AccountID, new-old); err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 
 	noteVal, noteChanged := req.NoteChange()
 
-	// Update both rows
 	updatedOut, err := s.store.UpdateRowTx(ctx, tx, userID, outRow.ID,
-		req.Amount, req.Date, nil, false, noteVal, noteChanged)
+		req.Amount, req.Date, nil, false, noteVal, noteChanged, newOutAccID, outAccChange)
 	if err != nil {
 		return nil, nil, err
 	}
 	updatedIn, err := s.store.UpdateRowTx(ctx, tx, userID, inRow.ID,
-		req.Amount, req.Date, nil, false, noteVal, noteChanged)
+		req.Amount, req.Date, nil, false, noteVal, noteChanged, newInAccID, inAccChange)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -928,13 +1012,26 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 func (s *Service) authorizePairMutation(
 	ctx context.Context, userID uuid.UUID, current, outRow, inRow *Transaction,
 ) error {
-	activeOut, err := s.store.IsActiveMember(ctx, outRow.AccountID, userID)
-	if err != nil {
-		return err
+	var activeOut, activeIn bool
+	var err error
+	if outRow.AccountID != nil {
+		activeOut, err = s.store.IsActiveMember(ctx, *outRow.AccountID, userID)
+		if err != nil {
+			return err
+		}
 	}
-	activeIn, err := s.store.IsActiveMember(ctx, inRow.AccountID, userID)
-	if err != nil {
-		return err
+	if inRow.AccountID != nil {
+		activeIn, err = s.store.IsActiveMember(ctx, *inRow.AccountID, userID)
+		if err != nil {
+			return err
+		}
+	}
+	if outRow.AccountID == nil && inRow.AccountID == nil {
+		// Both floating — only author may mutate.
+		if current.UserID != userID {
+			return ErrTxNotFound
+		}
+		return nil
 	}
 	if activeOut && activeIn {
 		return nil
@@ -971,12 +1068,14 @@ func (s *Service) checkNotSystemRow(ctx context.Context, current *Transaction) e
 }
 
 func (s *Service) deleteSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) error {
-	if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{current.AccountID}); err != nil {
-		return err
-	}
-	delta := signedDelta(current.Type, current.Amount, false)
-	if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, current.AccountID, -delta); err != nil {
-		return err
+	if current.AccountID != nil {
+		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*current.AccountID}); err != nil {
+			return err
+		}
+		delta := signedDelta(current.Type, current.Amount, false)
+		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *current.AccountID, -delta); err != nil {
+			return err
+		}
 	}
 	return s.store.DeleteRowTx(ctx, tx, current.ID)
 }
@@ -1014,18 +1113,30 @@ func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 		return err
 	}
 
-	lockIDs := []uuid.UUID{outRow.AccountID, inRow.AccountID}
+	var lockIDs []uuid.UUID
+	if outRow.AccountID != nil {
+		lockIDs = append(lockIDs, *outRow.AccountID)
+	}
+	if inRow.AccountID != nil {
+		lockIDs = append(lockIDs, *inRow.AccountID)
+	}
 	sort.Slice(lockIDs, func(i, j int) bool { return uuidLess(lockIDs[i], lockIDs[j]) })
-	if err := s.store.LockAccountsForUpdate(ctx, tx, lockIDs); err != nil {
-		return err
+	if len(lockIDs) > 0 {
+		if err := s.store.LockAccountsForUpdate(ctx, tx, lockIDs); err != nil {
+			return err
+		}
 	}
 
 	// Reverse balances
-	if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, outRow.AccountID, current.Amount); err != nil {
-		return err
+	if outRow.AccountID != nil {
+		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *outRow.AccountID, current.Amount); err != nil {
+			return err
+		}
 	}
-	if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, inRow.AccountID, -current.Amount); err != nil {
-		return err
+	if inRow.AccountID != nil {
+		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *inRow.AccountID, -current.Amount); err != nil {
+			return err
+		}
 	}
 
 	// Delete both rows
