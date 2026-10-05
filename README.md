@@ -1,6 +1,19 @@
 # chubi-pocket-be
 
-Backend API for ChubiPocket. Phase 0 ships authentication and user profile management.
+The Go REST API for ChubiPocket, a personal finance and shared-expense app. It
+backs the [Flutter app](https://github.com/ppChub722/chubi-pocket-app) and runs
+in production on a VPS.
+
+Around 126 endpoints across 14 feature modules — accounts, transactions,
+budgets, saving goals, scheduled transactions, categories, tags, contacts,
+personal debts, projects (shared costs), notifications, plus auth and users.
+
+Part of a multi-repo project:
+
+- **chubi-pocket-be** — this repo, the Go REST API
+- [chubi-pocket-app](https://github.com/ppChub722/chubi-pocket-app) — Flutter client
+- [chubi-pocket-web](https://github.com/ppChub722/chubi-pocket-web) — web client (in progress)
+- [chubi-pocket-docs](https://github.com/ppChub722/chubi-pocket-docs) — specs and design docs
 
 ## Tech stack
 
@@ -27,31 +40,40 @@ curl http://localhost:8080/health
 
 For more commands (psql, migration rollback, fresh-reset, etc.) see [COMMANDS.md](COMMANDS.md).
 
-## Phase 0 endpoints
+## API surface
 
-```
-GET    /health
-POST   /api/v1/auth/register
-POST   /api/v1/auth/login
-POST   /api/v1/auth/logout              (auth)
-PUT    /api/v1/auth/password            (auth)
-GET    /api/v1/users/me                 (auth)
-PUT    /api/v1/users/me                 (auth)
-PUT    /api/v1/users/me/password        (auth — alias of /auth/password)
-POST   /api/v1/users/me/deactivate      (auth)
-POST   /api/v1/users/me/reactivate      (auth, allowed while inactive)
-```
+All routes are under `/api/v1` and require a JWT except `register`, `login` and
+`/health`.
 
-Specs: [01-auth.md](../chubi-pocket-docs/design/spec/01-auth.md), [02-users.md](../chubi-pocket-docs/design/spec/02-users.md). Phase 0 plan: [phase0/be.md](../chubi-pocket-docs/product/phase0/be.md).
+| Module | What it covers |
+|---|---|
+| `auth` | Register, login, logout, change password |
+| `users` | Profile, deactivate/reactivate, entitlement packs |
+| `accounts` | Balances, members, transfers, ownership, adjustments |
+| `transactions` | Income/expense/transfer, summary, tagging |
+| `categories` | CRUD, reorder, soft-delete/restore |
+| `tags` | CRUD, attach to transactions |
+| `budgets` | Caps per category, overview, archive/restore |
+| `saving_goals` | Targets and allocations |
+| `scheduled_transactions` | Recurring entries, upcoming, run history |
+| `contacts` | People, link requests, merge/absorb |
+| `personal_debts` | Who owes whom, per-person views |
+| `projects` | Shared costs, members, project transactions |
+| `notifications` | Invites, link requests, reminders, settings |
+
+Every module follows the same shape (see [Project layout](#project-layout)), so
+the list grows without the codebase changing shape. Endpoint-level detail lives
+in the [specs](../chubi-pocket-docs/design/spec/).
 
 ## Project layout
 
 ```
 cmd/api/main.go           # entrypoint — wires modules + router
 internal/
-  modules/
-    auth/                 # register, login, logout, change password, JWT middleware
-    users/                # GET/PUT /me, deactivate, reactivate
+  modules/                # one folder per feature (14 in total)
+    auth/  users/  accounts/  transactions/  categories/  tags/
+    budgets/  saving_goals/  scheduled_transactions/  contacts/
+    personal_debts/  projects/  notifications/  user_pack_permissions/
   platform/
     config/               # env loader
     database/             # pgxpool factory
@@ -60,7 +82,9 @@ internal/
 migrations/               # golang-migrate SQL files (canonical schema lives in docs)
 ```
 
-Each feature module has the same shape — `model.go` / `store.go` / `service.go` / `handler.go`. Phase 1+ modules copy this layout.
+Each feature module has the same shape — `model.go` / `store.go` / `service.go`
+/ `handler.go` — so a change stays in one folder and a new module is a copy of
+the pattern, not a new pattern.
 
 ## Configuration
 
@@ -71,6 +95,21 @@ cp .env.example .env
 ```
 
 The `.env` is gitignored. Defaults work out-of-the-box for local dev.
+
+## Deployment
+
+Runs on a VPS as one Docker Compose stack: the API, PostgreSQL, a one-shot
+migration service, and [Caddy](https://caddyserver.com/) as a reverse proxy
+with automatic HTTPS. `docker-compose.deploy.yml` is the production compose
+file; `scripts/setup-vps.sh` provisions a fresh box.
+
+The full runbook — SSH hardening, firewall, DNS, deploy, day-2 operations and
+backups — is in [DEPLOY.md](DEPLOY.md).
+
+```bash
+# on the VPS, after setup
+docker compose -f docker-compose.deploy.yml up -d
+```
 
 ## Logging
 
