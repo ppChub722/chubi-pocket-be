@@ -138,30 +138,7 @@ func (h *Handler) Delete(c *gin.Context) {
 	}
 
 	msg := "Category deleted"
-	if status == "archived" {
-		msg = "Category archived"
-	}
 	c.JSON(http.StatusOK, gin.H{"message": msg, "status": status})
-}
-
-// POST /v1/categories/:id/restore
-func (h *Handler) Restore(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-
-	cat, err := h.service.Restore(c.Request.Context(), userID, id)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, cat)
 }
 
 // PATCH /v1/categories/reorder — bulk-rewrites (parent_id, sort_order) for
@@ -185,25 +162,6 @@ func (h *Handler) Reorder(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, ListResponse{Data: updated})
-}
-
-// DELETE /v1/categories/:id/permanent
-func (h *Handler) PermanentDelete(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-
-	if err := h.service.PermanentDelete(c.Request.Context(), userID, id); err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Category permanently deleted"})
 }
 
 // --- Helpers ---
@@ -231,10 +189,6 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "MAX_DEPTH_EXCEEDED", err.Error(), nil)
 	case errors.Is(err, ErrSystemImmutable):
 		response.BadRequest(c, "SYSTEM_CATEGORY_IMMUTABLE", err.Error(), nil)
-	case errors.Is(err, ErrNotArchived):
-		response.BadRequest(c, "NOT_ARCHIVED", err.Error(), nil)
-	case errors.Is(err, ErrHasTransactions):
-		response.BadRequest(c, "HAS_TRANSACTIONS", err.Error(), nil)
 	default:
 		response.InternalError(c, "Category operation failed", err.Error())
 	}

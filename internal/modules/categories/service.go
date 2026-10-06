@@ -104,12 +104,17 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*CategoryDetai
 	if err != nil {
 		return nil, fmt.Errorf("count transactions: %w", err)
 	}
+	budgetCount, err := s.store.CountBudgets(ctx, c.ID)
+	if err != nil {
+		return nil, fmt.Errorf("count budgets: %w", err)
+	}
 
 	out := &CategoryDetail{
 		Category:         *c,
 		Depth:            depth,
 		ChildCount:       childCount,
 		TransactionCount: txCount,
+		BudgetCount:      budgetCount,
 	}
 	if c.ParentID != nil {
 		parent, err := s.store.GetByID(ctx, userID, *c.ParentID)
@@ -204,7 +209,11 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCa
 	})
 }
 
-// Delete archives or hard-deletes per spec §3.5.
+// Delete always hard-deletes (owner decision 2026-10-07; replaces the old
+// archive-when-used rule). Children shift up to the grandparent first.
+// Transactions / scheduled transactions using it drop to "no category"
+// (FK SET NULL); its budgets go with it (FK CASCADE, migration 000043).
+// Returns "deleted" — kept in the response for client compatibility.
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (status string, err error) {
 	current, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
@@ -213,64 +222,13 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (status stri
 	if current.IsSystem {
 		return "", fmt.Errorf("%w: system categories cannot be deleted", ErrSystemImmutable)
 	}
-
 	if err := s.store.ReparentChildren(ctx, userID, id); err != nil {
 		return "", err
 	}
-
-	txCount, err := s.countTransactions(ctx, id)
-	if err != nil {
+	if err := s.store.HardDelete(ctx, userID, id); err != nil {
 		return "", err
 	}
-	if txCount == 0 {
-		if err := s.store.HardDelete(ctx, userID, id); err != nil {
-			return "", err
-		}
-		return "deleted", nil
-	}
-
-	if err := s.store.SetStatus(ctx, userID, id, "archived"); err != nil {
-		return "", err
-	}
-	return "archived", nil
-}
-
-// Restore reactivates an archived category. Auto-reparents to nearest active
-// ancestor if the original parent is still archived (spec §4.8).
-func (s *Service) Restore(ctx context.Context, userID, id uuid.UUID) (*Category, error) {
-	current, err := s.store.GetByID(ctx, userID, id)
-	if err != nil {
-		return nil, err
-	}
-	if current.Status != "archived" {
-		return nil, ErrNotArchived
-	}
-
-	// If parent is archived, find nearest active ancestor.
-	if current.ParentID != nil {
-		parent, err := s.store.GetByID(ctx, userID, *current.ParentID)
-		if err != nil && !errors.Is(err, ErrCategoryNotFound) {
-			return nil, err
-		}
-		if parent == nil || parent.Status != "active" {
-			active, err := s.store.FindNearestActiveAncestor(ctx, id)
-			if err != nil {
-				return nil, err
-			}
-			// active may be nil → becomes root
-			if _, err := s.store.Update(ctx, userID, id, UpdateFields{
-				ParentID:       active,
-				ParentIDChange: true,
-			}); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	if err := s.store.SetStatus(ctx, userID, id, "active"); err != nil {
-		return nil, err
-	}
-	return s.store.GetByID(ctx, userID, id)
+	return "deleted", nil
 }
 
 // Reorder applies a batch (parent_id, sort_order) rewrite to the user's
@@ -379,31 +337,6 @@ func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []Reord
 	}
 
 	return s.store.ReorderTx(ctx, userID, entries)
-}
-
-// PermanentDelete hard-deletes from archived state with 0 transactions.
-func (s *Service) PermanentDelete(ctx context.Context, userID, id uuid.UUID) error {
-	current, err := s.store.GetByID(ctx, userID, id)
-	if err != nil {
-		return err
-	}
-	if current.IsSystem {
-		return fmt.Errorf("%w: system categories cannot be deleted", ErrSystemImmutable)
-	}
-	if current.Status != "archived" {
-		return ErrNotArchived
-	}
-	txCount, err := s.countTransactions(ctx, id)
-	if err != nil {
-		return err
-	}
-	if txCount > 0 {
-		return ErrHasTransactions
-	}
-	if err := s.store.ReparentChildren(ctx, userID, id); err != nil {
-		return err
-	}
-	return s.store.HardDelete(ctx, userID, id)
 }
 
 // --- Internal helpers ---

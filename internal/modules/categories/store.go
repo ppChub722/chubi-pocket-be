@@ -29,8 +29,6 @@ var (
 	ErrCycleDetected    = errors.New("parent change would create a cycle")
 	ErrMaxDepth         = errors.New("category tree depth limit exceeded (max 3)")
 	ErrSystemImmutable  = errors.New("system category cannot be modified this way")
-	ErrNotArchived      = errors.New("category is not archived")
-	ErrHasTransactions  = errors.New("category still has transactions and cannot be permanently deleted")
 )
 
 const categoryColumns = `id, user_id, name, type, parent_id, is_system, system_kind,
@@ -333,20 +331,6 @@ func (s *Store) Update(
 	return c, nil
 }
 
-func (s *Store) SetStatus(ctx context.Context, userID, id uuid.UUID, status string) error {
-	tag, err := s.db.Exec(ctx,
-		`UPDATE categories SET status = $1, updated_by_user_id = $2
-		 WHERE id = $3 AND user_id = $2`,
-		status, userID, id)
-	if err != nil {
-		return fmt.Errorf("db error: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrCategoryNotFound
-	}
-	return nil
-}
-
 // HardDelete removes the row. Caller (service) must reparent children first.
 func (s *Store) HardDelete(ctx context.Context, userID, id uuid.UUID) error {
 	tag, err := s.db.Exec(ctx,
@@ -372,43 +356,6 @@ func (s *Store) ReparentChildren(ctx context.Context, userID, id uuid.UUID) erro
 		return fmt.Errorf("reparent children: %w", err)
 	}
 	return nil
-}
-
-// FindNearestActiveAncestor walks up `from`'s parent chain and returns the
-// first ancestor whose status is 'active'. Returns (nil, nil) when no active
-// ancestor exists (caller should make `from` a root). Used by Restore when
-// the original parent is still archived.
-func (s *Store) FindNearestActiveAncestor(ctx context.Context, from uuid.UUID) (*uuid.UUID, error) {
-	var parentID *uuid.UUID
-	err := s.db.QueryRow(ctx,
-		`SELECT parent_id FROM categories WHERE id = $1`, from).Scan(&parentID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read self parent: %w", err)
-	}
-
-	for parentID != nil {
-		var (
-			nextParent *uuid.UUID
-			status     string
-		)
-		err := s.db.QueryRow(ctx,
-			`SELECT parent_id, status FROM categories WHERE id = $1`, *parentID,
-		).Scan(&nextParent, &status)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("walk ancestors: %w", err)
-		}
-		if status == "active" {
-			return parentID, nil
-		}
-		parentID = nextParent
-	}
-	return nil, nil
 }
 
 // --- Reorder (PATCH /v1/categories/reorder) ---
@@ -620,4 +567,12 @@ func mapInsertError(err error) error {
 		return ErrDuplicateName
 	}
 	return fmt.Errorf("db error: %w", err)
+}
+
+// CountBudgets — budgets (any scope/status) that a delete would cascade.
+func (s *Store) CountBudgets(ctx context.Context, id uuid.UUID) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM budgets WHERE category_id = $1`, id).Scan(&n)
+	return n, err
 }

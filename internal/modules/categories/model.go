@@ -59,6 +59,8 @@ type CategoryDetail struct {
 	Depth            int     `json:"depth"`
 	ChildCount       int     `json:"child_count"`
 	TransactionCount int     `json:"transaction_count"`
+	// BudgetCount = budgets deleted along with this category (FK CASCADE).
+	BudgetCount int `json:"budget_count"`
 }
 
 type CreateCategoryRequest struct {

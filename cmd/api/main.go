@@ -235,8 +235,6 @@ func main() {
 			protected.GET("/categories/:id", categoriesHandler.Get)
 			protected.PUT("/categories/:id", categoriesHandler.Update)
 			protected.DELETE("/categories/:id", categoriesHandler.Delete)
-			protected.POST("/categories/:id/restore", categoriesHandler.Restore)
-			protected.DELETE("/categories/:id/permanent", categoriesHandler.PermanentDelete)
 
 			// Tags (Phase 1a)
 			protected.POST("/tags", tagsHandler.Create)
