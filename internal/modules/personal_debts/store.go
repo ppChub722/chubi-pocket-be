@@ -26,7 +26,33 @@ var (
 	ErrAlreadySettled    = errors.New("debt is already settled")
 	ErrAlreadyCancelled  = errors.New("debt is already cancelled")
 	ErrOverpayment       = errors.New("settle amount exceeds outstanding")
+	// ErrContactNotFound — counterparty_contact_id doesn't exist or belongs
+	// to another user. Never link a debt to someone else's contact row.
+	ErrContactNotFound = errors.New("contact not found")
 )
+
+// contactQuerier is satisfied by both *pgxpool.Pool and pgx.Tx.
+type contactQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// assertContactOwned returns ErrContactNotFound unless contactID is one of
+// userID's own contacts. nil contactID is always fine (free-text name).
+func assertContactOwned(ctx context.Context, q contactQuerier, userID uuid.UUID, contactID *uuid.UUID) error {
+	if contactID == nil {
+		return nil
+	}
+	var ok bool
+	if err := q.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM contacts WHERE id = $1 AND user_id = $2)`,
+		*contactID, userID).Scan(&ok); err != nil {
+		return fmt.Errorf("check contact owner: %w", err)
+	}
+	if !ok {
+		return ErrContactNotFound
+	}
+	return nil
+}
 
 const debtColumns = `id, user_id, direction,
 	counterparty_contact_id, counterparty_person_name,
@@ -49,6 +75,9 @@ func scanDebt(row pgx.Row) (*PersonalDebt, error) {
 // --- Manual create / list / get / update / cancel / delete ---
 
 func (s *Store) Create(ctx context.Context, userID uuid.UUID, req CreateRequest) (*PersonalDebt, error) {
+	if err := assertContactOwned(ctx, s.db, userID, req.CounterpartyContactID); err != nil {
+		return nil, err
+	}
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
@@ -337,6 +366,9 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequ
 	if err != nil {
 		return nil, err
 	}
+	if err := assertContactOwned(ctx, s.db, userID, req.CounterpartyContactID); err != nil {
+		return nil, err
+	}
 
 	q := `UPDATE personal_debts SET updated_by_user_id = $1`
 	args := []any{userID}
@@ -470,12 +502,14 @@ func (s *Store) People(ctx context.Context, userID uuid.UUID) ([]PersonRow, floa
 				counterparty_contact_id,
 				LOWER(COALESCE(
 					(SELECT c.display_name FROM contacts c
-					 WHERE c.id = pd.counterparty_contact_id),
+					 WHERE c.id = pd.counterparty_contact_id
+					   AND c.user_id = pd.user_id),
 					pd.counterparty_person_name
 				)) AS group_key,
 				COALESCE(
 					(SELECT c.display_name FROM contacts c
-					 WHERE c.id = pd.counterparty_contact_id),
+					 WHERE c.id = pd.counterparty_contact_id
+					   AND c.user_id = pd.user_id),
 					pd.counterparty_person_name
 				) AS display_name,
 				direction,

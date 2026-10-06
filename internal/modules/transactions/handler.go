@@ -237,6 +237,8 @@ func mapServiceError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusForbidden, "FORBIDDEN", "Category not accessible", nil)
 	case errors.Is(err, ErrCategoryTypeMismatch):
 		response.BadRequest(c, "CATEGORY_TYPE_MISMATCH", err.Error(), nil)
+	case errors.Is(err, ErrSplitContactNotFound):
+		response.BadRequest(c, "CONTACT_NOT_FOUND", "Split contact not found", nil)
 	case errors.Is(err, ErrTransferSameAccount):
 		response.BadRequest(c, "TRANSFER_SAME_ACCOUNT", err.Error(), nil)
 	case errors.Is(err, ErrTransferCurrencyMismatch):

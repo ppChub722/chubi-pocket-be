@@ -203,6 +203,17 @@ func (s *Service) CreateForTransactionTx(
 	if parentType == "income" {
 		splitterDir, partnerDir = DirectionIOwe, DirectionOwedToMe
 	}
+	// Every split contact must be one of the splitter's own contacts —
+	// otherwise a foreign contact id would mirror a debt into a stranger's
+	// account (step 2 below). Reject the whole transaction.
+	for i := range inputs {
+		if err := assertContactOwned(ctx, tx, userID, inputs[i].ContactID); err != nil {
+			if errors.Is(err, ErrContactNotFound) {
+				return transactions.ErrSplitContactNotFound
+			}
+			return err
+		}
+	}
 	for i := range inputs {
 		in := inputs[i]
 		// 1. Splitter's side — always created.
@@ -219,8 +230,8 @@ func (s *Service) CreateForTransactionTx(
 		if in.ContactID != nil {
 			var linkedUserID *uuid.UUID
 			if err := tx.QueryRow(ctx,
-				`SELECT linked_user_id FROM contacts WHERE id = $1`,
-				*in.ContactID).Scan(&linkedUserID); err != nil {
+				`SELECT linked_user_id FROM contacts WHERE id = $1 AND user_id = $2`,
+				*in.ContactID, userID).Scan(&linkedUserID); err != nil {
 				continue // contact missing or not linked
 			}
 			if linkedUserID == nil || *linkedUserID == userID {

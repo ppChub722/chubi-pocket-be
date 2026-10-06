@@ -28,6 +28,7 @@ var (
 	ErrTransferToAccountRequired   = errors.New("transfer_to_account_id is required for type=transfer")
 	ErrTransferFieldsOnNonTransfer = errors.New("transfer_to_account_id is only valid for type=transfer")
 	ErrAmountInvalid               = errors.New("amount must be > 0")
+	ErrSplitContactNotFound        = errors.New("split contact not found or not owned")
 	ErrCategoryRequiredForTransfer = errors.New("transfer category is auto-set; do not pass category_id")
 	ErrTransferRequiresAccount     = errors.New("account_id is required for type=transfer")
 	ErrMoveTransferNeedsToAccount  = errors.New("transfer_to_account_id is required when moving a transfer's account")

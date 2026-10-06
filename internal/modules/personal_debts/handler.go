@@ -219,6 +219,8 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "ALREADY_CANCELLED", "Debt is already cancelled", nil)
 	case errors.Is(err, ErrOverpayment):
 		response.BadRequest(c, "OVERPAYMENT", "Settle amount exceeds outstanding", nil)
+	case errors.Is(err, ErrContactNotFound):
+		response.BadRequest(c, "CONTACT_NOT_FOUND", "Contact not found", nil)
 	default:
 		response.InternalError(c, "Personal debt operation failed", err.Error())
 	}
