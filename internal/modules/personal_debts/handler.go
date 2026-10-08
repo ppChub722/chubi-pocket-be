@@ -1,14 +1,17 @@
 package personal_debts
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -122,10 +125,18 @@ func (h *Handler) Update(c *gin.Context) {
 		return
 	}
 	var req UpdateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
+	// Explicit `null` clears (contract §7); absent keys leave the field.
+	var raw map[string]json.RawMessage
+	if body, ok := c.Get(gin.BodyBytesKey); ok {
+		_ = json.Unmarshal(body.([]byte), &raw)
+	}
+	isNull := func(k string) bool { v, ok := raw[k]; return ok && string(v) == "null" }
+	req.ClearContact = isNull("counterparty_contact_id")
+	req.ClearNote = isNull("note")
 	out, err := h.service.Update(c.Request.Context(), userID, id, req)
 	if err != nil {
 		mapServiceError(c, err)
@@ -191,7 +202,13 @@ func (h *Handler) Settle(c *gin.Context) {
 		return
 	}
 	directOnly := c.Query("direct") == "true"
-	recordTx := !directOnly && req.AccountID != uuid.Nil
+	if directOnly {
+		req.AccountID = nil // ignored on a direct settle
+	} else if req.AccountID == nil || *req.AccountID == uuid.Nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "account_id is required unless direct=true", nil)
+		return
+	}
+	recordTx := !directOnly
 	out, err := h.service.Settle(c.Request.Context(), userID, id, req, recordTx)
 	if err != nil {
 		mapServiceError(c, err)
@@ -219,6 +236,8 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "ALREADY_CANCELLED", "Debt is already cancelled", nil)
 	case errors.Is(err, ErrOverpayment):
 		response.BadRequest(c, "OVERPAYMENT", "Settle amount exceeds outstanding", nil)
+	case errors.Is(err, ErrInvalidSettled):
+		response.BadRequest(c, "INVALID_SETTLED_AMOUNT", "settled_amount cannot exceed amount", nil)
 	case errors.Is(err, ErrContactNotFound):
 		response.BadRequest(c, "CONTACT_NOT_FOUND", "Contact not found", nil)
 	default:
@@ -235,4 +254,34 @@ func atoiOr(s string, dflt int) int {
 		return dflt
 	}
 	return n
+}
+
+// POST /v1/personal-debts/split-requests/:notification_id/accept —
+// "add to my debts" on a split_created notification (contract §5).
+func (h *Handler) AcceptSplitRequest(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	nid, err := uuid.Parse(c.Param("notification_id"))
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		return
+	}
+	out, err := h.service.AcceptSplitRequest(c.Request.Context(), userID, nid)
+	switch {
+	case errors.Is(err, ErrNotSplitRequest):
+		response.BadRequest(c, "NOT_SPLIT_REQUEST", err.Error(), nil)
+	case errors.Is(err, notifications.ErrNotificationNotFound):
+		response.NotFound(c, "NOT_FOUND", "Notification not found")
+	case errors.Is(err, notifications.ErrNotForYou):
+		response.Fail(c, http.StatusForbidden, "NOT_FOR_YOU", "Notification is not addressed to caller", nil)
+	case errors.Is(err, notifications.ErrStateConflict):
+		response.Fail(c, http.StatusConflict, "NOTIFICATION_STATE_CONFLICT", err.Error(), nil)
+	case err != nil:
+		mapServiceError(c, err)
+	default:
+		c.JSON(http.StatusCreated, out)
+	}
 }

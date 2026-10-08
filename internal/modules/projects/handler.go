@@ -462,6 +462,10 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "OWNER_CANNOT_LEAVE", "Owner cannot leave; transfer ownership first", nil)
 	case errors.Is(err, ErrNotMember):
 		response.Fail(c, http.StatusForbidden, "NOT_MEMBER", "Caller is not a member of this project", nil)
+	case errors.Is(err, ErrCannotChangeOwner):
+		response.Fail(c, http.StatusConflict, "CANNOT_CHANGE_OWNER", err.Error(), nil)
+	case errors.Is(err, ErrViewerReadOnly):
+		response.Fail(c, http.StatusForbidden, "FORBIDDEN_ROLE", err.Error(), nil)
 	case errors.Is(err, ErrMemberNotInProject):
 		response.BadRequest(c, "MEMBER_NOT_IN_PROJECT", "Member does not belong to this project", nil)
 	default:

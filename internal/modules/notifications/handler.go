@@ -1,11 +1,13 @@
 package notifications
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
@@ -141,12 +143,27 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		return
 	}
 	var req UpdateSettingsRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
+	// Explicit `"default_account_id": null` clears it (contract §5).
+	var raw map[string]json.RawMessage
+	if body, ok := c.Get(gin.BodyBytesKey); ok {
+		_ = json.Unmarshal(body.([]byte), &raw)
+	}
+	if v, ok := raw["default_account_id"]; ok && string(v) == "null" {
+		req.ClearDefaultAccount = true
+	}
 	out, err := h.service.UpdateSettings(c.Request.Context(), userID, req)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrTypeNotMutable):
+		response.BadRequest(c, "TYPE_NOT_MUTABLE", err.Error(), nil)
+		return
+	case errors.Is(err, ErrUnknownType), errors.Is(err, ErrDefaultAccountBad):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	case err != nil:
 		response.InternalError(c, "Failed to update settings", err.Error())
 		return
 	}
@@ -171,6 +188,8 @@ func mapServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrNotificationNotFound):
 		response.NotFound(c, "NOT_FOUND", "Notification not found")
+	case errors.Is(err, ErrStateConflict):
+		response.Fail(c, http.StatusConflict, "NOTIFICATION_STATE_CONFLICT", "Notification was already handled the other way", nil)
 	case errors.Is(err, ErrNotForYou):
 		response.Fail(c, http.StatusForbidden, "NOT_FOR_YOU", "Notification is not addressed to caller", nil)
 	default:

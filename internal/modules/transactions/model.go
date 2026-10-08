@@ -197,6 +197,11 @@ type ListFilter struct {
 	From       *string // YYYY-MM-DD
 	To         *string
 	NoWallet   bool // true → only rows with account_id IS NULL
+	// Contract §1 + dashboard drill-down.
+	Q               string      // substring over note, category (incl. parent) and wallet names
+	TagIDs          []uuid.UUID // rows having ANY of these tags
+	IncludeChildren bool        // with CategoryID: also its subcategories
+	Uncategorized   bool        // only rows with no category
 	Page       int
 	PerPage    int
 	Sort       string // date_desc | date_asc | amount_desc | amount_asc
@@ -219,7 +224,8 @@ type SummaryRequest struct {
 	To         string     // required
 	AccountID  *uuid.UUID // optional
 	CategoryID *uuid.UUID
-	GroupBy    string // empty | day | week | month | category | account
+	Type       *TxType // optional: income | expense — filters rows before grouping
+	GroupBy    string  // empty | day | week | month | category | parent_category | account
 }
 
 type SummaryGroup struct {
@@ -227,6 +233,9 @@ type SummaryGroup struct {
 	Name  string  `json:"name,omitempty"`
 	Total float64 `json:"total"`
 	Count int     `json:"count"`
+	// Income / Expense split the group's total by row type (contract §2).
+	Income  float64 `json:"income"`
+	Expense float64 `json:"expense"`
 }
 
 type SummaryResponse struct {

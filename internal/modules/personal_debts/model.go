@@ -4,6 +4,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // Direction values. Per-row from the row-owner's perspective.
@@ -47,6 +49,8 @@ type PersonalDebt struct {
 	Note                        *string    `json:"note"`
 	CreatedAt                   time.Time  `json:"created_at"`
 	UpdatedAt                   time.Time  `json:"updated_at"`
+	// The mirror row in the other user's book (linked splits, §5).
+	CounterpartDebtID *uuid.UUID `json:"counterpart_debt_id"`
 }
 
 // PersonalDebtView extends the row with computed `outstanding`.
@@ -76,6 +80,11 @@ type UpdateRequest struct {
 	Currency               *string    `json:"currency"                binding:"omitempty,len=3"`
 	Status                 *string    `json:"status"                  binding:"omitempty,oneof=open settled cancelled"`
 	Note                   *string    `json:"note"`
+
+	// Set by the handler when the body carries an explicit null (contract
+	// §7) — a nil pointer alone can't tell "absent" from "clear it".
+	ClearContact bool `json:"-"`
+	ClearNote    bool `json:"-"`
 }
 
 // SettleRequest — record a real money movement against a debt. Creates
@@ -85,7 +94,9 @@ type UpdateRequest struct {
 // For 'owed_to_me' debts: settling = my income (getting paid back).
 // Direction is inferred from the debt; caller doesn't pass it.
 type SettleRequest struct {
-	AccountID uuid.UUID `json:"account_id" binding:"required"`
+	// Required unless the call is ?direct=true (contract §7) — the handler
+	// enforces it, since the binding tag can't see the query string.
+	AccountID *uuid.UUID `json:"account_id"`
 	Amount    *float64  `json:"amount"     binding:"omitempty,gt=0"`
 	Date      *string   `json:"date"       binding:"omitempty,datetime=2006-01-02"`
 	Note      *string   `json:"note"`
@@ -121,6 +132,7 @@ type PersonRow struct {
 	IOweOpen             float64    `json:"i_owe_open"`
 	NetPosition          float64    `json:"net_position"`         // positive = they owe me (net)
 	OpenCount            int        `json:"open_count"`
+	IconCode             *shared.IconCode `json:"icon_code"` // contact's icon; nil for free-text names
 }
 
 type PeopleResponse struct {

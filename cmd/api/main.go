@@ -19,6 +19,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/budgets"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/contacts"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/dashboard"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
@@ -111,7 +112,13 @@ func main() {
 	// trigger; Phase 3 wires the same logic into an hourly cron.
 	scheduledStore := scheduled_transactions.NewStore(dbPool)
 	scheduledService := scheduled_transactions.NewService(scheduledStore)
+	scheduledService.WithTimezoneResolver(budgetsService.ResolveTimezone)
 	scheduledHandler := scheduled_transactions.NewHandler(scheduledService)
+
+	// Dashboard (Phase 2) — read-only aggregate over the modules above.
+	dashboardService := dashboard.NewService(dashboard.NewStore(dbPool),
+		transactionsService, accountsService, budgetsService, savingGoalsService, personalDebtsService)
+	dashboardHandler := dashboard.NewHandler(dashboardService)
 
 	// --- Cross-module wiring (breaks cycles). Same pattern as 1a's
 	// categoriesService.WithTransactionCounter.
@@ -120,6 +127,8 @@ func main() {
 	transactionsService.WithDebtsCreator(personalDebtsService.CreateForTransactionTx)
 	transactionsService.WithDebtValidator(personalDebtsService.ValidateOwnership)
 	transactionsService.WithDebtAutoBumper(personalDebtsService.AutoBumpInTx)
+	// personal_debts ↔ notifications (linked splits, contract §5).
+	personalDebtsService.WithNotifications(notificationsService)
 
 	// contacts ↔ notifications (link-request flow).
 	contactsService.WithNotificationService(notificationsService)
@@ -185,7 +194,7 @@ func main() {
 	// Phase 3: restrict AllowAllOrigins → AllowOrigins with the prod web/app hostnames.
 	r.Use(cors.New(cors.Config{
 		AllowAllOrigins: true,
-		AllowMethods:    []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowMethods:    []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders: []string{
 			"Origin",
 			"Content-Type",
@@ -247,6 +256,7 @@ func main() {
 			// Static-path-before-param: /invites/... must come before /:id.
 			protected.POST("/accounts", accountsHandler.Create)
 			protected.GET("/accounts", accountsHandler.List)
+			protected.PATCH("/accounts/reorder", accountsHandler.Reorder)
 			protected.POST("/accounts/invites/:notification_id/accept", accountsHandler.AcceptInvite)
 			protected.POST("/accounts/invites/:notification_id/reject", accountsHandler.RejectInvite)
 			protected.GET("/accounts/:id", accountsHandler.Get)
@@ -301,6 +311,7 @@ func main() {
 			// Personal debts (bidirectional, replaces splits + old debts).
 			// /people view aggregates by counterparty with net positions.
 			protected.GET("/personal-debts/people", personalDebtsHandler.People)
+			protected.POST("/personal-debts/split-requests/:notification_id/accept", personalDebtsHandler.AcceptSplitRequest)
 			protected.GET("/personal-debts", personalDebtsHandler.List)
 			protected.POST("/personal-debts", personalDebtsHandler.Create)
 			protected.GET("/personal-debts/:id", personalDebtsHandler.Get)
@@ -377,6 +388,9 @@ func main() {
 			protected.POST("/scheduled-transactions/:id/cancel", scheduledHandler.Cancel)
 			protected.POST("/scheduled-transactions/:id/generate-now", scheduledHandler.GenerateNow)
 			protected.GET("/scheduled-transactions/:id/history", scheduledHandler.History)
+
+			// Dashboard (Phase 2, contract §4) — one aggregated read for the home screen.
+			protected.GET("/dashboard", dashboardHandler.Get)
 		}
 	}
 

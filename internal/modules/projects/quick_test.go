@@ -269,7 +269,7 @@ func TestQuickCreateHappyPath(t *testing.T) {
 		Name: "แฟน, บี · 15 ก.ย. 2026",
 		NewTransaction: transactions.CreateRequest{
 			Type:       transactions.TypeExpense,
-			AccountID:  f.acctPersonal,
+			AccountID:  &f.acctPersonal,
 			Amount:     150,
 			CategoryID: &f.cat,
 			Date:       "2026-09-15",
@@ -477,7 +477,7 @@ func TestQuickCreateAtomicRollback(t *testing.T) {
 	newTx := func(amount float64) transactions.CreateRequest {
 		return transactions.CreateRequest{
 			Type:       transactions.TypeExpense,
-			AccountID:  f.acctPersonal,
+			AccountID:  &f.acctPersonal,
 			Amount:     amount,
 			CategoryID: &f.cat,
 			Date:       "2026-09-15",

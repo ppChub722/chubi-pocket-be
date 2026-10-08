@@ -213,18 +213,16 @@ func (s *Store) List(
 	return out, rows.Err()
 }
 
-// Upcoming — active rows whose next_billing_date is within `days` from
-// today. Uses CURRENT_DATE on the DB; fine for Phase 1c (Phase 3 will
-// likely want per-tz windows).
+// Upcoming — active rows due on or before `until` (a date in the
+// caller's timezone, computed by the service), overdue ones included.
 func (s *Store) Upcoming(
-	ctx context.Context, userID uuid.UUID, days int,
+	ctx context.Context, userID uuid.UUID, until string,
 ) ([]ScheduledTransaction, error) {
 	q := `SELECT ` + scheduleColumns + ` FROM scheduled_transactions
 	       WHERE user_id = $1 AND status = 'active'
-	         AND next_billing_date BETWEEN CURRENT_DATE
-	                                   AND (CURRENT_DATE + ($2 || ' days')::interval)::date
+	         AND next_billing_date <= $2::date
 	       ORDER BY next_billing_date ASC`
-	rows, err := s.db.Query(ctx, q, userID, days)
+	rows, err := s.db.Query(ctx, q, userID, until)
 	if err != nil {
 		return nil, fmt.Errorf("upcoming: %w", err)
 	}

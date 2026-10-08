@@ -17,11 +17,8 @@ func (s *Service) CreateProjectTransaction(
 	if err := s.store.AssertWritable(ctx, projectID, "create_pt"); err != nil {
 		return nil, err
 	}
-	if active, err := s.store.IsActiveMember(ctx, projectID, callerUserID); err != nil || !active {
-		if err != nil {
-			return nil, err
-		}
-		return nil, ErrNotMember
+	if _, err := s.store.AssertCanWrite(ctx, projectID, callerUserID); err != nil {
+		return nil, err
 	}
 
 	// Validate transaction_member_id belongs to this project.
@@ -42,6 +39,16 @@ func (s *Service) CreateProjectTransaction(
 	pt, err := s.store.InsertPTTx(ctx, tx, projectID, callerUserID, req)
 	if err != nil {
 		return nil, err
+	}
+
+	// auto_resolve_own_in_projects (contract §5): my own row → my personal
+	// mirror, same tx (auto_resolve.go).
+	if s.txs != nil && s.notifs != nil && member.UserID != nil && *member.UserID == callerUserID {
+		if st, err := s.notifs.GetSettings(ctx, callerUserID); err == nil && st.AutoResolveOwnInProjects {
+			if err := s.autoResolveOwnTx(ctx, tx, callerUserID, pt); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// project_tx_recorded_for_you fires once for the parent's actor when
@@ -84,11 +91,8 @@ func (s *Service) UpdateProjectTransaction(
 		return nil, ErrPTIsChild
 	}
 	// Members can edit any project_tx (full edit rights, see plan §1).
-	if active, err := s.store.IsActiveMember(ctx, projectID, callerUserID); err != nil || !active {
-		if err != nil {
-			return nil, err
-		}
-		return nil, ErrNotMember
+	if _, err := s.store.AssertCanWrite(ctx, projectID, callerUserID); err != nil {
+		return nil, err
 	}
 
 	tx, err := s.store.Pool().Begin(ctx)
@@ -138,11 +142,8 @@ func (s *Service) DeleteProjectTransaction(
 	if _, err := s.store.GetPT(ctx, ptID); err != nil {
 		return err
 	}
-	if active, err := s.store.IsActiveMember(ctx, projectID, callerUserID); err != nil || !active {
-		if err != nil {
-			return err
-		}
-		return ErrNotMember
+	if _, err := s.store.AssertCanWrite(ctx, projectID, callerUserID); err != nil {
+		return err
 	}
 
 	// Capture recipients BEFORE delete (FK cascade nukes the children).
@@ -207,7 +208,7 @@ func (s *Service) ToggleMark(
 	if err := s.store.AssertWritable(ctx, projectID, "resolve"); err != nil {
 		return nil, err
 	}
-	member, err := s.store.MemberByUserID(ctx, projectID, callerUserID)
+	member, err := s.store.AssertCanWrite(ctx, projectID, callerUserID)
 	if err != nil {
 		return nil, err
 	}

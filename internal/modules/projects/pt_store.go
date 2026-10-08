@@ -443,6 +443,9 @@ func (s *Store) SummaryAggregate(ctx context.Context, projectID, callerID uuid.U
 		resp.SpentNet = &spentNet
 		resp.Remaining = &remaining
 	}
+	if err := s.fillBreakdowns(ctx, resp, callerID); err != nil {
+		return nil, err
+	}
 	return resp, nil
 }
 

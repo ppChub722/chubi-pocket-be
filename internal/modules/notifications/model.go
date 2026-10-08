@@ -46,6 +46,8 @@ type Settings struct {
 	AutoRecordReceivedPayment                    bool       `json:"auto_record_received_payment"`
 	AutoResolveOwnInProjects                     bool       `json:"auto_resolve_own_in_projects"`
 	DefaultAccountID                             *uuid.UUID `json:"default_account_id"`
+	// Contract §5: notification types this user doesn't want in the inbox.
+	MutedTypes []string `json:"muted_types"`
 	CreatedAt                                    time.Time  `json:"created_at"`
 	UpdatedAt                                    time.Time  `json:"updated_at"`
 }
@@ -56,6 +58,10 @@ type UpdateSettingsRequest struct {
 	AutoRecordReceivedPayment                *bool      `json:"auto_record_received_payment"`
 	AutoResolveOwnInProjects                 *bool      `json:"auto_resolve_own_in_projects"`
 	DefaultAccountID                         *uuid.UUID `json:"default_account_id"`
+	// Replaces the whole list when present; [] unmutes everything.
+	MutedTypes *[]string `json:"muted_types"`
+	// Set by the handler on an explicit `"default_account_id": null`.
+	ClearDefaultAccount bool `json:"-"`
 }
 
 type ListFilter struct {
@@ -92,6 +98,8 @@ type SplitCreatedPayload struct {
 	Amount              float64    `json:"amount"`
 	Currency            string     `json:"currency"`
 	Note                *string    `json:"note"`
+	// The recipient's own debt row (contract §5) — the deep link opens it.
+	RecipientDebtID *uuid.UUID `json:"recipient_debt_id"`
 }
 
 type SplitPaidPayload struct {
@@ -100,8 +108,10 @@ type SplitPaidPayload struct {
 	PayerDisplayName   string     `json:"payer_display_name"`
 	Amount             float64    `json:"amount"`
 	Currency           string     `json:"currency"`
-	PayerTransactionID uuid.UUID  `json:"payer_transaction_id"`
+	PayerTransactionID *uuid.UUID `json:"payer_transaction_id"` // nil on a direct (no-wallet) settle
 	ProjectID          *uuid.UUID `json:"project_id"`
+	// The recipient's own debt row (contract §5) — the deep link opens it.
+	RecipientDebtID *uuid.UUID `json:"recipient_debt_id"`
 }
 
 type SplitReceivedPayload struct {
@@ -110,8 +120,10 @@ type SplitReceivedPayload struct {
 	ReceiverDisplayName   string     `json:"receiver_display_name"`
 	Amount                float64    `json:"amount"`
 	Currency              string     `json:"currency"`
-	ReceiverTransactionID uuid.UUID  `json:"receiver_transaction_id"`
+	ReceiverTransactionID *uuid.UUID `json:"receiver_transaction_id"` // nil when recorded without a wallet
 	ProjectID             *uuid.UUID `json:"project_id"`
+	// The recipient's own debt row (contract §5) — the deep link opens it.
+	RecipientDebtID *uuid.UUID `json:"recipient_debt_id"`
 }
 
 type ProjectTxRecordedPayload struct {

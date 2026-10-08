@@ -9,12 +9,14 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/contacts"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
 type Service struct {
-	store *Store
-	txs   *transactions.Service
+	store  *Store
+	txs    *transactions.Service
+	notifs *notifications.Service // optional — see split_flow.go
 }
 
 func NewService(store *Store, txs *transactions.Service) *Service {
@@ -121,7 +123,8 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRe
 	}
 
 	var txn any
-	if recordTransaction && req.AccountID != uuid.Nil {
+	var txID *uuid.UUID // the wallet transaction, nil for a direct settle
+	if recordTransaction && req.AccountID != nil {
 		// Direction-aware transaction: i_owe → expense, owed_to_me → income
 		var txType transactions.TxType
 		switch current.Direction {
@@ -133,7 +136,7 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRe
 			return nil, fmt.Errorf("unknown direction: %s", current.Direction)
 		}
 
-		accID := req.AccountID
+		accID := *req.AccountID
 		createReq := transactions.CreateRequest{
 			Type:      txType,
 			AccountID: &accID,
@@ -141,10 +144,11 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRe
 			Date:      *date,
 			Note:      req.Note,
 		}
-		txn, err = s.txs.CreateInTxWithSourceDebt(ctx, tx, userID, id, createReq)
+		created, err := s.txs.CreateInTxWithSourceDebt(ctx, tx, userID, id, createReq)
 		if err != nil {
 			return nil, err
 		}
+		txn, txID = created, &created.ID
 		// CreateInTxWithSourceDebt's hook bumps settled_amount via
 		// AutoBumpInTx — but only when the user_id + debt_id match. The
 		// auto-bumper handled it; nothing to do here.
@@ -155,7 +159,12 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRe
 		}
 	}
 
-	updated, err := s.store.GetByID(ctx, userID, id)
+	// Linked split → notify / auto-settle the other side (split_flow.go).
+	if err := s.afterSettleTx(ctx, tx, current, amount, *date, txID); err != nil {
+		return nil, err
+	}
+
+	updated, err := getAnyDebtTx(ctx, tx, id) // in-tx: sees the settle
 	if err != nil {
 		return nil, err
 	}
@@ -199,9 +208,9 @@ func (s *Service) CreateForTransactionTx(
 	if len(inputs) == 0 {
 		return nil
 	}
-	splitterDir, partnerDir := DirectionOwedToMe, DirectionIOwe
+	splitterDir := DirectionOwedToMe
 	if parentType == "income" {
-		splitterDir, partnerDir = DirectionIOwe, DirectionOwedToMe
+		splitterDir = DirectionIOwe
 	}
 	// Every split contact must be one of the splitter's own contacts —
 	// otherwise a foreign contact id would mirror a debt into a stranger's
@@ -217,7 +226,7 @@ func (s *Service) CreateForTransactionTx(
 	for i := range inputs {
 		in := inputs[i]
 		// 1. Splitter's side — always created.
-		_, err := s.store.CreateAttachedTx(ctx, tx, userID, splitterDir,
+		splitterDebt, err := s.store.CreateAttachedTx(ctx, tx, userID, splitterDir,
 			in.ContactID, in.PersonName,
 			&parentTxID, nil, nil,
 			in.OwedAmount, parentCurrency, nil,
@@ -237,33 +246,8 @@ func (s *Service) CreateForTransactionTx(
 			if linkedUserID == nil || *linkedUserID == userID {
 				continue
 			}
-			// Find the contact in the partner's book that links back to
-			// the splitter (us). Lookup by linked_user_id = userID.
-			var partnerContactID *uuid.UUID
-			var partnerPersonName string
-			row := tx.QueryRow(ctx,
-				`SELECT id, display_name FROM contacts
-				 WHERE user_id = $1 AND linked_user_id = $2 LIMIT 1`,
-				*linkedUserID, userID)
-			var pcID uuid.UUID
-			if err := row.Scan(&pcID, &partnerPersonName); err == nil {
-				partnerContactID = &pcID
-			} else {
-				// Partner has no contact for us yet; fall back to user's display name.
-				_ = tx.QueryRow(ctx,
-					`SELECT display_name FROM users WHERE id = $1`, userID).
-					Scan(&partnerPersonName)
-				if partnerPersonName == "" {
-					partnerPersonName = "Unknown"
-				}
-			}
-			_, err := s.store.CreateAttachedTx(ctx, tx, *linkedUserID, partnerDir,
-				partnerContactID, partnerPersonName,
-				nil, // partner has no transaction in their book
-				nil, nil,
-				in.OwedAmount, parentCurrency, nil,
-			)
-			if err != nil {
+			// Mirror + split_created per both users' flags (split_flow.go).
+			if err := s.splitToPartnerTx(ctx, tx, splitterDebt, *linkedUserID, parentTxID); err != nil {
 				return err
 			}
 		}

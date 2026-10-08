@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -80,6 +82,23 @@ func (h *Handler) List(c *gin.Context) {
 			return
 		}
 		f.CategoryID = &id
+	}
+	f.IncludeChildren = c.Query("include_children") == "true"
+	f.Uncategorized = c.Query("uncategorized") == "true"
+	if v := strings.TrimSpace(c.Query("q")); v != "" {
+		if utf8.RuneCountInString(v) > 100 {
+			response.BadRequest(c, "VALIDATION_ERROR", "q must be at most 100 characters", nil)
+			return
+		}
+		f.Q = v
+	}
+	for _, v := range c.QueryArray("tag_id") {
+		id, err := uuid.Parse(v)
+		if err != nil {
+			response.BadRequest(c, "VALIDATION_ERROR", "Invalid tag_id", nil)
+			return
+		}
+		f.TagIDs = append(f.TagIDs, id)
 	}
 	if v := c.Query("type"); v != "" {
 		if v != "expense" && v != "income" && v != "transfer" {
@@ -206,6 +225,14 @@ func (h *Handler) Summary(c *gin.Context) {
 			return
 		}
 		req.CategoryID = &id
+	}
+	switch v := TxType(c.Query("type")); v {
+	case "":
+	case TypeIncome, TypeExpense:
+		req.Type = &v
+	default:
+		response.BadRequest(c, "VALIDATION_ERROR", "type must be income or expense", nil)
+		return
 	}
 
 	summary, err := h.service.Summary(c.Request.Context(), userID, req)

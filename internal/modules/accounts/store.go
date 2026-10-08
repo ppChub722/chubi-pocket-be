@@ -92,7 +92,11 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, status, accType stri
 		args = append(args, accType)
 		q += fmt.Sprintf(" AND type = $%d", len(args))
 	}
-	q += " ORDER BY sort_order ASC, created_at ASC"
+	// Each member keeps their own order (contract §3).
+	q += ` ORDER BY (SELECT am.sort_order FROM account_members am
+		WHERE am.account_id = a.id AND am.user_id = $1
+		  AND am.joined_at IS NOT NULL AND am.left_at IS NULL LIMIT 1) ASC,
+		created_at ASC`
 
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {

@@ -182,9 +182,19 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Con
 		}
 	}
 
+	// Contract §8: name, email (own or the linked user's) or phone. Phone
+	// compares digits only, and only when the query has digits.
 	if s := strings.TrimSpace(f.Search); s != "" {
-		args = append(args, "%"+strings.ToLower(s)+"%")
-		q += fmt.Sprintf(` AND LOWER(display_name) LIKE $%d`, len(args))
+		args = append(args, "%"+shared.EscapeLike(strings.ToLower(s))+"%")
+		n := len(args)
+		cond := fmt.Sprintf(`LOWER(display_name) LIKE $%[1]d
+			OR LOWER(COALESCE(email, '')) LIKE $%[1]d
+			OR LOWER(COALESCE((SELECT email FROM users WHERE id = contacts.linked_user_id), '')) LIKE $%[1]d`, n)
+		if digits := onlyDigits(s); digits != "" {
+			args = append(args, "%"+digits+"%")
+			cond += fmt.Sprintf(` OR regexp_replace(COALESCE(phone, ''), '\D', '', 'g') LIKE $%d`, len(args))
+		}
+		q += ` AND (` + cond + `)`
 	}
 
 	// Recent-first ranking: contacts the user just split with float to the
@@ -361,4 +371,15 @@ func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 		return ErrContactNotFound
 	}
 	return nil
+}
+
+// onlyDigits keeps 0-9 — phone search compares digits only (contract §8).
+func onlyDigits(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

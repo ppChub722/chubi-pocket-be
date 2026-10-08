@@ -24,6 +24,14 @@ func (s *Service) dispatchTx(
 	if actorUserID != nil && *actorUserID == recipientUserID {
 		return nil
 	}
+	// Recipient mutes (contract §5); requests are never muted.
+	if !actionTypes[notifType] {
+		if muted, err := s.store.IsMutedTx(ctx, tx, recipientUserID, notifType); err != nil {
+			return err
+		} else if muted {
+			return nil
+		}
+	}
 	bytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal %s payload: %w", notifType, err)
@@ -40,7 +48,7 @@ func (s *Service) DispatchSplitCreated(
 	ctx context.Context, tx pgx.Tx,
 	recipientUserID uuid.UUID, actorUserID uuid.UUID, p SplitCreatedPayload,
 ) error {
-	deepLink := splitDeepLink(p.SplitID, p.ProjectID)
+	deepLink := splitDeepLink(p.RecipientDebtID)
 	return s.dispatchTx(ctx, tx, TypeSplitCreated, recipientUserID, &actorUserID, p, &deepLink)
 }
 
@@ -48,7 +56,7 @@ func (s *Service) DispatchSplitPaid(
 	ctx context.Context, tx pgx.Tx,
 	recipientUserID uuid.UUID, actorUserID uuid.UUID, p SplitPaidPayload,
 ) error {
-	deepLink := splitDeepLink(p.SplitID, p.ProjectID)
+	deepLink := splitDeepLink(p.RecipientDebtID)
 	return s.dispatchTx(ctx, tx, TypeSplitPaid, recipientUserID, &actorUserID, p, &deepLink)
 }
 
@@ -56,7 +64,7 @@ func (s *Service) DispatchSplitReceived(
 	ctx context.Context, tx pgx.Tx,
 	recipientUserID uuid.UUID, actorUserID uuid.UUID, p SplitReceivedPayload,
 ) error {
-	deepLink := splitDeepLink(p.SplitID, p.ProjectID)
+	deepLink := splitDeepLink(p.RecipientDebtID)
 	return s.dispatchTx(ctx, tx, TypeSplitReceived, recipientUserID, &actorUserID, p, &deepLink)
 }
 
@@ -114,9 +122,11 @@ func (s *Service) DispatchAccountInvite(
 	return s.dispatchTx(ctx, tx, TypeAccountInvite, recipientUserID, &actorUserID, p, &deepLink)
 }
 
-func splitDeepLink(splitID uuid.UUID, projectID *uuid.UUID) string {
-	if projectID != nil {
-		return fmt.Sprintf("/projects/%s/splits/%s", *projectID, splitID)
+// splitDeepLink opens the recipient's own debt row when they have one;
+// otherwise (split_created awaiting "add to my debts") the debts list.
+func splitDeepLink(recipientDebtID *uuid.UUID) string {
+	if recipientDebtID != nil {
+		return fmt.Sprintf("/personal-debts/%s", *recipientDebtID)
 	}
-	return fmt.Sprintf("/shared-expenses/splits/%s", splitID)
+	return "/personal-debts"
 }

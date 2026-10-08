@@ -163,7 +163,29 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	}
 	if f.CategoryID != nil {
 		args = append(args, *f.CategoryID)
-		whereClauses = append(whereClauses, fmt.Sprintf("t.category_id = $%d", len(args)))
+		if f.IncludeChildren {
+			whereClauses = append(whereClauses, fmt.Sprintf(
+				"t.category_id IN (SELECT id FROM categories WHERE id = $%[1]d OR parent_id = $%[1]d)", len(args)))
+		} else {
+			whereClauses = append(whereClauses, fmt.Sprintf("t.category_id = $%d", len(args)))
+		}
+	}
+	if f.Uncategorized {
+		whereClauses = append(whereClauses, "t.category_id IS NULL")
+	}
+	// Search + tags use subqueries, not the SELECT's joins, so the COUNT
+	// query below can share the same WHERE.
+	if q := strings.TrimSpace(f.Q); q != "" {
+		args = append(args, "%"+shared.EscapeLike(q)+"%")
+		whereClauses = append(whereClauses, fmt.Sprintf(`(t.note ILIKE $%[1]d
+			OR EXISTS (SELECT 1 FROM categories qc LEFT JOIN categories qp ON qp.id = qc.parent_id
+			           WHERE qc.id = t.category_id AND (qc.name ILIKE $%[1]d OR qp.name ILIKE $%[1]d))
+			OR EXISTS (SELECT 1 FROM accounts qa WHERE qa.id = t.account_id AND qa.name ILIKE $%[1]d))`, len(args)))
+	}
+	if len(f.TagIDs) > 0 {
+		args = append(args, f.TagIDs)
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM transaction_tags tt WHERE tt.transaction_id = t.id AND tt.tag_id = ANY($%d))", len(args)))
 	}
 	if f.Type != nil {
 		args = append(args, string(*f.Type))

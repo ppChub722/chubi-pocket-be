@@ -41,6 +41,9 @@ var (
 	ErrSplitsExceedParent   = errors.New("sum of splits exceeds parent amount")
 	ErrMemberNotInProject   = errors.New("member does not belong to this project")
 	ErrLinkRequestNotForYou = errors.New("link request is not addressed to caller")
+	// Contract §6b.
+	ErrCannotChangeOwner = errors.New("the owner's role can't be changed here; use transfer-ownership")
+	ErrViewerReadOnly    = errors.New("viewers can't change project transactions")
 )
 
 const projectColumns = `id, owner_user_id, name, type, description,

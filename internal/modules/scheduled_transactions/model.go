@@ -144,7 +144,8 @@ type UpcomingItem struct {
 	Type            string    `json:"type"`
 	NextBillingDate string    `json:"next_billing_date"`
 	Amount          float64   `json:"amount"`
-	DaysUntil       int       `json:"days_until"`
+	DaysUntil       int       `json:"days_until"` // negative when overdue
+	Overdue         bool      `json:"overdue"`
 }
 
 type UpcomingResponse struct {

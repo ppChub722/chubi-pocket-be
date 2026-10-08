@@ -245,3 +245,19 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+// AssertCanWrite — the caller is an active, non-viewer member (contract
+// §6b: viewers are read-only for project transactions and marks).
+func (s *Store) AssertCanWrite(ctx context.Context, projectID, userID uuid.UUID) (*ProjectMember, error) {
+	m, err := s.MemberByUserID(ctx, projectID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if m.Status != "active" {
+		return nil, ErrNotMember
+	}
+	if m.Role == RoleViewer {
+		return nil, ErrViewerReadOnly
+	}
+	return m, nil
+}

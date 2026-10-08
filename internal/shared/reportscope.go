@@ -16,7 +16,9 @@ import "fmt"
 //   - report_scope = 'own' AND the row was authored by U.
 //
 // Rows on accounts where U's scope is 'none' — or where U has no
-// membership at all — are excluded. Personal accounts are backfilled
+// membership at all — are excluded. Floating rows (account_id IS NULL,
+// migration 000042 "no wallet") have no membership to consult, so they
+// count for their author only. Personal accounts are backfilled
 // with an owner row at 'all' (migration 000039), so single-member
 // behavior is identical to the pre-shared-wallets `user_id = U` filter.
 //
@@ -31,7 +33,7 @@ import "fmt"
 func ReportScopePredicate(txAlias, userParam string) string {
 	// Correlated scalar subquery: pick the governing membership row,
 	// translate its scope into a boolean; no row → NULL → FALSE.
-	return fmt.Sprintf(`COALESCE((
+	return fmt.Sprintf(`CASE WHEN %[1]s.account_id IS NULL THEN %[1]s.user_id = %[2]s ELSE COALESCE((
 		SELECT CASE
 			WHEN am.report_scope = 'all' THEN TRUE
 			WHEN am.report_scope = 'own' THEN %[1]s.user_id = %[2]s
@@ -43,7 +45,18 @@ func ReportScopePredicate(txAlias, userParam string) string {
 		  AND am.joined_at IS NOT NULL
 		ORDER BY (am.left_at IS NULL) DESC, am.joined_at DESC
 		LIMIT 1
-	), FALSE)`, txAlias, userParam)
+	), FALSE) END`, txAlias, userParam)
+}
+
+// ReportableCategoryPredicate is the "counts as real income/expense"
+// filter (spec §03/§2.7 + §05/§4.14c): keep the row when its category
+// has include_in_report = TRUE, or when it has no category at all.
+// System rows (Opening Balance, Adjustment, Transfer In/Out, Debt
+// Received/Paid) are seeded FALSE and drop out without a special case.
+//
+// catAlias is the alias of a LEFT JOIN categories ON t.category_id.
+func ReportableCategoryPredicate(catAlias string) string {
+	return fmt.Sprintf("COALESCE(%s.include_in_report, TRUE)", catAlias)
 }
 
 // ActiveMembershipPredicate returns a SQL boolean expression that is

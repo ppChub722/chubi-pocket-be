@@ -2,6 +2,7 @@ package personal_debts
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Store struct {
@@ -26,6 +29,9 @@ var (
 	ErrAlreadySettled    = errors.New("debt is already settled")
 	ErrAlreadyCancelled  = errors.New("debt is already cancelled")
 	ErrOverpayment       = errors.New("settle amount exceeds outstanding")
+	// ErrInvalidSettled — an update would leave settled_amount > amount
+	// (the DB CHECK would otherwise surface as a 500).
+	ErrInvalidSettled = errors.New("settled_amount exceeds amount")
 	// ErrContactNotFound — counterparty_contact_id doesn't exist or belongs
 	// to another user. Never link a debt to someone else's contact row.
 	ErrContactNotFound = errors.New("contact not found")
@@ -58,7 +64,7 @@ const debtColumns = `id, user_id, direction,
 	counterparty_contact_id, counterparty_person_name,
 	source_transaction_id, source_project_transaction_id, project_id,
 	amount, settled_amount, currency, status, note,
-	created_at, updated_at`
+	created_at, updated_at, counterpart_debt_id`
 
 func scanDebt(row pgx.Row) (*PersonalDebt, error) {
 	var d PersonalDebt
@@ -67,7 +73,7 @@ func scanDebt(row pgx.Row) (*PersonalDebt, error) {
 		&d.CounterpartyContactID, &d.CounterpartyPersonName,
 		&d.SourceTransactionID, &d.SourceProjectTransactionID, &d.ProjectID,
 		&d.Amount, &d.SettledAmount, &d.Currency, &d.Status, &d.Note,
-		&d.CreatedAt, &d.UpdatedAt,
+		&d.CreatedAt, &d.UpdatedAt, &d.CounterpartDebtID,
 	)
 	return &d, err
 }
@@ -373,7 +379,21 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequ
 	q := `UPDATE personal_debts SET updated_by_user_id = $1`
 	args := []any{userID}
 
-	if req.CounterpartyContactID != nil {
+	// Resulting settled_amount must stay within amount (DB CHECK → 500).
+	nextAmount, nextSettled := current.Amount, current.SettledAmount
+	if req.Amount != nil {
+		nextAmount = *req.Amount
+	}
+	if req.SettledAmount != nil {
+		nextSettled = *req.SettledAmount
+	}
+	if nextSettled > nextAmount {
+		return nil, ErrInvalidSettled
+	}
+
+	if req.ClearContact {
+		q += ", counterparty_contact_id = NULL"
+	} else if req.CounterpartyContactID != nil {
 		args = append(args, *req.CounterpartyContactID)
 		q += fmt.Sprintf(", counterparty_contact_id = $%d", len(args))
 	}
@@ -395,21 +415,15 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequ
 	}
 	if req.Status != nil {
 		// status='settled' requires settled_amount >= amount.
-		nextSettled := current.SettledAmount
-		if req.SettledAmount != nil {
-			nextSettled = *req.SettledAmount
-		}
-		nextAmount := current.Amount
-		if req.Amount != nil {
-			nextAmount = *req.Amount
-		}
 		if *req.Status == StatusSettled && nextSettled < nextAmount {
 			return nil, fmt.Errorf("cannot mark settled when settled_amount < amount")
 		}
 		args = append(args, *req.Status)
 		q += fmt.Sprintf(", status = $%d", len(args))
 	}
-	if req.Note != nil {
+	if req.ClearNote {
+		q += ", note = NULL"
+	} else if req.Note != nil {
 		args = append(args, *req.Note)
 		q += fmt.Sprintf(", note = $%d", len(args))
 	}
@@ -522,7 +536,10 @@ func (s *Store) People(ctx context.Context, userID uuid.UUID) ([]PersonRow, floa
 			MAX(display_name) AS display_name,
 			COALESCE(SUM(outstanding) FILTER (WHERE direction = 'owed_to_me'), 0) AS owed_to_me,
 			COALESCE(SUM(outstanding) FILTER (WHERE direction = 'i_owe'), 0) AS i_owe,
-			COUNT(*) AS open_count
+			COUNT(*) AS open_count,
+			-- contract §7: the contact's icon (NULL for free-text names).
+			(SELECT c.icon_code FROM contacts c
+			 WHERE c.id = counterparty_contact_id AND c.user_id = $1) AS icon_code
 		FROM grouped
 		GROUP BY counterparty_contact_id, group_key
 		ORDER BY ABS(
@@ -540,11 +557,18 @@ func (s *Store) People(ctx context.Context, userID uuid.UUID) ([]PersonRow, floa
 	var totalOwed, totalIOwe float64
 	for rows.Next() {
 		var r PersonRow
+		var icon []byte
 		if err := rows.Scan(
 			&r.ContactID, &r.DisplayName,
-			&r.OwedToMeOpen, &r.IOweOpen, &r.OpenCount,
+			&r.OwedToMeOpen, &r.IOweOpen, &r.OpenCount, &icon,
 		); err != nil {
 			return nil, 0, 0, err
+		}
+		if icon != nil {
+			r.IconCode = new(shared.IconCode)
+			if err := json.Unmarshal(icon, r.IconCode); err != nil {
+				return nil, 0, 0, fmt.Errorf("unmarshal icon_code: %w", err)
+			}
 		}
 		r.NetPosition = r.OwedToMeOpen - r.IOweOpen
 		out = append(out, r)

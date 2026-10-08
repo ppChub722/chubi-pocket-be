@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,9 +20,17 @@ var (
 	ErrTerminalStatus            = errors.New("schedule is in a terminal status")
 )
 
+// TimezoneResolver picks the caller's location (header → stored pref →
+// default). Wired from budgets.Service.ResolveTimezone in main.
+type TimezoneResolver func(ctx context.Context, userID uuid.UUID, headerTZ string) (*time.Location, string, error)
+
 type Service struct {
-	store *Store
+	store      *Store
+	resolveLoc TimezoneResolver
 }
+
+// WithTimezoneResolver wires the tz policy used by Upcoming.
+func (s *Service) WithTimezoneResolver(fn TimezoneResolver) { s.resolveLoc = fn }
 
 func NewService(store *Store) *Service {
 	return &Service{store: store}
@@ -82,7 +91,7 @@ func (s *Service) List(
 }
 
 func (s *Service) Upcoming(
-	ctx context.Context, userID uuid.UUID, days int,
+	ctx context.Context, userID uuid.UUID, days int, headerTZ string,
 ) (*UpcomingResponse, error) {
 	if days <= 0 {
 		days = 7
@@ -90,22 +99,31 @@ func (s *Service) Upcoming(
 	if days > 90 {
 		days = 90
 	}
-	rows, err := s.store.Upcoming(ctx, userID, days)
+	loc := time.UTC
+	if s.resolveLoc != nil {
+		l, _, err := s.resolveLoc(ctx, userID, headerTZ)
+		if err != nil {
+			return nil, err
+		}
+		loc = l
+	}
+	now := time.Now().In(loc)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+
+	// Overdue rows included: nothing auto-generates schedules yet, so a
+	// past next_billing_date means "not recorded" — the user should see it.
+	rows, err := s.store.Upcoming(ctx, userID, today.AddDate(0, 0, days).Format(dateLayout))
 	if err != nil {
 		return nil, err
 	}
 
 	out := UpcomingResponse{Data: make([]UpcomingItem, 0, len(rows))}
-	today := time.Now().UTC().Truncate(24 * time.Hour)
 	for _, r := range rows {
-		due, err := time.Parse(dateLayout, r.NextBillingDate)
+		due, err := time.ParseInLocation(dateLayout, r.NextBillingDate, loc)
 		if err != nil {
 			continue
 		}
-		daysUntil := int(due.Sub(today).Hours() / 24)
-		if daysUntil < 0 {
-			daysUntil = 0
-		}
+		daysUntil := int(math.Round(due.Sub(today).Hours() / 24))
 		out.Data = append(out.Data, UpcomingItem{
 			ID:              r.ID,
 			Name:            r.Name,
@@ -113,6 +131,7 @@ func (s *Service) Upcoming(
 			NextBillingDate: r.NextBillingDate,
 			Amount:          r.Amount,
 			DaysUntil:       daysUntil,
+			Overdue:         daysUntil < 0,
 		})
 		switch r.Type {
 		case TypeExpense:

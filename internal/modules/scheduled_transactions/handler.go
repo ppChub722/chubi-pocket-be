@@ -74,7 +74,7 @@ func (h *Handler) Upcoming(c *gin.Context) {
 		return
 	}
 	days := atoiOr(c.Query("days"), 7)
-	out, err := h.service.Upcoming(c.Request.Context(), userID, days)
+	out, err := h.service.Upcoming(c.Request.Context(), userID, days, c.GetHeader("X-Timezone"))
 	if err != nil {
 		response.InternalError(c, "Upcoming failed", err.Error())
 		return

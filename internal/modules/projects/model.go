@@ -280,7 +280,11 @@ type SummaryResponse struct {
 	TotalIncome      float64   `json:"total_income"`
 	TransactionCount int       `json:"transaction_count"`
 	MemberCount      int       `json:"member_count"`
-	MyPosition       *float64  `json:"my_position,omitempty"`
+	// Contract §6a — expense parents only. my_position omitted when the
+	// caller isn't a member.
+	MyPosition *MemberPosition `json:"my_position,omitempty"`
+	Members    []MemberPosition `json:"members"`
+	ByCategory []CategoryTotal  `json:"by_category"`
 	PlannedAmount    *float64  `json:"planned_amount,omitempty"`
 	SpentNet         *float64  `json:"spent_net,omitempty"`
 	Remaining        *float64  `json:"remaining,omitempty"`

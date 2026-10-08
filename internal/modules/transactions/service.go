@@ -1156,9 +1156,14 @@ func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequ
 	// The central report-scope predicate (spec §14/5 guardrail) replaces
 	// the old bare `user_id = $1` — every personal aggregate must go
 	// through shared.ReportScopePredicate, never an inlined filter.
+	// Reportable-category filter drops system rows (opening balance,
+	// adjustments, transfers, debt received/paid) — same rule as the
+	// per-account summary. Every query below joins categories as `c`.
 	whereClauses := []string{
 		shared.ReportScopePredicate("t", "$1"),
+		shared.ReportableCategoryPredicate("c"),
 		"t.date >= $2::date", "t.date <= $3::date",
+		"t.type IN ('income','expense')",
 	}
 	args := []any{userID, req.From, req.To}
 
@@ -1170,6 +1175,10 @@ func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequ
 		args = append(args, *req.CategoryID)
 		whereClauses = append(whereClauses, fmt.Sprintf("t.category_id = $%d", len(args)))
 	}
+	if req.Type != nil {
+		args = append(args, string(*req.Type))
+		whereClauses = append(whereClauses, fmt.Sprintf("t.type = $%d", len(args)))
+	}
 	where := joinAnd(whereClauses)
 
 	var (
@@ -1180,8 +1189,8 @@ func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequ
 	q := `SELECT
 		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'income'),  0),
 		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0),
-		COUNT(*) FILTER (WHERE t.type IN ('income', 'expense'))
-		FROM transactions t WHERE ` + where
+		COUNT(*)
+		FROM ` + summaryFrom + ` WHERE ` + where
 	if err := s.store.db.QueryRow(ctx, q, args...).Scan(&totalIncome, &totalExpense, &count); err != nil {
 		return nil, fmt.Errorf("summary: %w", err)
 	}
@@ -1198,7 +1207,9 @@ func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequ
 
 	switch req.GroupBy {
 	case "category":
-		resp.Groups, _ = s.summaryByCategory(ctx, where, args)
+		resp.Groups, _ = s.summaryByCategory(ctx, where, args, false)
+	case "parent_category":
+		resp.Groups, _ = s.summaryByCategory(ctx, where, args, true)
 	case "account":
 		resp.Groups, _ = s.summaryByAccount(ctx, where, args)
 	case "day", "week", "month":
@@ -1208,23 +1219,37 @@ func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequ
 	return resp, nil
 }
 
-func (s *Service) summaryByCategory(ctx context.Context, where string, args []any) ([]SummaryGroup, error) {
-	q := `SELECT COALESCE(c.id::text, ''), COALESCE(c.name, '(uncategorized)'),
-		COALESCE(SUM(t.amount), 0), COUNT(*)
-		FROM transactions t
-		LEFT JOIN categories c ON c.id = t.category_id
-		WHERE ` + where + ` AND t.type IN ('income','expense')
-		GROUP BY c.id, c.name
-		ORDER BY SUM(t.amount) DESC`
+// summaryFrom is the FROM clause every summary query shares — the
+// categories join backs shared.ReportableCategoryPredicate("c").
+const summaryFrom = `transactions t LEFT JOIN categories c ON c.id = t.category_id`
+
+// summaryAmounts is the shared aggregate tail: total, count, income, expense.
+const summaryAmounts = `COALESCE(SUM(t.amount), 0), COUNT(*),
+		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'income'),  0),
+		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0)`
+
+// summaryByCategory groups by leaf category, or — rollup=true — by the
+// top-level parent (categories are 2 levels deep). Uncategorized rows
+// come back as key "" / name "" so the client can localise the label.
+func (s *Service) summaryByCategory(ctx context.Context, where string, args []any, rollup bool) ([]SummaryGroup, error) {
+	keyExpr, nameExpr, join := "c.id", "c.name", ""
+	if rollup {
+		keyExpr, nameExpr = "COALESCE(p.id, c.id)", "COALESCE(p.name, c.name)"
+		join = " LEFT JOIN categories p ON p.id = c.parent_id"
+	}
+	q := fmt.Sprintf(`SELECT COALESCE(%[1]s::text, ''), COALESCE(%[2]s, ''), %[3]s
+		FROM %[4]s%[5]s
+		WHERE %[6]s
+		GROUP BY %[1]s, %[2]s
+		ORDER BY SUM(t.amount) DESC`, keyExpr, nameExpr, summaryAmounts, summaryFrom, join, where)
 	return s.scanSummary(ctx, q, args)
 }
 
 func (s *Service) summaryByAccount(ctx context.Context, where string, args []any) ([]SummaryGroup, error) {
-	q := `SELECT a.id::text, a.name,
-		COALESCE(SUM(t.amount), 0), COUNT(*)
-		FROM transactions t
+	q := `SELECT a.id::text, a.name, ` + summaryAmounts + `
+		FROM ` + summaryFrom + `
 		JOIN accounts a ON a.id = t.account_id
-		WHERE ` + where + ` AND t.type IN ('income','expense')
+		WHERE ` + where + `
 		GROUP BY a.id, a.name
 		ORDER BY SUM(t.amount) DESC`
 	return s.scanSummary(ctx, q, args)
@@ -1240,13 +1265,11 @@ func (s *Service) summaryByDate(ctx context.Context, where string, args []any, p
 	}
 	q := fmt.Sprintf(`SELECT
 		to_char(date_trunc('%s', t.date), 'YYYY-MM-DD'),
-		'',
-		COALESCE(SUM(t.amount), 0),
-		COUNT(*)
-		FROM transactions t
-		WHERE %s AND t.type IN ('income','expense')
+		'', %s
+		FROM %s
+		WHERE %s
 		GROUP BY date_trunc('%s', t.date)
-		ORDER BY 1 ASC`, trunc, where, trunc)
+		ORDER BY 1 ASC`, trunc, summaryAmounts, summaryFrom, where, trunc)
 	return s.scanSummary(ctx, q, args)
 }
 
@@ -1259,7 +1282,7 @@ func (s *Service) scanSummary(ctx context.Context, q string, args []any) ([]Summ
 	out := make([]SummaryGroup, 0)
 	for rows.Next() {
 		var g SummaryGroup
-		if err := rows.Scan(&g.Key, &g.Name, &g.Total, &g.Count); err != nil {
+		if err := rows.Scan(&g.Key, &g.Name, &g.Total, &g.Count, &g.Income, &g.Expense); err != nil {
 			return nil, err
 		}
 		out = append(out, g)

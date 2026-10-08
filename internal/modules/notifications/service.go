@@ -1,6 +1,7 @@
 package notifications
 
 import (
+	"errors"
 	"context"
 
 	"github.com/google/uuid"
@@ -53,8 +54,51 @@ func (s *Service) GetSettings(ctx context.Context, userID uuid.UUID) (*Settings,
 	return s.store.GetSettings(ctx, userID)
 }
 
+// Mutable / non-mutable notification types (contract §5). Requests need
+// an answer, so they can't be muted.
+var (
+	mutableTypes = map[string]bool{
+		TypeSplitCreated: true, TypeSplitPaid: true, TypeSplitReceived: true,
+		TypeProjectTxRecordedForYou: true, TypeProjectTxChanged: true, TypeProjectAdded: true,
+	}
+	actionTypes = map[string]bool{
+		TypeAccountInvite: true, TypeProjectInvite: true, TypeContactLinkRequest: true,
+	}
+)
+
+var (
+	ErrUnknownType       = errors.New("unknown notification type in muted_types")
+	ErrTypeNotMutable    = errors.New("invites and link requests can't be muted")
+	ErrDefaultAccountBad = errors.New("default_account_id must be an active wallet you're a member of")
+)
+
 // UpdateSettings applies a partial patch.
 func (s *Service) UpdateSettings(ctx context.Context, userID uuid.UUID, req UpdateSettingsRequest) (*Settings, error) {
+	if req.MutedTypes != nil {
+		seen := map[string]bool{}
+		clean := make([]string, 0, len(*req.MutedTypes))
+		for _, t := range *req.MutedTypes {
+			switch {
+			case actionTypes[t]:
+				return nil, ErrTypeNotMutable
+			case !mutableTypes[t]:
+				return nil, ErrUnknownType
+			case !seen[t]:
+				seen[t] = true
+				clean = append(clean, t)
+			}
+		}
+		req.MutedTypes = &clean
+	}
+	if req.DefaultAccountID != nil && !req.ClearDefaultAccount {
+		ok, err := s.store.IsActiveWalletMember(ctx, userID, *req.DefaultAccountID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, ErrDefaultAccountBad
+		}
+	}
 	return s.store.UpdateSettings(ctx, userID, req)
 }
 

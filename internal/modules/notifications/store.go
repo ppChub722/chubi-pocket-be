@@ -25,6 +25,9 @@ func (s *Store) Pool() *pgxpool.Pool { return s.db }
 var (
 	ErrNotificationNotFound = errors.New("notification not found")
 	ErrNotForYou            = errors.New("notification is not addressed to caller")
+	// ErrStateConflict — dismissing an actioned row or actioning a
+	// dismissed one (contract §11 → 409).
+	ErrStateConflict = errors.New("notification already in the other terminal state")
 )
 
 const notificationColumns = `id, recipient_user_id, type, actor_user_id, payload,
@@ -256,23 +259,6 @@ func (s *Store) MarkDismissedTx(ctx context.Context, tx pgx.Tx, userID, id uuid.
 	return s.markTerminalTx(ctx, tx, userID, id, "dismissed_at")
 }
 
-func (s *Store) markTerminalTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, col string) (*Notification, error) {
-	q := fmt.Sprintf(`UPDATE notifications SET
-		%s = COALESCE(%s, NOW()),
-		read_at = COALESCE(read_at, NOW()),
-		updated_by_user_id = $1
-		WHERE id = $2 AND recipient_user_id = $1
-		RETURNING %s`, col, col, notificationColumns)
-	n, err := scanNotification(tx.QueryRow(ctx, q, userID, id))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotificationNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("mark %s in tx: %w", col, err)
-	}
-	return n, nil
-}
-
 // GetByIDForCallerTx fetches a notification under the caller's identity
 // inside a tx, returning ErrNotForYou if the row isn't addressed to them.
 // Used by accept-link-request flows that need to read the payload before
@@ -292,22 +278,6 @@ func (s *Store) GetByIDForCallerTx(ctx context.Context, tx pgx.Tx, userID, id uu
 	return n, nil
 }
 
-func (s *Store) markTerminal(ctx context.Context, userID, id uuid.UUID, col string) (*Notification, error) {
-	q := fmt.Sprintf(`UPDATE notifications SET
-		%s = COALESCE(%s, NOW()),
-		read_at = COALESCE(read_at, NOW()),
-		updated_by_user_id = $1
-		WHERE id = $2 AND recipient_user_id = $1
-		RETURNING %s`, col, col, notificationColumns)
-	n, err := scanNotification(s.db.QueryRow(ctx, q, userID, id))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotificationNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("mark %s: %w", col, err)
-	}
-	return n, nil
-}
 
 func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	tag, err := s.db.Exec(ctx,
@@ -325,14 +295,14 @@ func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 
 const settingsColumns = `user_id, auto_notify_linked_split_contacts,
 	auto_add_to_personal_debt_on_split_notification, auto_record_received_payment,
-	auto_resolve_own_in_projects, default_account_id, created_at, updated_at`
+	auto_resolve_own_in_projects, default_account_id, muted_types, created_at, updated_at`
 
 func scanSettings(row pgx.Row) (*Settings, error) {
 	var s Settings
 	err := row.Scan(
 		&s.UserID, &s.AutoNotifyLinkedSplitContacts,
 		&s.AutoAddToPersonalDebtOnSplitNotification, &s.AutoRecordReceivedPayment,
-		&s.AutoResolveOwnInProjects, &s.DefaultAccountID, &s.CreatedAt, &s.UpdatedAt,
+		&s.AutoResolveOwnInProjects, &s.DefaultAccountID, &s.MutedTypes, &s.CreatedAt, &s.UpdatedAt,
 	)
 	return &s, err
 }
@@ -348,6 +318,9 @@ func (s *Store) GetSettings(ctx context.Context, userID uuid.UUID) (*Settings, e
 		return &Settings{
 			UserID:                        userID,
 			AutoNotifyLinkedSplitContacts: true,
+			// Owner decision 2026-10-07 (contract §5): default ON.
+			AutoAddToPersonalDebtOnSplitNotification: true,
+			MutedTypes: []string{},
 		}, nil
 	}
 	if err != nil {
@@ -389,9 +362,15 @@ func (s *Store) UpdateSettings(ctx context.Context, userID uuid.UUID, req Update
 		args = append(args, *req.AutoResolveOwnInProjects)
 		q += fmt.Sprintf(", auto_resolve_own_in_projects = $%d", len(args))
 	}
-	if req.DefaultAccountID != nil {
+	if req.ClearDefaultAccount {
+		q += ", default_account_id = NULL"
+	} else if req.DefaultAccountID != nil {
 		args = append(args, *req.DefaultAccountID)
 		q += fmt.Sprintf(", default_account_id = $%d", len(args))
+	}
+	if req.MutedTypes != nil {
+		args = append(args, *req.MutedTypes)
+		q += fmt.Sprintf(", muted_types = $%d", len(args))
 	}
 	q += " WHERE user_id = $1 RETURNING " + settingsColumns
 
@@ -431,4 +410,80 @@ func (s *Store) LookupUserByUsername(ctx context.Context, username string) (*uui
 		return nil, fmt.Errorf("lookup username: %w", err)
 	}
 	return &id, nil
+}
+
+// rowQuerier is satisfied by both *pgxpool.Pool and pgx.Tx.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func (s *Store) markTerminal(ctx context.Context, userID, id uuid.UUID, col string) (*Notification, error) {
+	return markTerminalOn(ctx, s.db, userID, id, col)
+}
+
+func (s *Store) markTerminalTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, col string) (*Notification, error) {
+	return markTerminalOn(ctx, tx, userID, id, col)
+}
+
+// markTerminalOn sets actioned_at or dismissed_at (idempotent). The two
+// are mutually exclusive (notifications_terminal_xor): asking for one when
+// the other is already set is ErrStateConflict (409), not a DB error.
+func markTerminalOn(ctx context.Context, db rowQuerier, userID, id uuid.UUID, col string) (*Notification, error) {
+	other := "dismissed_at"
+	if col == "dismissed_at" {
+		other = "actioned_at"
+	}
+	q := fmt.Sprintf(`UPDATE notifications SET
+		%[1]s = COALESCE(%[1]s, NOW()),
+		read_at = COALESCE(read_at, NOW()),
+		updated_by_user_id = $1
+		WHERE id = $2 AND recipient_user_id = $1 AND %[2]s IS NULL
+		RETURNING %[3]s`, col, other, notificationColumns)
+	n, err := scanNotification(db.QueryRow(ctx, q, userID, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Missing / not ours → 404; exists with the other state → 409.
+		var exists bool
+		if err := db.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM notifications WHERE id = $1 AND recipient_user_id = $2)`,
+			id, userID).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("mark %s: %w", col, err)
+		}
+		if exists {
+			return nil, ErrStateConflict
+		}
+		return nil, ErrNotificationNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("mark %s: %w", col, err)
+	}
+	return n, nil
+}
+
+// IsActiveWalletMember — userID actively belongs to an active wallet.
+func (s *Store) IsActiveWalletMember(ctx context.Context, userID, accountID uuid.UUID) (bool, error) {
+	var ok bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM account_members am JOIN accounts a ON a.id = am.account_id
+			WHERE am.account_id = $1 AND am.user_id = $2
+			  AND am.joined_at IS NOT NULL AND am.left_at IS NULL AND a.status = 'active'
+		)`, accountID, userID).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("wallet member: %w", err)
+	}
+	return ok, nil
+}
+
+// IsMutedTx — recipient muted this type (contract §5). Action-required
+// types never are (the API refuses to store them).
+func (s *Store) IsMutedTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, notifType string) (bool, error) {
+	var muted bool
+	err := tx.QueryRow(ctx, `
+		SELECT COALESCE((SELECT $2 = ANY(muted_types)
+		                 FROM user_notification_settings WHERE user_id = $1), FALSE)`,
+		userID, notifType).Scan(&muted)
+	if err != nil {
+		return false, fmt.Errorf("muted check: %w", err)
+	}
+	return muted, nil
 }

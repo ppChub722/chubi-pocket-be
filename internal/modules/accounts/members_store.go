@@ -53,9 +53,9 @@ func (s *Store) InsertMemberTx(
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
 	q := `INSERT INTO account_members
-		(id, account_id, user_id, role, report_scope, joined_at,
+		(id, account_id, user_id, role, report_scope, joined_at, sort_order,
 		 created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+		VALUES ($1, $2, $3, $4, $5, $6, ` + nextMemberSortOrder("$3") + `, $7, $7)
 		RETURNING ` + memberColumns
 	m, err := scanAccountMember(tx.QueryRow(ctx, q,
 		id, accountID, userID, role, reportScope, joinedAt, createdBy,
@@ -212,7 +212,8 @@ func (s *Store) ActivateMemberTx(
 	ctx context.Context, tx pgx.Tx, memberID, actorUserID uuid.UUID,
 ) (*AccountMember, error) {
 	q := `UPDATE account_members SET
-		joined_at = NOW(), report_scope = 'none', updated_by_user_id = $1
+		joined_at = NOW(), report_scope = 'none', updated_by_user_id = $1,
+		sort_order = ` + nextMemberSortOrder("account_members.user_id") + `
 		WHERE id = $2 AND joined_at IS NULL AND left_at IS NULL
 		RETURNING ` + memberColumns
 	m, err := scanAccountMember(tx.QueryRow(ctx, q, actorUserID, memberID))
@@ -416,4 +417,11 @@ func isMemberUniqueViolation(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "duplicate key") || strings.Contains(msg, "23505") ||
 		strings.Contains(msg, "idx_account_members_live_unique")
+}
+
+// nextMemberSortOrder — SQL for "after the user's last wallet": a new or
+// newly joined wallet lands at the end of that member's own list (§3).
+func nextMemberSortOrder(userExpr string) string {
+	return fmt.Sprintf(`COALESCE((SELECT MAX(x.sort_order) + 1 FROM account_members x
+		WHERE x.user_id = %s AND x.left_at IS NULL), 0)`, userExpr)
 }

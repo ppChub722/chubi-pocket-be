@@ -284,6 +284,19 @@ func (s *Service) UpdateMember(
 	if req.Role != nil && *req.Role == RoleOwner {
 		return nil, errors.New("use transfer-ownership to change owner")
 	}
+	// Contract §6b: the owner's own row can't be demoted here either.
+	if req.Role != nil {
+		target, err := s.store.GetMember(ctx, memberID)
+		if err != nil {
+			return nil, err
+		}
+		if target.ProjectID != projectID {
+			return nil, ErrMemberNotInProject
+		}
+		if target.Role == RoleOwner {
+			return nil, ErrCannotChangeOwner
+		}
+	}
 	if req.Role != nil {
 		if _, err := s.store.UpdateMemberRole(ctx, projectID, memberID, *req.Role, callerUserID); err != nil {
 			return nil, err
@@ -419,6 +432,17 @@ func (s *Service) RejectLinkRequest(ctx context.Context, userID, notificationID 
 	}
 	if n.Type != notifications.TypeProjectInvite {
 		return fmt.Errorf("notification is not a project_invite")
+	}
+	// Contract §6b: the invite's still-unlinked member row stops showing as
+	// "pending" — it becomes a left row (its history, if any, stays).
+	var p notifications.ProjectInvitePayload
+	if err := json.Unmarshal(n.Payload, &p); err == nil && p.ProjectMemberID != uuid.Nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE project_members SET status = 'left', left_at = NOW(), updated_by_user_id = $1
+			WHERE id = $2 AND user_id IS NULL AND status = 'pending'`,
+			userID, p.ProjectMemberID); err != nil {
+			return fmt.Errorf("drop pending member: %w", err)
+		}
 	}
 	if _, err := s.notifs.MarkDismissedTx(ctx, tx, userID, notificationID); err != nil {
 		return err
