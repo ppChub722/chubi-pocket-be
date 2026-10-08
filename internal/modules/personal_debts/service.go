@@ -76,14 +76,11 @@ type SettleResult struct {
 	Debt        *PersonalDebt `json:"debt"`
 }
 
-// Settle records a settlement event. If `req.AccountID` is provided AND
-// non-zero, a transaction is created (income for owed_to_me, expense for
-// i_owe) AND the debt's settled_amount is bumped via the auto-bump hook.
-//
-// Otherwise this falls back to a direct edit (just bump settled_amount,
-// no transaction). Used for non-cash settles: forgiveness, barter, or
-// users who don't track a cash account.
-func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRequest, recordTransaction bool) (*SettleResult, error) {
+// Settle records a settlement event: always a transaction (income for
+// owed_to_me, expense for i_owe) — into req.AccountID, or a floating row
+// when it's nil — and the debt's settled_amount is bumped by the auto-bump
+// hook. Forgiveness / write-offs use Cancel instead.
+func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRequest) (*SettleResult, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
@@ -122,45 +119,31 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRe
 		date = &today
 	}
 
-	var txn any
-	var txID *uuid.UUID // the wallet transaction, nil for a direct settle
-	if recordTransaction && req.AccountID != nil {
-		// Direction-aware transaction: i_owe → expense, owed_to_me → income
-		var txType transactions.TxType
-		switch current.Direction {
-		case DirectionIOwe:
-			txType = transactions.TypeExpense
-		case DirectionOwedToMe:
-			txType = transactions.TypeIncome
-		default:
-			return nil, fmt.Errorf("unknown direction: %s", current.Direction)
-		}
-
-		accID := *req.AccountID
-		createReq := transactions.CreateRequest{
-			Type:      txType,
-			AccountID: &accID,
-			Amount:    amount,
-			Date:      *date,
-			Note:      req.Note,
-		}
-		created, err := s.txs.CreateInTxWithSourceDebt(ctx, tx, userID, id, createReq)
-		if err != nil {
-			return nil, err
-		}
-		txn, txID = created, &created.ID
-		// CreateInTxWithSourceDebt's hook bumps settled_amount via
-		// AutoBumpInTx — but only when the user_id + debt_id match. The
-		// auto-bumper handled it; nothing to do here.
-	} else {
-		// Direct edit path: no transaction, just bump.
-		if _, err := s.store.SettleInTx(ctx, tx, userID, id, amount); err != nil {
-			return nil, err
-		}
+	// Always a real transaction (owner decision 2026-10-08): into the
+	// chosen wallet, or a floating row when none — the debt is settled by
+	// the auto-bump hook either way. i_owe → expense, owed_to_me → income.
+	var txType transactions.TxType
+	switch current.Direction {
+	case DirectionIOwe:
+		txType = transactions.TypeExpense
+	case DirectionOwedToMe:
+		txType = transactions.TypeIncome
+	default:
+		return nil, fmt.Errorf("unknown direction: %s", current.Direction)
+	}
+	created, err := s.txs.CreateInTxWithSourceDebt(ctx, tx, userID, id, transactions.CreateRequest{
+		Type:      txType,
+		AccountID: req.AccountID,
+		Amount:    amount,
+		Date:      *date,
+		Note:      req.Note,
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	// Linked split → notify / auto-settle the other side (split_flow.go).
-	if err := s.afterSettleTx(ctx, tx, current, amount, *date, txID); err != nil {
+	// Linked split → tell the other side (split_flow.go).
+	if err := s.afterSettleTx(ctx, tx, current, amount, *date); err != nil {
 		return nil, err
 	}
 
@@ -172,7 +155,7 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRe
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return &SettleResult{Transaction: txn, Debt: updated}, nil
+	return &SettleResult{Transaction: created, Debt: updated}, nil
 }
 
 func (s *Service) People(ctx context.Context, userID uuid.UUID) (*PeopleResponse, error) {

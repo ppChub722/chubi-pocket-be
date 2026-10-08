@@ -511,3 +511,28 @@ func atoiOr(s string, dflt int) int {
 	}
 	return n
 }
+
+// POST /v1/projects/:id/project-transactions/:pt_id/copy — copy a project
+// row into the caller's own book as a floating transaction (the "add to my
+// book" action on project_tx_recorded_for_you, contract §5). Idempotent.
+func (h *Handler) CopyToPersonal(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	ptID, err := uuid.Parse(c.Param("pt_id"))
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid project transaction id", nil)
+		return
+	}
+	txID, err := h.service.CopyToPersonal(c.Request.Context(), userID, id, ptID)
+	if errors.Is(err, ErrNoShareToCopy) {
+		response.BadRequest(c, "NOTHING_TO_COPY", err.Error(), nil)
+		return
+	}
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"transaction_id": txID})
+}

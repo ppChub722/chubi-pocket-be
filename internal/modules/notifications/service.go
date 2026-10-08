@@ -1,8 +1,8 @@
 package notifications
 
 import (
-	"errors"
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -54,12 +54,19 @@ func (s *Service) GetSettings(ctx context.Context, userID uuid.UUID) (*Settings,
 	return s.store.GetSettings(ctx, userID)
 }
 
-// Mutable / non-mutable notification types (contract §5). Requests need
-// an answer, so they can't be muted.
+// Per-type switches (contract §5). Requests need an answer, so they can't
+// be muted or automated; auto exists only where the notification carries
+// an action.
 var (
 	mutableTypes = map[string]bool{
-		TypeSplitCreated: true, TypeSplitPaid: true, TypeSplitReceived: true,
+		TypeSplitCreated: true, TypeSplitPaid: true,
 		TypeProjectTxRecordedForYou: true, TypeProjectTxChanged: true, TypeProjectAdded: true,
+	}
+	autoableTypes = map[string]bool{
+		TypeSplitCreated:            true, // add to my debts
+		TypeSplitPaid:               true, // record the receipt
+		TypeProjectTxRecordedForYou: true, // copy into my book
+		TypeProjectTxChanged:        true, // update my copy to match
 	}
 	actionTypes = map[string]bool{
 		TypeAccountInvite: true, TypeProjectInvite: true, TypeContactLinkRequest: true,
@@ -67,28 +74,45 @@ var (
 )
 
 var (
-	ErrUnknownType       = errors.New("unknown notification type in muted_types")
+	ErrUnknownType       = errors.New("unknown or unsupported notification type")
 	ErrTypeNotMutable    = errors.New("invites and link requests can't be muted")
 	ErrDefaultAccountBad = errors.New("default_account_id must be an active wallet you're a member of")
 )
 
-// UpdateSettings applies a partial patch.
+// cleanTypes validates + de-duplicates a muted_types / auto_types list.
+func cleanTypes(in []string, allowed map[string]bool) ([]string, error) {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, t := range in {
+		switch {
+		case actionTypes[t]:
+			return nil, ErrTypeNotMutable
+		case !allowed[t]:
+			return nil, ErrUnknownType
+		case !seen[t]:
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
+// UpdateSettings applies a partial patch. A muted type keeps whatever is in
+// auto_types — it's simply ignored until the type is unmuted.
 func (s *Service) UpdateSettings(ctx context.Context, userID uuid.UUID, req UpdateSettingsRequest) (*Settings, error) {
 	if req.MutedTypes != nil {
-		seen := map[string]bool{}
-		clean := make([]string, 0, len(*req.MutedTypes))
-		for _, t := range *req.MutedTypes {
-			switch {
-			case actionTypes[t]:
-				return nil, ErrTypeNotMutable
-			case !mutableTypes[t]:
-				return nil, ErrUnknownType
-			case !seen[t]:
-				seen[t] = true
-				clean = append(clean, t)
-			}
+		clean, err := cleanTypes(*req.MutedTypes, mutableTypes)
+		if err != nil {
+			return nil, err
 		}
 		req.MutedTypes = &clean
+	}
+	if req.AutoTypes != nil {
+		clean, err := cleanTypes(*req.AutoTypes, autoableTypes)
+		if err != nil {
+			return nil, err
+		}
+		req.AutoTypes = &clean
 	}
 	if req.DefaultAccountID != nil && !req.ClearDefaultAccount {
 		ok, err := s.store.IsActiveWalletMember(ctx, userID, *req.DefaultAccountID)

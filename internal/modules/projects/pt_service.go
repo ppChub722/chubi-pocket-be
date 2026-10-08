@@ -41,32 +41,22 @@ func (s *Service) CreateProjectTransaction(
 		return nil, err
 	}
 
-	// auto_resolve_own_in_projects (contract §5): my own row → my personal
-	// mirror, same tx (auto_resolve.go).
-	if s.txs != nil && s.notifs != nil && member.UserID != nil && *member.UserID == callerUserID {
-		if st, err := s.notifs.GetSettings(ctx, callerUserID); err == nil && st.AutoResolveOwnInProjects {
-			if err := s.autoResolveOwnTx(ctx, tx, callerUserID, pt); err != nil {
-				return nil, err
+	// Contract §5. My own row → my personal copy when I switched that on
+	// (no notification: I did it). Someone else recorded it as mine →
+	// project_tx_recorded_for_you, whose auto copies it for me.
+	if s.notifs != nil && member.UserID != nil {
+		if *member.UserID == callerUserID {
+			if s.txs != nil {
+				st, err := s.notifs.SettingsTx(ctx, tx, callerUserID)
+				if err == nil && st.AutoResolveOwnInProjects {
+					if _, err := s.copyToPersonalTx(ctx, tx, callerUserID, member.ID, pt); err != nil {
+						return nil, err
+					}
+				}
 			}
+		} else if err := s.notifyRecordedTx(ctx, tx, *member.UserID, member.ID, callerUserID, pt); err != nil {
+			return nil, err
 		}
-	}
-
-	// project_tx_recorded_for_you fires once for the parent's actor when
-	// they're linked and not the recorder. Split children don't trigger
-	// their own notifications — the parent event is enough.
-	if s.notifs != nil && member.UserID != nil && *member.UserID != callerUserID {
-		recorderName := userDisplayOrEmpty(ctx, tx, callerUserID)
-		_ = s.notifs.DispatchProjectTxRecorded(ctx, tx, *member.UserID, callerUserID,
-			notifications.ProjectTxRecordedPayload{
-				ProjectTransactionID: pt.ID,
-				ProjectID:            projectID,
-				RecorderUserID:       callerUserID,
-				RecorderDisplayName:  recorderName,
-				Amount:               pt.Amount,
-				Currency:             pt.Currency,
-				Type:                 pt.Type,
-				Note:                 pt.Note,
-			})
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -101,6 +91,7 @@ func (s *Service) UpdateProjectTransaction(
 	}
 	defer tx.Rollback(ctx)
 
+	beforeShares := splitSharesTx(ctx, tx, ptID)
 	updated, err := s.store.UpdatePTTx(ctx, tx, projectID, ptID, callerUserID, req)
 	if err != nil {
 		return nil, err
@@ -109,18 +100,13 @@ func (s *Service) UpdateProjectTransaction(
 	if s.notifs != nil {
 		recipients, err := s.store.PTRecipientsForChange(ctx, ptID, callerUserID)
 		if err == nil && len(recipients) > 0 {
-			editorName := userDisplayOrEmpty(ctx, tx, callerUserID)
+			afterShares := splitSharesTx(ctx, tx, ptID)
 			diff := buildDiff(current, updated)
 			for _, recipient := range recipients {
-				_ = s.notifs.DispatchProjectTxChanged(ctx, tx, recipient, callerUserID,
-					notifications.ProjectTxChangedPayload{
-						ProjectTransactionID: ptID,
-						ProjectID:            projectID,
-						EditorUserID:         callerUserID,
-						EditorDisplayName:    editorName,
-						ChangeKind:           "edited",
-						Diff:                 diff,
-					})
+				if err := s.notifyChangedTx(ctx, tx, recipient, callerUserID,
+					current, updated, beforeShares, afterShares, diff); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -165,7 +151,7 @@ func (s *Service) DeleteProjectTransaction(
 						EditorUserID:         callerUserID,
 						EditorDisplayName:    editorName,
 						ChangeKind:           "deleted",
-					})
+					}, false)
 			}
 			_ = tx.Commit(ctx)
 		}

@@ -183,9 +183,8 @@ func (h *Handler) Cancel(c *gin.Context) {
 }
 
 // POST /v1/personal-debts/:id/settle
-// Records a settlement event. By default creates a transaction (account_id
-// must be supplied). When `?direct=true` is set, skips the transaction
-// and just bumps settled_amount — for forgiveness/barter/no-cash cases.
+// Records a payment against a debt: always a transaction — into
+// account_id, or a floating (no-wallet) row when it is omitted.
 func (h *Handler) Settle(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -201,15 +200,12 @@ func (h *Handler) Settle(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
-	directOnly := c.Query("direct") == "true"
-	if directOnly {
-		req.AccountID = nil // ignored on a direct settle
-	} else if req.AccountID == nil || *req.AccountID == uuid.Nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "account_id is required unless direct=true", nil)
-		return
+	// Optional wallet: none = a floating transaction (contract §7, rev.
+	// 2026-10-08). The old ?direct=true is ignored — settling always records.
+	if req.AccountID != nil && *req.AccountID == uuid.Nil {
+		req.AccountID = nil
 	}
-	recordTx := !directOnly
-	out, err := h.service.Settle(c.Request.Context(), userID, id, req, recordTx)
+	out, err := h.service.Settle(c.Request.Context(), userID, id, req)
 	if err != nil {
 		mapServiceError(c, err)
 		return

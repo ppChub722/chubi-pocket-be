@@ -89,16 +89,18 @@ func (s *Store) HasPendingByPayloadKey(
 func (s *Store) InsertTx(
 	ctx context.Context, tx pgx.Tx,
 	recipientUserID uuid.UUID, notifType string,
-	actorUserID *uuid.UUID, payload []byte, deepLink *string,
+	actorUserID *uuid.UUID, payload []byte, deepLink *string, actioned bool,
 ) (uuid.UUID, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("uuid: %w", err)
 	}
 	q := `INSERT INTO notifications
-		(id, recipient_user_id, type, actor_user_id, payload, deep_link, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $4, $4)`
-	if _, err := tx.Exec(ctx, q, id, recipientUserID, notifType, actorUserID, payload, deepLink); err != nil {
+		(id, recipient_user_id, type, actor_user_id, payload, deep_link, created_by_user_id, updated_by_user_id,
+		 actioned_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $4, $4,
+		        CASE WHEN $7::boolean THEN NOW() END)`
+	if _, err := tx.Exec(ctx, q, id, recipientUserID, notifType, actorUserID, payload, deepLink, actioned); err != nil {
 		return uuid.Nil, fmt.Errorf("insert notification: %w", err)
 	}
 	return id, nil
@@ -293,35 +295,43 @@ func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 
 // --- Settings ---
 
-const settingsColumns = `user_id, auto_notify_linked_split_contacts,
-	auto_add_to_personal_debt_on_split_notification, auto_record_received_payment,
-	auto_resolve_own_in_projects, default_account_id, muted_types, created_at, updated_at`
+const settingsColumns = `user_id, muted_types, auto_types, default_account_id,
+	auto_resolve_own_in_projects, created_at, updated_at`
 
 func scanSettings(row pgx.Row) (*Settings, error) {
 	var s Settings
 	err := row.Scan(
-		&s.UserID, &s.AutoNotifyLinkedSplitContacts,
-		&s.AutoAddToPersonalDebtOnSplitNotification, &s.AutoRecordReceivedPayment,
-		&s.AutoResolveOwnInProjects, &s.DefaultAccountID, &s.MutedTypes, &s.CreatedAt, &s.UpdatedAt,
+		&s.UserID, &s.MutedTypes, &s.AutoTypes, &s.DefaultAccountID,
+		&s.AutoResolveOwnInProjects, &s.CreatedAt, &s.UpdatedAt,
 	)
 	return &s, err
 }
 
+// DefaultSettings mirrors the column defaults (migration 000045).
+func DefaultSettings(userID uuid.UUID) *Settings {
+	return &Settings{
+		UserID:     userID,
+		MutedTypes: []string{},
+		AutoTypes:  []string{TypeSplitCreated},
+	}
+}
+
 func (s *Store) GetSettings(ctx context.Context, userID uuid.UUID) (*Settings, error) {
+	return getSettingsOn(ctx, s.db, userID)
+}
+
+// GetSettingsTx reads inside a producer's transaction.
+func (s *Store) GetSettingsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) (*Settings, error) {
+	return getSettingsOn(ctx, tx, userID)
+}
+
+func getSettingsOn(ctx context.Context, db rowQuerier, userID uuid.UUID) (*Settings, error) {
 	q := `SELECT ` + settingsColumns + ` FROM user_notification_settings WHERE user_id = $1`
-	row, err := scanSettings(s.db.QueryRow(ctx, q, userID))
+	row, err := scanSettings(db.QueryRow(ctx, q, userID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Defensive: if a user predates the auth-hook seeding and somehow
-		// dodged the migration backfill, return defaults rather than 404.
-		// The migration's INSERT ... ON CONFLICT covers all known existing
-		// users, so this should be unreachable in practice.
-		return &Settings{
-			UserID:                        userID,
-			AutoNotifyLinkedSplitContacts: true,
-			// Owner decision 2026-10-07 (contract §5): default ON.
-			AutoAddToPersonalDebtOnSplitNotification: true,
-			MutedTypes: []string{},
-		}, nil
+		// Defensive: seeded at registration + backfilled by migration, so
+		// this should be unreachable — fall back to the defaults.
+		return DefaultSettings(userID), nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
@@ -346,17 +356,13 @@ func (s *Store) UpdateSettings(ctx context.Context, userID uuid.UUID, req Update
 	q := `UPDATE user_notification_settings SET updated_by_user_id = $1`
 	args := []any{userID}
 
-	if req.AutoNotifyLinkedSplitContacts != nil {
-		args = append(args, *req.AutoNotifyLinkedSplitContacts)
-		q += fmt.Sprintf(", auto_notify_linked_split_contacts = $%d", len(args))
+	if req.MutedTypes != nil {
+		args = append(args, *req.MutedTypes)
+		q += fmt.Sprintf(", muted_types = $%d", len(args))
 	}
-	if req.AutoAddToPersonalDebtOnSplitNotification != nil {
-		args = append(args, *req.AutoAddToPersonalDebtOnSplitNotification)
-		q += fmt.Sprintf(", auto_add_to_personal_debt_on_split_notification = $%d", len(args))
-	}
-	if req.AutoRecordReceivedPayment != nil {
-		args = append(args, *req.AutoRecordReceivedPayment)
-		q += fmt.Sprintf(", auto_record_received_payment = $%d", len(args))
+	if req.AutoTypes != nil {
+		args = append(args, *req.AutoTypes)
+		q += fmt.Sprintf(", auto_types = $%d", len(args))
 	}
 	if req.AutoResolveOwnInProjects != nil {
 		args = append(args, *req.AutoResolveOwnInProjects)
@@ -367,10 +373,6 @@ func (s *Store) UpdateSettings(ctx context.Context, userID uuid.UUID, req Update
 	} else if req.DefaultAccountID != nil {
 		args = append(args, *req.DefaultAccountID)
 		q += fmt.Sprintf(", default_account_id = $%d", len(args))
-	}
-	if req.MutedTypes != nil {
-		args = append(args, *req.MutedTypes)
-		q += fmt.Sprintf(", muted_types = $%d", len(args))
 	}
 	q += " WHERE user_id = $1 RETURNING " + settingsColumns
 
@@ -474,16 +476,3 @@ func (s *Store) IsActiveWalletMember(ctx context.Context, userID, accountID uuid
 	return ok, nil
 }
 
-// IsMutedTx — recipient muted this type (contract §5). Action-required
-// types never are (the API refuses to store them).
-func (s *Store) IsMutedTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, notifType string) (bool, error) {
-	var muted bool
-	err := tx.QueryRow(ctx, `
-		SELECT COALESCE((SELECT $2 = ANY(muted_types)
-		                 FROM user_notification_settings WHERE user_id = $1), FALSE)`,
-		userID, notifType).Scan(&muted)
-	if err != nil {
-		return false, fmt.Errorf("muted check: %w", err)
-	}
-	return muted, nil
-}

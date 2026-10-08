@@ -352,6 +352,7 @@ func main() {
 			protected.PUT("/projects/:id/project-transactions/:pt_id", projectsHandler.UpdatePT)
 			protected.DELETE("/projects/:id/project-transactions/:pt_id", projectsHandler.DeletePT)
 			protected.PUT("/projects/:id/project-transactions/:pt_id/mark", projectsHandler.ToggleMark)
+			protected.POST("/projects/:id/project-transactions/:pt_id/copy", projectsHandler.CopyToPersonal)
 			protected.GET("/projects/:id/summary", projectsHandler.Summary)
 
 			// Saving goals (Phase 1c). All paths under /saving-goals are

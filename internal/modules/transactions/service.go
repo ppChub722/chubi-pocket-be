@@ -518,11 +518,14 @@ func (s *Service) CreateInTxWithSourceDebt(
 		return nil, fmt.Errorf("amount %.2f exceeds outstanding %.2f", req.Amount, outstanding)
 	}
 
-	if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*req.AccountID}); err != nil {
-		return nil, err
-	}
-	if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *req.AccountID); err != nil {
-		return nil, err
+	// No wallet = a floating row (migration 000042) — the debt still settles.
+	if req.AccountID != nil {
+		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*req.AccountID}); err != nil {
+			return nil, err
+		}
+		if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *req.AccountID); err != nil {
+			return nil, err
+		}
 	}
 
 	// Auto-assign the matching system category (Debt Received / Debt Paid)
@@ -555,9 +558,13 @@ func (s *Service) CreateInTxWithSourceDebt(
 	if err != nil {
 		return nil, err
 	}
-	newBalance, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *req.AccountID, delta)
-	if err != nil {
-		return nil, err
+	var balanceAfter *float64
+	if req.AccountID != nil {
+		newBalance, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *req.AccountID, delta)
+		if err != nil {
+			return nil, err
+		}
+		balanceAfter = &newBalance
 	}
 
 	// Bump settled_amount on the personal_debt.
@@ -567,7 +574,7 @@ func (s *Service) CreateInTxWithSourceDebt(
 
 	d := &TransactionDetail{
 		Transaction:         *created,
-		AccountBalanceAfter: &newBalance,
+		AccountBalanceAfter: balanceAfter,
 		IsResolve:           true,
 		Category:            &EmbeddedRef{ID: sysCat.ID, Name: sysCat.Name},
 	}
@@ -665,6 +672,27 @@ func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 // gets — same polymorphic-return shape as Create. Mirrors the spec §3.1
 // "for transfers, response includes both rows" rule and lets the FE
 // surgically refresh both rows + both account balances after one PUT.
+// UpdateInTx — a non-transfer row edit inside the caller's transaction,
+// under the same rules as Update (row authz, system rows read-only).
+// Used by the project "update to match" auto-action (contract §5).
+func (s *Service) UpdateInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, req UpdateRequest) error {
+	current, err := s.store.GetByID(ctx, userID, id)
+	if err != nil {
+		return err
+	}
+	if current.Type == TypeTransfer {
+		return ErrSplitsOnTransfer
+	}
+	if err := s.authorizeRowMutation(ctx, userID, current, req); err != nil {
+		return err
+	}
+	if err := s.checkNotSystemRow(ctx, current); err != nil {
+		return err
+	}
+	_, err = s.updateSingleInTx(ctx, tx, userID, current, req)
+	return err
+}
+
 func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (any, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {

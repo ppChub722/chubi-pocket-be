@@ -14,19 +14,18 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
-// Linked splits between two users (contract §5). A split with a linked
-// contact creates the splitter's debt plus — unless the partner opted out —
-// a mirror debt in the partner's book; the two rows point at each other
-// through counterpart_debt_id. Payments on one side notify the other and,
-// when the receiver allows it, settle their side automatically.
+// Linked splits between two users (contract §5). Principle: each user's
+// book is their own — the other side gets a notification with a one-tap
+// action, and their own switches decide what happens:
 //
-// Each user's flags (user_notification_settings) drive only their own side:
-//   - splitter: auto_notify_linked_split_contacts → send split_created
-//   - partner:  auto_add_to_personal_debt_on_split_notification → create
-//     the mirror now; off = the split_created notification carries an
-//     "add to my debts" action instead (AcceptSplitRequest)
-//   - receiver: auto_record_received_payment (+ default_account_id) →
-//     settle my side when the other side pays
+//   - split_created → "add to my debts" (creates my mirror debt)
+//   - split_paid    → "record the receipt" (income into my debt)
+//
+// Muted = nothing at all; auto = the action runs on arrival and the
+// notification lands already actioned. The pair of debts points at each
+// other through counterpart_debt_id so a payment can find the other side.
+// Nothing is ever pushed back the other way (no "received" notice, no
+// closing the payer's side).
 
 var (
 	ErrNotSplitRequest = errors.New("notification is not a split you can add")
@@ -35,23 +34,6 @@ var (
 // WithNotifications wires the notifications module (cross-module, set in
 // main). Without it splits behave as before: mirror always, no notices.
 func (s *Service) WithNotifications(n *notifications.Service) { s.notifs = n }
-
-// settingsFor — the user's automation flags, defaults when unavailable.
-func (s *Service) settingsFor(ctx context.Context, userID uuid.UUID) notifications.Settings {
-	def := notifications.Settings{
-		UserID:                                   userID,
-		AutoNotifyLinkedSplitContacts:            true,
-		AutoAddToPersonalDebtOnSplitNotification: true,
-	}
-	if s.notifs == nil {
-		return def
-	}
-	st, err := s.notifs.GetSettings(ctx, userID)
-	if err != nil || st == nil {
-		return def
-	}
-	return *st
-}
 
 func displayNameTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) string {
 	var name string
@@ -109,21 +91,25 @@ func (s *Service) createMirrorTx(
 	return mirror, nil
 }
 
-// splitToPartnerTx — the partner side of one linked split, honouring both
-// users' flags.
+// splitToPartnerTx — the partner side of one linked split.
 func (s *Service) splitToPartnerTx(
 	ctx context.Context, tx pgx.Tx, splitter *PersonalDebt, partnerUserID, parentTxID uuid.UUID,
 ) error {
+	if s.notifs == nil { // not wired (tests) — the pre-§5 behaviour
+		_, err := s.createMirrorTx(ctx, tx, splitter, partnerUserID)
+		return err
+	}
+	d, err := s.notifs.DeliveryFor(ctx, tx, partnerUserID, &splitter.UserID, notifications.TypeSplitCreated)
+	if err != nil || !d.Deliver {
+		return err
+	}
 	var mirrorID *uuid.UUID
-	if s.settingsFor(ctx, partnerUserID).AutoAddToPersonalDebtOnSplitNotification {
+	if d.Auto {
 		mirror, err := s.createMirrorTx(ctx, tx, splitter, partnerUserID)
 		if err != nil {
 			return err
 		}
 		mirrorID = &mirror.ID
-	}
-	if s.notifs == nil || !s.settingsFor(ctx, splitter.UserID).AutoNotifyLinkedSplitContacts {
-		return nil
 	}
 	return s.notifs.DispatchSplitCreated(ctx, tx, partnerUserID, splitter.UserID, notifications.SplitCreatedPayload{
 		SplitID:             splitter.ID,
@@ -135,12 +121,11 @@ func (s *Service) splitToPartnerTx(
 		Currency:            splitter.Currency,
 		Note:                splitter.Note,
 		RecipientDebtID:     mirrorID,
-	})
+	}, d.Auto)
 }
 
-// AcceptSplitRequest — "add to my debts" on a split_created notification
-// (the recipient had auto-add off). Idempotent: an already-mirrored split
-// returns the existing row.
+// AcceptSplitRequest — "add to my debts" on a split_created notification.
+// Idempotent: an already-mirrored split returns the existing row.
 func (s *Service) AcceptSplitRequest(ctx context.Context, userID, notificationID uuid.UUID) (*PersonalDebt, error) {
 	if s.notifs == nil {
 		return nil, errors.New("notifications module not wired")
@@ -195,72 +180,55 @@ func (s *Service) AcceptSplitRequest(ctx context.Context, userID, notificationID
 	return out, nil
 }
 
-// afterSettleTx runs inside Settle, after `debt` (as it was before the
-// settle) got `amount` paid on `date`; txID is the wallet transaction, nil
-// for a direct settle. Linked pairs only.
-//
-//   - I paid what I owe (i_owe) → split_paid to the creditor; if they allow
-//     it, their side settles too (into default_account_id as income when
-//     set and usable, else as a direct settle) → split_received back to me.
-//   - I recorded money I was owed (owed_to_me) → split_received to the
-//     debtor. Their side stays open: only they know which wallet paid.
+// afterSettleTx runs inside Settle once `debt` (as it was before) got
+// `amount` paid on `date`. Only the payer's side notifies: when I pay back
+// what I owe on a linked split, the creditor gets split_paid — unless their
+// side is already closed (they recorded it themselves; nothing to tell).
+// Their auto switch records the receipt into default_account_id, or as a
+// floating row when none / unusable.
 func (s *Service) afterSettleTx(
-	ctx context.Context, tx pgx.Tx, debt *PersonalDebt, amount float64, date string, txID *uuid.UUID,
+	ctx context.Context, tx pgx.Tx, debt *PersonalDebt, amount float64, date string,
 ) error {
-	if s.notifs == nil || debt.CounterpartDebtID == nil {
+	if s.notifs == nil || debt.CounterpartDebtID == nil || debt.Direction != DirectionIOwe {
 		return nil
 	}
 	cp, err := getAnyDebtTx(ctx, tx, *debt.CounterpartDebtID)
 	if errors.Is(err, ErrDebtNotFound) {
-		return nil // mirror deleted — nothing to keep in sync
+		return nil // their row was deleted — their book, their call
 	}
-	if err != nil {
+	if err != nil || cp.Status != StatusOpen {
 		return err
 	}
 	me := debt.UserID
-
-	if debt.Direction == DirectionOwedToMe {
-		return s.notifs.DispatchSplitReceived(ctx, tx, cp.UserID, me, notifications.SplitReceivedPayload{
-			SplitID: cp.ID, ReceiverUserID: me, ReceiverDisplayName: displayNameTx(ctx, tx, me),
-			Amount: amount, Currency: debt.Currency, ReceiverTransactionID: txID,
-			ProjectID: debt.ProjectID, RecipientDebtID: &cp.ID,
-		})
-	}
-
-	if err := s.notifs.DispatchSplitPaid(ctx, tx, cp.UserID, me, notifications.SplitPaidPayload{
-		SplitID: cp.ID, PayerUserID: me, PayerDisplayName: displayNameTx(ctx, tx, me),
-		Amount: amount, Currency: debt.Currency, PayerTransactionID: txID,
-		ProjectID: debt.ProjectID, RecipientDebtID: &cp.ID,
-	}); err != nil {
+	d, err := s.notifs.DeliveryFor(ctx, tx, cp.UserID, &me, notifications.TypeSplitPaid)
+	if err != nil || !d.Deliver {
 		return err
 	}
 
-	st := s.settingsFor(ctx, cp.UserID)
-	if !st.AutoRecordReceivedPayment || cp.Status != StatusOpen {
-		return nil
-	}
-	recv := math.Min(amount, cp.Amount-cp.SettledAmount)
-	if recv <= 0 {
-		return nil
-	}
-	var recvTxID *uuid.UUID
-	if acc := st.DefaultAccountID; acc != nil && s.activeWalletMemberTx(ctx, tx, cp.UserID, *acc) {
-		accID := *acc
+	var recorded *uuid.UUID
+	if d.Auto {
+		recv := math.Min(amount, cp.Amount-cp.SettledAmount)
+		st, err := s.notifs.SettingsTx(ctx, tx, cp.UserID)
+		if err != nil {
+			return err
+		}
+		var accID *uuid.UUID
+		if a := st.DefaultAccountID; a != nil && s.activeWalletMemberTx(ctx, tx, cp.UserID, *a) {
+			accID = a
+		}
 		created, err := s.txs.CreateInTxWithSourceDebt(ctx, tx, cp.UserID, cp.ID, transactions.CreateRequest{
-			Type: transactions.TypeIncome, AccountID: &accID, Amount: recv, Date: date,
+			Type: transactions.TypeIncome, AccountID: accID, Amount: recv, Date: date,
 		})
 		if err != nil {
 			return fmt.Errorf("auto-record payment: %w", err)
 		}
-		recvTxID = &created.ID
-	} else if err := s.store.AutoBumpInTx(ctx, tx, cp.UserID, cp.ID, recv); err != nil {
-		return err
+		recorded = &created.ID
 	}
-	return s.notifs.DispatchSplitReceived(ctx, tx, me, cp.UserID, notifications.SplitReceivedPayload{
-		SplitID: debt.ID, ReceiverUserID: cp.UserID, ReceiverDisplayName: displayNameTx(ctx, tx, cp.UserID),
-		Amount: recv, Currency: debt.Currency, ReceiverTransactionID: recvTxID,
-		ProjectID: debt.ProjectID, RecipientDebtID: &debt.ID,
-	})
+	return s.notifs.DispatchSplitPaid(ctx, tx, cp.UserID, me, notifications.SplitPaidPayload{
+		SplitID: cp.ID, PayerUserID: me, PayerDisplayName: displayNameTx(ctx, tx, me),
+		Amount: amount, Currency: debt.Currency, ProjectID: debt.ProjectID,
+		RecipientDebtID: &cp.ID, RecordedTransactionID: recorded,
+	}, d.Auto)
 }
 
 func (s *Service) activeWalletMemberTx(ctx context.Context, tx pgx.Tx, userID, accountID uuid.UUID) bool {

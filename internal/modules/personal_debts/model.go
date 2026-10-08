@@ -94,8 +94,7 @@ type UpdateRequest struct {
 // For 'owed_to_me' debts: settling = my income (getting paid back).
 // Direction is inferred from the debt; caller doesn't pass it.
 type SettleRequest struct {
-	// Required unless the call is ?direct=true (contract §7) — the handler
-	// enforces it, since the binding tag can't see the query string.
+	// Optional — nil records a floating (no-wallet) transaction.
 	AccountID *uuid.UUID `json:"account_id"`
 	Amount    *float64  `json:"amount"     binding:"omitempty,gt=0"`
 	Date      *string   `json:"date"       binding:"omitempty,datetime=2006-01-02"`
