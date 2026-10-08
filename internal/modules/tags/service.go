@@ -2,9 +2,11 @@ package tags
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // AttachRequest carries the tag IDs to attach to a transaction.
@@ -71,4 +73,26 @@ func (s *Service) DetachTag(ctx context.Context, userID, txID, tagID uuid.UUID) 
 		return err
 	}
 	return s.store.DetachTag(ctx, txID, tagID)
+}
+
+// AttachTagsTx attaches inside the caller's DB transaction — used when a
+// pending draft is submitted, so the transaction and its tags land (or
+// roll back) together. Ownership of the tags is checked first.
+func (s *Service) AttachTagsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, tagIDs []uuid.UUID) error {
+	if len(tagIDs) == 0 {
+		return nil
+	}
+	if err := s.store.VerifyOwnership(ctx, userID, tagIDs); err != nil {
+		return err
+	}
+	for _, tagID := range tagIDs {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO transaction_tags (transaction_id, tag_id, created_by_user_id)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (transaction_id, tag_id) DO NOTHING`,
+			txID, tagID, userID); err != nil {
+			return fmt.Errorf("attach tag %s: %w", tagID, err)
+		}
+	}
+	return nil
 }

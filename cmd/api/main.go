@@ -21,6 +21,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/contacts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/dashboard"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
@@ -114,6 +115,10 @@ func main() {
 	scheduledService := scheduled_transactions.NewService(scheduledStore)
 	scheduledService.WithTimezoneResolver(budgetsService.ResolveTimezone)
 	scheduledHandler := scheduled_transactions.NewHandler(scheduledService)
+
+	// Pending transactions — drafts waiting to be confirmed.
+	pendingHandler := pending.NewHandler(pending.NewService(pending.NewStore(dbPool),
+		transactionsService, tagsService, personalDebtsService))
 
 	// Dashboard (Phase 2) — read-only aggregate over the modules above.
 	dashboardService := dashboard.NewService(dashboard.NewStore(dbPool),
@@ -349,6 +354,7 @@ func main() {
 			protected.POST("/projects/:id/leave", projectsHandler.Leave)
 			protected.GET("/projects/:id/transactions", projectsHandler.ListPT)
 			protected.POST("/projects/:id/project-transactions", projectsHandler.CreatePT)
+			protected.POST("/projects/:id/bills", projectsHandler.AddBills)
 			protected.PUT("/projects/:id/project-transactions/:pt_id", projectsHandler.UpdatePT)
 			protected.DELETE("/projects/:id/project-transactions/:pt_id", projectsHandler.DeletePT)
 			protected.PUT("/projects/:id/project-transactions/:pt_id/mark", projectsHandler.ToggleMark)
@@ -392,6 +398,13 @@ func main() {
 
 			// Dashboard (Phase 2, contract §4) — one aggregated read for the home screen.
 			protected.GET("/dashboard", dashboardHandler.Get)
+
+			// Pending transactions (drafts). /submit before /:id.
+			protected.GET("/pending-transactions", pendingHandler.List)
+			protected.POST("/pending-transactions", pendingHandler.Create)
+			protected.POST("/pending-transactions/submit", pendingHandler.Submit)
+			protected.PUT("/pending-transactions/:id", pendingHandler.Update)
+			protected.DELETE("/pending-transactions/:id", pendingHandler.Delete)
 		}
 	}
 

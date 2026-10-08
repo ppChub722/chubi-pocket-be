@@ -536,3 +536,24 @@ func (h *Handler) CopyToPersonal(c *gin.Context) {
 	}
 	c.JSON(http.StatusCreated, gin.H{"transaction_id": txID})
 }
+
+// POST /v1/projects/:id/bills — a new bill (plus optional loose bills)
+// pulled into an existing project; same body and response shape as quick
+// create, minus the project name.
+func (h *Handler) AddBills(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	var req AddBillsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	out, err := h.service.AddBills(c.Request.Context(), userID, id, req)
+	if err != nil {
+		mapQuickCreateError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, out)
+}

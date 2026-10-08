@@ -237,6 +237,15 @@ type QuickCreateRequest struct {
 type QuickCreateResponse struct {
 	Project
 	LinkedCount int `json:"linked_count"`
+	// The new bill created by the call — lets the client attach tags.
+	TransactionID uuid.UUID `json:"transaction_id"`
+}
+
+// AddBillsRequest — POST /v1/projects/:id/bills: a new bill (and optionally
+// existing loose bills) pulled into a project that already exists.
+type AddBillsRequest struct {
+	NewTransaction transactions.CreateRequest `json:"new_transaction" binding:"required"`
+	TransactionIDs []uuid.UUID                `json:"transaction_ids" binding:"omitempty"`
 }
 
 // --- List filters / responses ---
