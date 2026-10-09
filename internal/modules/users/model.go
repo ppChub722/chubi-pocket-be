@@ -42,7 +42,14 @@ var allowedPreferenceKeys = map[string]bool{
 	"timezone": true,
 	"theme":    true, // accepted from Phase 0 but only user-facing in Phase 2 per spec
 	"language": true,
+	// Slip import (spec 15 §7): the expense category fee drafts get — the
+	// "ใช้เป็นหมวดค่าธรรมเนียม" switch on a category. UUID string, or null
+	// to clear. Checked by Service.UpdateProfile.
+	PrefFeeCategoryID: true,
 }
+
+// PrefFeeCategoryID — preference key of the fee category.
+const PrefFeeCategoryID = "fee_category_id"
 
 func ValidatePreferenceKeys(prefs map[string]any) (string, bool) {
 	for k := range prefs {

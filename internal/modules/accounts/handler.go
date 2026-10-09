@@ -124,6 +124,31 @@ func (h *Handler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, a)
 }
 
+// POST /v1/accounts/:id/identifiers — append one identifier
+// ({kind, value, bank_code?}); answers the whole account. Owner only.
+func (h *Handler) AddIdentifier(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	var req Identifier
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	a, err := h.service.AddIdentifier(c.Request.Context(), userID, id, req)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, a)
+}
+
 // POST /v1/accounts/:id/adjust-balance
 func (h *Handler) AdjustBalance(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
@@ -233,6 +258,8 @@ func mapServiceError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusConflict, "ACCOUNT_HAS_MEMBERS", err.Error(), nil)
 	case errors.Is(err, ErrScopeNotAllowed):
 		response.BadRequest(c, "SCOPE_NOT_ALLOWED", err.Error(), nil)
+	case errors.Is(err, ErrInvalidIdentifier), errors.Is(err, ErrTooManyIdentifiers):
+		response.BadRequest(c, "INVALID_IDENTIFIER", err.Error(), nil)
 	case errors.Is(err, ErrCreditFieldMismatch):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, ErrTypeChangeNeedsLimit):

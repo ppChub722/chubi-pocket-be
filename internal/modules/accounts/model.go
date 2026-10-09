@@ -58,6 +58,9 @@ type Account struct {
 	SortOrder      int              `json:"sort_order"`
 	CreatedAt      time.Time        `json:"created_at"`
 	UpdatedAt      time.Time        `json:"updated_at"`
+	// Numbers this wallet is known by on bank slips (spec 15 §5). Always an
+	// array; edited by the owner.
+	Identifiers []Identifier `json:"identifiers"`
 	// Shared-wallet fields (spec §14, pinned contract). `members` holds
 	// ACTIVE members only, always including the caller. `is_shared` =
 	// active member count > 1. `my_report_scope` is the caller's own
@@ -141,6 +144,7 @@ type CreateRequest struct {
 	StatementDate  *int             `json:"statement_date"   binding:"omitempty,min=1,max=31"`
 	PaymentDueDate *int             `json:"payment_due_date" binding:"omitempty,min=1,max=31"`
 	MinimumPayment *float64         `json:"minimum_payment"  binding:"omitempty,gte=0"`
+	Identifiers    []Identifier     `json:"identifiers"`
 }
 
 // UpdateRequest — partial. `balance` is intentionally absent (use the
@@ -162,6 +166,8 @@ type UpdateRequest struct {
 	PaymentDueDate *int             `json:"payment_due_date" binding:"omitempty,min=1,max=31"`
 	MinimumPayment *float64         `json:"minimum_payment"  binding:"omitempty,gte=0"`
 	SortOrder      *int             `json:"sort_order"       binding:"omitempty"`
+	// Present → replaces the whole list ([] clears it); absent → unchanged.
+	Identifiers *[]Identifier `json:"identifiers"`
 
 	iconCodePresent    bool
 	logoURLPresent     bool

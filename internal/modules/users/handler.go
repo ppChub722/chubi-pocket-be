@@ -54,7 +54,7 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	prof, err := h.service.UpdateProfile(c.Request.Context(), id, req)
 	if err != nil {
 		switch {
-		case errors.Is(err, ErrUnknownPreferenceKey):
+		case errors.Is(err, ErrUnknownPreferenceKey), errors.Is(err, ErrInvalidFeeCategory):
 			response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		case errors.Is(err, ErrEmailExists):
 			response.Fail(c, http.StatusConflict, "EMAIL_EXISTS",

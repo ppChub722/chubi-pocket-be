@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -84,6 +85,10 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, userCurrency str
 	if req.Currency != nil && *req.Currency != "" {
 		currency = *req.Currency
 	}
+	identifiers, err := NormalizeIdentifiers(req.Identifiers)
+	if err != nil {
+		return nil, err
+	}
 
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -104,6 +109,7 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, userCurrency str
 		StatementDate:  req.StatementDate,
 		PaymentDueDate: req.PaymentDueDate,
 		MinimumPayment: req.MinimumPayment,
+		Identifiers:    identifiers,
 	}
 	created, err := s.store.InsertTx(ctx, tx, row)
 	if err != nil {
@@ -182,11 +188,34 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		}
 	}
 
+	if req.Identifiers != nil {
+		norm, err := NormalizeIdentifiers(*req.Identifiers)
+		if err != nil {
+			return nil, err
+		}
+		req.Identifiers = &norm
+	}
+
 	if _, err := s.store.Update(ctx, userID, id, req, clearCreditFields); err != nil {
 		return nil, err
 	}
 	// Re-fetch for the members[] / my_report_scope / is_shared shape.
 	return s.store.GetByID(ctx, userID, id)
+}
+
+// AddIdentifier appends one identifier to the wallet's list (spec 15 §8,
+// "remember this number" on the pending page); an identical one is not
+// added twice. Owner only, like every wallet field.
+func (s *Service) AddIdentifier(ctx context.Context, userID, id uuid.UUID, in Identifier) (*Account, error) {
+	current, err := s.store.GetByID(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	list, err := NormalizeIdentifiers(append(slices.Clone(current.Identifiers), in))
+	if err != nil {
+		return nil, err
+	}
+	return s.Update(ctx, userID, id, UpdateRequest{Identifiers: &list})
 }
 
 // --- Adjust balance ---

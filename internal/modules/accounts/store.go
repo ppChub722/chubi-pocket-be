@@ -31,19 +31,25 @@ var (
 const accountColumns = `id, user_id, name, type, balance, currency, icon_code, logo_url,
 	description, note, status,
 	credit_limit, statement_date, payment_due_date, minimum_payment,
-	sort_order, created_at, updated_at`
+	sort_order, created_at, updated_at, identifiers`
 
 func scanAccount(row pgx.Row) (*Account, error) {
 	var a Account
-	var iconBytes []byte
+	var iconBytes, identifiersBytes []byte
 	err := row.Scan(
 		&a.ID, &a.UserID, &a.Name, &a.Type, &a.Balance, &a.Currency, &iconBytes, &a.LogoURL,
 		&a.Description, &a.Note, &a.Status,
 		&a.CreditLimit, &a.StatementDate, &a.PaymentDueDate, &a.MinimumPayment,
-		&a.SortOrder, &a.CreatedAt, &a.UpdatedAt,
+		&a.SortOrder, &a.CreatedAt, &a.UpdatedAt, &identifiersBytes,
 	)
 	if err != nil {
 		return nil, err
+	}
+	a.Identifiers = []Identifier{}
+	if len(identifiersBytes) > 0 {
+		if err := json.Unmarshal(identifiersBytes, &a.Identifiers); err != nil {
+			return nil, fmt.Errorf("unmarshal identifiers: %w", err)
+		}
 	}
 	if iconBytes != nil {
 		a.IconCode = new(shared.IconCode)
@@ -177,20 +183,29 @@ func (s *Store) InsertTx(ctx context.Context, tx pgx.Tx, a *Account) (*Account, 
 		}
 	}
 
+	identifiers := a.Identifiers
+	if identifiers == nil {
+		identifiers = []Identifier{}
+	}
+	identifiersJSON, err := json.Marshal(identifiers)
+	if err != nil {
+		return nil, fmt.Errorf("marshal identifiers: %w", err)
+	}
+
 	q := `INSERT INTO accounts
 		(id, user_id, name, type, balance, currency, icon_code, logo_url,
 		 description, note, status,
 		 credit_limit, statement_date, payment_due_date, minimum_payment,
-		 sort_order, created_by_user_id)
+		 sort_order, created_by_user_id, identifiers)
 		VALUES ($1, $2, $3, $4, 0, $5, $6::jsonb, $7,
 		        $8, $9, 'active',
-		        $10, $11, $12, $13, $14, $2)
+		        $10, $11, $12, $13, $14, $2, $15::jsonb)
 		RETURNING ` + accountColumns
 	created, err := scanAccount(tx.QueryRow(ctx, q,
 		a.ID, a.UserID, a.Name, a.Type, a.Currency, iconJSON, a.LogoURL,
 		a.Description, a.Note,
 		a.CreditLimit, a.StatementDate, a.PaymentDueDate, a.MinimumPayment,
-		a.SortOrder))
+		a.SortOrder, identifiersJSON))
 	if err != nil {
 		return nil, fmt.Errorf("insert account: %w", err)
 	}
@@ -262,6 +277,15 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequ
 	}
 	if req.SortOrder != nil {
 		add("sort_order", *req.SortOrder)
+	}
+	if req.Identifiers != nil {
+		// Already normalized by the service.
+		b, err := json.Marshal(*req.Identifiers)
+		if err != nil {
+			return nil, fmt.Errorf("marshal identifiers: %w", err)
+		}
+		args = append(args, b)
+		q += fmt.Sprintf(", identifiers = $%d::jsonb", len(args))
 	}
 
 	args = append(args, id)
