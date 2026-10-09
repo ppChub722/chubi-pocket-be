@@ -203,7 +203,7 @@ func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID
 		return nil, err
 	}
 
-	delta := req.NewBalance - current.Balance
+	delta := *req.NewBalance - current.Balance
 	if delta == 0 {
 		return nil, ErrAdjustNoOp
 	}

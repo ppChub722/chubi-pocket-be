@@ -356,7 +356,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Per
 			&v.CounterpartyContactID, &v.CounterpartyPersonName,
 			&v.SourceTransactionID, &v.SourceProjectTransactionID, &v.ProjectID,
 			&v.Amount, &v.SettledAmount, &v.Currency, &v.Status, &v.Note,
-			&v.CreatedAt, &v.UpdatedAt, &v.Outstanding,
+			&v.CreatedAt, &v.UpdatedAt, &v.CounterpartDebtID, &v.Outstanding,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan: %w", err)
 		}

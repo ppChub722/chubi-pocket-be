@@ -201,8 +201,10 @@ func (r *UpdateRequest) NoteChange() (*string, bool) {
 	return r.Note, r.notePresent
 }
 
+// NewBalance is a pointer so 0 is a valid target (`required` on a plain
+// float64 rejects zero) — and it may be negative (overdraft, card debt).
 type AdjustBalanceRequest struct {
-	NewBalance float64 `json:"new_balance" binding:"required"`
+	NewBalance *float64 `json:"new_balance" binding:"required"`
 	Date       *string `json:"date"        binding:"omitempty,datetime=2006-01-02"`
 	Note       *string `json:"note"        binding:"omitempty"`
 }

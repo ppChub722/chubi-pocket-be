@@ -215,6 +215,18 @@ func (s *Service) Summary(ctx context.Context, callerUserID, projectID uuid.UUID
 	return s.store.SummaryAggregate(ctx, projectID, callerUserID)
 }
 
+// ListTags — the project's tags (members only), most used first.
+func (s *Service) ListTags(ctx context.Context, callerUserID, projectID uuid.UUID) (*ProjectTagsResponse, error) {
+	if _, err := s.store.GetByIDForCaller(ctx, callerUserID, projectID); err != nil {
+		return nil, err
+	}
+	tags, err := s.store.ListTags(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return &ProjectTagsResponse{Data: tags}, nil
+}
+
 // buildDiff produces a small map of changed numeric/string fields for the
 // project_tx_changed payload. Only fields that actually changed are included.
 func buildDiff(before, after *ProjectTransaction) map[string][2]interface{} {

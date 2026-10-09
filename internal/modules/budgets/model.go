@@ -96,15 +96,19 @@ type CreateRequest struct {
 	Note        *string    `json:"note"`
 }
 
-// UpdateRequest — partial. category_id / scope / project_id NOT
-// editable (delete + recreate). status changes flow via archive /
-// restore endpoints.
+// UpdateRequest — partial. scope / project_id NOT editable (delete +
+// recreate). status changes flow via archive / restore endpoints.
+//
+// CategoryID re-anchors the budget on another expense category. Spent is
+// computed live from transactions, so nothing needs migrating; the
+// one-active-budget-per-(category, period, scope) rule still applies.
 type UpdateRequest struct {
-	Amount      *float64 `json:"amount"      binding:"omitempty,gt=0"`
-	Period      *string  `json:"period"      binding:"omitempty,oneof=weekly monthly yearly"`
-	Currency    *string  `json:"currency"    binding:"omitempty,len=3"`
-	Description *string  `json:"description" binding:"omitempty,max=200"`
-	Note        *string  `json:"note"`
+	CategoryID  *uuid.UUID `json:"category_id"`
+	Amount      *float64   `json:"amount"      binding:"omitempty,gt=0"`
+	Period      *string    `json:"period"      binding:"omitempty,oneof=weekly monthly yearly"`
+	Currency    *string    `json:"currency"    binding:"omitempty,len=3"`
+	Description *string    `json:"description" binding:"omitempty,max=200"`
+	Note        *string    `json:"note"`
 }
 
 type ListFilter struct {

@@ -98,8 +98,9 @@ type ProjectTransaction struct {
 	Date                       string           `json:"date"`
 	Note                       *string          `json:"note"`
 	Description                *string          `json:"description"`
-	CategoryName               *string          `json:"category_name"`
-	CategoryIconCode           *shared.IconCode `json:"category_icon_code"`
+	// Free labels shared by the project's members (replaced the per-row
+	// category, migration 47). Never null — empty when untagged.
+	Tags                       []string         `json:"tags"`
 	Marks                      []uuid.UUID      `json:"marks"`
 	CreatedAt                  time.Time        `json:"created_at"`
 	UpdatedAt                  time.Time        `json:"updated_at"`
@@ -192,9 +193,10 @@ type CreateProjectTransactionRequest struct {
 	Date                string              `json:"date"                  binding:"required,datetime=2006-01-02"`
 	Note                *string             `json:"note"`
 	Description         *string             `json:"description"`
-	CategoryName        *string             `json:"category_name"`
-	CategoryIconCode    *shared.IconCode    `json:"category_icon_code"    binding:"omitempty"`
-	Splits              []ProjectSplitInput `json:"splits"                binding:"omitempty,dive"`
+	// Names — trimmed and de-duplicated (case-insensitive) by the BE; a new
+	// name just starts being used, there's nothing to create first.
+	Tags   []string            `json:"tags"   binding:"omitempty,max=20,dive,max=40"`
+	Splits []ProjectSplitInput `json:"splits" binding:"omitempty,dive"`
 }
 
 // UpdateProjectTransactionRequest — full-replacement on splits when present.
@@ -206,9 +208,20 @@ type UpdateProjectTransactionRequest struct {
 	Date             *string              `json:"date"              binding:"omitempty,datetime=2006-01-02"`
 	Note             *string              `json:"note"`
 	Description      *string              `json:"description"`
-	CategoryName     *string              `json:"category_name"`
-	CategoryIconCode *shared.IconCode     `json:"category_icon_code" binding:"omitempty"`
-	Splits           *[]ProjectSplitInput `json:"splits"             binding:"omitempty,dive"`
+	// Present → replaces the row's tags (empty list clears them).
+	Tags   *[]string            `json:"tags"   binding:"omitempty,max=20,dive,max=40"`
+	Splits *[]ProjectSplitInput `json:"splits" binding:"omitempty,dive"`
+}
+
+// ProjectTag — one name in use on the project's rows, with how many rows
+// (parents) carry it. GET /v1/projects/:id/tags.
+type ProjectTag struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+type ProjectTagsResponse struct {
+	Data []ProjectTag `json:"data"`
 }
 
 // MarkRequest — body for PUT /projects/:id/project-transactions/:pt_id/mark.
@@ -293,7 +306,7 @@ type SummaryResponse struct {
 	// caller isn't a member.
 	MyPosition *MemberPosition `json:"my_position,omitempty"`
 	Members    []MemberPosition `json:"members"`
-	ByCategory []CategoryTotal  `json:"by_category"`
+	ByTag      []TagTotal       `json:"by_tag"`
 	PlannedAmount    *float64  `json:"planned_amount,omitempty"`
 	SpentNet         *float64  `json:"spent_net,omitempty"`
 	Remaining        *float64  `json:"remaining,omitempty"`

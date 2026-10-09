@@ -416,6 +416,20 @@ func (h *Handler) Summary(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
+// GET /v1/projects/:id/tags
+func (h *Handler) ListTags(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.ListTags(c.Request.Context(), userID, id)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
 // --- Helpers ---
 
 func (h *Handler) bindProjectID(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {

@@ -21,6 +21,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/contacts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/dashboard"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
@@ -119,6 +120,9 @@ func main() {
 	// Pending transactions — drafts waiting to be confirmed.
 	pendingHandler := pending.NewHandler(pending.NewService(pending.NewStore(dbPool),
 		transactionsService, tagsService, personalDebtsService))
+
+	// Imports (0.3.0) — slips / text into pending drafts. Stub: logs + echoes.
+	importsHandler := imports.NewHandler(log)
 
 	// Dashboard (Phase 2) — read-only aggregate over the modules above.
 	dashboardService := dashboard.NewService(dashboard.NewStore(dbPool),
@@ -360,6 +364,7 @@ func main() {
 			protected.PUT("/projects/:id/project-transactions/:pt_id/mark", projectsHandler.ToggleMark)
 			protected.POST("/projects/:id/project-transactions/:pt_id/copy", projectsHandler.CopyToPersonal)
 			protected.GET("/projects/:id/summary", projectsHandler.Summary)
+			protected.GET("/projects/:id/tags", projectsHandler.ListTags)
 
 			// Saving goals (Phase 1c). All paths under /saving-goals are
 			// param-only — no static-vs-param ordering hazard.
@@ -403,6 +408,10 @@ func main() {
 			protected.GET("/pending-transactions", pendingHandler.List)
 			protected.POST("/pending-transactions", pendingHandler.Create)
 			protected.POST("/pending-transactions/submit", pendingHandler.Submit)
+			protected.POST("/pending-transactions/scan-slip", importsHandler.ScanSlip)
+			protected.POST("/pending-transactions/parse-text", importsHandler.ParseText)
+			protected.POST("/slip-imports/check", importsHandler.CheckSlips)
+			protected.DELETE("/slip-imports", importsHandler.ResetSlips)
 			protected.PUT("/pending-transactions/:id", pendingHandler.Update)
 			protected.DELETE("/pending-transactions/:id", pendingHandler.Delete)
 		}

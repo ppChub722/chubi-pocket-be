@@ -232,6 +232,10 @@ func (s *Store) Update(
 	q := `UPDATE budgets SET updated_by_user_id = $1`
 	args := []any{actorUserID}
 
+	if req.CategoryID != nil {
+		args = append(args, *req.CategoryID)
+		q += fmt.Sprintf(", category_id = $%d", len(args))
+	}
 	if req.Amount != nil {
 		args = append(args, *req.Amount)
 		q += fmt.Sprintf(", amount = $%d", len(args))
@@ -261,7 +265,7 @@ func (s *Store) Update(
 		return nil, ErrBudgetNotFound
 	}
 	if err != nil {
-		// Period change can collide with the unique index.
+		// Category / period change can collide with the unique index.
 		if strings.Contains(err.Error(), "idx_budgets_user_category_period") {
 			return nil, ErrDuplicateBudget
 		}

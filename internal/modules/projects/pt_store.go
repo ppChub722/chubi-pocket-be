@@ -2,44 +2,55 @@ package projects
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-
-	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 const ptColumns = `id, project_id, parent_project_transaction_id,
 	transaction_member_id, record_user_id,
 	type, amount, currency,
 	to_char(date, 'YYYY-MM-DD') AS date,
-	note, description, category_name, category_icon_code,
+	note, description, tags,
 	marks, created_at, updated_at`
 
 func scanPT(row pgx.Row) (*ProjectTransaction, error) {
 	var pt ProjectTransaction
-	var iconBytes []byte
 	err := row.Scan(
 		&pt.ID, &pt.ProjectID, &pt.ParentProjectTransactionID,
 		&pt.TransactionMemberID, &pt.RecordUserID,
 		&pt.Type, &pt.Amount, &pt.Currency,
 		&pt.Date, &pt.Note, &pt.Description,
-		&pt.CategoryName, &iconBytes,
+		&pt.Tags,
 		&pt.Marks, &pt.CreatedAt, &pt.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if iconBytes != nil {
-		pt.CategoryIconCode = new(shared.IconCode)
-		if err := json.Unmarshal(iconBytes, pt.CategoryIconCode); err != nil {
-			return nil, fmt.Errorf("unmarshal category_icon_code: %w", err)
-		}
+	if pt.Tags == nil {
+		pt.Tags = []string{}
 	}
 	return &pt, nil
+}
+
+// normalizeTags trims each name, drops blanks and keeps the first spelling
+// of case-insensitive duplicates — "Food", " food " → ["Food"].
+func normalizeTags(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, t := range in {
+		t = strings.TrimSpace(t)
+		key := strings.ToLower(t)
+		if t == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, t)
+	}
+	return out
 }
 
 // InsertPTTx inserts a parent project_transaction row plus any child split
@@ -62,22 +73,16 @@ func (s *Store) InsertPTTx(
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
-	var categoryIconJSON []byte
-	if req.CategoryIconCode != nil {
-		if categoryIconJSON, err = json.Marshal(req.CategoryIconCode); err != nil {
-			return nil, fmt.Errorf("marshal category_icon_code: %w", err)
-		}
-	}
 	q := `INSERT INTO project_transactions
 		(id, project_id, transaction_member_id, record_user_id, type, amount, currency,
-		 date, note, description, category_name, category_icon_code,
+		 date, note, description, tags,
 		 created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9, $10, $11, $12::jsonb, $4, $4)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9, $10, $11, $4, $4)
 		RETURNING ` + ptColumns
 	parent, err := scanPT(tx.QueryRow(ctx, q,
 		id, projectID, req.TransactionMemberID, recordUserID,
 		req.Type, req.Amount, req.Currency, req.Date, req.Note, req.Description,
-		req.CategoryName, categoryIconJSON,
+		normalizeTags(req.Tags),
 	))
 	if err != nil {
 		return nil, fmt.Errorf("insert parent PT: %w", err)
@@ -146,19 +151,12 @@ func (s *Store) insertSplitChildrenTx(
 	ctx context.Context, tx pgx.Tx, parent *ProjectTransaction,
 	recordUserID uuid.UUID, splits []ProjectSplitInput,
 ) error {
-	var categoryIconJSON []byte
-	if parent.CategoryIconCode != nil {
-		var err error
-		if categoryIconJSON, err = json.Marshal(parent.CategoryIconCode); err != nil {
-			return fmt.Errorf("marshal category_icon_code: %w", err)
-		}
-	}
 	q := `INSERT INTO project_transactions
 		(id, project_id, parent_project_transaction_id, transaction_member_id,
 		 record_user_id, type, amount, currency, date, note, description,
-		 category_name, category_icon_code,
+		 tags,
 		 created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13::jsonb, $5, $5)`
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $5, $5)`
 	for _, sp := range splits {
 		childID, err := uuid.NewV7()
 		if err != nil {
@@ -167,7 +165,7 @@ func (s *Store) insertSplitChildrenTx(
 		if _, err := tx.Exec(ctx, q,
 			childID, parent.ProjectID, parent.ID, sp.MemberID,
 			recordUserID, parent.Type, sp.Amount, parent.Currency, parent.Date, parent.Note, parent.Description,
-			parent.CategoryName, categoryIconJSON,
+			parent.Tags,
 		); err != nil {
 			return fmt.Errorf("insert split child: %w", err)
 		}
@@ -226,17 +224,9 @@ func (s *Store) UpdatePTTx(
 		args = append(args, *req.Description)
 		q += fmt.Sprintf(", description = $%d", len(args))
 	}
-	if req.CategoryName != nil {
-		args = append(args, *req.CategoryName)
-		q += fmt.Sprintf(", category_name = $%d", len(args))
-	}
-	if req.CategoryIconCode != nil {
-		iconJSON, err := json.Marshal(req.CategoryIconCode)
-		if err != nil {
-			return nil, fmt.Errorf("marshal category_icon_code: %w", err)
-		}
-		args = append(args, iconJSON)
-		q += fmt.Sprintf(", category_icon_code = $%d::jsonb", len(args))
+	if req.Tags != nil {
+		args = append(args, normalizeTags(*req.Tags))
+		q += fmt.Sprintf(", tags = $%d", len(args))
 	}
 	args = append(args, ptID)
 	q += fmt.Sprintf(" WHERE id = $%d AND project_id = ", len(args))
@@ -447,6 +437,30 @@ func (s *Store) SummaryAggregate(ctx context.Context, projectID, callerID uuid.U
 		return nil, err
 	}
 	return resp, nil
+}
+
+// ListTags — every tag on the project's rows (parents), most used first.
+func (s *Store) ListTags(ctx context.Context, projectID uuid.UUID) ([]ProjectTag, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT t.name, COUNT(*)
+		FROM project_transactions pt
+		CROSS JOIN LATERAL unnest(pt.tags) AS t(name)
+		WHERE pt.project_id = $1 AND pt.parent_project_transaction_id IS NULL
+		GROUP BY t.name
+		ORDER BY COUNT(*) DESC, t.name`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("list tags: %w", err)
+	}
+	defer rows.Close()
+	out := make([]ProjectTag, 0)
+	for rows.Next() {
+		var t ProjectTag
+		if err := rows.Scan(&t.Name, &t.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // MemberByUserID resolves the project_member row matching (projectID, userID).

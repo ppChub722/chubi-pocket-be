@@ -25,15 +25,15 @@ type MemberPosition struct {
 	Net         float64    `json:"net"`
 }
 
-// CategoryTotal — expense parents grouped by their category name snapshot.
-// Rows without a category come back as name "" (the client localises it).
-type CategoryTotal struct {
+// TagTotal — expense parents grouped by tag. A row with several tags counts
+// under each; untagged rows come back as name "" (the client localises it).
+type TagTotal struct {
 	Name  string  `json:"name"`
 	Total float64 `json:"total"`
 	Count int     `json:"count"`
 }
 
-// fillBreakdowns adds members / my_position / by_category to resp.
+// fillBreakdowns adds members / my_position / by_tag to resp.
 // Members are the active ones plus anyone who left but still has money in
 // the project.
 func (s *Store) fillBreakdowns(ctx context.Context, resp *SummaryResponse, callerID uuid.UUID) error {
@@ -86,23 +86,28 @@ func (s *Store) fillBreakdowns(ctx context.Context, resp *SummaryResponse, calle
 		return err
 	}
 
+	// Untagged rows unnest to one '' so they still show up.
 	rows, err = s.db.Query(ctx, `
-		SELECT COALESCE(category_name, ''), SUM(amount), COUNT(*)
-		FROM project_transactions
-		WHERE project_id = $1 AND parent_project_transaction_id IS NULL AND type = 'expense'
-		GROUP BY COALESCE(category_name, '')
-		ORDER BY SUM(amount) DESC`, resp.ProjectID)
+		SELECT t.name, SUM(pt.amount), COUNT(*)
+		FROM project_transactions pt
+		CROSS JOIN LATERAL unnest(
+			CASE WHEN cardinality(pt.tags) = 0 THEN ARRAY[''] ELSE pt.tags END
+		) AS t(name)
+		WHERE pt.project_id = $1 AND pt.parent_project_transaction_id IS NULL
+		  AND pt.type = 'expense'
+		GROUP BY t.name
+		ORDER BY SUM(pt.amount) DESC`, resp.ProjectID)
 	if err != nil {
-		return fmt.Errorf("by category: %w", err)
+		return fmt.Errorf("by tag: %w", err)
 	}
 	defer rows.Close()
-	resp.ByCategory = make([]CategoryTotal, 0)
+	resp.ByTag = make([]TagTotal, 0)
 	for rows.Next() {
-		var c CategoryTotal
+		var c TagTotal
 		if err := rows.Scan(&c.Name, &c.Total, &c.Count); err != nil {
 			return err
 		}
-		resp.ByCategory = append(resp.ByCategory, c)
+		resp.ByTag = append(resp.ByTag, c)
 	}
 	return rows.Err()
 }

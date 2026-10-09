@@ -173,6 +173,13 @@ func (s *Service) Update(
 	if err := s.authorizeMutation(ctx, callerID, current); err != nil {
 		return nil, err
 	}
+	// A new anchor must be an expense category owned by the budget's user
+	// (same rule as Create).
+	if req.CategoryID != nil && *req.CategoryID != current.CategoryID {
+		if _, err := s.store.VerifyExpenseCategory(ctx, current.UserID, *req.CategoryID); err != nil {
+			return nil, err
+		}
+	}
 	row, err := s.store.Update(ctx, callerID, id, req)
 	if err != nil {
 		return nil, err

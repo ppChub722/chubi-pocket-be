@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"strings"
 	"context"
 	"errors"
 	"fmt"
@@ -92,15 +93,22 @@ func (s *Service) copyToPersonalTx(
 	if err != nil {
 		return uuid.Nil, err
 	}
+	// A tag named like one of the user's categories files the copy there
+	// (earlier tags win).
 	var categoryID *uuid.UUID
-	if pt.CategoryName != nil && *pt.CategoryName != "" {
+	if len(pt.Tags) > 0 {
+		lowered := make([]string, len(pt.Tags))
+		for i, t := range pt.Tags {
+			lowered[i] = strings.ToLower(t)
+		}
 		var id uuid.UUID
 		if err := tx.QueryRow(ctx, `
 			SELECT id FROM categories
 			WHERE user_id = $1 AND type = $2 AND status = 'active' AND NOT is_system
-			  AND LOWER(name) = LOWER($3)
-			ORDER BY (parent_id IS NOT NULL) DESC, sort_order
-			LIMIT 1`, userID, pt.Type, *pt.CategoryName).Scan(&id); err == nil {
+			  AND LOWER(name) = ANY($3::text[])
+			ORDER BY array_position($3::text[], LOWER(name)),
+			         (parent_id IS NOT NULL) DESC, sort_order
+			LIMIT 1`, userID, pt.Type, lowered).Scan(&id); err == nil {
 			categoryID = &id
 		}
 	}
