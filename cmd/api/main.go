@@ -2,17 +2,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"syscall"
 	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/accounts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
@@ -20,11 +23,13 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/contacts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/dashboard"
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports/ocr"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/providers"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/scheduled_transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
@@ -121,8 +126,31 @@ func main() {
 	pendingHandler := pending.NewHandler(pending.NewService(pending.NewStore(dbPool),
 		transactionsService, tagsService, personalDebtsService))
 
-	// Imports (0.3.0) — slips / text into pending drafts. Stub: logs + echoes.
-	importsHandler := imports.NewHandler(log)
+	// Imports — slips / text into pending drafts. 0.3.1: scan-slip runs OCR
+	// (tesseract CLI, shipped in the Docker image); the rest is still a stub.
+	ocrReader := ocr.NewTesseract(ocr.Config{
+		Bin:     cfg.OCR.Bin,
+		Lang:    cfg.OCR.Lang,
+		Timeout: cfg.OCR.Timeout,
+		Slots:   cfg.OCR.Concurrency,
+	})
+	if err := ocrReader.Check(); err != nil {
+		log.Warn("ocr: tesseract not found — scan-slip will answer 503", "err", err)
+	}
+	importsHandler := imports.NewHandler(log, ocrReader)
+	// Payment providers (migration 49) + import logs (migration 50): codes
+	// the import meets but doesn't know, and slips it can't read yet.
+	providersStore := providers.NewStore(dbPool)
+	providersHandler := providers.NewHandler(providersStore)
+	importsHandler.WithImportLogs(imports.NewLogStore(dbPool).Write, providersStore.Known)
+	// OCR dump (0.3.1 tuning) — OCR_DUMP=1 compares every mode on each slip;
+	// never in production. See imports/ocr_dump.go.
+	if cfg.OCR.Dump && cfg.App.Env != "production" {
+		importsHandler.EnableOCRDump(filepath.Join(os.TempDir(), "ocr-dump"),
+			ocr.NewTesseract(ocr.Config{
+				Bin: cfg.OCR.Bin, Lang: cfg.OCR.Lang, Timeout: 3 * time.Minute, Slots: 4,
+			}))
+	}
 
 	// Dashboard (Phase 2) — read-only aggregate over the modules above.
 	dashboardService := dashboard.NewService(dashboard.NewStore(dbPool),
@@ -177,6 +205,39 @@ func main() {
 	usersStore := users.NewStore(dbPool)
 	usersService := users.NewService(usersStore)
 	usersHandler := users.NewHandler(usersService, authService)
+
+	// Slip import (spec 15 §5, §7): the fee category must be one of the
+	// user's expense categories; drafts get the user's wallets (with their
+	// identifiers) and that fee category.
+	isExpenseCategory := func(ctx context.Context, userID, id uuid.UUID) error {
+		c, err := categoriesService.Get(ctx, userID, id)
+		if err != nil {
+			return err
+		}
+		if c.Type != "expense" {
+			return errors.New("not an expense category")
+		}
+		return nil
+	}
+	usersService.WithFeeCategoryCheck(isExpenseCategory)
+	importsHandler.WithDraftContext(func(ctx context.Context, userID uuid.UUID) (imports.DraftContext, error) {
+		var dc imports.DraftContext
+		accs, err := accountsService.List(ctx, userID, accounts.StatusActive, "")
+		if err != nil {
+			return dc, err
+		}
+		for _, a := range accs {
+			if len(a.Identifiers) > 0 {
+				dc.Wallets = append(dc.Wallets, imports.Wallet{ID: a.ID, Identifiers: a.Identifiers})
+			}
+		}
+		// A deleted (or retyped) fee category is simply not used.
+		if id, err := usersService.FeeCategoryID(ctx, userID); err == nil && id != nil &&
+			isExpenseCategory(ctx, userID, *id) == nil {
+			dc.FeeCategoryID = id
+		}
+		return dc, nil
+	})
 
 	packPermsStore := user_pack_permissions.NewStore(dbPool)
 	packPermsHandler := user_pack_permissions.NewHandler(packPermsStore)
@@ -272,6 +333,7 @@ func main() {
 			protected.PUT("/accounts/:id", accountsHandler.Update)
 			protected.DELETE("/accounts/:id", accountsHandler.Delete)
 			protected.POST("/accounts/:id/adjust-balance", accountsHandler.AdjustBalance)
+			protected.POST("/accounts/:id/identifiers", accountsHandler.AddIdentifier)
 			protected.GET("/accounts/:id/summary", accountsHandler.Summary)
 			// Shared-wallet membership (spec §14).
 			protected.GET("/accounts/:id/members", accountsHandler.ListMembers)
@@ -411,6 +473,7 @@ func main() {
 			protected.POST("/pending-transactions/scan-slip", importsHandler.ScanSlip)
 			protected.POST("/pending-transactions/parse-text", importsHandler.ParseText)
 			protected.POST("/slip-imports/check", importsHandler.CheckSlips)
+			protected.GET("/payment-providers", providersHandler.List)
 			protected.DELETE("/slip-imports", importsHandler.ResetSlips)
 			protected.PUT("/pending-transactions/:id", pendingHandler.Update)
 			protected.DELETE("/pending-transactions/:id", pendingHandler.Delete)

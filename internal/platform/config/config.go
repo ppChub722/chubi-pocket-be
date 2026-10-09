@@ -15,6 +15,7 @@ type Config struct {
 	Database DatabaseConfig
 	JWT      JWTConfig
 	Server   ServerConfig
+	OCR      OCRConfig
 }
 
 // AppConfig contains application-level configuration
@@ -58,6 +59,17 @@ type JWTConfig struct {
 	ExpirationTime   time.Duration
 }
 
+// OCRConfig — slip OCR (0.3.1): the tesseract CLI, see imports/ocr.
+type OCRConfig struct {
+	Bin         string        // OCR_TESSERACT_BIN (default "tesseract")
+	Lang        string        // OCR_LANG (default "tha+eng")
+	Timeout     time.Duration // OCR_TIMEOUT seconds per slip (default 30)
+	Concurrency int           // OCR_CONCURRENCY reads at once (default 1)
+	// Dump — OCR_DUMP=1: re-read every scanned slip in all modes and dump
+	// the results (mode comparison; see imports/ocr_dump.go). Off in prod.
+	Dump bool
+}
+
 // ServerConfig contains HTTP server configuration
 type ServerConfig struct {
 	ReadTimeout  time.Duration
@@ -95,6 +107,13 @@ func Load() (*Config, error) {
 			ReadTimeout:  time.Duration(getEnvAsInt("SERVER_READ_TIMEOUT", 10)) * time.Second,
 			WriteTimeout: time.Duration(getEnvAsInt("SERVER_WRITE_TIMEOUT", 10)) * time.Second,
 			IdleTimeout:  time.Duration(getEnvAsInt("SERVER_IDLE_TIMEOUT", 120)) * time.Second,
+		},
+		OCR: OCRConfig{
+			Bin:         getEnv("OCR_TESSERACT_BIN", "tesseract"),
+			Lang:        getEnv("OCR_LANG", "tha+eng"),
+			Timeout:     time.Duration(getEnvAsInt("OCR_TIMEOUT", 30)) * time.Second,
+			Concurrency: getEnvAsInt("OCR_CONCURRENCY", 1),
+			Dump:        getEnv("OCR_DUMP", "") == "1",
 		},
 	}
 

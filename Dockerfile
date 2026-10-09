@@ -17,8 +17,15 @@ FROM alpine:3.20
 WORKDIR /app
 
 # CA certs for any outbound HTTPS (Phase 2+ email/OAuth/etc.)
-RUN apk add --no-cache ca-certificates && \
+# tesseract-ocr — slip OCR (0.3.1), run as a CLI by internal/modules/imports/ocr.
+RUN apk add --no-cache ca-certificates tesseract-ocr && \
     adduser -D -H -u 10001 app
+
+# Thai + English models from tessdata_best (LSTM, most accurate; pinned to
+# the 4.1.0 tag). Overwrites the package's default eng if it brought one.
+ADD --chmod=644 https://github.com/tesseract-ocr/tessdata_best/raw/4.1.0/tha.traineddata \
+    https://github.com/tesseract-ocr/tessdata_best/raw/4.1.0/eng.traineddata \
+    /usr/share/tessdata/
 
 COPY --from=builder /out/server .
 RUN chown app:app /app/server

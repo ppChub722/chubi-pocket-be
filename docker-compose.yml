@@ -57,6 +57,11 @@ services:
       # wider beta, warn/false in production. No code changes needed.
       LOG_LEVEL: debug
       LOG_BODIES: "true"
+      # OCR mode comparison (0.3.1, imports/ocr_dump.go): every scanned slip is
+      # re-read in all modes, dumped to /tmp/ocr-dump in the container
+      # (`docker cp chubi_pocket_app:/tmp/ocr-dump .`). On while slips from
+      # more banks come in. Off: `OCR_DUMP=0 docker compose up -d app`.
+      OCR_DUMP: ${OCR_DUMP:-1}
     # Closed-beta log storage: stdout → Docker json-file rotation (~100MB
     # cap). Tail with `docker logs -f chubi_pocket_app`.
     logging:
