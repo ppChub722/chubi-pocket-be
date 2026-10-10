@@ -30,7 +30,8 @@ func (h *Handler) ListMembers(c *gin.Context) {
 	c.JSON(http.StatusOK, ListMembersResponse{Data: out})
 }
 
-// POST /v1/accounts/:id/members — invite by email (notification pattern).
+// POST /v1/accounts/:id/members — invite a linked contact or an email
+// (notification pattern).
 func (h *Handler) InviteMember(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {

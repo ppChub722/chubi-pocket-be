@@ -134,39 +134,46 @@ func (s *Service) EditForTransactionTx(
 	return nil
 }
 
-// identityEdit — the new person of a kept split (owner 2026-10-10).
+// identityEdit — the new person of a kept split (owner 2026-10-10/11).
 type identityEdit struct {
 	name      string
-	contactID *uuid.UUID // nil: keep the row unlinked (a rename)
+	contactID *uuid.UUID // the split's contact after the edit; nil = a free name
+	newLink   bool       // contactID is a different contact than before
 }
 
 // checkIdentityEditTx — does kept split d change its person? person_name /
-// contact_id left out (or equal) = unchanged. Only an unlinked row
-// (contact_id NULL) may change: rename in place, or link to one of my
-// contacts (name defaults to the contact's). A row with a contact is fixed
-// → ErrSplitIdentityLocked (remove + add instead).
+// contact_id left out (or equal) = unchanged; "contact_id": null drops the
+// contact (back to a free name). Locked only when d's contact is linked to
+// another app user — they may hold a mirror → ErrSplitIdentityLocked
+// (remove + add instead). Free names and contacts without an app account
+// change in place; a new contact's name is the default.
 func checkIdentityEditTx(
 	ctx context.Context, tx pgx.Tx, userID uuid.UUID, d *PersonalDebt, e transactions.SplitEdit,
 ) (identityEdit, bool, error) {
 	name := strings.TrimSpace(e.PersonName)
+	out := identityEdit{name: d.CounterpartyPersonName, contactID: d.CounterpartyContactID}
+	if e.ContactIDSet || e.ContactID != nil {
+		out.contactID = e.ContactID
+	}
+	contactChanged := !sameUUID(out.contactID, d.CounterpartyContactID)
 	nameChanged := name != "" && name != d.CounterpartyPersonName
-	contactChanged := e.ContactID != nil &&
-		(d.CounterpartyContactID == nil || *d.CounterpartyContactID != *e.ContactID)
 	if !nameChanged && !contactChanged {
 		return identityEdit{}, false, nil
 	}
-	if d.CounterpartyContactID != nil {
+	if linkedPartnerTx(ctx, tx, d) != nil {
 		return identityEdit{}, false, transactions.ErrSplitIdentityLocked
 	}
-	out := identityEdit{name: name}
-	if contactChanged {
-		if err := assertSplitContactTx(ctx, tx, userID, *e.ContactID); err != nil {
+	if name != "" {
+		out.name = name
+	}
+	if contactChanged && out.contactID != nil {
+		if err := assertSplitContactTx(ctx, tx, userID, *out.contactID); err != nil {
 			return identityEdit{}, false, err
 		}
-		out.contactID = e.ContactID
+		out.newLink = true
 		if name == "" {
 			if err := tx.QueryRow(ctx, `SELECT display_name FROM contacts WHERE id = $1`,
-				*e.ContactID).Scan(&out.name); err != nil {
+				*out.contactID).Scan(&out.name); err != nil {
 				return identityEdit{}, false, fmt.Errorf("contact name: %w", err)
 			}
 		}
@@ -174,20 +181,27 @@ func checkIdentityEditTx(
 	return out, true, nil
 }
 
-// applyIdentityEditTx renames / links splitter debt debtID in place — same
-// row, so repayments stay. A rename tells no one; a link to a contact with an
-// app account tells them like a new split (split_created per their flags).
+func sameUUID(a, b *uuid.UUID) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// applyIdentityEditTx changes splitter debt debtID's person in place — same
+// row, so repayments stay. Nobody is told, except when the new contact is
+// linked to an app user: they hear it like a new split (split_created per
+// their flags).
 func (s *Service) applyIdentityEditTx(
 	ctx context.Context, tx pgx.Tx, debtID, parentTxID uuid.UUID, e identityEdit,
 ) error {
 	if _, err := tx.Exec(ctx, `UPDATE personal_debts
-		SET counterparty_person_name = $2,
-		    counterparty_contact_id = COALESCE($3, counterparty_contact_id),
+		SET counterparty_person_name = $2, counterparty_contact_id = $3,
 		    updated_by_user_id = user_id
 		WHERE id = $1`, debtID, e.name, e.contactID); err != nil {
 		return fmt.Errorf("split person: %w", err)
 	}
-	if e.contactID == nil {
+	if !e.newLink {
 		return nil
 	}
 	d, err := getAnyDebtTx(ctx, tx, debtID)

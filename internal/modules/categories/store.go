@@ -210,10 +210,9 @@ func (s *Store) Create(ctx context.Context, c *Category) (*Category, error) {
 	}
 	c.ID = id
 
-	// Resolve next sort_order. Newly-created categories slot in at the
-	// FRONT of their sibling group (sort_order = MIN-1) so the user sees
-	// what they just made without scrolling. Negative values are fine —
-	// sort_order is just an ordering key, never displayed.
+	// Resolve next sort_order. A new category goes to the END of its
+	// sibling group (sort_order = MAX+1, spec 05 §3.1; owner 2026-10-11).
+	// The first one in a group gets 0, like the seeded ones.
 	//
 	// Done as a separate query rather than inlined as a subquery in the
 	// INSERT VALUES list: inlining caused Postgres prepared-statement
@@ -222,7 +221,7 @@ func (s *Store) Create(ctx context.Context, c *Category) (*Category, error) {
 	// subquery comparison.
 	var nextSort int
 	err = s.db.QueryRow(ctx, `
-		SELECT COALESCE(MIN(sort_order), 0) - 1
+		SELECT COALESCE(MAX(sort_order), -1) + 1
 		  FROM categories
 		 WHERE user_id = $1 AND type = $2
 		   AND parent_id IS NOT DISTINCT FROM $3`,

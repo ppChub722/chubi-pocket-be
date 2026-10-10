@@ -246,6 +246,14 @@ func mapServiceError(c *gin.Context, err error) {
 		response.NotFound(c, "NOT_FOUND", "Member not found")
 	case errors.Is(err, ErrUserNotFound):
 		response.NotFound(c, "USER_NOT_FOUND", "No user matches that email")
+	case errors.Is(err, ErrInviteTarget):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, ErrContactNotFound):
+		response.NotFound(c, "CONTACT_NOT_FOUND", "Contact not found")
+	case errors.Is(err, ErrContactArchived):
+		response.Fail(c, http.StatusConflict, "CONTACT_ARCHIVED", err.Error(), nil)
+	case errors.Is(err, ErrContactNotLinked):
+		response.Fail(c, http.StatusUnprocessableEntity, "CONTACT_NOT_LINKED", err.Error(), nil)
 	case errors.Is(err, ErrAlreadyMember):
 		response.Fail(c, http.StatusConflict, "USER_ALREADY_MEMBER", "User is already a member of this account", nil)
 	case errors.Is(err, ErrNotMember):

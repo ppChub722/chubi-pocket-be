@@ -48,12 +48,9 @@ func (s *Service) InviteMember(
 		return nil, err
 	}
 
-	targetID, err := s.notifs.LookupUserByEmail(ctx, req.Email)
+	targetID, err := s.inviteTarget(ctx, callerUserID, req)
 	if err != nil {
 		return nil, err
-	}
-	if targetID == nil {
-		return nil, ErrUserNotFound
 	}
 	if *targetID == callerUserID {
 		return nil, ErrAlreadyMember
@@ -96,6 +93,47 @@ func (s *Service) InviteMember(
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return member, nil
+}
+
+// inviteTarget resolves who an invite is for: my contact's linked app user
+// (contact_id), or the user with that email.
+func (s *Service) inviteTarget(
+	ctx context.Context, callerUserID uuid.UUID, req InviteMemberRequest,
+) (*uuid.UUID, error) {
+	switch {
+	case (req.ContactID == nil) == (req.Email == nil):
+		return nil, ErrInviteTarget
+	case req.ContactID != nil:
+		var (
+			linked *uuid.UUID
+			status string
+		)
+		err := s.store.db.QueryRow(ctx,
+			`SELECT linked_user_id, status FROM contacts WHERE id = $1 AND user_id = $2`,
+			*req.ContactID, callerUserID).Scan(&linked, &status)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrContactNotFound
+		}
+		if err != nil {
+			return nil, fmt.Errorf("invite contact: %w", err)
+		}
+		if status == "archived" {
+			return nil, ErrContactArchived
+		}
+		if linked == nil {
+			return nil, ErrContactNotLinked
+		}
+		return linked, nil
+	default:
+		targetID, err := s.notifs.LookupUserByEmail(ctx, *req.Email)
+		if err != nil {
+			return nil, err
+		}
+		if targetID == nil {
+			return nil, ErrUserNotFound
+		}
+		return targetID, nil
+	}
 }
 
 // --- Leave / remove (DELETE /v1/accounts/:id/members/:member_id) ---

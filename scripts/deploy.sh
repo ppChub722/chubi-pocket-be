@@ -74,7 +74,7 @@ sudo docker build -q -t chubi-be:prod-new --label "commit=$COMMIT" src </dev/nul
 
 echo "· backup"
 sudo bash /srv/backup/backup.sh >/dev/null
-echo "  latest dump: $(ls -t /srv/backup/dumps | head -1)"
+echo "  latest dump: $(ls -t /srv/backup/dumps | grep '\.dump\.gz$' | head -1)"
 
 echo "· migrations"
 sudo cp -r src/migrations/. /srv/chubi/migrations/

@@ -52,14 +52,33 @@ type SplitInput struct {
 
 // SplitEdit — one row of PUT /v1/transactions/:id/splits. With debt_id it
 // keeps / re-amounts that existing split; person_name / contact_id on it
-// rename or link the person in place, only while the split has no contact
-// (left out = unchanged). Without debt_id it adds a person (same fields as
-// SplitInput).
+// change the person in place (rename, another contact, or "contact_id":
+// null back to a free name) unless the split's contact is linked to an app
+// user. Left out = unchanged. Without debt_id it adds a person (same fields
+// as SplitInput).
 type SplitEdit struct {
 	DebtID     *uuid.UUID `json:"debt_id"`
 	PersonName string     `json:"person_name" binding:"omitempty,max=100"`
 	ContactID  *uuid.UUID `json:"contact_id"`
 	OwedAmount float64    `json:"owed_amount" binding:"required,gt=0"`
+
+	// ContactIDSet — the body carried "contact_id" (null included), so a
+	// kept split's contact is being set or dropped. A non-nil ContactID
+	// implies it.
+	ContactIDSet bool `json:"-"`
+}
+
+func (e *SplitEdit) UnmarshalJSON(data []byte) error {
+	type alias SplitEdit
+	if err := json.Unmarshal(data, (*alias)(e)); err != nil {
+		return err
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	_, e.ContactIDSet = probe["contact_id"]
+	return nil
 }
 
 // EditSplitsRequest — the WHOLE new list; a split left out is removed, []

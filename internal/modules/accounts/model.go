@@ -114,8 +114,12 @@ type ListMembersResponse struct {
 	Data []MemberHistoryView `json:"data"`
 }
 
+// InviteMemberRequest — exactly one of: contact_id (one of my contacts
+// linked to an app user; owner 2026-10-11, the app's picker) or email (the
+// older form, still accepted).
 type InviteMemberRequest struct {
-	Email string `json:"email" binding:"required,email"`
+	ContactID *uuid.UUID `json:"contact_id"`
+	Email     *string    `json:"email" binding:"omitempty,email"`
 }
 
 type TransferOwnershipRequest struct {
