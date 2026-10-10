@@ -271,6 +271,19 @@ Use Flutter build flavors or `--dart-define=API_BASE_URL=...` to switch.
 - [ ] CI/CD: build image in GitHub Actions, push to GHCR, `docker compose pull` on the VPS
 - [ ] Monitoring / error tracking (Sentry)
 
+## App version check
+
+The app sends its build number in `X-App-Build`. `GET /api/v1/app/version` (public) returns `{min_build, latest_build, download_url, message_th?, message_en?}`; any other `/api/v1` call from a build older than `MIN_APP_BUILD` gets `426` `APP_OUTDATED` with the same fields in `error.details`. No header (web, Postman, curl) always passes. Env, read at start (`docker compose up -d app` after editing `.env`):
+
+| Var | Default | Meaning |
+|---|---|---|
+| `MIN_APP_BUILD` | `0` (off) | Oldest build allowed — raise it to force testers to update |
+| `LATEST_APP_BUILD` | `0` | Newest build out there — the app nudges older ones |
+| `APP_DOWNLOAD_URL` | empty | Firebase App Distribution tester link |
+| `APP_UPDATE_MESSAGE_TH` / `_EN` | empty | Optional text for the update screen |
+
+Release order: deploy BE + upload the APK first, then raise `MIN_APP_BUILD` / `LATEST_APP_BUILD` to the new build. Raising `MIN_APP_BUILD` past a build nobody can download yet locks everyone out.
+
 ---
 
 ## Troubleshooting

@@ -16,6 +16,7 @@ type Config struct {
 	JWT      JWTConfig
 	Server   ServerConfig
 	OCR      OCRConfig
+	Version  AppVersionConfig
 }
 
 // AppConfig contains application-level configuration
@@ -70,6 +71,16 @@ type OCRConfig struct {
 	Dump bool
 }
 
+// AppVersionConfig — the app version check (see modules/appversion). Read
+// at start; changing it needs a restart.
+type AppVersionConfig struct {
+	MinBuild    int    // MIN_APP_BUILD — older builds get 426 APP_OUTDATED (default 0 = off)
+	LatestBuild int    // LATEST_APP_BUILD — newest build out there (default 0 = not set)
+	DownloadURL string // APP_DOWNLOAD_URL — where testers get it (Firebase App Distribution)
+	MessageTH   string // APP_UPDATE_MESSAGE_TH — optional text for the update screen
+	MessageEN   string // APP_UPDATE_MESSAGE_EN
+}
+
 // ServerConfig contains HTTP server configuration
 type ServerConfig struct {
 	ReadTimeout  time.Duration
@@ -114,6 +125,13 @@ func Load() (*Config, error) {
 			Timeout:     time.Duration(getEnvAsInt("OCR_TIMEOUT", 30)) * time.Second,
 			Concurrency: getEnvAsInt("OCR_CONCURRENCY", 1),
 			Dump:        getEnv("OCR_DUMP", "") == "1",
+		},
+		Version: AppVersionConfig{
+			MinBuild:    getEnvAsInt("MIN_APP_BUILD", 0),
+			LatestBuild: getEnvAsInt("LATEST_APP_BUILD", 0),
+			DownloadURL: getEnv("APP_DOWNLOAD_URL", ""),
+			MessageTH:   getEnv("APP_UPDATE_MESSAGE_TH", ""),
+			MessageEN:   getEnv("APP_UPDATE_MESSAGE_EN", ""),
 		},
 	}
 

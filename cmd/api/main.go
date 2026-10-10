@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/accounts"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/appversion"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/budgets"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
@@ -52,6 +53,7 @@ func main() {
 		"env", cfg.App.Env,
 		"port", cfg.App.Port,
 		"log_bodies", cfg.App.LogBodies,
+		"min_app_build", cfg.Version.MinBuild,
 	)
 
 	dbPool, err := database.New(cfg.GetDatabaseURL(), log)
@@ -275,6 +277,8 @@ func main() {
 			// allowed here or the OPTIONS response 403s and the actual
 			// request never fires.
 			"X-Request-ID",
+			// The app's build number — the version check (modules/appversion).
+			appversion.Header,
 		},
 		// Echo X-Request-ID back so the FE can read it from the response
 		// (ApiException pulls it from this header for error UIs).
@@ -287,8 +291,20 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
+	versionHandler := appversion.NewHandler(appversion.Info{
+		MinBuild:    cfg.Version.MinBuild,
+		LatestBuild: cfg.Version.LatestBuild,
+		DownloadURL: cfg.Version.DownloadURL,
+		MessageTH:   cfg.Version.MessageTH,
+		MessageEN:   cfg.Version.MessageEN,
+	})
+
 	api := r.Group("/api/v1")
 	{
+		// Builds older than MIN_APP_BUILD get 426 on every route but this one.
+		api.Use(versionHandler.Middleware("/api/v1/app/version"))
+		api.GET("/app/version", versionHandler.Version)
+
 		// Public
 		api.POST("/auth/register", authHandler.Register)
 		api.POST("/auth/login", authHandler.Login)
