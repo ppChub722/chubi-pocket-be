@@ -293,9 +293,44 @@ func mapServiceError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusForbidden, "CATEGORY_AUTHOR_ONLY", err.Error(), nil)
 	case errors.Is(err, ErrRowLocked):
 		response.Fail(c, http.StatusForbidden, "ROW_LOCKED", err.Error(), nil)
+	case errors.Is(err, ErrSplitsOnTransfer):
+		response.BadRequest(c, "SPLITS_ON_TRANSFER", err.Error(), nil)
+	case errors.Is(err, ErrSplitsAuthorOnly):
+		response.Fail(c, http.StatusForbidden, "SPLITS_AUTHOR_ONLY", err.Error(), nil)
+	case errors.Is(err, ErrSplitsExceedAmount):
+		response.BadRequest(c, "SPLITS_EXCEED_AMOUNT", err.Error(), nil)
+	case errors.Is(err, ErrSplitUnknownDebt), errors.Is(err, ErrSplitPersonRequired):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, ErrSplitContactArchived):
+		response.Fail(c, http.StatusConflict, "CONTACT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, ErrAmountInvalid):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	default:
 		response.InternalError(c, "Transaction operation failed", err.Error())
 	}
 }
+
+// PUT /v1/transactions/:id/splits — replace the split list (see EditSplits).
+func (h *Handler) EditSplits(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	var req EditSplitsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	out, err := h.service.EditSplits(c.Request.Context(), userID, id, *req.Splits)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+

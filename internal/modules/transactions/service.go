@@ -29,6 +29,12 @@ var (
 	ErrTransferFieldsOnNonTransfer = errors.New("transfer_to_account_id is only valid for type=transfer")
 	ErrAmountInvalid               = errors.New("amount must be > 0")
 	ErrSplitContactNotFound        = errors.New("split contact not found or not owned")
+	// PUT /transactions/:id/splits (owner 2026-10-10).
+	ErrSplitsAuthorOnly     = errors.New("only the transaction's author can change its splits")
+	ErrSplitsExceedAmount   = errors.New("splits add up to more than the transaction amount")
+	ErrSplitUnknownDebt     = errors.New("debt_id is not one of this transaction's splits (or is listed twice)")
+	ErrSplitPersonRequired  = errors.New("person_name is required for a new split")
+	ErrSplitContactArchived = errors.New("split contact is archived")
 	ErrCategoryRequiredForTransfer = errors.New("transfer category is auto-set; do not pass category_id")
 	ErrTransferRequiresAccount     = errors.New("account_id is required for type=transfer")
 	ErrMoveTransferNeedsToAccount  = errors.New("transfer_to_account_id is required when moving a transfer's account")
@@ -64,6 +70,11 @@ type (
 	// personal_debts.Service.CreateForTransactionTx.
 	DebtsCreator func(ctx context.Context, tx pgx.Tx, parentTxID, userID uuid.UUID, parentType, parentCurrency string, parentDescription *string, splits []SplitInput) error
 
+	// SplitsEditor replaces parentTxID's split debts with `edits` (PUT
+	// /transactions/:id/splits) — add, re-amount, remove, and tell linked
+	// partners. Inside the caller's tx; wired from personal_debts in main.
+	SplitsEditor func(ctx context.Context, tx pgx.Tx, parentTxID, userID uuid.UUID, parentType, parentCurrency string, parentDescription *string, edits []SplitEdit) error
+
 	// DebtValidator confirms the caller owns the debt and returns its
 	// direction ('i_owe' | 'owed_to_me') and outstanding. Used when a
 	// transaction is being created with source_personal_debt_id set
@@ -76,14 +87,20 @@ type (
 	// validation is done by DebtValidator; this hook just bumps.
 	// Implemented by personal_debts.Service.AutoBumpInTx.
 	DebtAutoBumper func(ctx context.Context, tx pgx.Tx, userID, debtID uuid.UUID, deltaAmount float64) error
+
+	// DebtSettledAdjuster moves a debt's settled_amount by delta (+/−, floored
+	// at 0) when its repayment transaction is deleted (later: edited / unlinked).
+	DebtSettledAdjuster func(ctx context.Context, tx pgx.Tx, userID, debtID uuid.UUID, delta float64) error
 )
 
 type Service struct {
 	store        *Store
 	cats         *categories.Service
 	debtsCreator DebtsCreator
+	splitsEditor SplitsEditor
 	debtValid    DebtValidator
 	debtBumper   DebtAutoBumper
+	debtAdjust   DebtSettledAdjuster
 }
 
 func NewService(s *Store, cats *categories.Service) *Service {
@@ -91,8 +108,10 @@ func NewService(s *Store, cats *categories.Service) *Service {
 }
 
 func (s *Service) WithDebtsCreator(fn DebtsCreator)     { s.debtsCreator = fn }
+func (s *Service) WithSplitsEditor(fn SplitsEditor)     { s.splitsEditor = fn }
 func (s *Service) WithDebtValidator(fn DebtValidator)   { s.debtValid = fn }
 func (s *Service) WithDebtAutoBumper(fn DebtAutoBumper) { s.debtBumper = fn }
+func (s *Service) WithDebtSettledAdjuster(fn DebtSettledAdjuster) { s.debtAdjust = fn }
 
 // CountByCategory exposes the underlying count to categories.Service via the
 // TransactionCounter func wired in main.go.
@@ -175,7 +194,7 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*Li
 		f.PerPage = 100
 	}
 
-	rows, total, err := s.store.List(ctx, userID, f)
+	rows, total, totals, err := s.store.List(ctx, userID, f)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +210,7 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*Li
 			Total:      total,
 			TotalPages: totalPages,
 		},
+		Totals: totals,
 	}, nil
 }
 
@@ -198,11 +218,21 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*Li
 func (s *Service) hydrate(ctx context.Context, userID uuid.UUID, t *Transaction) (*TransactionDetail, error) {
 	d := &TransactionDetail{Transaction: *t, Tags: []EmbeddedTag{}, IsResolve: t.SourcePersonalDebtID != nil}
 	if t.SourcePersonalDebtID == nil {
-		var n int
-		if err := s.store.db.QueryRow(ctx,
-			`SELECT COUNT(*) FROM personal_debts WHERE source_transaction_id = $1`,
-			t.ID).Scan(&n); err == nil && n > 0 {
-			d.HasSplits = true
+		single := []TransactionDetail{*d}
+		if err := s.store.fillHasSplitsForList(ctx, single); err == nil {
+			*d = single[0]
+		}
+	}
+	splits, err := s.store.SplitsFor(ctx, userID, t.ID)
+	if err != nil {
+		return nil, err
+	}
+	d.Splits = &splits
+	if t.ProjectID != nil {
+		var name string
+		if err := s.store.db.QueryRow(ctx, `SELECT name FROM projects WHERE id = $1`,
+			*t.ProjectID).Scan(&name); err == nil {
+			d.Project = &EmbeddedRef{ID: *t.ProjectID, Name: name}
 		}
 	}
 	// Account ref — bare query rather than importing accounts module.
@@ -425,7 +455,7 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 		return nil, err
 	}
 
-	d := &TransactionDetail{Transaction: *created, HasSplits: len(req.Splits) > 0}
+	d := &TransactionDetail{Transaction: *created, HasSplits: len(req.Splits) > 0, SplitCount: len(req.Splits)}
 
 	if req.AccountID != nil {
 		delta := signedDelta(req.Type, req.Amount, false)
@@ -1031,10 +1061,14 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 		// Adjustment) is undeletable — silently dropping it would
 		// leave the cached `accounts.balance` honest but the audit
 		// trail would lie. Reverse via the account-level operation.
-		if err := s.checkNotSystemRow(ctx, current); err != nil {
+		if err := s.checkDeletable(ctx, current); err != nil {
 			return err
 		}
 		if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
+			return err
+		}
+		// A debt repayment: what it repaid comes off the debt.
+		if err := s.adjustRepaymentTx(ctx, tx, current, -current.Amount); err != nil {
 			return err
 		}
 	}
@@ -1347,3 +1381,75 @@ func joinAnd(parts []string) string {
 	}
 	return out
 }
+
+// EditSplits — PUT /v1/transactions/:id/splits (owner 2026-10-10): the
+// whole new split list for an expense / income the caller wrote. The debt
+// rows (and the linked partners' notifications) are personal_debts'
+// business, reached through the SplitsEditor hook inside this tx.
+func (s *Service) EditSplits(ctx context.Context, userID, id uuid.UUID, edits []SplitEdit) (*TransactionDetail, error) {
+	if s.splitsEditor == nil {
+		return nil, ErrSplitsNotSupportedYet
+	}
+	current, err := s.store.GetByID(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	if current.UserID != userID {
+		return nil, ErrSplitsAuthorOnly
+	}
+	if current.Type == TypeTransfer {
+		return nil, ErrSplitsOnTransfer
+	}
+	if err := s.checkNotSystemRow(ctx, current); err != nil {
+		return nil, err
+	}
+	var sum float64
+	for _, e := range edits {
+		sum += e.OwedAmount
+	}
+	if sum > current.Amount+0.005 {
+		return nil, ErrSplitsExceedAmount
+	}
+
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	// The bill's currency: its wallet's, else the user's.
+	var currency string
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE((SELECT currency FROM accounts WHERE id = $1),
+		                (SELECT currency FROM users WHERE id = $2), 'THB')`,
+		current.AccountID, userID).Scan(&currency); err != nil {
+		return nil, fmt.Errorf("currency: %w", err)
+	}
+	if err := s.splitsEditor(ctx, tx, current.ID, userID, string(current.Type), currency, current.Description, edits); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.Get(ctx, userID, id)
+}
+
+// checkDeletable — rows in a system category (opening balance, adjustment)
+// can't be deleted, EXCEPT a debt repayment: deleting it takes what it
+// repaid off its debt (owner 2026-10-10). Editing repayments waits for the
+// debt-repayment round.
+func (s *Service) checkDeletable(ctx context.Context, current *Transaction) error {
+	if current.SourcePersonalDebtID != nil {
+		return nil
+	}
+	return s.checkNotSystemRow(ctx, current)
+}
+
+// adjustRepaymentTx moves the repaid amount of t's debt by delta (no-op for
+// a row that isn't a repayment, or whose debt is gone).
+func (s *Service) adjustRepaymentTx(ctx context.Context, tx pgx.Tx, t *Transaction, delta float64) error {
+	if t.SourcePersonalDebtID == nil || s.debtAdjust == nil || (delta < 0.005 && delta > -0.005) {
+		return nil
+	}
+	return s.debtAdjust(ctx, tx, t.UserID, *t.SourcePersonalDebtID, delta)
+}
+

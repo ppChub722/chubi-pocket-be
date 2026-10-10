@@ -29,6 +29,8 @@ var (
 	ErrAlreadySettled    = errors.New("debt is already settled")
 	ErrAlreadyCancelled  = errors.New("debt is already cancelled")
 	ErrOverpayment       = errors.New("settle amount exceeds outstanding")
+	// Repaid more than owed (amount edited below repaid) — nothing to settle.
+	ErrDebtOverpaid = errors.New("this debt is already repaid in full or overpaid")
 	// ErrInvalidSettled — an update would leave settled_amount > amount
 	// (the DB CHECK would otherwise surface as a 500).
 	ErrInvalidSettled = errors.New("settled_amount exceeds amount")
@@ -503,7 +505,7 @@ func (s *Store) AutoBumpInTx(
 			settled_amount = LEAST(amount, settled_amount + $1),
 			status = CASE WHEN settled_amount + $1 >= amount THEN 'settled' ELSE status END,
 			updated_by_user_id = $2
-		WHERE id = $3 AND user_id = $2 AND status = 'open'`,
+		WHERE id = $3 AND user_id = $2 AND status = 'open' AND settled_amount < amount`,
 		delta, userID, debtID)
 	if err != nil {
 		return fmt.Errorf("auto-bump: %w", err)
@@ -538,8 +540,11 @@ func (s *Store) People(ctx context.Context, userID uuid.UUID) ([]PersonRow, floa
 		SELECT
 			counterparty_contact_id,
 			MAX(display_name) AS display_name,
-			COALESCE(SUM(outstanding) FILTER (WHERE direction = 'owed_to_me'), 0) AS owed_to_me,
-			COALESCE(SUM(outstanding) FILTER (WHERE direction = 'i_owe'), 0) AS i_owe,
+			-- Overpaid rows (outstanding < 0) count the other way round.
+			COALESCE(SUM(GREATEST(outstanding, 0)) FILTER (WHERE direction = 'owed_to_me'), 0) +
+			COALESCE(SUM(GREATEST(-outstanding, 0)) FILTER (WHERE direction = 'i_owe'), 0) AS owed_to_me,
+			COALESCE(SUM(GREATEST(outstanding, 0)) FILTER (WHERE direction = 'i_owe'), 0) +
+			COALESCE(SUM(GREATEST(-outstanding, 0)) FILTER (WHERE direction = 'owed_to_me'), 0) AS i_owe,
 			COUNT(*) AS open_count,
 			-- contract §7: the contact's icon (NULL for free-text names).
 			(SELECT c.icon_code FROM contacts c

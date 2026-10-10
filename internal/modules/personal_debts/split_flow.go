@@ -148,7 +148,13 @@ func (s *Service) AcceptSplitRequest(ctx context.Context, userID, notificationID
 	if err := json.Unmarshal(n.Payload, &p); err != nil {
 		return nil, fmt.Errorf("payload: %w", err)
 	}
+	if p.Superseded {
+		return nil, ErrSplitChangeStale
+	}
 	splitter, err := getAnyDebtTx(ctx, tx, p.SplitID)
+	if errors.Is(err, ErrDebtNotFound) {
+		return nil, ErrSplitChangeStale // removed since
+	}
 	if err != nil {
 		return nil, err
 	}

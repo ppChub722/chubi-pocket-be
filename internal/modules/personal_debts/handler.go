@@ -231,6 +231,8 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "ALREADY_SETTLED", "Debt is already settled", nil)
 	case errors.Is(err, ErrAlreadyCancelled):
 		response.BadRequest(c, "ALREADY_CANCELLED", "Debt is already cancelled", nil)
+	case errors.Is(err, ErrDebtOverpaid):
+		response.BadRequest(c, "DEBT_OVERPAID", err.Error(), nil)
 	case errors.Is(err, ErrOverpayment):
 		response.BadRequest(c, "OVERPAYMENT", "Settle amount exceeds outstanding", nil)
 	case errors.Is(err, ErrInvalidSettled):
@@ -268,6 +270,8 @@ func (h *Handler) AcceptSplitRequest(c *gin.Context) {
 	}
 	out, err := h.service.AcceptSplitRequest(c.Request.Context(), userID, nid)
 	switch {
+	case errors.Is(err, ErrSplitChangeStale):
+		response.Fail(c, http.StatusConflict, "SPLIT_CHANGE_STALE", err.Error(), nil)
 	case errors.Is(err, ErrNotSplitRequest):
 		response.BadRequest(c, "NOT_SPLIT_REQUEST", err.Error(), nil)
 	case errors.Is(err, notifications.ErrNotificationNotFound):
@@ -280,5 +284,39 @@ func (h *Handler) AcceptSplitRequest(c *gin.Context) {
 		mapServiceError(c, err)
 	default:
 		c.JSON(http.StatusCreated, out)
+	}
+}
+
+// POST /v1/personal-debts/split-changes/:notification_id/apply —
+// "อัปเดตตาม" on a split_changed notification (one shot).
+func (h *Handler) ApplySplitChange(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	nid, err := uuid.Parse(c.Param("notification_id"))
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		return
+	}
+	out, err := h.service.ApplySplitChange(c.Request.Context(), userID, nid)
+	switch {
+	case errors.Is(err, ErrNotSplitChange):
+		response.BadRequest(c, "NOT_SPLIT_CHANGE", err.Error(), nil)
+	case errors.Is(err, ErrNotificationActioned):
+		response.Fail(c, http.StatusConflict, "NOTIFICATION_ACTIONED", err.Error(), nil)
+	case errors.Is(err, ErrSplitChangeStale):
+		response.Fail(c, http.StatusConflict, "SPLIT_CHANGE_STALE", err.Error(), nil)
+	case errors.Is(err, notifications.ErrNotificationNotFound):
+		response.NotFound(c, "NOT_FOUND", "Notification not found")
+	case errors.Is(err, notifications.ErrNotForYou):
+		response.Fail(c, http.StatusForbidden, "NOT_FOR_YOU", "Notification is not addressed to caller", nil)
+	case errors.Is(err, notifications.ErrStateConflict):
+		response.Fail(c, http.StatusConflict, "NOTIFICATION_STATE_CONFLICT", err.Error(), nil)
+	case err != nil:
+		mapServiceError(c, err)
+	default:
+		c.JSON(http.StatusOK, out)
 	}
 }

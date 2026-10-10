@@ -153,7 +153,7 @@ func (s *Store) CountByCategory(ctx context.Context, categoryID uuid.UUID) (int,
 
 // List returns a page of TransactionDetail rows joined with embedded
 // account + category refs. Sort = date_desc by default.
-func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]TransactionDetail, int, error) {
+func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]TransactionDetail, int, Totals, error) {
 	whereClauses := []string{txVisible("t", "$1")}
 	args := []any{userID}
 
@@ -205,13 +205,20 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 
 	where := strings.Join(whereClauses, " AND ")
 
-	// total count
-	var total int
-	err := s.db.QueryRow(ctx,
-		"SELECT COUNT(*) FROM transactions t WHERE "+where, args...).Scan(&total)
+	// Row count + money totals over the whole filtered set, one pass.
+	var (
+		total  int
+		totals Totals
+	)
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*),
+		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'income'), 0),
+		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0),
+		COUNT(*) FILTER (WHERE t.type <> 'transfer')
+		FROM transactions t WHERE `+where, args...).Scan(&total, &totals.Income, &totals.Expense, &totals.Count)
 	if err != nil {
-		return nil, 0, fmt.Errorf("count: %w", err)
+		return nil, 0, Totals{}, fmt.Errorf("count: %w", err)
 	}
+	totals.Net = totals.Income - totals.Expense
 
 	orderBy := "t.date DESC, t.created_at DESC"
 	switch f.Sort {
@@ -244,7 +251,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
-		return nil, 0, fmt.Errorf("list: %w", err)
+		return nil, 0, Totals{}, fmt.Errorf("list: %w", err)
 	}
 	defer rows.Close()
 
@@ -266,7 +273,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 			&catID, &catName,
 		)
 		if err != nil {
-			return nil, 0, fmt.Errorf("scan: %w", err)
+			return nil, 0, Totals{}, fmt.Errorf("scan: %w", err)
 		}
 		if accID != nil && accName != nil {
 			d.Account = &EmbeddedRef{ID: *accID, Name: *accName}
@@ -281,22 +288,25 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		out = append(out, d)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, err
+		return nil, 0, Totals{}, err
 	}
 
 	// Batch-fetch tags for the page in a single query, then patch onto
 	// each row by id. Avoids N+1 against the page; with per_page <= 100
 	// this stays a small in-memory join.
 	if err := s.fillTagsForList(ctx, userID, out); err != nil {
-		return nil, 0, fmt.Errorf("fill tags: %w", err)
+		return nil, 0, Totals{}, fmt.Errorf("fill tags: %w", err)
 	}
 	if err := s.fillHasSplitsForList(ctx, out); err != nil {
-		return nil, 0, fmt.Errorf("fill has_splits: %w", err)
+		return nil, 0, Totals{}, fmt.Errorf("fill has_splits: %w", err)
 	}
 	if err := s.fillSharedInfoForList(ctx, userID, out); err != nil {
-		return nil, 0, fmt.Errorf("fill shared info: %w", err)
+		return nil, 0, Totals{}, fmt.Errorf("fill shared info: %w", err)
 	}
-	return out, total, nil
+	if err := s.fillProjectsForList(ctx, out); err != nil {
+		return nil, 0, Totals{}, fmt.Errorf("fill projects: %w", err)
+	}
+	return out, total, totals, nil
 }
 
 // fillSharedInfoForList decorates rows that live on SHARED wallets
@@ -394,8 +404,8 @@ func (s *Store) fillSharedInfoForList(ctx context.Context, userID uuid.UUID, det
 	return nil
 }
 
-// fillHasSplitsForList flags every row that has any debts attached
-// (i.e. the splitter's side of a split-bill transaction). Single batch
+// fillHasSplitsForList counts the debts every row made (the splitter's side
+// of a split-bill transaction) → split_count + has_splits. Single batch
 // query against the personal_debts.source_transaction_id index.
 func (s *Store) fillHasSplitsForList(ctx context.Context, details []TransactionDetail) error {
 	if len(details) == 0 {
@@ -406,27 +416,71 @@ func (s *Store) fillHasSplitsForList(ctx context.Context, details []TransactionD
 		ids[i] = details[i].ID
 	}
 	rows, err := s.db.Query(ctx, `
-		SELECT DISTINCT source_transaction_id
+		SELECT source_transaction_id, COUNT(*)
 		FROM personal_debts
-		WHERE source_transaction_id = ANY($1)`, ids)
+		WHERE source_transaction_id = ANY($1)
+		GROUP BY source_transaction_id`, ids)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	hasByID := make(map[uuid.UUID]struct{}, len(details))
+	countByID := make(map[uuid.UUID]int, len(details))
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var (
+			id uuid.UUID
+			n  int
+		)
+		if err := rows.Scan(&id, &n); err != nil {
 			return err
 		}
-		hasByID[id] = struct{}{}
+		countByID[id] = n
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 	for i := range details {
-		if _, ok := hasByID[details[i].ID]; ok {
-			details[i].HasSplits = true
+		details[i].SplitCount = countByID[details[i].ID]
+		details[i].HasSplits = details[i].SplitCount > 0
+	}
+	return nil
+}
+
+// fillProjectsForList embeds {id, name} for rows that carry a project_id.
+// One query per page.
+func (s *Store) fillProjectsForList(ctx context.Context, details []TransactionDetail) error {
+	var ids []uuid.UUID
+	for i := range details {
+		if details[i].ProjectID != nil {
+			ids = append(ids, *details[i].ProjectID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT id, name FROM projects WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	names := make(map[uuid.UUID]string, len(ids))
+	for rows.Next() {
+		var (
+			id   uuid.UUID
+			name string
+		)
+		if err := rows.Scan(&id, &name); err != nil {
+			return err
+		}
+		names[id] = name
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range details {
+		if p := details[i].ProjectID; p != nil {
+			if name, ok := names[*p]; ok {
+				details[i].Project = &EmbeddedRef{ID: *p, Name: name}
+			}
 		}
 	}
 	return nil
@@ -624,4 +678,30 @@ func (s *Store) DeleteRowTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) error 
 		return ErrTxNotFound
 	}
 	return nil
+}
+
+// SplitsFor — the debts transaction txID made in userID's book (GET
+// /transactions/:id). A shared-wallet member who isn't the author gets
+// none: the debts are the author's.
+func (s *Store) SplitsFor(ctx context.Context, userID, txID uuid.UUID) ([]SplitRef, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id, counterparty_person_name, counterparty_contact_id, direction,
+		       amount, settled_amount, status
+		FROM personal_debts
+		WHERE source_transaction_id = $1 AND user_id = $2
+		ORDER BY created_at, id`, txID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("splits: %w", err)
+	}
+	defer rows.Close()
+	out := []SplitRef{}
+	for rows.Next() {
+		var r SplitRef
+		if err := rows.Scan(&r.DebtID, &r.PersonName, &r.ContactID, &r.Direction,
+			&r.Amount, &r.SettledAmount, &r.Status); err != nil {
+			return nil, fmt.Errorf("splits scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

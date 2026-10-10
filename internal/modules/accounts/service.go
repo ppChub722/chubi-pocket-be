@@ -13,7 +13,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
-	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 var (
@@ -138,8 +137,8 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, userCurrency str
 			amount = -req.Balance
 		}
 		today := time.Now().Format("2006-01-02")
-		desc := "Opening balance"
-		_, newBalance, err := s.txs.CreateSystemInTx(ctx, tx, userID, created.ID, kind, amount, today, &desc, nil)
+		// No description: the app labels it by its system category (owner 2026-10-10).
+		_, newBalance, err := s.txs.CreateSystemInTx(ctx, tx, userID, created.ID, kind, amount, today, nil, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -248,12 +247,9 @@ func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID
 	if req.Date != nil {
 		date = *req.Date
 	}
-	desc := "Balance adjustment"
-	if d := shared.CleanText(req.Description); d != nil {
-		desc = *d
-	}
-
-	created, newBalance, err := s.txs.CreateSystemInTx(ctx, tx, userID, accountID, kind, amount, date, &desc, req.Note)
+	// Only what the user typed — no canned text; the app labels the row by
+	// its system category (owner 2026-10-10).
+	created, newBalance, err := s.txs.CreateSystemInTx(ctx, tx, userID, accountID, kind, amount, date, req.Description, req.Note)
 	if err != nil {
 		return nil, err
 	}

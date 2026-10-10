@@ -164,8 +164,10 @@ func main() {
 
 	// transactions ↔ personal_debts.
 	transactionsService.WithDebtsCreator(personalDebtsService.CreateForTransactionTx)
+	transactionsService.WithSplitsEditor(personalDebtsService.EditForTransactionTx)
 	transactionsService.WithDebtValidator(personalDebtsService.ValidateOwnership)
 	transactionsService.WithDebtAutoBumper(personalDebtsService.AutoBumpInTx)
+	transactionsService.WithDebtSettledAdjuster(personalDebtsService.AdjustSettledInTx)
 	// personal_debts ↔ notifications (linked splits, contract §5).
 	personalDebtsService.WithNotifications(notificationsService)
 
@@ -368,6 +370,7 @@ func main() {
 			protected.GET("/transactions/summary", transactionsHandler.Summary)
 			protected.GET("/transactions/:id", transactionsHandler.Get)
 			protected.PUT("/transactions/:id", transactionsHandler.Update)
+			protected.PUT("/transactions/:id/splits", transactionsHandler.EditSplits)
 			protected.DELETE("/transactions/:id", transactionsHandler.Delete)
 			protected.POST("/transactions/:id/tags", tagsHandler.Attach)
 			protected.DELETE("/transactions/:id/tags/:tag_id", tagsHandler.Detach)
@@ -399,6 +402,7 @@ func main() {
 			// /people view aggregates by counterparty with net positions.
 			protected.GET("/personal-debts/people", personalDebtsHandler.People)
 			protected.POST("/personal-debts/split-requests/:notification_id/accept", personalDebtsHandler.AcceptSplitRequest)
+			protected.POST("/personal-debts/split-changes/:notification_id/apply", personalDebtsHandler.ApplySplitChange)
 			protected.GET("/personal-debts", personalDebtsHandler.List)
 			protected.POST("/personal-debts", personalDebtsHandler.Create)
 			protected.GET("/personal-debts/:id", personalDebtsHandler.Get)

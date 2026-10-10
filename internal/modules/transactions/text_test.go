@@ -76,7 +76,7 @@ func TestUpdateTextFields(t *testing.T) {
 		}
 	}
 
-	found, _, err := store.List(ctx, uid, ListFilter{Q: "d2", Page: 1, PerPage: 10})
+	found, _, _, err := store.List(ctx, uid, ListFilter{Q: "d2", Page: 1, PerPage: 10})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

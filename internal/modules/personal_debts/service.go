@@ -99,6 +99,9 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRe
 	}
 
 	outstanding := current.Amount - current.SettledAmount
+	if outstanding <= 0.005 {
+		return nil, ErrDebtOverpaid
+	}
 	amount := outstanding
 	if req.Amount != nil {
 		amount = *req.Amount
@@ -249,6 +252,19 @@ func (s *Service) AutoBumpInTx(
 	ctx context.Context, tx pgx.Tx, userID, debtID uuid.UUID, delta float64,
 ) error {
 	return s.store.AutoBumpInTx(ctx, tx, userID, debtID, delta)
+}
+
+// AdjustSettledInTx — the transactions.DebtSettledAdjuster hook: a
+// repayment row was edited (delta = new − old), deleted or unlinked
+// (delta = −amount). Repaid is floored at 0; status follows.
+func (s *Service) AdjustSettledInTx(ctx context.Context, tx pgx.Tx, userID, debtID uuid.UUID, delta float64) error {
+	if _, err := tx.Exec(ctx, `UPDATE personal_debts SET settled_amount = GREATEST(settled_amount + $3, 0)
+		WHERE id = $1 AND user_id = $2`, debtID, userID, delta); err != nil {
+		return fmt.Errorf("adjust settled: %w", err)
+	}
+	_, err := tx.Exec(ctx, `UPDATE personal_debts SET status = `+debtStatusAfterAmount+`,
+		updated_by_user_id = $2 WHERE id = $1 AND user_id = $2`, debtID, userID)
+	return err
 }
 
 // ValidateOwnership checks the caller actually owns the debt. Used by

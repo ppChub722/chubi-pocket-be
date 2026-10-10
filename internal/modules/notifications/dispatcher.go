@@ -146,3 +146,30 @@ func splitDeepLink(recipientDebtID *uuid.UUID) string {
 	}
 	return "/personal-debts"
 }
+
+// DispatchSplitChanged — a split the recipient mirrored changed. Older
+// pending split_changed for the same split are superseded first, so only
+// the newest one can still be applied.
+func (s *Service) DispatchSplitChanged(
+	ctx context.Context, tx pgx.Tx,
+	recipientUserID uuid.UUID, actorUserID uuid.UUID, p SplitChangedPayload, actioned bool,
+) error {
+	if err := s.store.SupersedeSplitNoticesTx(ctx, tx, recipientUserID, TypeSplitChanged, p.SplitID); err != nil {
+		return err
+	}
+	deepLink := splitDeepLink(&p.RecipientDebtID)
+	return s.dispatchTx(ctx, tx, TypeSplitChanged, recipientUserID, &actorUserID, p, &deepLink, actioned)
+}
+
+// SupersedeSplitNoticesTx marks the recipient's still-pending notices of
+// notifType about splitID superseded — their action no longer applies.
+func (s *Service) SupersedeSplitNoticesTx(ctx context.Context, tx pgx.Tx, recipientUserID uuid.UUID, notifType string, splitID uuid.UUID) error {
+	return s.store.SupersedeSplitNoticesTx(ctx, tx, recipientUserID, notifType, splitID)
+}
+
+// RefreshSplitCreatedTx keeps a still-pending split_created in step with
+// its split's new amount ("add to my debts" always uses the live amount;
+// this keeps the card's figure right). Reports whether one was pending.
+func (s *Service) RefreshSplitCreatedTx(ctx context.Context, tx pgx.Tx, recipientUserID, splitID uuid.UUID, amount float64) (bool, error) {
+	return s.store.RefreshSplitCreatedTx(ctx, tx, recipientUserID, splitID, amount)
+}

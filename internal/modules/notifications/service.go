@@ -61,12 +61,14 @@ var (
 	mutableTypes = map[string]bool{
 		TypeSplitCreated: true, TypeSplitPaid: true,
 		TypeProjectTxRecordedForYou: true, TypeProjectTxChanged: true, TypeProjectAdded: true,
+		TypeSplitChanged: true,
 	}
 	autoableTypes = map[string]bool{
 		TypeSplitCreated:            true, // add to my debts
 		TypeSplitPaid:               true, // record the receipt
 		TypeProjectTxRecordedForYou: true, // copy into my book
 		TypeProjectTxChanged:        true, // update my copy to match
+		TypeSplitChanged:            true, // update my debt to match
 	}
 	actionTypes = map[string]bool{
 		TypeAccountInvite: true, TypeProjectInvite: true, TypeContactLinkRequest: true,

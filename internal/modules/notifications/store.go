@@ -476,3 +476,28 @@ func (s *Store) IsActiveWalletMember(ctx context.Context, userID, accountID uuid
 	return ok, nil
 }
 
+
+// SupersedeSplitNoticesTx — see Service.SupersedeSplitNoticesTx.
+func (s *Store) SupersedeSplitNoticesTx(ctx context.Context, tx pgx.Tx, recipientUserID uuid.UUID, notifType string, splitID uuid.UUID) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE notifications SET payload = payload || '{"superseded": true}'::jsonb, updated_at = NOW()
+		WHERE recipient_user_id = $1 AND type = $2 AND payload->>'split_id' = $3::text
+		  AND actioned_at IS NULL`, recipientUserID, notifType, splitID.String())
+	if err != nil {
+		return fmt.Errorf("supersede %s: %w", notifType, err)
+	}
+	return nil
+}
+
+// RefreshSplitCreatedTx — see Service.RefreshSplitCreatedTx.
+func (s *Store) RefreshSplitCreatedTx(ctx context.Context, tx pgx.Tx, recipientUserID, splitID uuid.UUID, amount float64) (bool, error) {
+	tag, err := tx.Exec(ctx, `
+		UPDATE notifications SET payload = jsonb_set(payload, '{amount}', to_jsonb($4::numeric)), updated_at = NOW()
+		WHERE recipient_user_id = $1 AND type = $2 AND payload->>'split_id' = $3::text
+		  AND actioned_at IS NULL AND dismissed_at IS NULL`,
+		recipientUserID, TypeSplitCreated, splitID.String(), amount)
+	if err != nil {
+		return false, fmt.Errorf("refresh split_created: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}

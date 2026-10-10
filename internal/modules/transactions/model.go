@@ -50,11 +50,38 @@ type SplitInput struct {
 	OwedAmount float64    `json:"owed_amount" binding:"required,gt=0"`
 }
 
+// SplitEdit — one row of PUT /v1/transactions/:id/splits. With debt_id it
+// keeps / re-amounts that existing split (only owed_amount is read);
+// without, it adds a person (same fields as SplitInput).
+type SplitEdit struct {
+	DebtID     *uuid.UUID `json:"debt_id"`
+	PersonName string     `json:"person_name" binding:"omitempty,max=100"`
+	ContactID  *uuid.UUID `json:"contact_id"`
+	OwedAmount float64    `json:"owed_amount" binding:"required,gt=0"`
+}
+
+// EditSplitsRequest — the WHOLE new list; a split left out is removed, []
+// removes them all.
+type EditSplitsRequest struct {
+	Splits *[]SplitEdit `json:"splits" binding:"required,dive"`
+}
+
 // EmbeddedRef is a {id, name} pair used in list/get responses to embed the
 // referenced category or account name without forcing the client to JOIN.
 type EmbeddedRef struct {
 	ID   uuid.UUID `json:"id"`
 	Name string    `json:"name"`
+}
+
+// SplitRef — one personal_debts row a split-bill transaction made.
+type SplitRef struct {
+	DebtID        uuid.UUID  `json:"debt_id"`
+	PersonName    string     `json:"person_name"`
+	ContactID     *uuid.UUID `json:"contact_id"`
+	Direction     string     `json:"direction"`
+	Amount        float64    `json:"amount"`
+	SettledAmount float64    `json:"settled_amount"`
+	Status        string     `json:"status"`
 }
 
 // EmbeddedTag enriches a tag ref with icon_code so the FE can render
@@ -90,6 +117,11 @@ type TransactionDetail struct {
 	Category     *EmbeddedRef  `json:"category,omitempty"`
 	Tags         []EmbeddedTag `json:"tags"`
 	HasSplits    bool          `json:"has_splits"`
+	SplitCount   int           `json:"split_count"`
+	// The debts this row made in the caller's book — GET /:id only (nil =
+	// key absent on list rows).
+	Splits  *[]SplitRef  `json:"splits,omitempty"`
+	Project *EmbeddedRef `json:"project,omitempty"`
 	IsRecurring  bool          `json:"is_recurring"`
 	IsResolve    bool          `json:"is_resolve"`
 	// Set on POST response only — not returned in lists.
@@ -232,9 +264,20 @@ type Pagination struct {
 	TotalPages int `json:"total_pages"`
 }
 
+// Totals — money over the WHOLE filtered set (every page), same WHERE as
+// the list rows. Transfers count in neither side; net = income − expense;
+// count = the income + expense rows (pagination.total also counts transfers).
+type Totals struct {
+	Income  float64 `json:"income"`
+	Expense float64 `json:"expense"`
+	Net     float64 `json:"net"`
+	Count   int     `json:"count"`
+}
+
 type ListResponse struct {
 	Data       []TransactionDetail `json:"data"`
 	Pagination Pagination          `json:"pagination"`
+	Totals     Totals              `json:"totals"`
 }
 
 type SummaryRequest struct {

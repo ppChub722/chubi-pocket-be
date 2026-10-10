@@ -68,6 +68,12 @@ func User(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 			`DELETE FROM projects WHERE owner_user_id = $1`,
 			`DELETE FROM account_members WHERE user_id = $1`,
 			`DELETE FROM accounts WHERE user_id = $1`,
+			`DELETE FROM notifications WHERE recipient_user_id = $1 OR actor_user_id = $1`,
+			`DELETE FROM contacts WHERE user_id = $1`,
+			`DELETE FROM tags WHERE user_id = $1`,
+			`DELETE FROM user_notification_settings WHERE user_id = $1`,
+			`DELETE FROM categories WHERE user_id = $1 AND parent_id IS NOT NULL`,
+			`DELETE FROM categories WHERE user_id = $1`,
 			`DELETE FROM users WHERE id = $1`,
 		} {
 			if _, err := pool.Exec(ctx, q, id); err != nil {

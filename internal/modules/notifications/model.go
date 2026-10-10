@@ -19,6 +19,7 @@ const (
 	TypeContactLinkRequest       = "contact_link_request"
 	TypeAccountInvite            = "account_invite"
 	TypeProjectAdded             = "project_added"
+	TypeSplitChanged             = "split_changed" // 2026-10-10: a split I'm in was re-amounted / removed
 )
 
 // Notification is the DB row.
@@ -120,7 +121,33 @@ type SplitCreatedPayload struct {
 	Note                *string    `json:"note"`
 	// The recipient's own debt row (contract §5) — the deep link opens it.
 	RecipientDebtID *uuid.UUID `json:"recipient_debt_id"`
+	// Set when the splitter removed this split before it was added.
+	Superseded bool `json:"superseded,omitempty"`
 }
+
+// SplitChangedPayload — the splitter edited a split the recipient already
+// added to their book (PUT /transactions/:id/splits). One-shot action
+// "อัปเดตตาม" = POST /personal-debts/split-changes/:id/apply. Superseded
+// is set when a newer change to the same split replaces this one.
+type SplitChangedPayload struct {
+	SplitID             uuid.UUID `json:"split_id"`
+	ParentKind          string    `json:"parent_kind"` // "transaction"
+	ParentID            uuid.UUID `json:"parent_id"`
+	Change              string    `json:"change"` // amount | removed
+	SplitterDisplayName string    `json:"splitter_display_name"`
+	OldAmount           float64   `json:"old_amount"`
+	NewAmount           float64   `json:"new_amount"` // 0 when removed
+	Currency            string    `json:"currency"`
+	Description         *string   `json:"description"`
+	// The recipient's own (mirror) debt row — what the action updates.
+	RecipientDebtID uuid.UUID `json:"recipient_debt_id"`
+	Superseded      bool      `json:"superseded,omitempty"`
+}
+
+const (
+	SplitChangeAmount  = "amount"
+	SplitChangeRemoved = "removed"
+)
 
 type SplitPaidPayload struct {
 	SplitID            uuid.UUID  `json:"split_id"`
