@@ -64,7 +64,7 @@ func (s *Store) LookupSourcePTTx(
 }
 
 const txColumns = `id, user_id, account_id, type, amount, category_id,
-	to_char(date, 'YYYY-MM-DD') AS date, note, transfer_group_id,
+	to_char(date, 'YYYY-MM-DD') AS date, description, note, transfer_group_id,
 	source_personal_debt_id, source_project_transaction_id, project_id,
 	created_at, updated_at`
 
@@ -72,7 +72,7 @@ func scanTx(row pgx.Row) (*Transaction, error) {
 	var t Transaction
 	err := row.Scan(
 		&t.ID, &t.UserID, &t.AccountID, &t.Type, &t.Amount, &t.CategoryID,
-		&t.Date, &t.Note, &t.TransferGroupID,
+		&t.Date, &t.Description, &t.Note, &t.TransferGroupID,
 		&t.SourcePersonalDebtID, &t.SourceProjectTransactionID, &t.ProjectID,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
@@ -177,7 +177,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	// query below can share the same WHERE.
 	if q := strings.TrimSpace(f.Q); q != "" {
 		args = append(args, "%"+shared.EscapeLike(q)+"%")
-		whereClauses = append(whereClauses, fmt.Sprintf(`(t.note ILIKE $%[1]d
+		whereClauses = append(whereClauses, fmt.Sprintf(`(t.description ILIKE $%[1]d OR t.note ILIKE $%[1]d
 			OR EXISTS (SELECT 1 FROM categories qc LEFT JOIN categories qp ON qp.id = qc.parent_id
 			           WHERE qc.id = t.category_id AND (qc.name ILIKE $%[1]d OR qp.name ILIKE $%[1]d))
 			OR EXISTS (SELECT 1 FROM accounts qa WHERE qa.id = t.account_id AND qa.name ILIKE $%[1]d))`, len(args)))
@@ -230,7 +230,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 
 	q := fmt.Sprintf(`
 		SELECT t.id, t.user_id, t.account_id, t.type, t.amount, t.category_id,
-		       to_char(t.date, 'YYYY-MM-DD') AS date, t.note, t.transfer_group_id,
+		       to_char(t.date, 'YYYY-MM-DD') AS date, t.description, t.note, t.transfer_group_id,
 		       t.source_personal_debt_id, t.source_project_transaction_id, t.project_id,
 		       t.created_at, t.updated_at,
 		       a.id, a.name,
@@ -259,7 +259,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		)
 		err := rows.Scan(
 			&d.ID, &d.UserID, &d.AccountID, &d.Type, &d.Amount, &d.CategoryID,
-			&d.Date, &d.Note, &d.TransferGroupID,
+			&d.Date, &d.Description, &d.Note, &d.TransferGroupID,
 			&d.SourcePersonalDebtID, &d.SourceProjectTransactionID, &d.ProjectID,
 			&d.CreatedAt, &d.UpdatedAt,
 			&accID, &accName,
@@ -543,13 +543,13 @@ func (s *Store) InsertRowTx(ctx context.Context, tx pgx.Tx, t *Transaction) (*Tr
 	q := `INSERT INTO transactions
 		(id, user_id, account_id, type, amount, category_id, date, note,
 		 transfer_group_id, source_personal_debt_id, source_project_transaction_id, project_id,
-		 created_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $2)
+		 description, created_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $2)
 		RETURNING ` + txColumns
 	created, err := scanTx(tx.QueryRow(ctx, q,
 		t.ID, t.UserID, t.AccountID, string(t.Type), t.Amount, t.CategoryID,
-		t.Date, t.Note, t.TransferGroupID,
-		t.SourcePersonalDebtID, t.SourceProjectTransactionID, t.ProjectID))
+		t.Date, shared.CleanText(t.Note), t.TransferGroupID,
+		t.SourcePersonalDebtID, t.SourceProjectTransactionID, t.ProjectID, shared.CleanText(t.Description)))
 	if err != nil {
 		return nil, fmt.Errorf("insert tx: %w", err)
 	}
@@ -563,6 +563,7 @@ func (s *Store) UpdateRowTx(
 	ctx context.Context, tx pgx.Tx, userID, id uuid.UUID,
 	amount *float64, date *string,
 	categoryID *uuid.UUID, categoryChange bool,
+	description *string, descriptionChange bool,
 	note *string, noteChange bool,
 	accountID *uuid.UUID, accountIDChange bool,
 ) (*Transaction, error) {
@@ -579,6 +580,10 @@ func (s *Store) UpdateRowTx(
 	if categoryChange {
 		args = append(args, categoryID)
 		q += fmt.Sprintf(", category_id = $%d", len(args))
+	}
+	if descriptionChange {
+		args = append(args, description)
+		q += fmt.Sprintf(", description = $%d", len(args))
 	}
 	if noteChange {
 		args = append(args, note)

@@ -57,6 +57,7 @@ type quickBill struct {
 	Amount    float64
 	Currency  string
 	Date      string // YYYY-MM-DD
+	Description *string
 	Note      *string
 }
 
@@ -285,6 +286,7 @@ func (s *Service) pullBillsTx(
 			Amount:              bill.Amount,
 			Currency:            bill.Currency,
 			Date:                bill.Date,
+			Description:         bill.Description,
 			Note:                bill.Note,
 			Splits:              splits,
 		})
@@ -351,6 +353,7 @@ func (s *Service) quickBillFromNew(
 		Amount:    d.Amount,
 		Currency:  currency,
 		Date:      d.Date,
+		Description: d.Description,
 		Note:      d.Note,
 	}, nil
 }
@@ -367,13 +370,13 @@ func (s *Service) loadQuickBillTx(
 	)
 	err := tx.QueryRow(ctx, `
 		SELECT t.id, t.user_id, t.project_id, t.account_id, t.type, t.amount,
-		       a.currency, to_char(t.date, 'YYYY-MM-DD'), t.note
+		       a.currency, to_char(t.date, 'YYYY-MM-DD'), t.description, t.note
 		FROM transactions t
 		JOIN accounts a ON a.id = t.account_id
 		WHERE t.id = $1
 		FOR UPDATE OF t`, txID).Scan(
 		&bill.TxID, &ownerID, &projectID, &bill.AccountID, &bill.Type,
-		&bill.Amount, &bill.Currency, &bill.Date, &bill.Note,
+		&bill.Amount, &bill.Currency, &bill.Date, &bill.Description, &bill.Note,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrQuickTxNotFound

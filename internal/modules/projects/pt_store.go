@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 const ptColumns = `id, project_id, parent_project_transaction_id,
@@ -81,7 +83,7 @@ func (s *Store) InsertPTTx(
 		RETURNING ` + ptColumns
 	parent, err := scanPT(tx.QueryRow(ctx, q,
 		id, projectID, req.TransactionMemberID, recordUserID,
-		req.Type, req.Amount, req.Currency, req.Date, req.Note, req.Description,
+		req.Type, req.Amount, req.Currency, req.Date, shared.CleanText(req.Note), shared.CleanText(req.Description),
 		normalizeTags(req.Tags),
 	))
 	if err != nil {
@@ -216,13 +218,13 @@ func (s *Store) UpdatePTTx(
 		args = append(args, *req.Date)
 		q += fmt.Sprintf(", date = $%d::date", len(args))
 	}
-	if req.Note != nil {
-		args = append(args, *req.Note)
-		q += fmt.Sprintf(", note = $%d", len(args))
-	}
-	if req.Description != nil {
-		args = append(args, *req.Description)
+	if v, ok := req.DescriptionChange(); ok {
+		args = append(args, v)
 		q += fmt.Sprintf(", description = $%d", len(args))
+	}
+	if v, ok := req.NoteChange(); ok {
+		args = append(args, v)
+		q += fmt.Sprintf(", note = $%d", len(args))
 	}
 	if req.Tags != nil {
 		args = append(args, normalizeTags(*req.Tags))

@@ -77,7 +77,7 @@ func (s *Service) createMirrorTx(
 		partnerContactID, personName,
 		nil, // the partner has no transaction in their book
 		splitter.SourceProjectTransactionID, splitter.ProjectID,
-		splitter.Amount, splitter.Currency, nil,
+		splitter.Amount, splitter.Currency, splitter.Description, nil,
 	)
 	if err != nil {
 		return nil, err
@@ -119,6 +119,7 @@ func (s *Service) splitToPartnerTx(
 		SplitterDisplayName: displayNameTx(ctx, tx, splitter.UserID),
 		Amount:              splitter.Amount,
 		Currency:            splitter.Currency,
+		Description:         splitter.Description,
 		Note:                splitter.Note,
 		RecipientDebtID:     mirrorID,
 	}, d.Auto)

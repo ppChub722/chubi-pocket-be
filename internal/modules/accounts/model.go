@@ -138,8 +138,8 @@ type CreateRequest struct {
 	Currency       *string          `json:"currency"         binding:"omitempty,len=3"`
 	IconCode       *shared.IconCode `json:"icon_code"        binding:"omitempty"`
 	LogoURL        *string          `json:"logo_url"         binding:"omitempty,url,max=2048"`
-	Description    *string          `json:"description"      binding:"omitempty,max=280"`
-	Note           *string          `json:"note"             binding:"omitempty,max=280"`
+	Description    *string          `json:"description"      binding:"omitempty,max=200"`
+	Note           *string          `json:"note"             binding:"omitempty,max=500"`
 	CreditLimit    *float64         `json:"credit_limit"     binding:"omitempty,gte=0"`
 	StatementDate  *int             `json:"statement_date"   binding:"omitempty,min=1,max=31"`
 	PaymentDueDate *int             `json:"payment_due_date" binding:"omitempty,min=1,max=31"`
@@ -158,8 +158,8 @@ type UpdateRequest struct {
 	Currency       *string          `json:"currency"         binding:"omitempty,len=3"`
 	IconCode       *shared.IconCode `json:"icon_code"`
 	LogoURL        *string          `json:"logo_url"         binding:"omitempty,url,max=2048"`
-	Description    *string          `json:"description"      binding:"omitempty,max=280"`
-	Note           *string          `json:"note"             binding:"omitempty,max=280"`
+	Description    *string          `json:"description"      binding:"omitempty,max=200"`
+	Note           *string          `json:"note"             binding:"omitempty,max=500"`
 	Status         *string          `json:"status"           binding:"omitempty,oneof=active archived closed"`
 	CreditLimit    *float64         `json:"credit_limit"     binding:"omitempty,gte=0"`
 	StatementDate  *int             `json:"statement_date"   binding:"omitempty,min=1,max=31"`
@@ -200,11 +200,11 @@ func (r *UpdateRequest) LogoURLChange() (*string, bool) {
 }
 
 func (r *UpdateRequest) DescriptionChange() (*string, bool) {
-	return r.Description, r.descriptionPresent
+	return shared.CleanText(r.Description), r.descriptionPresent
 }
 
 func (r *UpdateRequest) NoteChange() (*string, bool) {
-	return r.Note, r.notePresent
+	return shared.CleanText(r.Note), r.notePresent
 }
 
 // NewBalance is a pointer so 0 is a valid target (`required` on a plain
@@ -212,7 +212,8 @@ func (r *UpdateRequest) NoteChange() (*string, bool) {
 type AdjustBalanceRequest struct {
 	NewBalance *float64 `json:"new_balance" binding:"required"`
 	Date       *string `json:"date"        binding:"omitempty,datetime=2006-01-02"`
-	Note       *string `json:"note"        binding:"omitempty"`
+	Description *string `json:"description" binding:"omitempty,max=200"`
+	Note       *string `json:"note"        binding:"omitempty,max=500"`
 }
 
 type AdjustBalanceResponse struct {

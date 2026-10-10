@@ -30,6 +30,7 @@ type Transaction struct {
 	Amount                     float64    `json:"amount"`
 	CategoryID                 *uuid.UUID `json:"category_id"`
 	Date                       string     `json:"date"` // YYYY-MM-DD; calendar date in user's tz
+	Description                *string    `json:"description"`
 	Note                       *string    `json:"note"`
 	TransferGroupID            *uuid.UUID `json:"transfer_group_id"`
 	SourcePersonalDebtID       *uuid.UUID `json:"source_personal_debt_id"`
@@ -121,7 +122,8 @@ type CreateRequest struct {
 	Amount              float64    `json:"amount"                  binding:"required,gt=0"`
 	CategoryID          *uuid.UUID `json:"category_id"             binding:"omitempty"`
 	Date                string     `json:"date"                    binding:"required,datetime=2006-01-02"`
-	Note                *string    `json:"note"                    binding:"omitempty"`
+	Description         *string    `json:"description"             binding:"omitempty,max=200"`
+	Note                *string    `json:"note"                    binding:"omitempty,max=500"`
 	TransferToAccountID *uuid.UUID `json:"transfer_to_account_id"  binding:"omitempty"`
 
 	// 1b.1 wires Splits + MyShare. ProjectID stays rejected from clients —
@@ -141,12 +143,14 @@ type UpdateRequest struct {
 	Amount              *float64   `json:"amount"                  binding:"omitempty,gt=0"`
 	Date                *string    `json:"date"                    binding:"omitempty,datetime=2006-01-02"`
 	CategoryID          *uuid.UUID `json:"category_id"             binding:"omitempty"`
-	Note                *string    `json:"note"                    binding:"omitempty"`
+	Description         *string    `json:"description"             binding:"omitempty,max=200"`
+	Note                *string    `json:"note"                    binding:"omitempty,max=500"`
 	AccountID           *uuid.UUID `json:"account_id"              binding:"omitempty"`
 	TransferToAccountID *uuid.UUID `json:"transfer_to_account_id"  binding:"omitempty"`
 
 	// Track presence so callers can explicitly clear nullable fields.
 	categoryIDPresent          bool
+	descriptionPresent         bool
 	notePresent                bool
 	accountIDPresent           bool
 	transferToAccountIDPresent bool
@@ -162,6 +166,7 @@ func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	_, r.categoryIDPresent = probe["category_id"]
+	_, r.descriptionPresent = probe["description"]
 	_, r.notePresent = probe["note"]
 	_, r.accountIDPresent = probe["account_id"]
 	_, r.transferToAccountIDPresent = probe["transfer_to_account_id"]
@@ -174,9 +179,22 @@ func (r *UpdateRequest) CategoryIDChange() (*uuid.UUID, bool) {
 	return r.CategoryID, r.categoryIDPresent
 }
 
-// NoteChange follows the same convention as CategoryIDChange.
+// DescriptionChange / NoteChange: (value, true) when the body carried the
+// key — null or "" clears. A non-nil value set in Go (pending submit)
+// also counts, since those callers can't mark presence.
+func (r *UpdateRequest) DescriptionChange() (*string, bool) {
+	return shared.CleanText(r.Description), r.descriptionPresent || r.Description != nil
+}
+
 func (r *UpdateRequest) NoteChange() (*string, bool) {
-	return r.Note, r.notePresent
+	return shared.CleanText(r.Note), r.notePresent || r.Note != nil
+}
+
+// SetText writes both description and note, nil included (= clear) — for
+// callers in Go that mirror another record, e.g. a project row's copy.
+func (r *UpdateRequest) SetText(description, note *string) {
+	r.Description, r.Note = description, note
+	r.descriptionPresent, r.notePresent = true, true
 }
 
 // AccountIDChange returns (newID, true) when account_id was present in the
@@ -198,7 +216,7 @@ type ListFilter struct {
 	To         *string
 	NoWallet   bool // true → only rows with account_id IS NULL
 	// Contract §1 + dashboard drill-down.
-	Q               string      // substring over note, category (incl. parent) and wallet names
+	Q               string      // substring over description, note, category (incl. parent) and wallet names
 	TagIDs          []uuid.UUID // rows having ANY of these tags
 	IncludeChildren bool        // with CategoryID: also its subcategories
 	Uncategorized   bool        // only rows with no category

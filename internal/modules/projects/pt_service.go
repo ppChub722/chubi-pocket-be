@@ -237,6 +237,10 @@ func buildDiff(before, after *ProjectTransaction) map[string][2]interface{} {
 	if before.Date != after.Date {
 		diff["date"] = [2]interface{}{before.Date, after.Date}
 	}
+	if (before.Description == nil) != (after.Description == nil) ||
+		(before.Description != nil && after.Description != nil && *before.Description != *after.Description) {
+		diff["description"] = [2]interface{}{ptr(before.Description), ptr(after.Description)}
+	}
 	if (before.Note == nil) != (after.Note == nil) ||
 		(before.Note != nil && after.Note != nil && *before.Note != *after.Note) {
 		diff["note"] = [2]interface{}{ptr(before.Note), ptr(after.Note)}

@@ -136,6 +136,7 @@ func (h *Handler) Update(c *gin.Context) {
 	}
 	isNull := func(k string) bool { v, ok := raw[k]; return ok && string(v) == "null" }
 	req.ClearContact = isNull("counterparty_contact_id")
+	req.ClearDescription = isNull("description")
 	req.ClearNote = isNull("note")
 	out, err := h.service.Update(c.Request.Context(), userID, id, req)
 	if err != nil {

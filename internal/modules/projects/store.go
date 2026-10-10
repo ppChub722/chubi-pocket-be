@@ -46,7 +46,7 @@ var (
 	ErrViewerReadOnly    = errors.New("viewers can't change project transactions")
 )
 
-const projectColumns = `id, owner_user_id, name, type, description,
+const projectColumns = `id, owner_user_id, name, type, description, note,
 	to_char(start_date, 'YYYY-MM-DD') AS start_date,
 	to_char(end_date, 'YYYY-MM-DD')   AS end_date,
 	status, icon_code, planned_amount, created_at, updated_at`
@@ -55,7 +55,7 @@ func scanProject(row pgx.Row) (*Project, error) {
 	var p Project
 	var iconBytes []byte
 	err := row.Scan(
-		&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description,
+		&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description, &p.Note,
 		&p.StartDate, &p.EndDate, &p.Status, &iconBytes, &p.PlannedAmount,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
@@ -83,13 +83,13 @@ func (s *Store) Create(ctx context.Context, ownerUserID uuid.UUID, req CreatePro
 		}
 	}
 	q := `INSERT INTO projects
-		(id, owner_user_id, name, type, description, start_date, end_date,
+		(id, owner_user_id, name, type, description, note, start_date, end_date,
 		 icon_code, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8::jsonb, $2, $2)
+		VALUES ($1, $2, $3, $4, $5, $9, $6::date, $7::date, $8::jsonb, $2, $2)
 		RETURNING ` + projectColumns
 	return scanProject(s.db.QueryRow(ctx, q,
-		id, ownerUserID, strings.TrimSpace(req.Name), req.Type, req.Description,
-		req.StartDate, req.EndDate, iconJSON,
+		id, ownerUserID, strings.TrimSpace(req.Name), req.Type, shared.CleanText(req.Description),
+		req.StartDate, req.EndDate, iconJSON, shared.CleanText(req.Note),
 	))
 }
 
@@ -107,13 +107,13 @@ func (s *Store) CreateInTx(ctx context.Context, tx pgx.Tx, ownerUserID uuid.UUID
 		}
 	}
 	q := `INSERT INTO projects
-		(id, owner_user_id, name, type, description, start_date, end_date,
+		(id, owner_user_id, name, type, description, note, start_date, end_date,
 		 icon_code, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8::jsonb, $2, $2)
+		VALUES ($1, $2, $3, $4, $5, $9, $6::date, $7::date, $8::jsonb, $2, $2)
 		RETURNING ` + projectColumns
 	return scanProject(tx.QueryRow(ctx, q,
-		id, ownerUserID, strings.TrimSpace(req.Name), req.Type, req.Description,
-		req.StartDate, req.EndDate, iconJSON,
+		id, ownerUserID, strings.TrimSpace(req.Name), req.Type, shared.CleanText(req.Description),
+		req.StartDate, req.EndDate, iconJSON, shared.CleanText(req.Note),
 	))
 }
 
@@ -122,7 +122,7 @@ func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (*Project, error) {
 	// consistently across create / list / get. Without this, the create
 	// response omits the count (default 0) and the FE list shows
 	// "0 members" until the next list refresh.
-	q := `SELECT p.id, p.owner_user_id, p.name, p.type, p.description,
+	q := `SELECT p.id, p.owner_user_id, p.name, p.type, p.description, p.note,
 	             to_char(p.start_date, 'YYYY-MM-DD'),
 	             to_char(p.end_date, 'YYYY-MM-DD'),
 	             p.status, p.icon_code, p.planned_amount, p.created_at, p.updated_at,
@@ -133,7 +133,7 @@ func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (*Project, error) {
 	var p Project
 	var iconBytes []byte
 	err := row.Scan(
-		&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description,
+		&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description, &p.Note,
 		&p.StartDate, &p.EndDate, &p.Status, &iconBytes, &p.PlannedAmount,
 		&p.CreatedAt, &p.UpdatedAt,
 		&p.MembersCount,
@@ -218,7 +218,7 @@ func (s *Store) ListForUser(ctx context.Context, userID uuid.UUID, f ListFilter)
 	offsetIdx := len(args)
 
 	q := fmt.Sprintf(`
-		SELECT p.id, p.owner_user_id, p.name, p.type, p.description,
+		SELECT p.id, p.owner_user_id, p.name, p.type, p.description, p.note,
 		       to_char(p.start_date, 'YYYY-MM-DD'),
 		       to_char(p.end_date, 'YYYY-MM-DD'),
 		       p.status, p.icon_code, p.planned_amount, p.created_at, p.updated_at,
@@ -239,7 +239,7 @@ func (s *Store) ListForUser(ctx context.Context, userID uuid.UUID, f ListFilter)
 		var p Project
 		var iconBytes []byte
 		if err := rows.Scan(
-			&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description,
+			&p.ID, &p.OwnerUserID, &p.Name, &p.Type, &p.Description, &p.Note,
 			&p.StartDate, &p.EndDate, &p.Status, &iconBytes, &p.PlannedAmount,
 			&p.CreatedAt, &p.UpdatedAt,
 			&p.MembersCount,
@@ -269,9 +269,13 @@ func (s *Store) Update(ctx context.Context, ownerUserID, id uuid.UUID, req Updat
 		args = append(args, *req.Type)
 		q += fmt.Sprintf(", type = $%d", len(args))
 	}
-	if req.Description != nil {
-		args = append(args, *req.Description)
+	if v, ok := req.DescriptionChange(); ok {
+		args = append(args, v)
 		q += fmt.Sprintf(", description = $%d", len(args))
+	}
+	if v, ok := req.NoteChange(); ok {
+		args = append(args, v)
+		q += fmt.Sprintf(", note = $%d", len(args))
 	}
 	if req.StartDate != nil {
 		args = append(args, *req.StartDate)

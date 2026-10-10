@@ -203,7 +203,7 @@ func (s *Store) InsertTx(ctx context.Context, tx pgx.Tx, a *Account) (*Account, 
 		RETURNING ` + accountColumns
 	created, err := scanAccount(tx.QueryRow(ctx, q,
 		a.ID, a.UserID, a.Name, a.Type, a.Currency, iconJSON, a.LogoURL,
-		a.Description, a.Note,
+		shared.CleanText(a.Description), shared.CleanText(a.Note),
 		a.CreditLimit, a.StatementDate, a.PaymentDueDate, a.MinimumPayment,
 		a.SortOrder, identifiersJSON))
 	if err != nil {

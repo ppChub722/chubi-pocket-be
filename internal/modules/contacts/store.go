@@ -38,7 +38,7 @@ var (
 // linked. Spec §4.4 + post-1c policy: client picks linked_user_* fields
 // over the contact's own stored copies when present, so the linked
 // person's name / email / icon stays in sync with their account.
-const contactColumns = `id, user_id, display_name, email, phone, notes, icon_code,
+const contactColumns = `id, user_id, display_name, email, phone, description, note, icon_code,
 	linked_user_id, status, last_used_at, created_at, updated_at,
 	(SELECT icon_code    FROM users WHERE id = contacts.linked_user_id) AS linked_user_icon_code,
 	(SELECT display_name FROM users WHERE id = contacts.linked_user_id) AS linked_user_display_name,
@@ -48,7 +48,7 @@ func scanContact(row pgx.Row) (*Contact, error) {
 	var c Contact
 	var iconBytes, linkedIconBytes []byte
 	err := row.Scan(
-		&c.ID, &c.UserID, &c.DisplayName, &c.Email, &c.Phone, &c.Notes, &iconBytes,
+		&c.ID, &c.UserID, &c.DisplayName, &c.Email, &c.Phone, &c.Description, &c.Note, &iconBytes,
 		&c.LinkedUserID, &c.Status, &c.LastUsedAt, &c.CreatedAt, &c.UpdatedAt,
 		&linkedIconBytes, &c.LinkedUserDisplayName, &c.LinkedUserEmail,
 	)
@@ -84,13 +84,13 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, req CreateContactR
 	}
 
 	q := `INSERT INTO contacts
-		(id, user_id, display_name, email, phone, notes, icon_code, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $2, $2)
+		(id, user_id, display_name, email, phone, description, note, icon_code, created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $2, $2)
 		RETURNING ` + contactColumns
 
 	c, err := scanContact(s.db.QueryRow(ctx, q,
 		id, userID, strings.TrimSpace(req.DisplayName),
-		req.Email, req.Phone, req.Notes, iconJSON,
+		req.Email, req.Phone, shared.CleanText(req.Description), shared.CleanText(req.Note), iconJSON,
 	))
 	if err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
@@ -108,7 +108,7 @@ func (s *Store) CreateLinkedTx(
 	ctx context.Context, tx pgx.Tx,
 	userID, linkedUserID uuid.UUID,
 	displayName string,
-	email, phone, notes *string,
+	email, phone, description, note *string,
 	iconCode *shared.IconCode,
 ) (*Contact, error) {
 	id, err := uuid.NewV7()
@@ -122,13 +122,13 @@ func (s *Store) CreateLinkedTx(
 		}
 	}
 	q := `INSERT INTO contacts
-		(id, user_id, display_name, email, phone, notes, icon_code, linked_user_id,
+		(id, user_id, display_name, email, phone, description, note, icon_code, linked_user_id,
 		 created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $2, $2)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $2, $2)
 		RETURNING ` + contactColumns
 	c, err := scanContact(tx.QueryRow(ctx, q,
 		id, userID, strings.TrimSpace(displayName),
-		email, phone, notes, iconJSON, linkedUserID,
+		email, phone, shared.CleanText(description), shared.CleanText(note), iconJSON, linkedUserID,
 	))
 	if err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
@@ -237,9 +237,13 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCont
 		args = append(args, *req.Phone)
 		q += fmt.Sprintf(", phone = $%d", len(args))
 	}
-	if req.Notes != nil {
-		args = append(args, *req.Notes)
-		q += fmt.Sprintf(", notes = $%d", len(args))
+	if v, ok := req.DescriptionChange(); ok {
+		args = append(args, v)
+		q += fmt.Sprintf(", description = $%d", len(args))
+	}
+	if v, ok := req.NoteChange(); ok {
+		args = append(args, v)
+		q += fmt.Sprintf(", note = $%d", len(args))
 	}
 	if req.IconCode != nil {
 		b, err := json.Marshal(req.IconCode)

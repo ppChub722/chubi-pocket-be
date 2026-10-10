@@ -131,12 +131,17 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRe
 	default:
 		return nil, fmt.Errorf("unknown direction: %s", current.Direction)
 	}
+	description := req.Description
+	if description == nil {
+		description = current.Description
+	}
 	created, err := s.txs.CreateInTxWithSourceDebt(ctx, tx, userID, id, transactions.CreateRequest{
-		Type:      txType,
-		AccountID: req.AccountID,
-		Amount:    amount,
-		Date:      *date,
-		Note:      req.Note,
+		Type:        txType,
+		AccountID:   req.AccountID,
+		Amount:      amount,
+		Date:        *date,
+		Description: description,
+		Note:        req.Note,
 	})
 	if err != nil {
 		return nil, err
@@ -185,7 +190,7 @@ func (s *Service) People(ctx context.Context, userID uuid.UUID) (*PeopleResponse
 func (s *Service) CreateForTransactionTx(
 	ctx context.Context, tx pgx.Tx,
 	parentTxID, userID uuid.UUID,
-	parentType, parentCurrency string,
+	parentType, parentCurrency string, parentDescription *string,
 	inputs []transactions.SplitInput,
 ) error {
 	if len(inputs) == 0 {
@@ -212,7 +217,7 @@ func (s *Service) CreateForTransactionTx(
 		splitterDebt, err := s.store.CreateAttachedTx(ctx, tx, userID, splitterDir,
 			in.ContactID, in.PersonName,
 			&parentTxID, nil, nil,
-			in.OwedAmount, parentCurrency, nil,
+			in.OwedAmount, parentCurrency, parentDescription, nil,
 		)
 		if err != nil {
 			return err

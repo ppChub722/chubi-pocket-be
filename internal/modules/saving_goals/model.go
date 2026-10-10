@@ -25,6 +25,7 @@ type SavingGoal struct {
 	Deadline          *string          `json:"deadline"` // YYYY-MM-DD
 	IconCode          *shared.IconCode `json:"icon_code"`
 	Status            string           `json:"status"`
+	Description       *string          `json:"description"`
 	Note              *string          `json:"note"`
 	CreatedAt         time.Time        `json:"created_at"`
 	UpdatedAt         time.Time        `json:"updated_at"`
@@ -65,7 +66,8 @@ type CreateRequest struct {
 	AllocationPct   *float64         `json:"allocation_pct"   binding:"omitempty,gt=0,lte=100"`
 	Deadline        *string          `json:"deadline"         binding:"omitempty,datetime=2006-01-02"`
 	IconCode        *shared.IconCode `json:"icon_code"`
-	Note            *string          `json:"note"`
+	Description     *string          `json:"description" binding:"omitempty,max=200"`
+	Note            *string          `json:"note"        binding:"omitempty,max=500"`
 }
 
 // UpdateRequest — partial. linked_account_id is intentionally not
@@ -77,7 +79,28 @@ type UpdateRequest struct {
 	AllocationPct *float64         `json:"allocation_pct" binding:"omitempty,gt=0,lte=100"`
 	Deadline      *string          `json:"deadline"      binding:"omitempty,datetime=2006-01-02"`
 	IconCode      *shared.IconCode `json:"icon_code"`
-	Note          *string          `json:"note"`
+	Description   *string          `json:"description" binding:"omitempty,max=200"`
+	Note          *string          `json:"note"        binding:"omitempty,max=500"`
+
+	descriptionPresent bool
+	notePresent        bool
+}
+
+// UnmarshalJSON records which keys the body carried: an absent description /
+// note stays as is; null or "" clears it.
+func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
+	type alias UpdateRequest
+	present, err := shared.DecodeTracked(data, (*alias)(r))
+	r.descriptionPresent, r.notePresent = present["description"], present["note"]
+	return err
+}
+
+func (r *UpdateRequest) DescriptionChange() (*string, bool) {
+	return shared.TextChange(r.Description, r.descriptionPresent)
+}
+
+func (r *UpdateRequest) NoteChange() (*string, bool) {
+	return shared.TextChange(r.Note, r.notePresent)
 }
 
 type ListFilter struct {

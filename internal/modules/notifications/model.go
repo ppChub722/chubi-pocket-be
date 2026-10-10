@@ -116,6 +116,7 @@ type SplitCreatedPayload struct {
 	SplitterDisplayName string     `json:"splitter_display_name"`
 	Amount              float64    `json:"amount"`
 	Currency            string     `json:"currency"`
+	Description         *string    `json:"description"`
 	Note                *string    `json:"note"`
 	// The recipient's own debt row (contract §5) — the deep link opens it.
 	RecipientDebtID *uuid.UUID `json:"recipient_debt_id"`
@@ -143,6 +144,7 @@ type ProjectTxRecordedPayload struct {
 	Amount               float64   `json:"amount"`
 	Currency             string    `json:"currency"`
 	Type                 string    `json:"type"`
+	Description          *string   `json:"description"`
 	Note                 *string   `json:"note"`
 	// The recipient's personal copy (source_project_transaction_id) —
 	// created by the auto-action, or the one to update.
@@ -207,5 +209,6 @@ type ProjectAddedPayload struct {
 type PersonalUpdate struct {
 	Amount float64 `json:"amount"`
 	Date   string  `json:"date"`
+	Description *string `json:"description"`
 	Note   *string `json:"note"`
 }

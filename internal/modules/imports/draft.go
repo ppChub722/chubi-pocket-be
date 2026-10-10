@@ -61,14 +61,15 @@ func buildPending(s *slip.Slip, transRef, bankCode string, ctx DraftContext) []P
 		d := s.OccurredAt.In(slip.Bangkok).Format("2006-01-02")
 		date = &d
 	}
-	note := s.Memo
-	if note == "" {
-		note = ref.Payee
-	}
-
+	// What it was for = who got the money; the slip's memo is the note.
 	main := pending.Draft{Amount: s.Amount, Date: date}
-	if note != "" {
-		main.Note = &note
+	if ref.Payee != "" {
+		payee := ref.Payee
+		main.Description = &payee
+	}
+	if s.Memo != "" {
+		memo := s.Memo
+		main.Note = &memo
 	}
 	txType := typeExpense
 	wePaid := true // the fee is ours
@@ -92,12 +93,12 @@ func buildPending(s *slip.Slip, transRef, bankCode string, ctx DraftContext) []P
 	if wePaid && len(s.Missing) == 0 && s.Fee != nil && *s.Fee > 0 {
 		feeRef := ref
 		feeRef.Part = partFee
-		feeNote := "ค่าธรรมเนียม"
+		feeDesc := "ค่าธรรมเนียม"
 		if ref.Payee != "" {
-			feeNote += " · " + ref.Payee
+			feeDesc += " · " + ref.Payee
 		}
 		expense := typeExpense
-		fee := pending.Draft{Type: &expense, Amount: s.Fee, Date: date, Note: &feeNote, AccountID: from}
+		fee := pending.Draft{Type: &expense, Amount: s.Fee, Date: date, Description: &feeDesc, AccountID: from}
 		if ctx.FeeCategoryID != nil {
 			fee.CategoryID = ctx.FeeCategoryID
 			feeRef.Guessed.Category = "fee_setting"

@@ -44,6 +44,7 @@ type Project struct {
 	Name         string           `json:"name"`
 	Type         *string          `json:"type"`
 	Description  *string          `json:"description"`
+	Note         *string          `json:"note"`
 	StartDate    *string          `json:"start_date"`
 	EndDate      *string          `json:"end_date"`
 	Status       string           `json:"status"`
@@ -111,7 +112,8 @@ type ProjectTransaction struct {
 type CreateProjectRequest struct {
 	Name        string           `json:"name"        binding:"required,min=1,max=100"`
 	Type        *string          `json:"type"        binding:"omitempty,max=30"`
-	Description *string          `json:"description"`
+	Description *string          `json:"description" binding:"omitempty,max=200"`
+	Note        *string          `json:"note"        binding:"omitempty,max=500"`
 	StartDate   *string          `json:"start_date"  binding:"omitempty,datetime=2006-01-02"`
 	EndDate     *string          `json:"end_date"    binding:"omitempty,datetime=2006-01-02"`
 	IconCode    *shared.IconCode `json:"icon_code"   binding:"omitempty"`
@@ -123,7 +125,8 @@ type CreateProjectRequest struct {
 type UpdateProjectRequest struct {
 	Name          *string          `json:"name"           binding:"omitempty,min=1,max=100"`
 	Type          *string          `json:"type"           binding:"omitempty,max=30"`
-	Description   *string          `json:"description"`
+	Description   *string          `json:"description"    binding:"omitempty,max=200"`
+	Note          *string          `json:"note"           binding:"omitempty,max=500"`
 	StartDate     *string          `json:"start_date"     binding:"omitempty,datetime=2006-01-02"`
 	EndDate       *string          `json:"end_date"       binding:"omitempty,datetime=2006-01-02"`
 	Status        *string          `json:"status"         binding:"omitempty,oneof=active completed cancelled archived"`
@@ -131,6 +134,8 @@ type UpdateProjectRequest struct {
 	PlannedAmount *float64         `json:"planned_amount" binding:"omitempty,gt=0"`
 
 	plannedAmountPresent bool
+	descriptionPresent   bool
+	notePresent          bool
 }
 
 func (r *UpdateProjectRequest) UnmarshalJSON(data []byte) error {
@@ -143,7 +148,18 @@ func (r *UpdateProjectRequest) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	_, r.plannedAmountPresent = probe["planned_amount"]
+	_, r.descriptionPresent = probe["description"]
+	_, r.notePresent = probe["note"]
 	return nil
+}
+
+// DescriptionChange / NoteChange: absent → unchanged; null or "" clears.
+func (r *UpdateProjectRequest) DescriptionChange() (*string, bool) {
+	return shared.TextChange(r.Description, r.descriptionPresent)
+}
+
+func (r *UpdateProjectRequest) NoteChange() (*string, bool) {
+	return shared.TextChange(r.Note, r.notePresent)
 }
 
 // PlannedAmountChange returns (newValue, true) when the request asked to
@@ -191,8 +207,8 @@ type CreateProjectTransactionRequest struct {
 	Amount              float64             `json:"amount"                binding:"required,gt=0"`
 	Currency            string              `json:"currency"              binding:"required,len=3"`
 	Date                string              `json:"date"                  binding:"required,datetime=2006-01-02"`
-	Note                *string             `json:"note"`
-	Description         *string             `json:"description"`
+	Note                *string             `json:"note"                  binding:"omitempty,max=500"`
+	Description         *string             `json:"description"           binding:"omitempty,max=200"`
 	// Names — trimmed and de-duplicated (case-insensitive) by the BE; a new
 	// name just starts being used, there's nothing to create first.
 	Tags   []string            `json:"tags"   binding:"omitempty,max=20,dive,max=40"`
@@ -206,11 +222,31 @@ type CreateProjectTransactionRequest struct {
 type UpdateProjectTransactionRequest struct {
 	Amount           *float64             `json:"amount"            binding:"omitempty,gt=0"`
 	Date             *string              `json:"date"              binding:"omitempty,datetime=2006-01-02"`
-	Note             *string              `json:"note"`
-	Description      *string              `json:"description"`
+	Note             *string              `json:"note"              binding:"omitempty,max=500"`
+	Description      *string              `json:"description"       binding:"omitempty,max=200"`
 	// Present → replaces the row's tags (empty list clears them).
 	Tags   *[]string            `json:"tags"   binding:"omitempty,max=20,dive,max=40"`
 	Splits *[]ProjectSplitInput `json:"splits" binding:"omitempty,dive"`
+
+	descriptionPresent bool
+	notePresent        bool
+}
+
+// UnmarshalJSON records which keys the body carried: an absent description /
+// note stays as is; null or "" clears it.
+func (r *UpdateProjectTransactionRequest) UnmarshalJSON(data []byte) error {
+	type alias UpdateProjectTransactionRequest
+	present, err := shared.DecodeTracked(data, (*alias)(r))
+	r.descriptionPresent, r.notePresent = present["description"], present["note"]
+	return err
+}
+
+func (r *UpdateProjectTransactionRequest) DescriptionChange() (*string, bool) {
+	return shared.TextChange(r.Description, r.descriptionPresent)
+}
+
+func (r *UpdateProjectTransactionRequest) NoteChange() (*string, bool) {
+	return shared.TextChange(r.Note, r.notePresent)
 }
 
 // ProjectTag — one name in use on the project's rows, with how many rows

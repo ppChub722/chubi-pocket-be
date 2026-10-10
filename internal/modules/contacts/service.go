@@ -401,7 +401,7 @@ func (s *Service) GetSenderProfile(
 // existing contact for them, create a fresh one" path. The notification
 // must already be actioned (caller previously hit Accept). BE pulls
 // display_name + email from the sender's user record so they're frozen
-// at create time as the contact's snapshot fallback; phone / notes /
+// at create time as the contact's snapshot fallback; phone / description / note /
 // icon come from the form.
 func (s *Service) CreateLinkedContactFromLinkRequest(
 	ctx context.Context, userID, notificationID uuid.UUID, req CreateLinkedContactRequest,
@@ -433,7 +433,7 @@ func (s *Service) CreateLinkedContactFromLinkRequest(
 
 	created, err := s.store.CreateLinkedTx(
 		ctx, tx, userID, senderUserID,
-		senderName, senderEmail, req.Phone, req.Notes, req.IconCode,
+		senderName, senderEmail, req.Phone, req.Description, req.Note, req.IconCode,
 	)
 	if err != nil {
 		return nil, err
@@ -451,7 +451,7 @@ func (s *Service) CreateLinkedContactFromLinkRequest(
 // linked to the same sender — idempotent).
 //
 // `display_name` and `email` are NOT touched on the contact row — the
-// FE pulls them from the linked user once linked. Phone / notes / icon
+// FE pulls them from the linked user once linked. Phone / description / note / icon
 // are optional B-side updates.
 func (s *Service) LinkExistingContactFromLinkRequest(
 	ctx context.Context, userID, notificationID, contactID uuid.UUID,
@@ -482,8 +482,8 @@ func (s *Service) LinkExistingContactFromLinkRequest(
 
 	// Apply optional B-side field updates first (so they're persisted
 	// regardless of whether the link write below is a no-op). Only
-	// phone / notes / icon — display_name / email are linked-driven.
-	if req.Phone != nil || req.Notes != nil || req.IconCode != nil {
+	// phone / description / note / icon — display_name / email are linked-driven.
+	if req.Phone != nil || req.Description != nil || req.Note != nil || req.IconCode != nil {
 		setClauses := []string{"updated_by_user_id = $1"}
 		args := []any{userID}
 		if req.Phone != nil {
@@ -491,10 +491,15 @@ func (s *Service) LinkExistingContactFromLinkRequest(
 			setClauses = append(setClauses,
 				fmt.Sprintf("phone = $%d", len(args)))
 		}
-		if req.Notes != nil {
-			args = append(args, *req.Notes)
+		if req.Description != nil {
+			args = append(args, shared.CleanText(req.Description))
 			setClauses = append(setClauses,
-				fmt.Sprintf("notes = $%d", len(args)))
+				fmt.Sprintf("description = $%d", len(args)))
+		}
+		if req.Note != nil {
+			args = append(args, shared.CleanText(req.Note))
+			setClauses = append(setClauses,
+				fmt.Sprintf("note = $%d", len(args)))
 		}
 		if req.IconCode != nil {
 			iconJSON, err := json.Marshal(req.IconCode)

@@ -287,8 +287,10 @@ func (s *Service) GenerateNow(
 		return nil, err
 	}
 
+	// The schedule's name is what the payment was for (owner 2026-10-10).
+	name := sched.Name
 	txID, err := s.store.InsertGeneratedTxTx(ctx, tx, userID, sched.AccountID,
-		sched.CategoryID, sched.Type, sched.Amount, txDate, sched.Note, id)
+		sched.CategoryID, sched.Type, sched.Amount, txDate, &name, sched.Note, id)
 	if err != nil {
 		return nil, err
 	}

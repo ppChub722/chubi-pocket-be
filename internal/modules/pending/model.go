@@ -32,7 +32,8 @@ type Draft struct {
 	AccountID           *uuid.UUID                `json:"account_id,omitempty"`
 	CategoryID          *uuid.UUID                `json:"category_id,omitempty"`
 	Date                *string                   `json:"date,omitempty"`
-	Note                *string                   `json:"note,omitempty"`
+	Description         *string                   `json:"description,omitempty" binding:"omitempty,max=200"`
+	Note                *string                   `json:"note,omitempty"        binding:"omitempty,max=500"`
 	TransferToAccountID *uuid.UUID                `json:"transfer_to_account_id,omitempty"`
 	TagIDs              []uuid.UUID               `json:"tag_ids,omitempty"`
 	Splits              []transactions.SplitInput `json:"splits,omitempty"`

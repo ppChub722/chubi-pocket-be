@@ -46,6 +46,7 @@ type PersonalDebt struct {
 	SettledAmount               float64    `json:"settled_amount"`
 	Currency                    string     `json:"currency"`
 	Status                      string     `json:"status"`
+	Description                 *string    `json:"description"`
 	Note                        *string    `json:"note"`
 	CreatedAt                   time.Time  `json:"created_at"`
 	UpdatedAt                   time.Time  `json:"updated_at"`
@@ -69,7 +70,8 @@ type CreateRequest struct {
 	CounterpartyPersonName string     `json:"counterparty_person_name" binding:"required,min=1,max=100"`
 	Amount                 float64    `json:"amount"                  binding:"required,gt=0"`
 	Currency               string     `json:"currency"                binding:"required,len=3"`
-	Note                   *string    `json:"note"`
+	Description            *string    `json:"description"             binding:"omitempty,max=200"`
+	Note                   *string    `json:"note"                    binding:"omitempty,max=500"`
 }
 
 type UpdateRequest struct {
@@ -79,12 +81,14 @@ type UpdateRequest struct {
 	SettledAmount          *float64   `json:"settled_amount"          binding:"omitempty,gte=0"`
 	Currency               *string    `json:"currency"                binding:"omitempty,len=3"`
 	Status                 *string    `json:"status"                  binding:"omitempty,oneof=open settled cancelled"`
-	Note                   *string    `json:"note"`
+	Description            *string    `json:"description"             binding:"omitempty,max=200"`
+	Note                   *string    `json:"note"                    binding:"omitempty,max=500"`
 
 	// Set by the handler when the body carries an explicit null (contract
 	// §7) — a nil pointer alone can't tell "absent" from "clear it".
 	ClearContact bool `json:"-"`
-	ClearNote    bool `json:"-"`
+	ClearDescription bool `json:"-"`
+	ClearNote        bool `json:"-"`
 }
 
 // SettleRequest — record a real money movement against a debt. Creates
@@ -97,8 +101,10 @@ type SettleRequest struct {
 	// Optional — nil records a floating (no-wallet) transaction.
 	AccountID *uuid.UUID `json:"account_id"`
 	Amount    *float64  `json:"amount"     binding:"omitempty,gt=0"`
+	// description absent → the debt's own description.
 	Date      *string   `json:"date"       binding:"omitempty,datetime=2006-01-02"`
-	Note      *string   `json:"note"`
+	Description *string `json:"description" binding:"omitempty,max=200"`
+	Note      *string   `json:"note"       binding:"omitempty,max=500"`
 }
 
 type ListFilter struct {

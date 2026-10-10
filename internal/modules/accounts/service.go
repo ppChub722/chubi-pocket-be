@@ -13,6 +13,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 var (
@@ -137,8 +138,8 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, userCurrency str
 			amount = -req.Balance
 		}
 		today := time.Now().Format("2006-01-02")
-		note := "Opening balance"
-		_, newBalance, err := s.txs.CreateSystemInTx(ctx, tx, userID, created.ID, kind, amount, today, &note)
+		desc := "Opening balance"
+		_, newBalance, err := s.txs.CreateSystemInTx(ctx, tx, userID, created.ID, kind, amount, today, &desc, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -247,12 +248,12 @@ func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID
 	if req.Date != nil {
 		date = *req.Date
 	}
-	note := "Balance adjustment"
-	if req.Note != nil {
-		note = *req.Note
+	desc := "Balance adjustment"
+	if d := shared.CleanText(req.Description); d != nil {
+		desc = *d
 	}
 
-	created, newBalance, err := s.txs.CreateSystemInTx(ctx, tx, userID, accountID, kind, amount, date, &note)
+	created, newBalance, err := s.txs.CreateSystemInTx(ctx, tx, userID, accountID, kind, amount, date, &desc, req.Note)
 	if err != nil {
 		return nil, err
 	}

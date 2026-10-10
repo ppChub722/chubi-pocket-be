@@ -63,7 +63,7 @@ func assertContactOwned(ctx context.Context, q contactQuerier, userID uuid.UUID,
 const debtColumns = `id, user_id, direction,
 	counterparty_contact_id, counterparty_person_name,
 	source_transaction_id, source_project_transaction_id, project_id,
-	amount, settled_amount, currency, status, note,
+	amount, settled_amount, currency, status, description, note,
 	created_at, updated_at, counterpart_debt_id`
 
 func scanDebt(row pgx.Row) (*PersonalDebt, error) {
@@ -72,7 +72,7 @@ func scanDebt(row pgx.Row) (*PersonalDebt, error) {
 		&d.ID, &d.UserID, &d.Direction,
 		&d.CounterpartyContactID, &d.CounterpartyPersonName,
 		&d.SourceTransactionID, &d.SourceProjectTransactionID, &d.ProjectID,
-		&d.Amount, &d.SettledAmount, &d.Currency, &d.Status, &d.Note,
+		&d.Amount, &d.SettledAmount, &d.Currency, &d.Status, &d.Description, &d.Note,
 		&d.CreatedAt, &d.UpdatedAt, &d.CounterpartDebtID,
 	)
 	return &d, err
@@ -90,13 +90,13 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, req CreateRequest)
 	}
 	q := `INSERT INTO personal_debts
 		(id, user_id, direction, counterparty_contact_id, counterparty_person_name,
-		 amount, currency, note, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $2, $2)
+		 amount, currency, description, note, created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $2, $2)
 		RETURNING ` + debtColumns
 	return scanDebt(s.db.QueryRow(ctx, q,
 		id, userID, req.Direction, req.CounterpartyContactID,
 		strings.TrimSpace(req.CounterpartyPersonName),
-		req.Amount, strings.ToUpper(req.Currency), req.Note,
+		req.Amount, strings.ToUpper(req.Currency), shared.CleanText(req.Description), shared.CleanText(req.Note),
 	))
 }
 
@@ -110,7 +110,7 @@ func (s *Store) CreateAttachedTx(
 	userID uuid.UUID, direction string,
 	contactID *uuid.UUID, personName string,
 	sourceTxID, sourceProjectTxID, projectID *uuid.UUID,
-	amount float64, currency string, note *string,
+	amount float64, currency string, description, note *string,
 ) (*PersonalDebt, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -119,13 +119,13 @@ func (s *Store) CreateAttachedTx(
 	q := `INSERT INTO personal_debts
 		(id, user_id, direction, counterparty_contact_id, counterparty_person_name,
 		 source_transaction_id, source_project_transaction_id, project_id,
-		 amount, currency, note, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $2, $2)
+		 amount, currency, description, note, created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $2, $2)
 		RETURNING ` + debtColumns
 	row, err := scanDebt(tx.QueryRow(ctx, q,
 		id, userID, direction, contactID, strings.TrimSpace(personName),
 		sourceTxID, sourceProjectTxID, projectID,
-		amount, strings.ToUpper(currency), note,
+		amount, strings.ToUpper(currency), shared.CleanText(description), shared.CleanText(note),
 	))
 	if err != nil {
 		return nil, err
@@ -355,7 +355,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Per
 			&v.ID, &v.UserID, &v.Direction,
 			&v.CounterpartyContactID, &v.CounterpartyPersonName,
 			&v.SourceTransactionID, &v.SourceProjectTransactionID, &v.ProjectID,
-			&v.Amount, &v.SettledAmount, &v.Currency, &v.Status, &v.Note,
+			&v.Amount, &v.SettledAmount, &v.Currency, &v.Status, &v.Description, &v.Note,
 			&v.CreatedAt, &v.UpdatedAt, &v.CounterpartDebtID, &v.Outstanding,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan: %w", err)
@@ -421,10 +421,14 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequ
 		args = append(args, *req.Status)
 		q += fmt.Sprintf(", status = $%d", len(args))
 	}
+	if v, ok := shared.TextChange(req.Description, req.ClearDescription); ok {
+		args = append(args, v)
+		q += fmt.Sprintf(", description = $%d", len(args))
+	}
 	if req.ClearNote {
 		q += ", note = NULL"
 	} else if req.Note != nil {
-		args = append(args, *req.Note)
+		args = append(args, shared.CleanText(req.Note))
 		q += fmt.Sprintf(", note = $%d", len(args))
 	}
 

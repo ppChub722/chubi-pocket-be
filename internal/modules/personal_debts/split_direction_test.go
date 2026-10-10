@@ -137,7 +137,7 @@ func (f *sdFixture) runCreator(t *testing.T, billID uuid.UUID, parentType string
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	err = f.svc.CreateForTransactionTx(ctx, tx, billID, f.splitter, parentType, "THB",
+	err = f.svc.CreateForTransactionTx(ctx, tx, billID, f.splitter, parentType, "THB", nil,
 		[]transactions.SplitInput{
 			{PersonName: "SD Partner", ContactID: &f.splitterContact, OwedAmount: 400},
 			{PersonName: "SD Freetext", OwedAmount: 100},

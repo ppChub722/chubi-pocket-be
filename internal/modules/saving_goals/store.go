@@ -34,7 +34,7 @@ var (
 // into pgtype.Date, not *string — without the ::text cast the scanner
 // errors with "cannot scan date (OID 1082) in binary format into **string".
 const goalColumns = `id, user_id, name, target_amount, linked_account_id,
-	allocation_pct, deadline::text, icon_code, status, note,
+	allocation_pct, deadline::text, icon_code, status, description, note,
 	created_at, updated_at`
 
 func scanGoal(row pgx.Row) (*SavingGoal, error) {
@@ -43,7 +43,7 @@ func scanGoal(row pgx.Row) (*SavingGoal, error) {
 	var deadline *string
 	if err := row.Scan(
 		&g.ID, &g.UserID, &g.Name, &g.TargetAmount, &g.LinkedAccountID,
-		&g.AllocationPct, &deadline, &iconBytes, &g.Status, &g.Note,
+		&g.AllocationPct, &deadline, &iconBytes, &g.Status, &g.Description, &g.Note,
 		&g.CreatedAt, &g.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -146,13 +146,14 @@ func (s *Store) CreateInTx(
 
 	q := `INSERT INTO saving_goals
 		(id, user_id, name, target_amount, linked_account_id,
-		 allocation_pct, deadline, icon_code, note,
+		 allocation_pct, deadline, icon_code, description, note,
 		 created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $2, $2)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $2, $2)
 		RETURNING ` + goalColumns
 	return scanGoal(tx.QueryRow(ctx, q,
 		id, userID, strings.TrimSpace(req.Name), req.TargetAmount,
-		req.LinkedAccountID, allocation, req.Deadline, iconBytes, req.Note,
+		req.LinkedAccountID, allocation, req.Deadline, iconBytes,
+		shared.CleanText(req.Description), shared.CleanText(req.Note),
 	))
 }
 
@@ -296,8 +297,12 @@ func (s *Store) UpdateInTx(
 		args = append(args, b)
 		q += fmt.Sprintf(", icon_code = $%d::jsonb", len(args))
 	}
-	if req.Note != nil {
-		args = append(args, *req.Note)
+	if v, ok := req.DescriptionChange(); ok {
+		args = append(args, v)
+		q += fmt.Sprintf(", description = $%d", len(args))
+	}
+	if v, ok := req.NoteChange(); ok {
+		args = append(args, v)
 		q += fmt.Sprintf(", note = $%d", len(args))
 	}
 

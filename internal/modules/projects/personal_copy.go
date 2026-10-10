@@ -112,16 +112,13 @@ func (s *Service) copyToPersonalTx(
 			categoryID = &id
 		}
 	}
-	note := pt.Note
-	if note == nil {
-		note = pt.Description
-	}
 	created, err := s.txs.CreateInTx(ctx, tx, userID, transactions.CreateRequest{
 		Type:                       transactions.TxType(pt.Type),
 		Amount:                     amount,
 		CategoryID:                 categoryID,
 		Date:                       pt.Date,
-		Note:                       note,
+		Description:                pt.Description,
+		Note:                       pt.Note,
 		SourceProjectTransactionID: &pt.ID,
 	})
 	if err != nil {
@@ -189,6 +186,7 @@ func (s *Service) notifyRecordedTx(
 			Amount:                pt.Amount,
 			Currency:              pt.Currency,
 			Type:                  pt.Type,
+			Description:           pt.Description,
 			Note:                  pt.Note,
 			PersonalTransactionID: copyID,
 		}, copyID != nil)
@@ -207,11 +205,9 @@ func suggestedUpdate(
 	case beforeShare:
 		amount = afterShare
 	}
-	note := after.Note
-	if note == nil {
-		note = after.Description
+	return &notifications.PersonalUpdate{
+		Amount: amount, Date: after.Date, Description: after.Description, Note: after.Note,
 	}
-	return &notifications.PersonalUpdate{Amount: amount, Date: after.Date, Note: note}
 }
 
 // notifyChangedTx — project_tx_changed ("edited") to one recipient. When
@@ -251,9 +247,9 @@ func (s *Service) notifyChangedTx(
 		p.Suggested = sug
 		if d.Auto && s.txs != nil {
 			amount, date := sug.Amount, sug.Date
-			if err := s.txs.UpdateInTx(ctx, tx, recipientUserID, copyID, transactions.UpdateRequest{
-				Amount: &amount, Date: &date, Note: sug.Note,
-			}); err != nil {
+			req := transactions.UpdateRequest{Amount: &amount, Date: &date}
+			req.SetText(sug.Description, sug.Note)
+			if err := s.txs.UpdateInTx(ctx, tx, recipientUserID, copyID, req); err != nil {
 				return fmt.Errorf("update personal copy: %w", err)
 			}
 			applied = true

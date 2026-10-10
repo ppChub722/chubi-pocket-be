@@ -28,7 +28,8 @@ type Contact struct {
 	DisplayName  string           `json:"display_name"`
 	Email        *string          `json:"email"`
 	Phone        *string          `json:"phone"`
-	Notes        *string          `json:"notes"`
+	Description  *string          `json:"description"`
+	Note         *string          `json:"note"`
 	IconCode     *shared.IconCode `json:"icon_code"`
 	LinkedUserID *uuid.UUID       `json:"linked_user_id"`
 	// LinkedUserIconCode mirrors the linked user's profile icon at read time.
@@ -55,7 +56,8 @@ type CreateContactRequest struct {
 	DisplayName string           `json:"display_name" binding:"required,min=1,max=100"`
 	Email       *string          `json:"email"        binding:"omitempty,email,max=255"`
 	Phone       *string          `json:"phone"        binding:"omitempty,max=50"`
-	Notes       *string          `json:"notes"`
+	Description *string          `json:"description"  binding:"omitempty,max=200"`
+	Note        *string          `json:"note"         binding:"omitempty,max=500"`
 	IconCode    *shared.IconCode `json:"icon_code"    binding:"omitempty"`
 	// AbsorbNames wires existing free-text person_names from the caller's
 	// personal_debts to the new contact in the same call. Case-insensitive
@@ -67,8 +69,29 @@ type UpdateContactRequest struct {
 	DisplayName *string          `json:"display_name" binding:"omitempty,min=1,max=100"`
 	Email       *string          `json:"email"        binding:"omitempty,email,max=255"`
 	Phone       *string          `json:"phone"        binding:"omitempty,max=50"`
-	Notes       *string          `json:"notes"`
+	Description *string          `json:"description"  binding:"omitempty,max=200"`
+	Note        *string          `json:"note"         binding:"omitempty,max=500"`
 	IconCode    *shared.IconCode `json:"icon_code"    binding:"omitempty"`
+
+	descriptionPresent bool
+	notePresent        bool
+}
+
+// UnmarshalJSON records which keys the body carried: an absent description /
+// note stays as is; null or "" clears it.
+func (r *UpdateContactRequest) UnmarshalJSON(data []byte) error {
+	type alias UpdateContactRequest
+	present, err := shared.DecodeTracked(data, (*alias)(r))
+	r.descriptionPresent, r.notePresent = present["description"], present["note"]
+	return err
+}
+
+func (r *UpdateContactRequest) DescriptionChange() (*string, bool) {
+	return shared.TextChange(r.Description, r.descriptionPresent)
+}
+
+func (r *UpdateContactRequest) NoteChange() (*string, bool) {
+	return shared.TextChange(r.Note, r.notePresent)
 }
 
 type CreateContactResponse struct {
@@ -101,9 +124,10 @@ type SenderProfile struct {
 // because for linked contacts those are projected from the sender's
 // users row at read time.
 type LinkExistingContactRequest struct {
-	Phone    *string          `json:"phone"     binding:"omitempty,max=50"`
-	Notes    *string          `json:"notes"`
-	IconCode *shared.IconCode `json:"icon_code" binding:"omitempty"`
+	Phone       *string          `json:"phone"     binding:"omitempty,max=50"`
+	Description *string          `json:"description" binding:"omitempty,max=200"`
+	Note        *string          `json:"note"        binding:"omitempty,max=500"`
+	IconCode    *shared.IconCode `json:"icon_code" binding:"omitempty"`
 }
 
 // CreateLinkedContactRequest is the body of
@@ -113,7 +137,8 @@ type LinkExistingContactRequest struct {
 // as the contact's snapshot (used as fallback if the contact is later
 // unlinked).
 type CreateLinkedContactRequest struct {
-	Phone    *string          `json:"phone"     binding:"omitempty,max=50"`
-	Notes    *string          `json:"notes"`
-	IconCode *shared.IconCode `json:"icon_code" binding:"omitempty"`
+	Phone       *string          `json:"phone"     binding:"omitempty,max=50"`
+	Description *string          `json:"description" binding:"omitempty,max=200"`
+	Note        *string          `json:"note"        binding:"omitempty,max=500"`
+	IconCode    *shared.IconCode `json:"icon_code" binding:"omitempty"`
 }

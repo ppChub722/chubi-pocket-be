@@ -287,7 +287,7 @@ func TestScanSlipBuildsDrafts(t *testing.T) {
 	body := w.Body.String()
 	for _, want := range []string{
 		`"v":1`, `"status":"ok"`, `"bank_code":"004"`, `"amount":97`,
-		`"date":"2026-10-09"`, `"note":"ร้านกาแฟ"`, `"part":"fee"`, `"amount":5`,
+		`"date":"2026-10-09"`, `"description":"ร้านกาแฟ"`, `"description":"ค่าธรรมเนียม · ร้านกาแฟ"`, `"part":"fee"`, `"amount":5`,
 		`"sender_masked":"xxxxx1234x"`, `"occurred_at":"2026-10-09T13:19:00+07:00"`,
 	} {
 		if !strings.Contains(body, want) {

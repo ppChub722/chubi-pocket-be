@@ -319,7 +319,7 @@ func (h *Handler) CreateLinkedContact(c *gin.Context) {
 // Post-accept "I already have a contact for them, just wire the link"
 // path. The notification must be actioned; the contact must be caller-
 // owned. display_name + email are NOT touched on the contact (those
-// project from the linked user once linked); phone / notes / icon are
+// project from the linked user once linked); phone / description / note / icon are
 // optional B-side updates.
 func (h *Handler) LinkExistingContact(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)

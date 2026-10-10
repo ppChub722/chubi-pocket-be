@@ -62,7 +62,7 @@ type (
 	// ('i_owe', mirror 'owed_to_me'). Called inside Create's tx after the
 	// parent transaction row lands. Implemented by
 	// personal_debts.Service.CreateForTransactionTx.
-	DebtsCreator func(ctx context.Context, tx pgx.Tx, parentTxID, userID uuid.UUID, parentType, parentCurrency string, splits []SplitInput) error
+	DebtsCreator func(ctx context.Context, tx pgx.Tx, parentTxID, userID uuid.UUID, parentType, parentCurrency string, parentDescription *string, splits []SplitInput) error
 
 	// DebtValidator confirms the caller owns the debt and returns its
 	// direction ('i_owe' | 'owed_to_me') and outstanding. Used when a
@@ -109,7 +109,7 @@ func (s *Service) CountByCategory(ctx context.Context, categoryID uuid.UUID) (in
 func (s *Service) CreateSystemInTx(
 	ctx context.Context, tx pgx.Tx, userID uuid.UUID,
 	accountID uuid.UUID, kind categories.SystemKind,
-	amount float64, date string, note *string,
+	amount float64, date string, description, note *string,
 ) (*Transaction, float64, error) {
 	if amount <= 0 {
 		return nil, 0, ErrAmountInvalid
@@ -139,6 +139,7 @@ func (s *Service) CreateSystemInTx(
 		Amount:     amount,
 		CategoryID: &cat.ID,
 		Date:       date,
+		Description: description,
 		Note:       note,
 	}
 	created, err := s.store.InsertRowTx(ctx, tx, row)
@@ -414,6 +415,7 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 		Amount:                     req.Amount,
 		CategoryID:                 categoryID,
 		Date:                       req.Date,
+		Description:                req.Description,
 		Note:                       req.Note,
 		ProjectID:                  projectID,
 		SourceProjectTransactionID: req.SourceProjectTransactionID,
@@ -448,7 +450,7 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	}
 
 	if len(req.Splits) > 0 {
-		if err := s.debtsCreator(ctx, tx, created.ID, userID, string(created.Type), currency, req.Splits); err != nil {
+		if err := s.debtsCreator(ctx, tx, created.ID, userID, string(created.Type), currency, created.Description, req.Splits); err != nil {
 			return nil, err
 		}
 	}
@@ -551,6 +553,7 @@ func (s *Service) CreateInTxWithSourceDebt(
 		Amount:               req.Amount,
 		CategoryID:           &sysCat.ID,
 		Date:                 req.Date,
+		Description:          req.Description,
 		Note:                 req.Note,
 		SourcePersonalDebtID: &debtID,
 	}
@@ -630,6 +633,7 @@ func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 		Amount:          req.Amount,
 		CategoryID:      &transferOutCat.ID,
 		Date:            req.Date,
+		Description:     req.Description,
 		Note:            req.Note,
 		TransferGroupID: &groupID,
 	})
@@ -648,6 +652,7 @@ func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 		Amount:          req.Amount,
 		CategoryID:      &transferInCat.ID,
 		Date:            req.Date,
+		Description:     req.Description,
 		Note:            req.Note,
 		TransferGroupID: &groupID,
 	})
@@ -842,10 +847,12 @@ func (s *Service) updateSingleInTx(
 		}
 	}
 
+	descVal, descChanged := req.DescriptionChange()
 	noteVal, noteChanged := req.NoteChange()
 	updated, err := s.store.UpdateRowTx(ctx, tx, userID, current.ID,
 		req.Amount, req.Date,
 		newCatID, catChange,
+		descVal, descChanged,
 		noteVal, noteChanged,
 		newAccID, accChange)
 	if err != nil {
@@ -979,15 +986,16 @@ func (s *Service) updateTransferInTx(
 		}
 	}
 
+	descVal, descChanged := req.DescriptionChange()
 	noteVal, noteChanged := req.NoteChange()
 
 	updatedOut, err := s.store.UpdateRowTx(ctx, tx, userID, outRow.ID,
-		req.Amount, req.Date, nil, false, noteVal, noteChanged, newOutAccID, outAccChange)
+		req.Amount, req.Date, nil, false, descVal, descChanged, noteVal, noteChanged, newOutAccID, outAccChange)
 	if err != nil {
 		return nil, nil, err
 	}
 	updatedIn, err := s.store.UpdateRowTx(ctx, tx, userID, inRow.ID,
-		req.Amount, req.Date, nil, false, noteVal, noteChanged, newInAccID, inAccChange)
+		req.Amount, req.Date, nil, false, descVal, descChanged, noteVal, noteChanged, newInAccID, inAccChange)
 	if err != nil {
 		return nil, nil, err
 	}

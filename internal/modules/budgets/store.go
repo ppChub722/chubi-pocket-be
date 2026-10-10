@@ -32,14 +32,14 @@ var (
 )
 
 const budgetColumns = `id, user_id, category_id, scope, project_id,
-	amount, period, currency, status, description, note,
+	amount, period, currency, status, name, description, note,
 	created_at, updated_at`
 
 func scanBudget(row pgx.Row) (*Budget, error) {
 	var b Budget
 	if err := row.Scan(
 		&b.ID, &b.UserID, &b.CategoryID, &b.Scope, &b.ProjectID,
-		&b.Amount, &b.Period, &b.Currency, &b.Status, &b.Description, &b.Note,
+		&b.Amount, &b.Period, &b.Currency, &b.Status, &b.Name, &b.Description, &b.Note,
 		&b.CreatedAt, &b.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -120,12 +120,15 @@ func (s *Store) Create(
 
 	q := `INSERT INTO budgets
 		(id, user_id, category_id, scope, project_id, amount, period,
-		 currency, description, note, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $2, $2)
+		 currency, name, description, note, created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+		        COALESCE($11, (SELECT name FROM categories WHERE id = $3)),
+		        $9, $10, $2, $2)
 		RETURNING ` + budgetColumns
 	b, err := scanBudget(s.db.QueryRow(ctx, q,
 		id, userID, req.CategoryID, req.Scope, req.ProjectID,
-		req.Amount, req.Period, currency, req.Description, req.Note,
+		req.Amount, req.Period, currency, shared.CleanText(req.Description), shared.CleanText(req.Note),
+		shared.CleanText(req.Name),
 	))
 	if err != nil {
 		// Best-effort detection of the partial unique-index hit.
@@ -248,12 +251,17 @@ func (s *Store) Update(
 		args = append(args, strings.ToUpper(*req.Currency))
 		q += fmt.Sprintf(", currency = $%d", len(args))
 	}
-	if req.Description != nil {
-		args = append(args, *req.Description)
+	if v, ok := req.NameChange(); ok {
+		// Cleared → the (new, if changing) category's name.
+		args = append(args, v, req.CategoryID)
+		q += fmt.Sprintf(", name = COALESCE($%d, (SELECT name FROM categories WHERE id = COALESCE($%d::uuid, budgets.category_id)))", len(args)-1, len(args))
+	}
+	if v, ok := req.DescriptionChange(); ok {
+		args = append(args, v)
 		q += fmt.Sprintf(", description = $%d", len(args))
 	}
-	if req.Note != nil {
-		args = append(args, *req.Note)
+	if v, ok := req.NoteChange(); ok {
+		args = append(args, v)
 		q += fmt.Sprintf(", note = $%d", len(args))
 	}
 

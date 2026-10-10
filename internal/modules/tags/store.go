@@ -28,12 +28,12 @@ var (
 	ErrTransactionNotOwned = errors.New("transaction not found or not owned")
 )
 
-const tagColumns = `id, user_id, name, icon_code, created_at, updated_at`
+const tagColumns = `id, user_id, name, description, note, icon_code, created_at, updated_at`
 
 func scanTag(row pgx.Row) (*Tag, error) {
 	var t Tag
 	var iconBytes []byte
-	err := row.Scan(&t.ID, &t.UserID, &t.Name, &iconBytes, &t.CreatedAt, &t.UpdatedAt)
+	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.Description, &t.Note, &iconBytes, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +49,7 @@ func scanTag(row pgx.Row) (*Tag, error) {
 func scanTagWithCount(row pgx.Row) (*Tag, error) {
 	var t Tag
 	var iconBytes []byte
-	err := row.Scan(&t.ID, &t.UserID, &t.Name, &iconBytes, &t.CreatedAt, &t.UpdatedAt, &t.UsageCount)
+	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.Description, &t.Note, &iconBytes, &t.CreatedAt, &t.UpdatedAt, &t.UsageCount)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func scanTagWithCount(row pgx.Row) (*Tag, error) {
 	return &t, nil
 }
 
-func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string, iconCode *shared.IconCode) (*Tag, error) {
+func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string, description, note *string, iconCode *shared.IconCode) (*Tag, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
@@ -73,10 +73,11 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string, iconC
 			return nil, fmt.Errorf("marshal icon_code: %w", err)
 		}
 	}
-	q := `INSERT INTO tags (id, user_id, name, icon_code, created_by_user_id)
-		VALUES ($1, $2, $3, $4::jsonb, $2)
+	q := `INSERT INTO tags (id, user_id, name, description, note, icon_code, created_by_user_id)
+		VALUES ($1, $2, $3, $5, $6, $4::jsonb, $2)
 		RETURNING ` + tagColumns
-	t, err := scanTag(s.db.QueryRow(ctx, q, id, userID, name, iconJSON))
+	t, err := scanTag(s.db.QueryRow(ctx, q, id, userID, name, iconJSON,
+		shared.CleanText(description), shared.CleanText(note)))
 	if err != nil {
 		return nil, mapInsertError(err)
 	}
@@ -84,7 +85,7 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string, iconC
 }
 
 func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Tag, error) {
-	q := `SELECT t.id, t.user_id, t.name, t.icon_code, t.created_at, t.updated_at,
+	q := `SELECT t.id, t.user_id, t.name, t.description, t.note, t.icon_code, t.created_at, t.updated_at,
 		COALESCE((SELECT COUNT(*) FROM transaction_tags WHERE tag_id = t.id), 0)
 		FROM tags t WHERE t.id = $1 AND t.user_id = $2`
 	t, err := scanTagWithCount(s.db.QueryRow(ctx, q, id, userID))
@@ -100,7 +101,7 @@ func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Tag, error)
 func (s *Store) List(ctx context.Context, userID uuid.UUID) ([]Tag, error) {
 	// Spec §3.9 — server sorts by usage_count DESC, then name ASC, so the
 	// user's most-used tags surface first in pickers.
-	q := `SELECT t.id, t.user_id, t.name, t.icon_code, t.created_at, t.updated_at,
+	q := `SELECT t.id, t.user_id, t.name, t.description, t.note, t.icon_code, t.created_at, t.updated_at,
 		COALESCE(c.cnt, 0) AS usage_count
 		FROM tags t
 		LEFT JOIN (
@@ -175,7 +176,7 @@ func (s *Store) DetachTag(ctx context.Context, txID, tagID uuid.UUID) error {
 
 // TagsForTransaction returns all tags attached to a single transaction.
 func (s *Store) TagsForTransaction(ctx context.Context, txID, userID uuid.UUID) ([]Tag, error) {
-	q := `SELECT t.id, t.user_id, t.name, t.icon_code, t.created_at, t.updated_at, 0
+	q := `SELECT t.id, t.user_id, t.name, t.description, t.note, t.icon_code, t.created_at, t.updated_at, 0
 		FROM tags t
 		JOIN transaction_tags tt ON tt.tag_id = t.id
 		WHERE tt.transaction_id = $1 AND t.user_id = $2
@@ -215,12 +216,21 @@ func (s *Store) VerifyOwnership(ctx context.Context, userID uuid.UUID, tagIDs []
 	return nil
 }
 
-func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, name *string, iconCode *shared.IconCode) (*Tag, error) {
+func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, name *string, req UpdateTagRequest) (*Tag, error) {
+	iconCode := req.IconCode
 	q := `UPDATE tags SET updated_by_user_id = $1`
 	args := []any{userID}
 	if name != nil {
 		args = append(args, *name)
 		q += fmt.Sprintf(", name = $%d", len(args))
+	}
+	if v, ok := req.DescriptionChange(); ok {
+		args = append(args, v)
+		q += fmt.Sprintf(", description = $%d", len(args))
+	}
+	if v, ok := req.NoteChange(); ok {
+		args = append(args, v)
+		q += fmt.Sprintf(", note = $%d", len(args))
 	}
 	if iconCode != nil {
 		b, err := json.Marshal(iconCode)

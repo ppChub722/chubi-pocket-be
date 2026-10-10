@@ -51,6 +51,7 @@ type ScheduledTransaction struct {
 	NextBillingDate       string           `json:"next_billing_date"` // YYYY-MM-DD
 	DayOfMonth            int              `json:"day_of_month"`
 	Status                string           `json:"status"`
+	Description           *string          `json:"description"`
 	Note                  *string          `json:"note"`
 	TotalAmount           *float64         `json:"total_amount"`
 	DownPayment           *float64         `json:"down_payment"`
@@ -97,7 +98,8 @@ type CreateRequest struct {
 	CategoryID            uuid.UUID        `json:"category_id"        binding:"required"`
 	BillingCycle          string           `json:"billing_cycle"      binding:"required,oneof=daily weekly monthly yearly"`
 	NextBillingDate       string           `json:"next_billing_date"  binding:"required,datetime=2006-01-02"`
-	Note                  *string          `json:"note"`
+	Description           *string          `json:"description"        binding:"omitempty,max=200"`
+	Note                  *string          `json:"note"               binding:"omitempty,max=500"`
 	TotalAmount           *float64         `json:"total_amount"       binding:"omitempty,gt=0"`
 	DownPayment           *float64         `json:"down_payment"       binding:"omitempty,gte=0"`
 	TotalInstallments     *int             `json:"total_installments" binding:"omitempty,gt=0"`
@@ -116,7 +118,8 @@ type UpdateRequest struct {
 	CategoryID            *uuid.UUID       `json:"category_id"        binding:"omitempty"`
 	BillingCycle          *string          `json:"billing_cycle"      binding:"omitempty,oneof=daily weekly monthly yearly"`
 	NextBillingDate       *string          `json:"next_billing_date"  binding:"omitempty,datetime=2006-01-02"`
-	Note                  *string          `json:"note"`
+	Description           *string          `json:"description"        binding:"omitempty,max=200"`
+	Note                  *string          `json:"note"               binding:"omitempty,max=500"`
 	TotalAmount           *float64         `json:"total_amount"       binding:"omitempty,gt=0"`
 	DownPayment           *float64         `json:"down_payment"       binding:"omitempty,gte=0"`
 	TotalInstallments     *int             `json:"total_installments" binding:"omitempty,gt=0"`
@@ -124,6 +127,26 @@ type UpdateRequest struct {
 	InterestRate          *float64         `json:"interest_rate"      binding:"omitempty,gte=0,lte=99.99"`
 	IconCode              *shared.IconCode `json:"icon_code"`
 	LogoURL               *string          `json:"logo_url"`
+
+	descriptionPresent bool
+	notePresent        bool
+}
+
+// UnmarshalJSON records which keys the body carried: an absent description /
+// note stays as is; null or "" clears it.
+func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
+	type alias UpdateRequest
+	present, err := shared.DecodeTracked(data, (*alias)(r))
+	r.descriptionPresent, r.notePresent = present["description"], present["note"]
+	return err
+}
+
+func (r *UpdateRequest) DescriptionChange() (*string, bool) {
+	return shared.TextChange(r.Description, r.descriptionPresent)
+}
+
+func (r *UpdateRequest) NoteChange() (*string, bool) {
+	return shared.TextChange(r.Note, r.notePresent)
 }
 
 type ListFilter struct {

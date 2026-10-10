@@ -147,6 +147,7 @@ func createRequest(d Draft) (transactions.CreateRequest, error) {
 		Amount:              *d.Amount,
 		CategoryID:          d.CategoryID,
 		Date:                *d.Date,
+		Description:         d.Description,
 		Note:                d.Note,
 		TransferToAccountID: d.TransferToAccountID,
 		Splits:              d.Splits,
@@ -204,10 +205,11 @@ func (s *Service) submitSettle(ctx context.Context, userID uuid.UUID, p *Pending
 		return nil, &submitErr{"MISSING_AMOUNT", "amount must be more than 0"}
 	}
 	res, err := s.debts.Settle(ctx, userID, *p.TargetDebtID, personal_debts.SettleRequest{
-		AccountID: p.Draft.AccountID,
-		Amount:    p.Draft.Amount,
-		Date:      p.Draft.Date,
-		Note:      p.Draft.Note,
+		AccountID:   p.Draft.AccountID,
+		Amount:      p.Draft.Amount,
+		Date:        p.Draft.Date,
+		Description: p.Draft.Description,
+		Note:        p.Draft.Note,
 	})
 	if err != nil {
 		return nil, err
@@ -230,11 +232,12 @@ func (s *Service) submitUpdate(ctx context.Context, userID uuid.UUID, p *Pending
 	}
 	defer tx.Rollback(ctx)
 	if err := s.txs.UpdateInTx(ctx, tx, userID, *p.TargetTransactionID, transactions.UpdateRequest{
-		Amount:     p.Draft.Amount,
-		Date:       p.Draft.Date,
-		Note:       p.Draft.Note,
-		CategoryID: p.Draft.CategoryID,
-		AccountID:  p.Draft.AccountID,
+		Amount:      p.Draft.Amount,
+		Date:        p.Draft.Date,
+		Description: p.Draft.Description,
+		Note:        p.Draft.Note,
+		CategoryID:  p.Draft.CategoryID,
+		AccountID:   p.Draft.AccountID,
 	}); err != nil {
 		return nil, err
 	}

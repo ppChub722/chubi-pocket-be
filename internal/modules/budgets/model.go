@@ -29,10 +29,9 @@ const (
 
 // Budget — stored row, no computed progress fields.
 //
-// Migration 000037 dropped `icon_code` (icon comes from the linked
-// category) and added `description` as the primary label. Migration
-// 000038 added `note` for the longer free-form narrative shown on the
-// detail page — same description/note split accounts use.
+// The icon comes from the linked category (migration 000037). Like every
+// "thing": `name` (the title — defaults to the category's name, migration
+// 000051), `description`, `note`.
 type Budget struct {
 	ID          uuid.UUID  `json:"id"`
 	UserID      uuid.UUID  `json:"user_id"`
@@ -43,6 +42,7 @@ type Budget struct {
 	Period      string     `json:"period"`
 	Currency    string     `json:"currency"`
 	Status      string     `json:"status"`
+	Name        string     `json:"name"`
 	Description *string    `json:"description"`
 	Note        *string    `json:"note"`
 	CreatedAt   time.Time  `json:"created_at"`
@@ -83,8 +83,7 @@ type BudgetView struct {
 
 // CreateRequest — `currency` is optional; defaults to user's currency
 // (THB in 1c). `project_id` required iff `scope='project'`.
-// `description` is the optional primary label; `note` is optional
-// long-form narrative.
+// `name` is optional: absent / null / "" → the category's name.
 type CreateRequest struct {
 	CategoryID  uuid.UUID  `json:"category_id" binding:"required"`
 	Amount      float64    `json:"amount"      binding:"required,gt=0"`
@@ -92,8 +91,9 @@ type CreateRequest struct {
 	Scope       string     `json:"scope"       binding:"required,oneof=user project"`
 	ProjectID   *uuid.UUID `json:"project_id"  binding:"omitempty"`
 	Currency    *string    `json:"currency"    binding:"omitempty,len=3"`
+	Name        *string    `json:"name"        binding:"omitempty,max=100"`
 	Description *string    `json:"description" binding:"omitempty,max=200"`
-	Note        *string    `json:"note"`
+	Note        *string    `json:"note"        binding:"omitempty,max=500"`
 }
 
 // UpdateRequest — partial. scope / project_id NOT editable (delete +
@@ -107,8 +107,36 @@ type UpdateRequest struct {
 	Amount      *float64   `json:"amount"      binding:"omitempty,gt=0"`
 	Period      *string    `json:"period"      binding:"omitempty,oneof=weekly monthly yearly"`
 	Currency    *string    `json:"currency"    binding:"omitempty,len=3"`
+	Name        *string    `json:"name"        binding:"omitempty,max=100"`
 	Description *string    `json:"description" binding:"omitempty,max=200"`
-	Note        *string    `json:"note"`
+	Note        *string    `json:"note"        binding:"omitempty,max=500"`
+
+	namePresent        bool
+	descriptionPresent bool
+	notePresent        bool
+}
+
+// UnmarshalJSON records which keys the body carried: an absent name /
+// description / note stays as is; null or "" clears it (name: back to the
+// category's name).
+func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
+	type alias UpdateRequest
+	present, err := shared.DecodeTracked(data, (*alias)(r))
+	r.namePresent = present["name"]
+	r.descriptionPresent, r.notePresent = present["description"], present["note"]
+	return err
+}
+
+func (r *UpdateRequest) NameChange() (*string, bool) {
+	return shared.TextChange(r.Name, r.namePresent)
+}
+
+func (r *UpdateRequest) DescriptionChange() (*string, bool) {
+	return shared.TextChange(r.Description, r.descriptionPresent)
+}
+
+func (r *UpdateRequest) NoteChange() (*string, bool) {
+	return shared.TextChange(r.Note, r.notePresent)
 }
 
 type ListFilter struct {

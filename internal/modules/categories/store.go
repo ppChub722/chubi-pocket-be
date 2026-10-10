@@ -248,7 +248,7 @@ func (s *Store) Create(ctx context.Context, c *Category) (*Category, error) {
 		RETURNING ` + categoryColumns
 	created, err := scanCategory(s.db.QueryRow(ctx, q,
 		c.ID, c.UserID, c.Name, c.Type, c.ParentID, c.IsSystem, c.SystemKind,
-		iconJSON, nextSort, c.IncludeInReport, c.Description, c.Note))
+		iconJSON, nextSort, c.IncludeInReport, shared.CleanText(c.Description), shared.CleanText(c.Note)))
 	if err != nil {
 		return nil, mapInsertError(err)
 	}

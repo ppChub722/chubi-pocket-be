@@ -69,8 +69,8 @@ type CreateCategoryRequest struct {
 	ParentID        *uuid.UUID       `json:"parent_id"         binding:"omitempty"`
 	IconCode        *shared.IconCode `json:"icon_code"         binding:"omitempty"`
 	IncludeInReport *bool            `json:"include_in_report" binding:"omitempty"`
-	Description     *string          `json:"description"       binding:"omitempty,max=280"`
-	Note            *string          `json:"note"              binding:"omitempty,max=280"`
+	Description     *string          `json:"description"       binding:"omitempty,max=200"`
+	Note            *string          `json:"note"              binding:"omitempty,max=500"`
 }
 
 // UpdateCategoryRequest — partial update. `type` and `is_system` are
@@ -89,8 +89,8 @@ type UpdateCategoryRequest struct {
 	ParentID        *uuid.UUID       `json:"parent_id"`
 	IconCode        *shared.IconCode `json:"icon_code"`
 	IncludeInReport *bool            `json:"include_in_report" binding:"omitempty"`
-	Description     *string          `json:"description"       binding:"omitempty,max=280"`
-	Note            *string          `json:"note"              binding:"omitempty,max=280"`
+	Description     *string          `json:"description"       binding:"omitempty,max=200"`
+	Note            *string          `json:"note"              binding:"omitempty,max=500"`
 
 	parentIDPresent    bool
 	iconCodePresent    bool
@@ -130,11 +130,11 @@ func (r *UpdateCategoryRequest) IconCodeChange() (*shared.IconCode, bool) {
 // DescriptionChange / NoteChange follow the same convention as
 // ParentIDChange — the bool tells the service "the client touched this field".
 func (r *UpdateCategoryRequest) DescriptionChange() (*string, bool) {
-	return r.Description, r.descriptionPresent
+	return shared.CleanText(r.Description), r.descriptionPresent
 }
 
 func (r *UpdateCategoryRequest) NoteChange() (*string, bool) {
-	return r.Note, r.notePresent
+	return shared.CleanText(r.Note), r.notePresent
 }
 
 // ReorderRequest — body of PATCH /v1/categories/reorder. Carries the user's

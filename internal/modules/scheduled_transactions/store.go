@@ -31,7 +31,7 @@ var (
 )
 
 const scheduleColumns = `id, user_id, account_id, name, type, entry_type, amount,
-	category_id, billing_cycle, next_billing_date::text, day_of_month, status, note,
+	category_id, billing_cycle, next_billing_date::text, day_of_month, status, description, note,
 	total_amount, down_payment, total_installments, remaining_installments, interest_rate,
 	icon_code, logo_url, created_at, updated_at`
 
@@ -40,7 +40,7 @@ func scanSchedule(row pgx.Row) (*ScheduledTransaction, error) {
 	var iconBytes []byte
 	if err := row.Scan(
 		&s.ID, &s.UserID, &s.AccountID, &s.Name, &s.Type, &s.EntryType, &s.Amount,
-		&s.CategoryID, &s.BillingCycle, &s.NextBillingDate, &s.DayOfMonth, &s.Status, &s.Note,
+		&s.CategoryID, &s.BillingCycle, &s.NextBillingDate, &s.DayOfMonth, &s.Status, &s.Description, &s.Note,
 		&s.TotalAmount, &s.DownPayment, &s.TotalInstallments, &s.RemainingInstallments, &s.InterestRate,
 		&iconBytes, &s.LogoURL, &s.CreatedAt, &s.UpdatedAt,
 	); err != nil {
@@ -118,18 +118,18 @@ func (s *Store) Create(
 		(id, user_id, account_id, name, type, entry_type, amount, category_id,
 		 billing_cycle, next_billing_date, day_of_month, note,
 		 total_amount, down_payment, total_installments, remaining_installments, interest_rate,
-		 icon_code, logo_url, created_by_user_id, updated_by_user_id)
+		 icon_code, logo_url, description, created_by_user_id, updated_by_user_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
 				$9, $10::date, $11, $12,
 				$13, $14, $15, $16, $17,
-				$18, $19, $2, $2)
+				$18, $19, $20, $2, $2)
 		RETURNING ` + scheduleColumns
 
 	return scanSchedule(s.db.QueryRow(ctx, q,
 		id, userID, req.AccountID, strings.TrimSpace(req.Name), req.Type, req.EntryType, req.Amount,
-		req.CategoryID, req.BillingCycle, req.NextBillingDate, dayOfMonth, req.Note,
+		req.CategoryID, req.BillingCycle, req.NextBillingDate, dayOfMonth, shared.CleanText(req.Note),
 		req.TotalAmount, req.DownPayment, req.TotalInstallments, req.RemainingInstallments, req.InterestRate,
-		iconBytes, req.LogoURL,
+		iconBytes, req.LogoURL, shared.CleanText(req.Description),
 	))
 }
 
@@ -272,8 +272,12 @@ func (s *Store) Update(
 		args = append(args, *newDayOfMonth)
 		q += fmt.Sprintf(", day_of_month = $%d", len(args))
 	}
-	if req.Note != nil {
-		args = append(args, *req.Note)
+	if v, ok := req.DescriptionChange(); ok {
+		args = append(args, v)
+		q += fmt.Sprintf(", description = $%d", len(args))
+	}
+	if v, ok := req.NoteChange(); ok {
+		args = append(args, v)
 		q += fmt.Sprintf(", note = $%d", len(args))
 	}
 	if req.TotalAmount != nil {
@@ -507,7 +511,7 @@ func (s *Store) ApplyBalanceDeltaTx(
 func (s *Store) InsertGeneratedTxTx(
 	ctx context.Context, tx pgx.Tx, userID, accountID uuid.UUID,
 	categoryID *uuid.UUID, txType string, amount float64, date string,
-	note *string, scheduleID uuid.UUID,
+	description, note *string, scheduleID uuid.UUID,
 ) (uuid.UUID, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -515,10 +519,10 @@ func (s *Store) InsertGeneratedTxTx(
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO transactions
-		(id, user_id, account_id, type, amount, category_id, date, note,
+		(id, user_id, account_id, type, amount, category_id, date, description, note,
 		 scheduled_transaction_id, created_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $2)`,
-		id, userID, accountID, txType, amount, categoryID, date, note, scheduleID)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $2)`,
+		id, userID, accountID, txType, amount, categoryID, date, description, note, scheduleID)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("insert generated tx: %w", err)
 	}
