@@ -35,6 +35,8 @@ var (
 	ErrSplitUnknownDebt     = errors.New("debt_id is not one of this transaction's splits (or is listed twice)")
 	ErrSplitPersonRequired  = errors.New("person_name is required for a new split")
 	ErrSplitContactArchived = errors.New("split contact is archived")
+	ErrSplitIdentityLocked  = errors.New("a split with a contact can't change its person; remove it and add a new one")
+	ErrSplitsExceedShare    = errors.New("splits add up to more than your share of this event bill")
 	ErrCategoryRequiredForTransfer = errors.New("transfer category is auto-set; do not pass category_id")
 	ErrTransferRequiresAccount     = errors.New("account_id is required for type=transfer")
 	ErrMoveTransferNeedsToAccount  = errors.New("transfer_to_account_id is required when moving a transfer's account")
@@ -222,6 +224,14 @@ func (s *Service) hydrate(ctx context.Context, userID uuid.UUID, t *Transaction)
 		if err := s.store.fillHasSplitsForList(ctx, single); err == nil {
 			*d = single[0]
 		}
+	}
+	withShare := []TransactionDetail{*d}
+	if err := s.store.fillMyShareForList(ctx, withShare); err == nil {
+		*d = withShare[0]
+	}
+	withFlags := []TransactionDetail{*d}
+	if err := s.store.fillSplitFlagsForList(ctx, userID, withFlags); err == nil {
+		*d = withFlags[0]
 	}
 	splits, err := s.store.SplitsFor(ctx, userID, t.ID)
 	if err != nil {
@@ -416,6 +426,14 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 			return nil, err
 		}
 		currency = cur
+	} else {
+		// No wallet: split debts take the user's currency (same fallback
+		// as EditSplits) — never ''.
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE((SELECT currency FROM users WHERE id = $1), 'THB')`,
+			userID).Scan(&currency); err != nil {
+			return nil, fmt.Errorf("user currency: %w", err)
+		}
 	}
 
 	// Validate category if provided. System cats not allowed for
@@ -1266,8 +1284,8 @@ func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequ
 		count        int
 	)
 	q := `SELECT
-		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'income'),  0),
-		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0),
+		COALESCE(SUM(` + shareT + `) FILTER (WHERE t.type = 'income'),  0),
+		COALESCE(SUM(` + shareT + `) FILTER (WHERE t.type = 'expense'), 0),
 		COUNT(*)
 		FROM ` + summaryFrom + ` WHERE ` + where
 	if err := s.store.db.QueryRow(ctx, q, args...).Scan(&totalIncome, &totalExpense, &count); err != nil {
@@ -1302,10 +1320,14 @@ func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequ
 // categories join backs shared.ReportableCategoryPredicate("c").
 const summaryFrom = `transactions t LEFT JOIN categories c ON c.id = t.category_id`
 
+// shareT — each row's share-basis amount (spec 12 §4.5): summaries sum
+// "my share", not the cash amount.
+var shareT = shared.ShareAmountExpr("t")
+
 // summaryAmounts is the shared aggregate tail: total, count, income, expense.
-const summaryAmounts = `COALESCE(SUM(t.amount), 0), COUNT(*),
-		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'income'),  0),
-		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0)`
+var summaryAmounts = `COALESCE(SUM(` + shareT + `), 0), COUNT(*),
+		COALESCE(SUM(` + shareT + `) FILTER (WHERE t.type = 'income'),  0),
+		COALESCE(SUM(` + shareT + `) FILTER (WHERE t.type = 'expense'), 0)`
 
 // summaryByCategory groups by leaf category, or — rollup=true — by the
 // top-level parent (categories are 2 levels deep). Uncategorized rows
@@ -1320,7 +1342,7 @@ func (s *Service) summaryByCategory(ctx context.Context, where string, args []an
 		FROM %[4]s%[5]s
 		WHERE %[6]s
 		GROUP BY %[1]s, %[2]s
-		ORDER BY SUM(t.amount) DESC`, keyExpr, nameExpr, summaryAmounts, summaryFrom, join, where)
+		ORDER BY 3 DESC`, keyExpr, nameExpr, summaryAmounts, summaryFrom, join, where)
 	return s.scanSummary(ctx, q, args)
 }
 
@@ -1330,7 +1352,7 @@ func (s *Service) summaryByAccount(ctx context.Context, where string, args []any
 		JOIN accounts a ON a.id = t.account_id
 		WHERE ` + where + `
 		GROUP BY a.id, a.name
-		ORDER BY SUM(t.amount) DESC`
+		ORDER BY 3 DESC`
 	return s.scanSummary(ctx, q, args)
 }
 
@@ -1391,6 +1413,53 @@ func joinAnd(parts []string) string {
 	return out
 }
 
+// splitParentTx — what the debt hooks need of the caller's txID: its type,
+// currency (wallet's, else the user's) and description.
+func splitParentTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (typ, currency string, description *string, err error) {
+	err = tx.QueryRow(ctx, `
+		SELECT t.type, COALESCE(a.currency, u.currency, 'THB'), t.description
+		FROM transactions t
+		JOIN users u ON u.id = t.user_id
+		LEFT JOIN accounts a ON a.id = t.account_id
+		WHERE t.id = $1 AND t.user_id = $2`, txID, userID).Scan(&typ, &currency, &description)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = ErrTxNotFound
+	}
+	return
+}
+
+// AddSplitsTx gives the caller's expense / income txID these split debts,
+// inside tx — the same path as create, so linked contacts hear
+// split_created. An event removal moves the board's member splits back
+// this way (owner 2026-10-10).
+func (s *Service) AddSplitsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, splits []SplitInput) error {
+	if len(splits) == 0 {
+		return nil
+	}
+	if s.debtsCreator == nil {
+		return ErrSplitsNotSupportedYet
+	}
+	typ, currency, description, err := splitParentTx(ctx, tx, userID, txID)
+	if err != nil {
+		return err
+	}
+	return s.debtsCreator(ctx, tx, txID, userID, typ, currency, description, splits)
+}
+
+// ClearSplitsTx removes all of txID's split debts, inside tx — the usual
+// removal (linked partners get split_changed / their pending split_created
+// is superseded). A pull onto an event board moves the splits there.
+func (s *Service) ClearSplitsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) error {
+	if s.splitsEditor == nil {
+		return ErrSplitsNotSupportedYet
+	}
+	typ, currency, description, err := splitParentTx(ctx, tx, userID, txID)
+	if err != nil {
+		return err
+	}
+	return s.splitsEditor(ctx, tx, txID, userID, typ, currency, description, nil)
+}
+
 // EditSplits — PUT /v1/transactions/:id/splits (owner 2026-10-10): the
 // whole new split list for an expense / income the caller wrote. The debt
 // rows (and the linked partners' notifications) are personal_debts'
@@ -1409,6 +1478,10 @@ func (s *Service) EditSplits(ctx context.Context, userID, id uuid.UUID, edits []
 	if current.Type == TypeTransfer {
 		return nil, ErrSplitsOnTransfer
 	}
+	// A repayment is a system row even if its category is gone.
+	if current.SourcePersonalDebtID != nil {
+		return nil, ErrSystemTransactionImmutable
+	}
 	if err := s.checkNotSystemRow(ctx, current); err != nil {
 		return nil, err
 	}
@@ -1418,6 +1491,15 @@ func (s *Service) EditSplits(ctx context.Context, userID, id uuid.UUID, edits []
 	}
 	if sum > current.Amount+0.005 {
 		return nil, ErrSplitsExceedAmount
+	}
+	// An event bill's own splits are a layer on my share of it (owner
+	// 2026-10-10): they can't go past amount − the board's member splits.
+	board, err := s.store.EventSplitsTotal(ctx, current.ID)
+	if err != nil {
+		return nil, err
+	}
+	if board > 0 && sum > current.Amount-board+0.005 {
+		return nil, ErrSplitsExceedShare
 	}
 
 	tx, err := s.store.Pool().Begin(ctx)

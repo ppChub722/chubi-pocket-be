@@ -116,3 +116,93 @@ func TestDetailSplitsAndProject(t *testing.T) {
 		}
 	}
 }
+
+// TestWalletlessSplitCurrency — a wallet-less bill's split debts take the
+// user's currency (they used to be stored with currency '').
+func TestWalletlessSplitCurrency(t *testing.T) {
+	pool := testdb.Pool(t)
+	ctx := context.Background()
+	uid := testdb.User(t, pool)
+	if _, err := pool.Exec(ctx, `UPDATE users SET currency = 'USD' WHERE id = $1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	cats := categories.NewService(categories.NewStore(pool))
+	txs := transactions.NewService(transactions.NewStore(pool), cats)
+	debts := personal_debts.NewService(personal_debts.NewStore(pool), txs)
+	txs.WithDebtsCreator(debts.CreateForTransactionTx)
+
+	created, err := txs.Create(ctx, uid, transactions.CreateRequest{
+		Type: transactions.TypeExpense, Amount: 90, Date: "2026-10-10",
+		Splits: []transactions.SplitInput{{PersonName: "Aom", OwedAmount: 30}},
+	})
+	if err != nil {
+		t.Fatalf("create wallet-less split bill: %v", err)
+	}
+	var currency string
+	if err := pool.QueryRow(ctx, `SELECT currency FROM personal_debts WHERE source_transaction_id = $1`,
+		created.(*transactions.TransactionDetail).ID).Scan(&currency); err != nil {
+		t.Fatal(err)
+	}
+	if currency != "USD" {
+		t.Errorf("split debt currency = %q, want USD (the user's)", currency)
+	}
+}
+
+// TestShareBasisReports — spec 12 §4.5: the wallet moves the cash amount,
+// reports count my share (amount − what others owe on it).
+func TestShareBasisReports(t *testing.T) {
+	pool := testdb.Pool(t)
+	ctx := context.Background()
+	uid := testdb.User(t, pool)
+	cats := categories.NewService(categories.NewStore(pool))
+	txs := transactions.NewService(transactions.NewStore(pool), cats)
+	debts := personal_debts.NewService(personal_debts.NewStore(pool), txs)
+	txs.WithDebtsCreator(debts.CreateForTransactionTx)
+	wallet := testdb.Account(t, pool, uid)
+
+	created, err := txs.Create(ctx, uid, transactions.CreateRequest{
+		Type: transactions.TypeExpense, AccountID: &wallet, Amount: 300, Date: "2026-10-10",
+		Splits: []transactions.SplitInput{
+			{PersonName: "Aom", OwedAmount: 100},
+			{PersonName: "Beam", OwedAmount: 100},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create split bill: %v", err)
+	}
+	if d := created.(*transactions.TransactionDetail); d.MyShare == nil || *d.MyShare != 100 {
+		t.Errorf("create response my_share = %v, want 100", d.MyShare)
+	}
+	if _, err := txs.Create(ctx, uid, transactions.CreateRequest{
+		Type: transactions.TypeExpense, AccountID: &wallet, Amount: 40, Date: "2026-10-11",
+	}); err != nil {
+		t.Fatalf("create plain: %v", err)
+	}
+
+	sum, err := txs.Summary(ctx, uid, transactions.SummaryRequest{From: "2026-10-01", To: "2026-10-31"})
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	if sum.TotalExpense != 140 {
+		t.Errorf("summary expense = %v, want 140 (100 share + 40)", sum.TotalExpense)
+	}
+	list, err := txs.List(ctx, uid, transactions.ListFilter{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if list.Totals.Expense != 140 {
+		t.Errorf("list totals expense = %v, want 140", list.Totals.Expense)
+	}
+	for _, r := range list.Data {
+		if r.MyShare == nil {
+			t.Errorf("list row %s has no my_share", r.ID)
+		}
+	}
+	var balance float64
+	if err := pool.QueryRow(ctx, `SELECT balance FROM accounts WHERE id = $1`, wallet).Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	if balance != -340 {
+		t.Errorf("wallet balance = %v, want -340 (cash moves in full)", balance)
+	}
+}

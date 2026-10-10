@@ -369,3 +369,124 @@ func TestRepaymentLifecycle(t *testing.T) {
 		t.Errorf("after deleting the repayment: %+v, want 0 repaid, open", d)
 	}
 }
+
+// TestEditSplitsIdentity — a saved split without a contact can be renamed
+// or linked to a contact in place, keeping its repayments; a split with a
+// contact can't change its person (owner 2026-10-10).
+func TestEditSplitsIdentity(t *testing.T) {
+	f := newSplitEditFixture(t)
+	s := f.splits(t)
+	beamID := s["Beam"].DebtID
+	if _, err := f.debts.Settle(f.ctx, f.me, beamID, SettleRequest{Amount: testdb.Float(50)}); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	ident := func(r transactions.SplitRef, name string, contact *uuid.UUID) transactions.SplitEdit {
+		e := keep(r, r.Amount)
+		e.PersonName, e.ContactID = name, contact
+		return e
+	}
+	countNotifs := func(user uuid.UUID, typ string) int {
+		t.Helper()
+		var n int
+		if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM notifications
+			WHERE recipient_user_id = $1 AND type = $2`, user, typ).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	partnerNotifs := countNotifs(f.partner, "split_created") + countNotifs(f.partner, "split_changed")
+
+	// Rename: same row, repayment kept, nobody told.
+	if err := f.edit(t, ident(s["Beam"], "Bam", nil), keep(s["Partner"], 100)); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	s = f.splits(t)
+	if r, ok := s["Bam"]; !ok || r.DebtID != beamID || r.SettledAmount != 50 || r.ContactID != nil {
+		t.Fatalf("renamed split = %+v, want same debt, 50 repaid, no contact", s["Bam"])
+	}
+	if n := countNotifs(f.partner, "split_created") + countNotifs(f.partner, "split_changed"); n != partnerNotifs {
+		t.Errorf("rename notified the partner: %d -> %d", partnerNotifs, n)
+	}
+
+	// Link to an archived contact → refused, nothing changes.
+	archived := uuid.New()
+	if _, err := f.pool.Exec(f.ctx, `INSERT INTO contacts (id, user_id, display_name, status)
+		VALUES ($1, $2, 'Old', 'archived')`, archived, f.me); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.edit(t, ident(s["Bam"], "", &archived), keep(s["Partner"], 100)); !errors.Is(err, transactions.ErrSplitContactArchived) {
+		t.Errorf("link to archived contact: err = %v", err)
+	}
+
+	// Link to a contact with an app account: name from the contact, same
+	// row, repayment kept, split_created to them (auto → mirror at 100).
+	bee := testdb.User(t, f.pool)
+	seed, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.notifs.SeedSettings(f.ctx, seed, bee); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	if err := seed.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(f.ctx, `DELETE FROM notifications WHERE recipient_user_id = $1`, bee)
+		_, _ = f.pool.Exec(f.ctx, `DELETE FROM personal_debts WHERE user_id = $1`, bee)
+		_, _ = f.pool.Exec(f.ctx, `UPDATE personal_debts SET counterparty_contact_id = NULL
+			WHERE counterparty_contact_id IN (SELECT id FROM contacts WHERE linked_user_id = $1)`, bee)
+		_, _ = f.pool.Exec(f.ctx, `DELETE FROM contacts WHERE linked_user_id = $1`, bee)
+	})
+	beeContact := uuid.New()
+	if _, err := f.pool.Exec(f.ctx, `INSERT INTO contacts (id, user_id, display_name, linked_user_id, status)
+		VALUES ($1, $2, 'Bee', $3, 'active')`, beeContact, f.me, bee); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.edit(t, ident(s["Bam"], "", &beeContact), keep(s["Partner"], 100)); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	s = f.splits(t)
+	r, ok := s["Bee"]
+	if !ok || r.DebtID != beamID || r.SettledAmount != 50 || r.ContactID == nil || *r.ContactID != beeContact {
+		t.Fatalf("linked split = %+v, want same debt, 50 repaid, Bee's contact", r)
+	}
+	if n := countNotifs(bee, "split_created"); n != 1 {
+		t.Errorf("split_created to Bee = %d, want 1", n)
+	}
+	var mirrorAmount float64
+	if err := f.pool.QueryRow(f.ctx, `SELECT amount FROM personal_debts WHERE user_id = $1 AND direction = 'i_owe'`,
+		bee).Scan(&mirrorAmount); err != nil || mirrorAmount != 100 {
+		t.Errorf("Bee's mirror amount = %v (err %v), want 100", mirrorAmount, err)
+	}
+
+	// A split with a contact is fixed: rename or swap → 422; the same
+	// name / contact sent back is no change.
+	if err := f.edit(t, ident(s["Bee"], "Beatrice", nil), keep(s["Partner"], 100)); !errors.Is(err, transactions.ErrSplitIdentityLocked) {
+		t.Errorf("rename a linked split: err = %v", err)
+	}
+	if err := f.edit(t, keep(s["Bee"], 100), ident(s["Partner"], "", &beeContact)); !errors.Is(err, transactions.ErrSplitIdentityLocked) {
+		t.Errorf("swap a linked split's contact: err = %v", err)
+	}
+	if err := f.edit(t, ident(s["Bee"], "Bee", &beeContact), keep(s["Partner"], 100)); err != nil {
+		t.Errorf("unchanged identity sent back: %v", err)
+	}
+}
+
+// TestEditSplitsOnRepayment — a repayment's splits can't be edited, even
+// when its system category is gone.
+func TestEditSplitsOnRepayment(t *testing.T) {
+	f := newSplitEditFixture(t)
+	res, err := f.debts.Settle(f.ctx, f.me, f.splits(t)["Beam"].DebtID, SettleRequest{Amount: testdb.Float(20)})
+	if err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	repay := res.Transaction.(*transactions.TransactionDetail).ID
+	if _, err := f.pool.Exec(f.ctx, `UPDATE transactions SET category_id = NULL WHERE id = $1`, repay); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.txs.EditSplits(f.ctx, f.me, repay, []transactions.SplitEdit{{PersonName: "X", OwedAmount: 5}})
+	if !errors.Is(err, transactions.ErrSystemTransactionImmutable) {
+		t.Errorf("edit splits on a repayment: err = %v", err)
+	}
+}

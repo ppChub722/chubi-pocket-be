@@ -62,6 +62,7 @@ func qcTestPool(t *testing.T) *pgxpool.Pool {
 type qcFixture struct {
 	pool *pgxpool.Pool
 	svc  *Service
+	txs  *transactions.Service
 
 	owner, friend, mate uuid.UUID
 	acctPersonal        uuid.UUID // owner-only wallet, balance 1000
@@ -190,6 +191,7 @@ func (f *qcFixture) cleanup(t *testing.T) {
 		`DELETE FROM accounts WHERE user_id = ANY($1)`,
 		`DELETE FROM categories WHERE user_id = ANY($1)`,
 		`DELETE FROM contacts WHERE user_id = ANY($1)`,
+		`DELETE FROM user_notification_settings WHERE user_id = ANY($1)`,
 		`DELETE FROM users WHERE id = ANY($1)`,
 	} {
 		if _, err := f.pool.Exec(ctx, q, f.userIDs); err != nil {
@@ -208,8 +210,11 @@ func newQCFixture(t *testing.T) *qcFixture {
 	catSvc := categories.NewService(categories.NewStore(pool))
 	txSvc := transactions.NewService(transactions.NewStore(pool), catSvc)
 	pdSvc := personal_debts.NewService(personal_debts.NewStore(pool), txSvc)
-	txSvc.WithDebtsCreator(pdSvc.CreateForTransactionTx)
 	notifSvc := notifications.NewService(notifications.NewStore(pool))
+	pdSvc.WithNotifications(notifSvc)
+	txSvc.WithDebtsCreator(pdSvc.CreateForTransactionTx)
+	txSvc.WithSplitsEditor(pdSvc.EditForTransactionTx)
+	f.txs = txSvc
 	f.svc = NewService(NewStore(pool))
 	f.svc.WithNotificationService(notifSvc)
 	f.svc.WithTransactionsService(txSvc)
@@ -229,10 +234,10 @@ func newQCFixture(t *testing.T) *qcFixture {
 	f.cat = f.newCategory(t, f.owner, "Food")
 	f.contactB = f.newContact(t, f.owner, "Bee", &f.friend)
 
-	// Bill 1 (personal wallet, ฿300): split with linked Bee (settled) and
-	// ad-hoc Grandma (open).
+	// Bill 1 (personal wallet, ฿300): split with linked Bee and ad-hoc
+	// Grandma, nothing repaid (a repaid split blocks the pull).
 	f.bill1 = f.insertBill(t, f.owner, f.acctPersonal, f.cat, 300, "2026-09-01")
-	f.debtB1 = f.insertDebt(t, f.owner, &f.contactB, "Bee", f.bill1, 100, 100, "settled")
+	f.debtB1 = f.insertDebt(t, f.owner, &f.contactB, "Bee", f.bill1, 100, 0, "open")
 	f.debtGr1 = f.insertDebt(t, f.owner, nil, "Grandma", f.bill1, 100, 0, "open")
 
 	// Bill 2 (shared wallet, ฿200): split with Bee again (dedupe check).
@@ -414,36 +419,12 @@ func TestQuickCreateHappyPath(t *testing.T) {
 		t.Errorf("bill1 Bee split child rows = %d, want 1", n)
 	}
 
-	// --- Settled means settled: debts gain project_id ONLY ---
-	type debtState struct {
-		projectID *uuid.UUID
-		settled   float64
-		status    string
-	}
-	debtOf := func(id uuid.UUID) debtState {
-		t.Helper()
-		var d debtState
-		if err := f.pool.QueryRow(ctx, `
-			SELECT project_id, settled_amount, status FROM personal_debts WHERE id = $1`,
-			id).Scan(&d.projectID, &d.settled, &d.status); err != nil {
-			t.Fatalf("debt %s: %v", id, err)
-		}
-		return d
-	}
-	if d := debtOf(f.debtB1); d.projectID == nil || *d.projectID != resp.ID ||
-		d.settled != 100 || d.status != "settled" {
-		t.Errorf("settled debt changed: %+v", d)
-	}
-	if d := debtOf(f.debtGr1); d.projectID == nil || d.settled != 0 || d.status != "open" {
-		t.Errorf("open debt: %+v", d)
-	}
-	if d := debtOf(f.debtB2); d.projectID == nil || d.status != "open" {
-		t.Errorf("bill2 debt: %+v", d)
-	}
+	// --- The splits MOVED onto the board: no debt lives in both books
+	// (owner 2026-10-10); the new bill's split never became a debt. ---
 	if n := f.countRows(t, `
-		SELECT COUNT(*) FROM personal_debts
-		WHERE source_transaction_id = $1 AND project_id = $2`, newTxID, resp.ID); n != 1 {
-		t.Errorf("new bill debt rows tagged = %d, want 1", n)
+		SELECT COUNT(*) FROM personal_debts WHERE source_transaction_id = ANY($1)`,
+		[]uuid.UUID{f.bill1, f.bill2, newTxID}); n != 0 {
+		t.Errorf("personal split debts left = %d, want 0 (moved to the board)", n)
 	}
 
 	// --- Balance moved only for the new bill ---

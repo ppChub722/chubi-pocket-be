@@ -62,20 +62,27 @@ func sumShares(m map[uuid.UUID]float64) float64 {
 	return t
 }
 
-// copyAmountTx — what memberID's copy of parent pt should be.
+// copyAmountTx — what memberID's copy of parent pt should be: their share
+// (owner 2026-10-10, project-as-separate-book §2 "I spent"). The actor's
+// share is the amount minus the other members' splits; a split member's
+// is their split.
 func copyAmountTx(ctx context.Context, tx pgx.Tx, pt *ProjectTransaction, memberID uuid.UUID) (float64, error) {
-	if pt.TransactionMemberID == memberID {
-		return pt.Amount, nil
-	}
 	var share float64
-	err := tx.QueryRow(ctx, `
-		SELECT COALESCE(SUM(amount), 0) FROM project_transactions
-		WHERE parent_project_transaction_id = $1 AND transaction_member_id = $2`,
-		pt.ID, memberID).Scan(&share)
+	var err error
+	if pt.TransactionMemberID == memberID {
+		err = tx.QueryRow(ctx, `
+			SELECT $2::numeric - COALESCE(SUM(amount), 0) FROM project_transactions
+			WHERE parent_project_transaction_id = $1`, pt.ID, pt.Amount).Scan(&share)
+	} else {
+		err = tx.QueryRow(ctx, `
+			SELECT COALESCE(SUM(amount), 0) FROM project_transactions
+			WHERE parent_project_transaction_id = $1 AND transaction_member_id = $2`,
+			pt.ID, memberID).Scan(&share)
+	}
 	if err != nil {
 		return 0, err
 	}
-	if share <= 0 {
+	if share <= 0.005 {
 		return 0, ErrNoShareToCopy
 	}
 	return share, nil
@@ -172,10 +179,13 @@ func (s *Service) notifyRecordedTx(
 	var copyID *uuid.UUID
 	if d.Auto && s.txs != nil {
 		id, err := s.copyToPersonalTx(ctx, tx, actorUserID, actorMemberID, pt)
-		if err != nil {
+		switch {
+		case errors.Is(err, ErrNoShareToCopy): // fully split to others — nothing to copy
+		case err != nil:
 			return err
+		default:
+			copyID = &id
 		}
-		copyID = &id
 	}
 	return s.notifs.DispatchProjectTxRecorded(ctx, tx, actorUserID, recorderUserID,
 		notifications.ProjectTxRecordedPayload{

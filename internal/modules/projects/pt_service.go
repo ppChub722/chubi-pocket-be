@@ -2,9 +2,11 @@ package projects
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // CreateProjectTransaction inserts a parent project_transaction row plus
@@ -47,7 +49,9 @@ func (s *Service) CreateProjectTransaction(
 			if s.txs != nil {
 				st, err := s.notifs.SettingsTx(ctx, tx, callerUserID)
 				if err == nil && st.AutoResolveOwnInProjects {
-					if _, err := s.copyToPersonalTx(ctx, tx, callerUserID, member.ID, pt); err != nil {
+					// Fully split to others → no share, no copy.
+					if _, err := s.copyToPersonalTx(ctx, tx, callerUserID, member.ID, pt); err != nil &&
+						!errors.Is(err, ErrNoShareToCopy) {
 						return nil, err
 					}
 				}
@@ -123,8 +127,12 @@ func (s *Service) DeleteProjectTransaction(
 	if err := s.store.AssertWritable(ctx, projectID, "edit_pt"); err != nil {
 		return err
 	}
-	if _, err := s.store.GetPT(ctx, ptID); err != nil {
+	pt, err := s.store.GetPT(ctx, ptID)
+	if err != nil {
 		return err
+	}
+	if pt.ProjectID != projectID {
+		return ErrPTNotFound
 	}
 	if _, err := s.store.AssertCanWrite(ctx, projectID, callerUserID); err != nil {
 		return err
@@ -137,8 +145,34 @@ func (s *Service) DeleteProjectTransaction(
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	if err := s.deleteBoardRowTx(ctx, tx, callerUserID, projectID, ptID); err != nil {
-		return err
+	// My own bill's row (I recorded it, I'm its actor): its member splits go
+	// back onto my bill, same as removing the bill from the event. Anyone
+	// else deleting it only unlinks — never write another user's book.
+	var originTx uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT id FROM transactions
+		WHERE source_project_transaction_id = $1 AND user_id = $2
+		ORDER BY created_at LIMIT 1`, ptID, callerUserID).Scan(&originTx)
+	switch {
+	case err == nil:
+		origin, err := isBoardOriginTx(ctx, tx, callerUserID, ptID)
+		if err != nil {
+			return err
+		}
+		if origin {
+			if _, err := s.detachBillTx(ctx, tx, callerUserID, originTx, true); err != nil {
+				return err
+			}
+			break
+		}
+		if err := s.deleteBoardRowTx(ctx, tx, callerUserID, projectID, ptID); err != nil {
+			return err
+		}
+	case errors.Is(err, pgx.ErrNoRows):
+		if err := s.deleteBoardRowTx(ctx, tx, callerUserID, projectID, ptID); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("origin bill: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)

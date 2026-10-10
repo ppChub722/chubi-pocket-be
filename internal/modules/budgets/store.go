@@ -357,7 +357,7 @@ func (s *Store) ComputeSpent(
 			JOIN descendants d ON c.parent_id = d.id
 		),
 		sums AS (
-			SELECT t.category_id, COALESCE(SUM(t.amount), 0) AS spent
+			SELECT t.category_id, COALESCE(SUM(` + shared.ShareAmountExpr("t") + `), 0) AS spent
 			FROM transactions t
 			WHERE ` + shared.ReportScopePredicate("t", "$1") + `
 			  AND t.type = 'expense'

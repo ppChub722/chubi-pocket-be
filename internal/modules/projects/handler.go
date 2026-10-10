@@ -499,7 +499,13 @@ func mapQuickCreateError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusConflict, "TX_ALREADY_IN_PROJECT", "Transaction is already in a project", nil)
 	case errors.Is(err, ErrQuickTxNotBillable), errors.Is(err, ErrQuickNothingToAdd):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-	case errors.Is(err, ErrQuickTxIsRepayment):
+	case errors.Is(err, ErrQuickTxSplitRepaid):
+		response.Fail(c, http.StatusUnprocessableEntity, "TX_SPLIT_HAS_REPAYMENT", err.Error(), nil)
+	case errors.Is(err, ErrQuickTxSplitCancelled):
+		response.Fail(c, http.StatusUnprocessableEntity, "TX_SPLIT_CANCELLED", err.Error(), nil)
+	case errors.Is(err, transactions.ErrSplitContactNotFound):
+		response.BadRequest(c, "CONTACT_NOT_FOUND", "Split contact not found", nil)
+	case errors.Is(err, ErrQuickTxIsRepayment), errors.Is(err, ErrQuickTxSystemRow):
 		response.Fail(c, http.StatusUnprocessableEntity, "TX_NOT_BILLABLE", err.Error(), nil)
 	case errors.Is(err, ErrBillNotInProject):
 		response.NotFound(c, "TX_NOT_IN_PROJECT", "Transaction is not in this project")

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -70,6 +71,7 @@ func (s *Service) EditForTransactionTx(
 
 	// Validate everything before touching a row.
 	kept := map[uuid.UUID]float64{}
+	idents := map[uuid.UUID]identityEdit{}
 	var added []transactions.SplitInput
 	for _, e := range edits {
 		if e.DebtID == nil {
@@ -86,11 +88,18 @@ func (s *Service) EditForTransactionTx(
 			})
 			continue
 		}
-		_, ok := existing[*e.DebtID]
+		d, ok := existing[*e.DebtID]
 		if _, dup := kept[*e.DebtID]; !ok || dup {
 			return transactions.ErrSplitUnknownDebt
 		}
 		kept[*e.DebtID] = e.OwedAmount
+		ident, changed, err := checkIdentityEditTx(ctx, tx, userID, d, e)
+		if err != nil {
+			return err
+		}
+		if changed {
+			idents[d.ID] = ident
+		}
 	}
 	// Apply: removals, re-amounts, additions.
 	for _, id := range order {
@@ -112,11 +121,84 @@ func (s *Service) EditForTransactionTx(
 				return err
 			}
 		}
+		// After the re-amount, so a newly linked partner hears the current amount.
+		if ident, ok := idents[id]; ok {
+			if err := s.applyIdentityEditTx(ctx, tx, d.ID, parentTxID, ident); err != nil {
+				return err
+			}
+		}
 	}
 	if len(added) > 0 {
 		return s.CreateForTransactionTx(ctx, tx, parentTxID, userID, parentType, parentCurrency, parentDescription, added)
 	}
 	return nil
+}
+
+// identityEdit — the new person of a kept split (owner 2026-10-10).
+type identityEdit struct {
+	name      string
+	contactID *uuid.UUID // nil: keep the row unlinked (a rename)
+}
+
+// checkIdentityEditTx — does kept split d change its person? person_name /
+// contact_id left out (or equal) = unchanged. Only an unlinked row
+// (contact_id NULL) may change: rename in place, or link to one of my
+// contacts (name defaults to the contact's). A row with a contact is fixed
+// → ErrSplitIdentityLocked (remove + add instead).
+func checkIdentityEditTx(
+	ctx context.Context, tx pgx.Tx, userID uuid.UUID, d *PersonalDebt, e transactions.SplitEdit,
+) (identityEdit, bool, error) {
+	name := strings.TrimSpace(e.PersonName)
+	nameChanged := name != "" && name != d.CounterpartyPersonName
+	contactChanged := e.ContactID != nil &&
+		(d.CounterpartyContactID == nil || *d.CounterpartyContactID != *e.ContactID)
+	if !nameChanged && !contactChanged {
+		return identityEdit{}, false, nil
+	}
+	if d.CounterpartyContactID != nil {
+		return identityEdit{}, false, transactions.ErrSplitIdentityLocked
+	}
+	out := identityEdit{name: name}
+	if contactChanged {
+		if err := assertSplitContactTx(ctx, tx, userID, *e.ContactID); err != nil {
+			return identityEdit{}, false, err
+		}
+		out.contactID = e.ContactID
+		if name == "" {
+			if err := tx.QueryRow(ctx, `SELECT display_name FROM contacts WHERE id = $1`,
+				*e.ContactID).Scan(&out.name); err != nil {
+				return identityEdit{}, false, fmt.Errorf("contact name: %w", err)
+			}
+		}
+	}
+	return out, true, nil
+}
+
+// applyIdentityEditTx renames / links splitter debt debtID in place — same
+// row, so repayments stay. A rename tells no one; a link to a contact with an
+// app account tells them like a new split (split_created per their flags).
+func (s *Service) applyIdentityEditTx(
+	ctx context.Context, tx pgx.Tx, debtID, parentTxID uuid.UUID, e identityEdit,
+) error {
+	if _, err := tx.Exec(ctx, `UPDATE personal_debts
+		SET counterparty_person_name = $2,
+		    counterparty_contact_id = COALESCE($3, counterparty_contact_id),
+		    updated_by_user_id = user_id
+		WHERE id = $1`, debtID, e.name, e.contactID); err != nil {
+		return fmt.Errorf("split person: %w", err)
+	}
+	if e.contactID == nil {
+		return nil
+	}
+	d, err := getAnyDebtTx(ctx, tx, debtID)
+	if err != nil {
+		return err
+	}
+	partner := linkedPartnerTx(ctx, tx, d)
+	if partner == nil {
+		return nil
+	}
+	return s.splitToPartnerTx(ctx, tx, d, *partner, parentTxID)
 }
 
 // assertSplitContactTx — a new split's contact must be the caller's own and

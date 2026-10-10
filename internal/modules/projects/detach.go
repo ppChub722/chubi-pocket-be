@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
 // ErrBillNotInProject — the transaction isn't in this project
@@ -52,7 +53,7 @@ func (s *Service) RemoveBill(ctx context.Context, callerUserID, projectID, txID 
 	if inProj == nil || *inProj != projectID {
 		return ErrBillNotInProject
 	}
-	if err := s.detachBillTx(ctx, tx, callerUserID, txID); err != nil {
+	if _, err := s.detachBillTx(ctx, tx, callerUserID, txID, true); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -62,8 +63,14 @@ func (s *Service) RemoveBill(ctx context.Context, callerUserID, projectID, txID 
 }
 
 // detachBillTx takes the caller's transaction txID out of its project (see
-// the file comment). Also step 1 of a move.
-func (s *Service) detachBillTx(ctx context.Context, tx pgx.Tx, callerUserID, txID uuid.UUID) error {
+// the file comment). When txID is its board row's origin, the row's member
+// splits leave the board with it: restore = true puts them back on txID as
+// personal splits (a removal); false hands them back for the caller to
+// carry to another board (a move). Returns them (nil when txID was only a
+// copy, so nothing moved).
+func (s *Service) detachBillTx(
+	ctx context.Context, tx pgx.Tx, callerUserID, txID uuid.UUID, restore bool,
+) ([]quickDebt, error) {
 	var (
 		projectID *uuid.UUID
 		sourcePT  *uuid.UUID
@@ -71,24 +78,37 @@ func (s *Service) detachBillTx(ctx context.Context, tx pgx.Tx, callerUserID, txI
 	if err := tx.QueryRow(ctx, `
 		SELECT project_id, source_project_transaction_id FROM transactions
 		WHERE id = $1 AND user_id = $2`, txID, callerUserID).Scan(&projectID, &sourcePT); err != nil {
-		return fmt.Errorf("load bill %s: %w", txID, err)
+		return nil, fmt.Errorf("load bill %s: %w", txID, err)
 	}
 
-	// The splits stay; only the event tag the pull gave them goes.
+	// Personal splits pulled in before splits moved onto the board (old
+	// data) only drop their event tag.
 	if _, err := tx.Exec(ctx, `
 		UPDATE personal_debts SET project_id = NULL, updated_by_user_id = $1
 		WHERE user_id = $1 AND source_transaction_id = $2 AND project_id IS NOT NULL`,
 		callerUserID, txID); err != nil {
-		return fmt.Errorf("untag debts of %s: %w", txID, err)
+		return nil, fmt.Errorf("untag debts of %s: %w", txID, err)
 	}
 
 	if sourcePT != nil && projectID != nil {
 		origin, err := isBoardOriginTx(ctx, tx, callerUserID, *sourcePT)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if origin {
-			return s.deleteBoardRowTx(ctx, tx, callerUserID, *projectID, *sourcePT)
+			children, err := boardSplitsTx(ctx, tx, *sourcePT)
+			if err != nil {
+				return nil, err
+			}
+			if err := s.deleteBoardRowTx(ctx, tx, callerUserID, *projectID, *sourcePT); err != nil {
+				return nil, err
+			}
+			if restore {
+				if err := s.restoreSplitsTx(ctx, tx, callerUserID, txID, children); err != nil {
+					return nil, err
+				}
+			}
+			return children, nil
 		}
 	}
 	_, err := tx.Exec(ctx, `
@@ -96,9 +116,67 @@ func (s *Service) detachBillTx(ctx context.Context, tx pgx.Tx, callerUserID, txI
 		SET project_id = NULL, source_project_transaction_id = NULL, updated_by_user_id = $1
 		WHERE id = $2`, callerUserID, txID)
 	if err != nil {
-		return fmt.Errorf("unlink bill %s: %w", txID, err)
+		return nil, fmt.Errorf("unlink bill %s: %w", txID, err)
 	}
-	return nil
+	return nil, nil
+}
+
+// boardSplitsTx — board row ptID's member splits, as the people they are:
+// a linked member by user, an ad-hoc one by name.
+func boardSplitsTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) ([]quickDebt, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT pm.user_id, pm.display_name, c.amount
+		FROM project_transactions c
+		JOIN project_members pm ON pm.id = c.transaction_member_id
+		WHERE c.parent_project_transaction_id = $1
+		ORDER BY c.created_at, c.id`, ptID)
+	if err != nil {
+		return nil, fmt.Errorf("board splits of %s: %w", ptID, err)
+	}
+	defer rows.Close()
+	out := make([]quickDebt, 0)
+	for rows.Next() {
+		var d quickDebt
+		if err := rows.Scan(&d.LinkedUserID, &d.PersonName, &d.Amount); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// restoreSplitsTx puts a board row's member splits back on the caller's
+// txID as personal splits: a linked member through my contact linked to
+// them when I have one, else by the member's name. The usual split rules
+// follow (a linked contact hears split_created).
+func (s *Service) restoreSplitsTx(
+	ctx context.Context, tx pgx.Tx, callerUserID, txID uuid.UUID, splits []quickDebt,
+) error {
+	if len(splits) == 0 {
+		return nil
+	}
+	inputs := make([]transactions.SplitInput, 0, len(splits))
+	for _, d := range splits {
+		in := transactions.SplitInput{PersonName: d.PersonName, OwedAmount: d.Amount}
+		if d.LinkedUserID != nil && *d.LinkedUserID != callerUserID {
+			var (
+				contactID uuid.UUID
+				name      string
+			)
+			err := tx.QueryRow(ctx, `
+				SELECT id, display_name FROM contacts
+				WHERE user_id = $1 AND linked_user_id = $2 AND status <> 'archived'
+				ORDER BY created_at LIMIT 1`, callerUserID, *d.LinkedUserID).Scan(&contactID, &name)
+			switch {
+			case err == nil:
+				in.ContactID, in.PersonName = &contactID, name
+			case !errors.Is(err, pgx.ErrNoRows):
+				return fmt.Errorf("contact for member: %w", err)
+			}
+		}
+		inputs = append(inputs, in)
+	}
+	return s.txs.AddSplitsTx(ctx, tx, callerUserID, txID, inputs)
 }
 
 // isBoardOriginTx — ptID is a parent row the caller recorded with

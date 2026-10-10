@@ -44,8 +44,17 @@ var (
 	// ErrQuickTxIsRepayment — a debt repayment can't join a project (it
 	// already has a source; 422 TX_NOT_BILLABLE).
 	ErrQuickTxIsRepayment = errors.New("a debt repayment can't be pulled into a project")
+	// ErrQuickTxSystemRow — a row in a system category (opening balance,
+	// balance adjustment) can't join a project (422 TX_NOT_BILLABLE).
+	ErrQuickTxSystemRow = errors.New("an opening balance or balance adjustment can't be pulled into a project")
 	// ErrQuickNothingToAdd — neither new_transaction nor transaction_ids.
 	ErrQuickNothingToAdd = errors.New("new_transaction or transaction_ids is required")
+	// ErrQuickTxSplitRepaid — someone already paid back part of a split on
+	// the bill; its splits can't move onto a board (422 TX_SPLIT_HAS_REPAYMENT).
+	ErrQuickTxSplitRepaid = errors.New("someone already paid back a split on this transaction")
+	// ErrQuickTxSplitCancelled — a split on the bill was forgiven
+	// (422 TX_SPLIT_CANCELLED).
+	ErrQuickTxSplitCancelled = errors.New("a split on this transaction was forgiven")
 )
 
 // quickDefaultType is the project type stamped on quick-created projects.
@@ -64,9 +73,18 @@ type quickBill struct {
 	Date      string // YYYY-MM-DD
 	Description *string
 	Note      *string
+
+	// The people the board row is split with. Pulling a bill MOVES its
+	// splits onto the board — no debt lives in both books (owner
+	// 2026-10-10, project-as-separate-book.md).
+	splits []quickDebt
+	// The bill's personal split debts are removed once it's on the board.
+	clearPersonal bool
 }
 
-// quickDebt is one of the caller's personal_debts rows hanging off a bill.
+// quickDebt is one person a bill is split with: one of the caller's
+// personal_debts rows, a new bill's split input, or a board split moving
+// with its bill to another event.
 type quickDebt struct {
 	ContactID    *uuid.UUID
 	PersonName   string
@@ -238,9 +256,16 @@ func (s *Service) pullBillsTx(
 	seen := map[uuid.UUID]bool{}
 	var newTxID *uuid.UUID
 
-	// --- 2. New bill through the normal create path (balance + debts). ---
+	// --- 2. New bill through the normal create path (balance moves). Its
+	// splits go straight onto the board, never into personal debts. ---
 	if newReq != nil {
-		created, err := s.txs.CreateInTx(ctx, tx, callerUserID, *newReq)
+		req := *newReq
+		req.Splits, req.MyShare = nil, nil
+		boardSplits, err := quickDebtsFromInputsTx(ctx, tx, callerUserID, newReq.Splits)
+		if err != nil {
+			return nil, 0, err
+		}
+		created, err := s.txs.CreateInTx(ctx, tx, callerUserID, req)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -252,6 +277,7 @@ func (s *Service) pullBillsTx(
 		if err != nil {
 			return nil, 0, err
 		}
+		newBill.splits = boardSplits
 		bills = append(bills, *newBill)
 		seen[newBill.TxID] = true
 		newTxID = &newBill.TxID
@@ -271,14 +297,8 @@ func (s *Service) pullBillsTx(
 	}
 
 	// --- 4. Member set: union across all included bills. ---
-	billDebts := make([][]quickDebt, len(bills))
-	for i, bill := range bills {
-		debts, err := s.loadQuickDebtsTx(ctx, tx, callerUserID, bill.TxID)
-		if err != nil {
-			return nil, 0, err
-		}
-		billDebts[i] = debts
-		for _, d := range debts {
+	for _, bill := range bills {
+		for _, d := range bill.splits {
 			if _, err := mb.memberForDebt(ctx, d); err != nil {
 				return nil, 0, err
 			}
@@ -292,9 +312,9 @@ func (s *Service) pullBillsTx(
 
 	// --- 5. Board parents + split children; link the personal rows. ---
 	linked := 0
-	for i, bill := range bills {
-		splits := make([]ProjectSplitInput, 0, len(billDebts[i]))
-		for _, d := range billDebts[i] {
+	for _, bill := range bills {
+		splits := make([]ProjectSplitInput, 0, len(bill.splits))
+		for _, d := range bill.splits {
 			memberID, err := mb.memberForDebt(ctx, d) // cached — no re-insert
 			if err != nil {
 				return nil, 0, err
@@ -323,14 +343,14 @@ func (s *Service) pullBillsTx(
 			p.ID, pt.ID, callerUserID, bill.TxID); err != nil {
 			return nil, 0, fmt.Errorf("link bill %s: %w", bill.TxID, err)
 		}
-		// Settled means settled: the bill's debt rows gain project_id for
-		// traceability ONLY — settled_amount/status are never touched.
-		if _, err := tx.Exec(ctx, `
-			UPDATE personal_debts
-			SET project_id = $1, updated_by_user_id = $2
-			WHERE user_id = $2 AND source_transaction_id = $3`,
-			p.ID, callerUserID, bill.TxID); err != nil {
-			return nil, 0, fmt.Errorf("tag debts of bill %s: %w", bill.TxID, err)
+		// The splits now live on the board: the personal debts go, the
+		// usual way (linked partners get split_changed / their pending
+		// split_created is superseded). None was repaid or forgiven
+		// (checked when loaded).
+		if bill.clearPersonal {
+			if err := s.txs.ClearSplitsTx(ctx, tx, callerUserID, bill.TxID); err != nil {
+				return nil, 0, fmt.Errorf("move splits of bill %s: %w", bill.TxID, err)
+			}
 		}
 		linked++
 	}
@@ -394,20 +414,23 @@ func (s *Service) loadQuickBillTx(
 		ownerID   uuid.UUID
 		projectID *uuid.UUID
 		repaysID  *uuid.UUID
+		isSystem  bool
 	)
 	// Wallet-less bills join too: currency falls back to the author's.
 	err := tx.QueryRow(ctx, `
 		SELECT t.id, t.user_id, t.project_id, t.account_id, t.type, t.amount,
 		       COALESCE(a.currency, u.currency, 'THB'), to_char(t.date, 'YYYY-MM-DD'),
-		       t.description, t.note, t.source_personal_debt_id
+		       t.description, t.note, t.source_personal_debt_id,
+		       COALESCE(c.is_system, FALSE)
 		FROM transactions t
 		JOIN users u ON u.id = t.user_id
 		LEFT JOIN accounts a ON a.id = t.account_id
+		LEFT JOIN categories c ON c.id = t.category_id
 		WHERE t.id = $1
 		FOR UPDATE OF t`, txID).Scan(
 		&bill.TxID, &ownerID, &projectID, &bill.AccountID, &bill.Type,
 		&bill.Amount, &bill.Currency, &bill.Date, &bill.Description, &bill.Note,
-		&repaysID,
+		&repaysID, &isSystem,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrQuickTxNotFound
@@ -425,26 +448,67 @@ func (s *Service) loadQuickBillTx(
 	if repaysID != nil {
 		return nil, ErrQuickTxIsRepayment
 	}
+	// Opening balance / balance adjustment rows aren't spending.
+	if isSystem {
+		return nil, ErrQuickTxSystemRow
+	}
 	if projectID != nil {
 		if !move || *projectID == targetProjectID {
 			return nil, ErrQuickTxAlreadyInProject
 		}
-		if err := s.detachBillTx(ctx, tx, callerUserID, txID); err != nil {
+		// The bill's board row leaves its old event; its member splits
+		// come along to the new board row (not back into personal debts).
+		carried, err := s.detachBillTx(ctx, tx, callerUserID, txID, false)
+		if err != nil {
 			return nil, err
 		}
+		if carried != nil {
+			bill.splits = carried
+			return &bill, nil
+		}
 	}
+	debts, err := s.loadQuickDebtsTx(ctx, tx, callerUserID, txID)
+	if err != nil {
+		return nil, err
+	}
+	bill.splits, bill.clearPersonal = debts, len(debts) > 0
 	return &bill, nil
+}
+
+// quickDebtsFromInputsTx — a new bill's split inputs as board splits. The
+// contact must be the caller's own (same rule as a personal split).
+func quickDebtsFromInputsTx(
+	ctx context.Context, tx pgx.Tx, callerUserID uuid.UUID, inputs []transactions.SplitInput,
+) ([]quickDebt, error) {
+	out := make([]quickDebt, 0, len(inputs))
+	for _, in := range inputs {
+		d := quickDebt{ContactID: in.ContactID, PersonName: in.PersonName, Amount: in.OwedAmount}
+		if in.ContactID != nil {
+			err := tx.QueryRow(ctx, `SELECT linked_user_id FROM contacts WHERE id = $1 AND user_id = $2`,
+				*in.ContactID, callerUserID).Scan(&d.LinkedUserID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, transactions.ErrSplitContactNotFound
+			}
+			if err != nil {
+				return nil, fmt.Errorf("split contact: %w", err)
+			}
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }
 
 // loadQuickDebtsTx returns the caller's personal_debts hanging off the
 // bill (both directions — expense splits are 'owed_to_me', income
 // splits 'i_owe') with the counterparty contact's linked user resolved.
+// They're about to move onto a board, so none may carry a repayment or be
+// forgiven — that money already happened in the personal book.
 func (s *Service) loadQuickDebtsTx(
 	ctx context.Context, tx pgx.Tx, callerUserID, txID uuid.UUID,
 ) ([]quickDebt, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT pd.counterparty_contact_id, pd.counterparty_person_name, pd.amount,
-		       c.linked_user_id
+		       c.linked_user_id, pd.settled_amount, pd.status
 		FROM personal_debts pd
 		LEFT JOIN contacts c ON c.id = pd.counterparty_contact_id
 		WHERE pd.user_id = $1
@@ -456,9 +520,19 @@ func (s *Service) loadQuickDebtsTx(
 	defer rows.Close()
 	out := make([]quickDebt, 0)
 	for rows.Next() {
-		var d quickDebt
-		if err := rows.Scan(&d.ContactID, &d.PersonName, &d.Amount, &d.LinkedUserID); err != nil {
+		var (
+			d       quickDebt
+			settled float64
+			status  string
+		)
+		if err := rows.Scan(&d.ContactID, &d.PersonName, &d.Amount, &d.LinkedUserID, &settled, &status); err != nil {
 			return nil, err
+		}
+		switch {
+		case settled > 0.005:
+			return nil, ErrQuickTxSplitRepaid
+		case status == "cancelled":
+			return nil, ErrQuickTxSplitCancelled
 		}
 		out = append(out, d)
 	}

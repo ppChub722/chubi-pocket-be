@@ -148,9 +148,11 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, status, accType stri
 // Service.Summary → GetByID (active membership). On a personal account
 // the sole author is the owner, so behavior is unchanged.
 func (s *Store) SummaryAggregate(ctx context.Context, accountID uuid.UUID, from, to string) (income, expense float64, count int, err error) {
+	// Share basis (spec 12 §4.5) like every report; the balance stays cash.
+	share := shared.ShareAmountExpr("t")
 	q := `SELECT
-		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'income'), 0),
-		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0),
+		COALESCE(SUM(` + share + `) FILTER (WHERE t.type = 'income'), 0),
+		COALESCE(SUM(` + share + `) FILTER (WHERE t.type = 'expense'), 0),
 		COUNT(*)
 		FROM transactions t
 		LEFT JOIN categories c ON c.id = t.category_id

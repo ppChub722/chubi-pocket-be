@@ -51,8 +51,10 @@ type SplitInput struct {
 }
 
 // SplitEdit — one row of PUT /v1/transactions/:id/splits. With debt_id it
-// keeps / re-amounts that existing split (only owed_amount is read);
-// without, it adds a person (same fields as SplitInput).
+// keeps / re-amounts that existing split; person_name / contact_id on it
+// rename or link the person in place, only while the split has no contact
+// (left out = unchanged). Without debt_id it adds a person (same fields as
+// SplitInput).
 type SplitEdit struct {
 	DebtID     *uuid.UUID `json:"debt_id"`
 	PersonName string     `json:"person_name" binding:"omitempty,max=100"`
@@ -118,6 +120,27 @@ type TransactionDetail struct {
 	Tags         []EmbeddedTag `json:"tags"`
 	HasSplits    bool          `json:"has_splits"`
 	SplitCount   int           `json:"split_count"`
+	// The author's share (spec 12 §4.5, shared.ShareAmountExpr): amount −
+	// what others owe on it (split debts, an event row's member splits).
+	// Expense / income only; what reports and budgets count.
+	MyShare *float64 `json:"my_share,omitempty"`
+	// What the caller may do with the row's splits / events (the BE's own
+	// rules, so the client doesn't re-derive them):
+	//   can_split       — the row can carry personal splits at all: expense /
+	//                     income, not a repayment or system row. An event
+	//                     bill too — its own splits are a layer on my share
+	//                     of it (Σ ≤ amount − the board's member splits).
+	//   can_edit_splits — can_split and the caller is the author
+	//                     (PUT /:id/splits).
+	//   can_join_event  — the caller may pull it into an event (POST
+	//                     /projects/:id/bills, /projects/quick; with move if
+	//                     it's already in one): author, expense / income, not
+	//                     a repayment or system row, no split repaid or
+	//                     forgiven (an event bill's own splits don't move, so
+	//                     they never block).
+	CanSplit      bool `json:"can_split"`
+	CanEditSplits bool `json:"can_edit_splits"`
+	CanJoinEvent  bool `json:"can_join_event"`
 	// The debts this row made in the caller's book — GET /:id only (nil =
 	// key absent on list rows).
 	Splits  *[]SplitRef  `json:"splits,omitempty"`

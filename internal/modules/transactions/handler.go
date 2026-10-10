@@ -303,6 +303,10 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, ErrSplitContactArchived):
 		response.Fail(c, http.StatusConflict, "CONTACT_ARCHIVED", err.Error(), nil)
+	case errors.Is(err, ErrSplitIdentityLocked):
+		response.Fail(c, http.StatusUnprocessableEntity, "SPLIT_IDENTITY_LOCKED", err.Error(), nil)
+	case errors.Is(err, ErrSplitsExceedShare):
+		response.BadRequest(c, "SPLITS_EXCEED_SHARE", err.Error(), nil)
 	case errors.Is(err, ErrAmountInvalid):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	default:

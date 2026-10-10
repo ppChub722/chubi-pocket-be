@@ -206,13 +206,15 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	where := strings.Join(whereClauses, " AND ")
 
 	// Row count + money totals over the whole filtered set, one pass.
+	// Share basis (spec 12 §4.5), same as the summary.
 	var (
 		total  int
 		totals Totals
 	)
+	share := shared.ShareAmountExpr("t")
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*),
-		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'income'), 0),
-		COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0),
+		COALESCE(SUM(`+share+`) FILTER (WHERE t.type = 'income'), 0),
+		COALESCE(SUM(`+share+`) FILTER (WHERE t.type = 'expense'), 0),
 		COUNT(*) FILTER (WHERE t.type <> 'transfer')
 		FROM transactions t WHERE `+where, args...).Scan(&total, &totals.Income, &totals.Expense, &totals.Count)
 	if err != nil {
@@ -299,6 +301,12 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	}
 	if err := s.fillHasSplitsForList(ctx, out); err != nil {
 		return nil, 0, Totals{}, fmt.Errorf("fill has_splits: %w", err)
+	}
+	if err := s.fillMyShareForList(ctx, out); err != nil {
+		return nil, 0, Totals{}, fmt.Errorf("fill my_share: %w", err)
+	}
+	if err := s.fillSplitFlagsForList(ctx, userID, out); err != nil {
+		return nil, 0, Totals{}, fmt.Errorf("fill split flags: %w", err)
 	}
 	if err := s.fillSharedInfoForList(ctx, userID, out); err != nil {
 		return nil, 0, Totals{}, fmt.Errorf("fill shared info: %w", err)
@@ -400,6 +408,107 @@ func (s *Store) fillSharedInfoForList(ctx context.Context, userID uuid.UUID, det
 		isLocked, canEdit := info.isLocked, info.canEditCategory
 		details[i].IsLocked = &isLocked
 		details[i].CanEditCategory = &canEdit
+	}
+	return nil
+}
+
+// fillSplitFlagsForList sets can_split / can_edit_splits / can_join_event
+// for callerUserID (one batch query; rules on TransactionDetail).
+func (s *Store) fillSplitFlagsForList(ctx context.Context, callerUserID uuid.UUID, details []TransactionDetail) error {
+	if len(details) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(details))
+	for i := range details {
+		ids[i] = details[i].ID
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT t.id,
+		       t.type IN ('income', 'expense') AND t.source_personal_debt_id IS NULL
+		         AND NOT COALESCE(c.is_system, FALSE),
+		       `+shared.EventBillPredicate("t")+`,
+		       EXISTS (SELECT 1 FROM personal_debts d
+		               WHERE d.source_transaction_id = t.id AND d.user_id = t.user_id
+		                 AND (d.settled_amount > 0.005 OR d.status = 'cancelled')),
+		       t.user_id = $2
+		FROM transactions t
+		LEFT JOIN categories c ON c.id = t.category_id
+		WHERE t.id = ANY($1)`, ids, callerUserID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type flags struct{ split, edit, join bool }
+	byID := make(map[uuid.UUID]flags, len(details))
+	for rows.Next() {
+		var (
+			id                               uuid.UUID
+			billable, eventBill, closed, own bool
+		)
+		if err := rows.Scan(&id, &billable, &eventBill, &closed, &own); err != nil {
+			return err
+		}
+		// An event bill's own splits stay on it when it moves (only the
+		// board splits travel), so a repaid one doesn't block the move.
+		byID[id] = flags{split: billable, edit: billable && own, join: billable && own && (eventBill || !closed)}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range details {
+		f := byID[details[i].ID]
+		details[i].CanSplit, details[i].CanEditSplits, details[i].CanJoinEvent = f.split, f.edit, f.join
+	}
+	return nil
+}
+
+// EventSplitsTotal — for an event bill (shared.EventBillPredicate), Σ the
+// other members' splits on its board row; 0 for any other transaction.
+func (s *Store) EventSplitsTotal(ctx context.Context, txID uuid.UUID) (float64, error) {
+	var total float64
+	err := s.db.QueryRow(ctx, `
+		SELECT CASE WHEN `+shared.EventBillPredicate("t")+` THEN COALESCE((
+			SELECT SUM(c.amount) FROM project_transactions c
+			WHERE c.parent_project_transaction_id = t.source_project_transaction_id), 0)
+		ELSE 0 END
+		FROM transactions t WHERE t.id = $1`, txID).Scan(&total)
+	return total, err
+}
+
+// fillMyShareForList sets my_share on every expense / income row (one
+// batch query, same fragment as the reports).
+func (s *Store) fillMyShareForList(ctx context.Context, details []TransactionDetail) error {
+	if len(details) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(details))
+	for i := range details {
+		ids[i] = details[i].ID
+	}
+	rows, err := s.db.Query(ctx, `SELECT t.id, `+shared.ShareAmountExpr("t")+`
+		FROM transactions t WHERE t.id = ANY($1) AND t.type IN ('income', 'expense')`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	byID := make(map[uuid.UUID]float64, len(details))
+	for rows.Next() {
+		var (
+			id    uuid.UUID
+			share float64
+		)
+		if err := rows.Scan(&id, &share); err != nil {
+			return err
+		}
+		byID[id] = share
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range details {
+		if v, ok := byID[details[i].ID]; ok {
+			details[i].MyShare = &v
+		}
 	}
 	return nil
 }
