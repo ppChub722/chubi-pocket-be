@@ -497,8 +497,12 @@ func mapQuickCreateError(c *gin.Context, err error) {
 		response.NotFound(c, "TX_NOT_FOUND", "Transaction not found or not owned")
 	case errors.Is(err, ErrQuickTxAlreadyInProject):
 		response.Fail(c, http.StatusConflict, "TX_ALREADY_IN_PROJECT", "Transaction is already in a project", nil)
-	case errors.Is(err, ErrQuickTxNotBillable):
+	case errors.Is(err, ErrQuickTxNotBillable), errors.Is(err, ErrQuickNothingToAdd):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, ErrQuickTxIsRepayment):
+		response.Fail(c, http.StatusUnprocessableEntity, "TX_NOT_BILLABLE", err.Error(), nil)
+	case errors.Is(err, ErrBillNotInProject):
+		response.NotFound(c, "TX_NOT_IN_PROJECT", "Transaction is not in this project")
 	case errors.Is(err, transactions.ErrAccountForbidden):
 		response.NotFound(c, "ACCOUNT_NOT_FOUND", "Account not found")
 	case errors.Is(err, transactions.ErrCategoryForbidden):
@@ -570,4 +574,23 @@ func (h *Handler) AddBills(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, out)
+}
+
+// DELETE /v1/projects/:id/bills/:transaction_id — take the caller's own
+// transaction out of the project; the transaction itself stays (detach.go).
+func (h *Handler) RemoveBill(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	txID, err := uuid.Parse(c.Param("transaction_id"))
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid transaction id", nil)
+		return
+	}
+	if err := h.service.RemoveBill(c.Request.Context(), userID, id, txID); err != nil {
+		mapQuickCreateError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }

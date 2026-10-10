@@ -273,12 +273,17 @@ type QuickCreateRequest struct {
 	Name string `json:"name" binding:"required,min=1,max=100"`
 	// Same body as POST /v1/transactions (splits[] allowed). Processed
 	// through the normal create path: account balance moves, splits create
-	// personal_debts exactly as usual. Must be expense or income.
-	NewTransaction transactions.CreateRequest `json:"new_transaction" binding:"required"`
-	// Existing loose bills to pull in. Each must belong to the caller and
-	// have project_id IS NULL — otherwise the whole call fails (atomic).
+	// personal_debts exactly as usual. Must be expense or income. Optional
+	// (2026-10-10): new_transaction or transaction_ids, at least one.
+	NewTransaction *transactions.CreateRequest `json:"new_transaction" binding:"omitempty"`
+	// Existing loose bills to pull in. Each must belong to the caller, have
+	// a wallet, not be a repayment, and have project_id IS NULL (or Move) —
+	// otherwise the whole call fails (atomic).
 	TransactionIDs []uuid.UUID      `json:"transaction_ids" binding:"omitempty"`
 	IconCode       *shared.IconCode `json:"icon_code"       binding:"omitempty"`
+	// Move: a listed bill already in another project leaves it first, in
+	// the same DB transaction (see detach.go), instead of 409.
+	Move bool `json:"move"`
 }
 
 // QuickCreateResponse — the created project in the same shape POST
@@ -287,14 +292,17 @@ type QuickCreateResponse struct {
 	Project
 	LinkedCount int `json:"linked_count"`
 	// The new bill created by the call — lets the client attach tags.
-	TransactionID uuid.UUID `json:"transaction_id"`
+	// Absent when the call only pulled existing bills.
+	TransactionID *uuid.UUID `json:"transaction_id,omitempty"`
 }
 
-// AddBillsRequest — POST /v1/projects/:id/bills: a new bill (and optionally
-// existing loose bills) pulled into a project that already exists.
+// AddBillsRequest — POST /v1/projects/:id/bills: a new bill and/or
+// existing loose bills pulled into a project that already exists. Same
+// rules as QuickCreateRequest.
 type AddBillsRequest struct {
-	NewTransaction transactions.CreateRequest `json:"new_transaction" binding:"required"`
-	TransactionIDs []uuid.UUID                `json:"transaction_ids" binding:"omitempty"`
+	NewTransaction *transactions.CreateRequest `json:"new_transaction" binding:"omitempty"`
+	TransactionIDs []uuid.UUID                 `json:"transaction_ids" binding:"omitempty"`
+	Move           bool                        `json:"move"`
 }
 
 // --- List filters / responses ---

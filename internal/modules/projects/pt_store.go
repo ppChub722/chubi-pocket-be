@@ -265,18 +265,6 @@ func (s *Store) UpdatePTTx(
 	return parent, nil
 }
 
-func (s *Store) DeletePT(ctx context.Context, projectID, ptID uuid.UUID) error {
-	tag, err := s.db.Exec(ctx,
-		`DELETE FROM project_transactions WHERE id = $1 AND project_id = $2`, ptID, projectID)
-	if err != nil {
-		return fmt.Errorf("delete PT: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrPTNotFound
-	}
-	return nil
-}
-
 // ListPT paginates parents only — children of returned parents are appended
 // without counting against per_page. Caller (FE) groups parent + children
 // into a tree.

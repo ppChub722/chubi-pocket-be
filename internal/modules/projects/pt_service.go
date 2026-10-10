@@ -5,8 +5,6 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
-
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 )
 
 // CreateProjectTransaction inserts a parent project_transaction row plus
@@ -132,29 +130,18 @@ func (s *Service) DeleteProjectTransaction(
 		return err
 	}
 
-	// Capture recipients BEFORE delete (FK cascade nukes the children).
-	recipients, _ := s.store.PTRecipientsForChange(ctx, ptID, callerUserID)
-
-	if err := s.store.DeletePT(ctx, projectID, ptID); err != nil {
+	// One tx: personal copies are unlinked first (they stay as loose
+	// transactions), then the row goes — see deleteBoardRowTx.
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := s.deleteBoardRowTx(ctx, tx, callerUserID, projectID, ptID); err != nil {
 		return err
 	}
-
-	if s.notifs != nil && len(recipients) > 0 {
-		tx, err := s.store.Pool().Begin(ctx)
-		if err == nil {
-			editorName := userDisplayOrEmpty(ctx, tx, callerUserID)
-			for _, recipient := range recipients {
-				_ = s.notifs.DispatchProjectTxChanged(ctx, tx, recipient, callerUserID,
-					notifications.ProjectTxChangedPayload{
-						ProjectTransactionID: ptID,
-						ProjectID:            projectID,
-						EditorUserID:         callerUserID,
-						EditorDisplayName:    editorName,
-						ChangeKind:           "deleted",
-					}, false)
-			}
-			_ = tx.Commit(ctx)
-		}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }

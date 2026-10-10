@@ -441,6 +441,7 @@ func main() {
 			protected.GET("/projects/:id/transactions", projectsHandler.ListPT)
 			protected.POST("/projects/:id/project-transactions", projectsHandler.CreatePT)
 			protected.POST("/projects/:id/bills", projectsHandler.AddBills)
+			protected.DELETE("/projects/:id/bills/:transaction_id", projectsHandler.RemoveBill)
 			protected.PUT("/projects/:id/project-transactions/:pt_id", projectsHandler.UpdatePT)
 			protected.DELETE("/projects/:id/project-transactions/:pt_id", projectsHandler.DeletePT)
 			protected.PUT("/projects/:id/project-transactions/:pt_id/mark", projectsHandler.ToggleMark)

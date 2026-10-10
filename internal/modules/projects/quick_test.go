@@ -26,7 +26,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
-const qcTestDefaultDSN = "postgres://chubadmin:admin1234@localhost:5432/chubi_pocket_db?sslmode=disable"
+const qcTestDefaultDSN = "postgres://chubadmin:admin1234@localhost:5433/chubi_pocket_db?sslmode=disable"
 
 func qcTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -267,7 +267,7 @@ func TestQuickCreateHappyPath(t *testing.T) {
 
 	resp, err := f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{
 		Name: "แฟน, บี · 15 ก.ย. 2026",
-		NewTransaction: transactions.CreateRequest{
+		NewTransaction: &transactions.CreateRequest{
 			Type:       transactions.TypeExpense,
 			AccountID:  &f.acctPersonal,
 			Amount:     150,
@@ -474,8 +474,8 @@ func TestQuickCreateAtomicRollback(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
 
-	newTx := func(amount float64) transactions.CreateRequest {
-		return transactions.CreateRequest{
+	newTx := func(amount float64) *transactions.CreateRequest {
+		return &transactions.CreateRequest{
 			Type:       transactions.TypeExpense,
 			AccountID:  &f.acctPersonal,
 			Amount:     amount,
