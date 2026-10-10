@@ -327,6 +327,15 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit tx: %w", err)
 	}
+	// Expense / income: answer with the same detail GET /:id gives (splits,
+	// tags, project, shared-wallet fields). The row is already committed,
+	// so a failed read-back falls back to the in-tx response, not an error.
+	if d, ok := res.(*TransactionDetail); ok {
+		if full, err := s.hydrate(ctx, userID, &d.Transaction); err == nil {
+			full.AccountBalanceAfter = d.AccountBalanceAfter
+			return full, nil
+		}
+	}
 	return res, nil
 }
 

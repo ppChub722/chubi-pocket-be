@@ -37,6 +37,19 @@ func TestDetailSplitsAndProject(t *testing.T) {
 	if split.SplitCount != 2 {
 		t.Errorf("create response split_count = %d, want 2", split.SplitCount)
 	}
+	// The create response is the full detail, splits included.
+	if split.Splits == nil || len(*split.Splits) != 2 {
+		t.Fatalf("create response splits = %v, want 2", split.Splits)
+	}
+	if s := (*split.Splits)[1]; s.PersonName != "Beam" || s.Amount != 100 || s.Direction != "owed_to_me" {
+		t.Errorf("create response second split = %+v", s)
+	}
+	if split.AccountBalanceAfter == nil {
+		t.Errorf("create response lost account_balance_after")
+	}
+	if split.Account == nil {
+		t.Errorf("create response lost the account ref")
+	}
 	plain, err := txs.Create(ctx, uid, transactions.CreateRequest{
 		Type: transactions.TypeExpense, AccountID: &wallet, Amount: 40, Date: "2026-10-10",
 	})
