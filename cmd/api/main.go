@@ -126,7 +126,7 @@ func main() {
 
 	// Pending transactions — drafts waiting to be confirmed.
 	pendingHandler := pending.NewHandler(pending.NewService(pending.NewStore(dbPool),
-		transactionsService, tagsService, personalDebtsService))
+		transactionsService, tagsService, personalDebtsService, projectsService))
 
 	// Imports — slips / text into pending drafts. 0.3.1: scan-slip runs OCR
 	// (tesseract CLI, shipped in the Docker image); the rest is still a stub.

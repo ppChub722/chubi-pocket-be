@@ -53,3 +53,23 @@ func TestToSubmitErrorMapsKnownErrors(t *testing.T) {
 		t.Errorf("fallback code %q", got)
 	}
 }
+
+func TestCreateRequestChecksSplitShape(t *testing.T) {
+	base := Draft{Type: ptr("expense"), Amount: ptr(100.0), Date: ptr("2026-10-08")}
+	for name, sp := range map[string]transactions.SplitInput{
+		"blank name":  {PersonName: " ", OwedAmount: 10},
+		"zero amount": {PersonName: "A", OwedAmount: 0},
+	} {
+		d := base
+		d.Splits = []transactions.SplitInput{sp}
+		_, err := createRequest(d)
+		if got := toSubmitError(err).Code; got != "INVALID_SPLIT" {
+			t.Errorf("%s: code %q, want INVALID_SPLIT", name, got)
+		}
+	}
+	d := base
+	d.Splits = []transactions.SplitInput{{PersonName: "A", OwedAmount: 10}}
+	if _, err := createRequest(d); err != nil {
+		t.Errorf("valid split rejected: %v", err)
+	}
+}

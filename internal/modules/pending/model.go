@@ -37,6 +37,9 @@ type Draft struct {
 	TransferToAccountID *uuid.UUID                `json:"transfer_to_account_id,omitempty"`
 	TagIDs              []uuid.UUID               `json:"tag_ids,omitempty"`
 	Splits              []transactions.SplitInput `json:"splits,omitempty"`
+	// ProjectID — the event the bill goes into on confirm (kind create only).
+	// Not checked at save: the event is validated when the draft is submitted.
+	ProjectID *uuid.UUID `json:"project_id,omitempty"`
 }
 
 // SubmitError — why a draft didn't go through (kept on the row).

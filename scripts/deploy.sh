@@ -41,7 +41,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 say() { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
-ssh_vps() { ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 "$VPS" "$@"; }
+# The host drops a connection now and then: retry the connect, and notice a
+# dead link instead of hanging.
+SSH_OPTS=(-i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 -o ConnectionAttempts=3
+  -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+ssh_vps() { ssh "${SSH_OPTS[@]}" "$VPS" "$@"; }
 
 deploy_be() {
   cd "$BE_DIR"
@@ -61,7 +65,7 @@ deploy_be() {
 
   say "BE: uploading"
   ssh_vps 'mkdir -p ~/deploy'
-  scp -i "$KEY" -q "$tgz" "$VPS:~/deploy/chubi-be-src.tgz"
+  scp "${SSH_OPTS[@]}" -q "$tgz" "$VPS:~/deploy/chubi-be-src.tgz"
 
   say "BE: build → backup → migrate → swap → health check (on the VPS)"
   ssh_vps "COMMIT=$commit HEALTH_URL=$HEALTH_URL bash -s" <<'REMOTE'

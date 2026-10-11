@@ -65,14 +65,14 @@ const quickDefaultType = "other"
 // quickBill is one included bill (the new one or a listed one) normalized
 // for board-parent creation.
 type quickBill struct {
-	TxID      uuid.UUID
-	AccountID *uuid.UUID // nil: a wallet-less bill
-	Type      string // expense | income
-	Amount    float64
-	Currency  string
-	Date      string // YYYY-MM-DD
+	TxID        uuid.UUID
+	AccountID   *uuid.UUID // nil: a wallet-less bill
+	Type        string     // expense | income
+	Amount      float64
+	Currency    string
+	Date        string // YYYY-MM-DD
 	Description *string
-	Note      *string
+	Note        *string
 
 	// The people the board row is split with. Pulling a bill MOVES its
 	// splits onto the board — no debt lives in both books (owner
@@ -164,27 +164,68 @@ func (s *Service) AddBills(
 	if err := s.checkNewBill(req.NewTransaction, req.TransactionIDs); err != nil {
 		return nil, err
 	}
-	if err := s.store.AssertWritable(ctx, projectID, "create_pt"); err != nil {
-		return nil, err
-	}
-	me, err := s.store.AssertCanWrite(ctx, projectID, callerUserID)
-	if err != nil {
-		return nil, err
-	}
-	p, err := s.store.GetByID(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
-	existing, err := s.store.ListMembers(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
-
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
+	newTxID, linked, err := s.addBillsTx(ctx, tx, callerUserID, projectID, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	full, err := s.store.GetByID(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return &QuickCreateResponse{Project: *full, LinkedCount: linked, TransactionID: newTxID}, nil
+}
+
+// AddNewBillTx creates a new bill through the normal personal path and puts
+// it in an existing event, inside the caller's database transaction (a
+// pending draft with a project_id, confirmed). Same rules as AddBills with
+// new_transaction: the caller is an active non-viewer member of an active
+// event, expense / income only, splits go onto the board. Returns the new
+// transaction's id.
+func (s *Service) AddNewBillTx(
+	ctx context.Context, tx pgx.Tx, callerUserID, projectID uuid.UUID, bill transactions.CreateRequest,
+) (uuid.UUID, error) {
+	if err := s.checkNewBill(&bill, nil); err != nil {
+		return uuid.Nil, err
+	}
+	newTxID, _, err := s.addBillsTx(ctx, tx, callerUserID, projectID, AddBillsRequest{NewTransaction: &bill})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if newTxID == nil {
+		return uuid.Nil, ErrQuickNothingToAdd // unreachable: a new bill was passed
+	}
+	return *newTxID, nil
+}
+
+// addBillsTx — the event checks, then the bill pull, all on tx. Nothing is
+// written before the checks pass.
+func (s *Service) addBillsTx(
+	ctx context.Context, tx pgx.Tx, callerUserID, projectID uuid.UUID, req AddBillsRequest,
+) (*uuid.UUID, int, error) {
+	if err := s.store.AssertWritable(ctx, projectID, "create_pt"); err != nil {
+		return nil, 0, err
+	}
+	me, err := s.store.AssertCanWrite(ctx, projectID, callerUserID)
+	if err != nil {
+		return nil, 0, err
+	}
+	p, err := s.store.GetByID(ctx, projectID)
+	if err != nil {
+		return nil, 0, err
+	}
+	existing, err := s.store.ListMembers(ctx, projectID)
+	if err != nil {
+		return nil, 0, err
+	}
 
 	// Seed the builder with the current roster so a counterparty already in
 	// the project (linked user, or the same name) is reused, not duplicated.
@@ -204,19 +245,8 @@ func (s *Service) AddBills(
 			mb.byName[strings.ToLower(strings.TrimSpace(m.DisplayName))] = m.ID
 		}
 	}
-	newTxID, linked, err := s.pullBillsTx(ctx, tx, p, me.ID, me.DisplayName, mb,
+	return s.pullBillsTx(ctx, tx, p, me.ID, me.DisplayName, mb,
 		req.NewTransaction, req.TransactionIDs, req.Move)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-	full, err := s.store.GetByID(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
-	return &QuickCreateResponse{Project: *full, LinkedCount: linked, TransactionID: newTxID}, nil
 }
 
 // checkNewBill — at least one bill; a new bill must be a plain expense /
@@ -373,7 +403,6 @@ func (s *Service) pullBillsTx(
 	return newTxID, linked, nil
 }
 
-
 // billCurrencySQL — a bill's currency: its wallet's, else its author's
 // (a wallet exists only on my side; a project has no currency of its own).
 // $1 = account id (may be NULL), $2 = user id.
@@ -391,14 +420,14 @@ func (s *Service) quickBillFromNew(
 		return nil, fmt.Errorf("new bill currency: %w", err)
 	}
 	return &quickBill{
-		TxID:      d.ID,
-		AccountID: d.AccountID,
-		Type:      string(d.Type),
-		Amount:    d.Amount,
-		Currency:  currency,
-		Date:      d.Date,
+		TxID:        d.ID,
+		AccountID:   d.AccountID,
+		Type:        string(d.Type),
+		Amount:      d.Amount,
+		Currency:    currency,
+		Date:        d.Date,
 		Description: d.Description,
-		Note:      d.Note,
+		Note:        d.Note,
 	}, nil
 }
 

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
@@ -24,14 +26,15 @@ type submitErr struct{ code, msg string }
 func (e *submitErr) Error() string { return e.msg }
 
 type Service struct {
-	store *Store
-	txs   *transactions.Service
-	tags  *tags.Service
-	debts *personal_debts.Service
+	store    *Store
+	txs      *transactions.Service
+	tags     *tags.Service
+	debts    *personal_debts.Service
+	projects *projects.Service
 }
 
-func NewService(store *Store, txs *transactions.Service, tg *tags.Service, debts *personal_debts.Service) *Service {
-	return &Service{store: store, txs: txs, tags: tg, debts: debts}
+func NewService(store *Store, txs *transactions.Service, tg *tags.Service, debts *personal_debts.Service, prj *projects.Service) *Service {
+	return &Service{store: store, txs: txs, tags: tg, debts: debts, projects: prj}
 }
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID) (*ListResponse, error) {
@@ -141,6 +144,16 @@ func createRequest(d Draft) (transactions.CreateRequest, error) {
 	if d.Date == nil {
 		return transactions.CreateRequest{}, &submitErr{"MISSING_DATE", "date is required"}
 	}
+	// A draft saves any splits; the POST /transactions body rules (name
+	// required, amount > 0) apply here.
+	for _, sp := range d.Splits {
+		if name := strings.TrimSpace(sp.PersonName); name == "" || len([]rune(name)) > 100 {
+			return transactions.CreateRequest{}, &submitErr{"INVALID_SPLIT", "every split needs a person name (max 100 characters)"}
+		}
+		if sp.OwedAmount <= 0 {
+			return transactions.CreateRequest{}, &submitErr{"INVALID_SPLIT", "every split amount must be more than 0"}
+		}
+	}
 	return transactions.CreateRequest{
 		Type:                transactions.TxType(*d.Type),
 		AccountID:           d.AccountID,
@@ -166,19 +179,31 @@ func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *Pending
 	}
 	defer tx.Rollback(ctx)
 
-	created, err := s.txs.CreateInTx(ctx, tx, userID, req)
-	if err != nil {
-		return nil, err
-	}
 	var txID uuid.UUID
-	switch c := created.(type) {
-	case *transactions.TransactionDetail:
-		txID = c.ID
-	case *transactions.TransferResponse:
-		// Tags go on the OUT row, like the regular form.
-		for _, r := range c.Rows {
-			if r.AccountID != nil && req.AccountID != nil && *r.AccountID == *req.AccountID {
-				txID = r.ID
+	if p.Draft.ProjectID != nil {
+		// An event bill: the same path as "add a new bill to an event" —
+		// event rules (member, active), splits go onto the board.
+		if s.projects == nil {
+			return nil, errors.New("events not available")
+		}
+		txID, err = s.projects.AddNewBillTx(ctx, tx, userID, *p.Draft.ProjectID, req)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		created, err := s.txs.CreateInTx(ctx, tx, userID, req)
+		if err != nil {
+			return nil, err
+		}
+		switch c := created.(type) {
+		case *transactions.TransactionDetail:
+			txID = c.ID
+		case *transactions.TransferResponse:
+			// Tags go on the OUT row, like the regular form.
+			for _, r := range c.Rows {
+				if r.AccountID != nil && req.AccountID != nil && *r.AccountID == *req.AccountID {
+					txID = r.ID
+				}
 			}
 		}
 	}
@@ -271,6 +296,15 @@ func toSubmitError(err error) SubmitError {
 		{transactions.ErrTransferRequiresAccount, "TRANSFER_NEEDS_WALLETS"},
 		{transactions.ErrSplitsOnTransfer, "SPLITS_ON_TRANSFER"},
 		{transactions.ErrSplitContactNotFound, "CONTACT_NOT_FOUND"},
+		{transactions.ErrSplitsExceedAmount, "SPLITS_EXCEED_AMOUNT"},
+		{projects.ErrSplitsExceedParent, "SPLITS_EXCEED_AMOUNT"},
+		{projects.ErrProjectNotFound, "PROJECT_NOT_FOUND"},
+		{projects.ErrProjectNotActive, "PROJECT_NOT_ACTIVE"},
+		{projects.ErrProjectLocked, "PROJECT_LOCKED"},
+		{projects.ErrNotMember, "PROJECT_NOT_MEMBER"},
+		{projects.ErrMemberNotFound, "PROJECT_NOT_MEMBER"},
+		{projects.ErrViewerReadOnly, "PROJECT_READ_ONLY"},
+		{projects.ErrQuickTxNotBillable, "TX_NOT_BILLABLE"},
 		{tags.ErrTagNotFound, "TAG_NOT_FOUND"},
 		{personal_debts.ErrDebtNotFound, "DEBT_NOT_FOUND"},
 		{personal_debts.ErrAlreadySettled, "DEBT_ALREADY_SETTLED"},
