@@ -2680,6 +2680,2121 @@ paths:
         "x-breaking": "New endpoint (archive was DELETE only)."
       }
 
+  /projects:
+    get: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "List my projects",
+        "operationId": "listProjects",
+        "description": "Projects the caller owns or is an active member of, newest-updated first. `status` filter: empty or `active` = active only (default); `completed`, `cancelled`, `archived`; `all` = no filter; any other value = no status filter (as today). `type` = exact match on the free type label. `per_page` is capped at 100 (default 20); bad numbers fall back to the defaults.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Page"
+          },
+          {
+            "$ref": "#/components/parameters/PerPage"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "completed",
+                "cancelled",
+                "archived",
+                "all"
+              ],
+              "default": "active"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of projects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    post: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Create a project",
+        "operationId": "createProject",
+        "description": "Creates the project and the caller's own active member row with role `owner` (display name = the caller's profile name) in one transaction. Returns the bare project with `members_count`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    get: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Get a project",
+        "operationId": "getProject",
+        "description": "Owner or active member only; anyone else gets 404 NOT_FOUND (no info leak).",
+        "responses": {
+          "200": {
+            "description": "The project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    put: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Update a project",
+        "operationId": "updateProject",
+        "description": "Owner only (403 NOT_OWNER). Not gated by the lifecycle status, so the owner can reopen a project by setting `status`. Returns the project WITHOUT `members_count` (as today).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    delete: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Delete a project",
+        "operationId": "deleteProject",
+        "description": "Owner only (403 NOT_OWNER). Hard delete, refused with 409 PROJECT_HAS_TRANSACTIONS while any project row or any personal transaction still references the project. Legacy envelope `{success, message:\"Project deleted\"}`.",
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "409 PROJECT_HAS_TRANSACTIONS.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}/members:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    get: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "List project members",
+        "operationId": "listProjectMembers",
+        "description": "Owner or active member only (else 404). Includes pending and left members; ordered owner first, then by status, then name.",
+        "responses": {
+          "200": {
+            "description": "Members.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectMemberListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    post: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Add a member",
+        "operationId": "addProjectMember",
+        "description": "Owner only (403 NOT_OWNER). Lifecycle gate: 400 PROJECT_LOCKED when the project is cancelled or archived (or archived only, depending on the action); 400 PROJECT_NOT_ACTIVE when a new row is added to a completed project. See the request schema for the two variants. As today: a body matching neither variant, or role `owner`, is answered 500 INTERNAL_SERVER_ERROR with the rule text in `details`, not 400. The email variant never reveals whether the email matched a user.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectAddMemberRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new member.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectMember"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}/members/{member_id}:
+    parameters: [{"$ref":"#/components/parameters/IdPath"},{"name":"member_id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}]
+    put: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Change a member's role or icon",
+        "operationId": "updateProjectMember",
+        "description": "Owner only (403 NOT_OWNER). Lifecycle gate: 400 PROJECT_LOCKED when the project is cancelled or archived (or archived only, depending on the action); 400 PROJECT_NOT_ACTIVE when a new row is added to a completed project. Errors: 409 CANNOT_CHANGE_OWNER when the target is the owner (role change only); 400 MEMBER_NOT_IN_PROJECT; 404 NOT_FOUND (member). Role `owner` is rejected with 500 (as today); use transfer-ownership.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectUpdateMemberRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The member after the change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectMember"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "409 CANNOT_CHANGE_OWNER.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    delete: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Remove a member",
+        "operationId": "removeProjectMember",
+        "description": "Owner only (403 NOT_OWNER). Lifecycle gate: 400 PROJECT_LOCKED when the project is cancelled or archived (or archived only, depending on the action); 400 PROJECT_NOT_ACTIVE when a new row is added to a completed project. Soft remove: the member becomes `left` (its history stays). 400 CANNOT_REMOVE_OWNER for the owner row; 404 NOT_FOUND for an unknown member id. As today the member id is not checked against the project id in the path. Legacy envelope `{success, message:\"Member removed\"}`.",
+        "responses": {
+          "200": {
+            "description": "Removed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}/members/{member_id}/request-link:
+    parameters: [{"$ref":"#/components/parameters/IdPath"},{"name":"member_id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}]
+    post: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Re-send a link request to a pending member",
+        "operationId": "requestProjectMemberLink",
+        "description": "Owner only (403 NOT_OWNER). As today this is a no-op that answers success for an unlinked member (the member row no longer stores an email, so nothing is sent; to re-invite, remove the member and add again with the email). 400 MEMBER_NOT_IN_PROJECT; an already linked member is answered 500 (as today). Legacy envelope `{success, message:\"Link request sent\"}`.",
+        "responses": {
+          "200": {
+            "description": "Accepted (nothing is sent).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}/transfer-ownership:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Transfer ownership",
+        "operationId": "transferProjectOwnership",
+        "description": "Owner only (403 NOT_OWNER). The new owner must be an active linked member, else 404 NOT_FOUND (member). The old owner becomes a contributor. Not gated by the lifecycle status. Legacy envelope `{success, message:\"Ownership transferred\"}`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectTransferOwnershipRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transferred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}/leave:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Leave a project",
+        "operationId": "leaveProject",
+        "description": "Soft-removes the caller's own active member row (status `left`). 400 OWNER_CANNOT_LEAVE for the owner (transfer ownership first); 403 NOT_MEMBER when the caller has no active member row. Legacy envelope `{success, message:\"Left project\"}`.",
+        "responses": {
+          "200": {
+            "description": "Left.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}/project-transactions:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Add a board row (with optional splits)",
+        "operationId": "createProjectTransaction",
+        "description": "Caller must be an active contributor or owner (403 FORBIDDEN_ROLE for a viewer, 403 NOT_MEMBER otherwise). Lifecycle gate: 400 PROJECT_LOCKED when the project is cancelled or archived (or archived only, depending on the action); 400 PROJECT_NOT_ACTIVE when a new row is added to a completed project. Errors: 400 MEMBER_NOT_IN_PROJECT (actor or a split member), 400 SELF_SPLIT, 400 SPLITS_EXCEED_PARENT, 404 NOT_FOUND (actor member id unknown). Side effects: when the actor is the caller and the caller turned on auto-resolve own rows, a personal copy is made; when the actor is another linked user, a `project_tx_recorded_for_you` notification is sent. Returns the parent row only (split children are not embedded; read them from the board list).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectCreateTransactionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The parent row.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectTransaction"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}/project-transactions/{pt_id}:
+    parameters: [{"$ref":"#/components/parameters/IdPath"},{"name":"pt_id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}]
+    put: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Edit a board row",
+        "operationId": "updateProjectTransaction",
+        "description": "Contributor or owner (viewer: 403 FORBIDDEN_ROLE; non-member: 403 NOT_MEMBER). Blocked with 400 PROJECT_LOCKED when the project is cancelled or archived. 400 PT_IS_CHILD when the row is a split child (edit its parent). Other errors as for creating (SELF_SPLIT, SPLITS_EXCEED_PARENT, MEMBER_NOT_IN_PROJECT). As today the row id is not checked against the project id in the path. Notifies the other linked members affected. Returns the parent row only.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectUpdateTransactionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated parent row.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectTransaction"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    delete: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Delete a board row",
+        "operationId": "deleteProjectTransaction",
+        "description": "Contributor or owner (viewer: 403 FORBIDDEN_ROLE). Blocked with 400 PROJECT_LOCKED when cancelled or archived. 404 NOT_FOUND when the row is not in this project. Deleting a parent removes its split children. Personal copies stay as loose transactions (unlinked). When the row is the caller's own bill on the board, it is detached from the project the same way as DELETE /projects/{id}/bills/{transaction_id} (member splits go back onto the bill). Legacy envelope `{success, message:\"Project transaction deleted\"}`.",
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}/project-transactions/{pt_id}/mark:
+    parameters: [{"$ref":"#/components/parameters/IdPath"},{"name":"pt_id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}]
+    put: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Mark or unmark a row as resolved",
+        "operationId": "markProjectTransaction",
+        "description": "Adds or removes the caller's member id in `marks` (idempotent). Contributor or owner only (viewer: 403 FORBIDDEN_ROLE). Allowed on completed and cancelled projects; 400 PROJECT_LOCKED only when archived. 404 NOT_FOUND when the row is not in this project.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectMarkRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The row after the change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectTransaction"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}/project-transactions/{pt_id}/copy:
+    parameters: [{"$ref":"#/components/parameters/IdPath"},{"name":"pt_id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}]
+    post: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Copy a board row into my own book",
+        "operationId": "copyProjectTransactionToPersonal",
+        "description": "The \"add to my book\" action. Creates a floating (wallet-less) personal transaction: the actor copies the full amount minus the others' splits (their own share), a split member copies their split. Idempotent: a repeat call returns the existing copy's id (as today still 201). 400 NOTHING_TO_COPY when the caller has no part in the row. Other errors per the shared project error mapper (404 NOT_FOUND, 403 NOT_MEMBER).",
+        "responses": {
+          "201": {
+            "description": "The caller's personal transaction id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectCopyResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}/bills/{transaction_id}:
+    parameters: [{"$ref":"#/components/parameters/IdPath"},{"name":"transaction_id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}]
+    delete: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Take my bill out of the project",
+        "operationId": "removeBillFromProject",
+        "description": "Detaches the caller's own personal transaction from the project; the transaction itself stays (its board row is removed and the member splits go back onto the bill). 404 TX_NOT_FOUND when the transaction does not exist or is not the caller's; 404 TX_NOT_IN_PROJECT when it belongs to no / another project. 422 (TX_SPLIT_HAS_REPAYMENT / TX_SPLIT_CANCELLED) when a split on the bill was already repaid or forgiven. Empty body.",
+        "responses": {
+          "204": {
+            "description": "Removed; empty body."
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "409 Same codes as the quick-create mapper.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "422 TX_SPLIT_HAS_REPAYMENT / TX_SPLIT_CANCELLED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}/summary:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    get: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Project summary",
+        "operationId": "getProjectSummary",
+        "description": "Owner or active member only (else 404). Totals count parent rows only (children are annotations of the same money). The plan trio is present only when the project has `planned_amount`.",
+        "responses": {
+          "200": {
+            "description": "Summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/{id}/tags:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    get: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Tags in use on the project",
+        "operationId": "listProjectTags",
+        "description": "Owner or active member only (else 404). Names in use on parent rows with how many rows carry each, most used first then by name. Untagged is not listed here.",
+        "responses": {
+          "200": {
+            "description": "Tags.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectTagListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/link-requests/{notification_id}/accept:
+    parameters: [{"name":"notification_id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}]
+    post: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Accept a project invite",
+        "operationId": "acceptProjectLinkRequest",
+        "description": "Links the caller to the pending member row named in the `project_invite` notification and marks the notification actioned. Idempotent when the caller is already linked. 409 USER_ALREADY_MEMBER when the row is linked to someone else. As today: a notification that is missing, not the caller's, or not a project_invite is answered 500 (the projects mapper does not translate the notification errors).",
+        "responses": {
+          "200": {
+            "description": "The linked member.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectMember"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "409 USER_ALREADY_MEMBER.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /projects/link-requests/{notification_id}/reject:
+    parameters: [{"name":"notification_id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}]
+    post: {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Reject a project invite",
+        "operationId": "rejectProjectLinkRequest",
+        "description": "Dismisses the notification and turns the still-unlinked pending member row into `left`. Same 500 behaviour for a missing / foreign / wrong-type notification as accept. Legacy envelope `{success, message:\"Project link request rejected\"}`.",
+        "responses": {
+          "200": {
+            "description": "Rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR: any error the project error mapper does not know (as today, this includes some plain rule violations noted in the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /budgets/overview:
+    get: {
+        "tags": [
+          "Budgets"
+        ],
+        "summary": "Budgets overview (totals for one period and scope)",
+        "operationId": "getBudgetsOverview",
+        "description": "Aggregates the caller's ACTIVE budgets that match `period`, `scope` and `project_id`. Each budget's `spent` uses the budget's own period bounds; top-level `period_start`/`period_end` use the `period` query. Totals are sums over the listed budgets. `category_name` is \"(archived)\" when the category cannot be resolved. 400 VALIDATION_ERROR for an invalid `project_id` or scope=project without `project_id`. As today: no value check on `period`/`scope`; an unknown period gets monthly bounds. Period bounds and spent are computed in the timezone from the X-Timezone header, else the user's stored timezone, else Asia/Bangkok.",
+        "parameters": [
+          {
+            "name": "period",
+            "in": "query",
+            "description": "Default monthly.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "weekly",
+                "monthly",
+                "yearly"
+              ],
+              "default": "monthly"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "description": "Default user.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "user",
+                "project"
+              ],
+              "default": "user"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Required when scope=project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "X-Timezone",
+            "in": "header",
+            "required": false,
+            "description": "IANA timezone name used to compute period bounds; falls back to the user's stored timezone, then Asia/Bangkok.",
+            "schema": {
+              "type": "string",
+              "example": "Asia/Bangkok"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Overview.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetOverview"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /budgets/{id}:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    get: {
+        "tags": [
+          "Budgets"
+        ],
+        "summary": "Get a budget",
+        "operationId": "getBudget",
+        "description": "One budget view. 404 NOT_FOUND when missing or not visible to the caller. Period bounds and spent are computed in the timezone from the X-Timezone header, else the user's stored timezone, else Asia/Bangkok.",
+        "parameters": [
+          {
+            "name": "X-Timezone",
+            "in": "header",
+            "required": false,
+            "description": "IANA timezone name used to compute period bounds; falls back to the user's stored timezone, then Asia/Bangkok.",
+            "schema": {
+              "type": "string",
+              "example": "Asia/Bangkok"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The budget view after the write. BudgetTouch lists only the changed keys; other keys as today: id, user_id, category_id, scope, project_id, amount, period, currency, status, name, description, note, created_at, updated_at, current_period {start, end, spent, remaining, utilization_pct, over_limit}, child_breakdown [{category_id, name, spent}].",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetTouch"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    put: {
+        "tags": [
+          "Budgets"
+        ],
+        "summary": "Update a budget (partial)",
+        "operationId": "updateBudget",
+        "description": "Partial update; absent keys stay. For name/description/note: key absent = unchanged, null or \"\" = cleared (name falls back to the category's name). `category_id` re-anchors on another expense category owned by the budget's user (one active budget per category/period/scope still applies). `scope` and `project_id` are not editable; status changes go through archive/restore. User-scope: only the owner; project-scope: only the current project owner. Period bounds and spent are computed in the timezone from the X-Timezone header, else the user's stored timezone, else Asia/Bangkok. Budget errors as today: 400 DUPLICATE_BUDGET (an active budget already exists for this category/period/scope), 400 INVALID_CATEGORY (category is income-type, a system category, or not owned by the budget's user), 403 FORBIDDEN (project-scope budget and the caller is not the project owner), 404 NOT_FOUND (budget not found or not visible).",
+        "parameters": [
+          {
+            "name": "X-Timezone",
+            "in": "header",
+            "required": false,
+            "description": "IANA timezone name used to compute period bounds; falls back to the user's stored timezone, then Asia/Bangkok.",
+            "schema": {
+              "type": "string",
+              "example": "Asia/Bangkok"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BudgetUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The budget view after the write. BudgetTouch lists only the changed keys; other keys as today: id, user_id, category_id, scope, project_id, amount, period, currency, status, name, description, note, created_at, updated_at, current_period {start, end, spent, remaining, utilization_pct, over_limit}, child_breakdown [{category_id, name, spent}].",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetTouch"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    delete: {
+        "tags": [
+          "Budgets"
+        ],
+        "summary": "Delete a budget (hard delete)",
+        "operationId": "deleteBudget",
+        "description": "Hard-deletes the budget. User-scope: only the owner; project-scope: only the project owner (403 FORBIDDEN otherwise). 404 NOT_FOUND when missing.",
+        "responses": {
+          "200": {
+            "description": "Legacy envelope {success:true, message}; `data` is null so the key is omitted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "success",
+                    "message"
+                  ],
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "message": {
+                      "type": "string",
+                      "example": "Budget deleted"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /budgets/{id}/archive:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post: {
+        "tags": [
+          "Budgets"
+        ],
+        "summary": "Archive a budget",
+        "operationId": "archiveBudget",
+        "description": "Sets status=archived (ignored in calculations, restorable). No request body. Same permission rules as update: 403 FORBIDDEN for a non-owner of a project-scope budget; 404 NOT_FOUND when missing. Period bounds and spent are computed in the timezone from the X-Timezone header, else the user's stored timezone, else Asia/Bangkok.",
+        "parameters": [
+          {
+            "name": "X-Timezone",
+            "in": "header",
+            "required": false,
+            "description": "IANA timezone name used to compute period bounds; falls back to the user's stored timezone, then Asia/Bangkok.",
+            "schema": {
+              "type": "string",
+              "example": "Asia/Bangkok"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The budget view after the write. BudgetTouch lists only the changed keys; other keys as today: id, user_id, category_id, scope, project_id, amount, period, currency, status, name, description, note, created_at, updated_at, current_period {start, end, spent, remaining, utilization_pct, over_limit}, child_breakdown [{category_id, name, spent}].",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetTouch"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /budgets/{id}/restore:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post: {
+        "tags": [
+          "Budgets"
+        ],
+        "summary": "Restore an archived budget",
+        "operationId": "restoreBudget",
+        "description": "Sets status=active. No request body. 400 DUPLICATE_BUDGET when another active budget already holds the same category/period/scope. Same permission rules as update (403 / 404). Period bounds and spent are computed in the timezone from the X-Timezone header, else the user's stored timezone, else Asia/Bangkok.",
+        "parameters": [
+          {
+            "name": "X-Timezone",
+            "in": "header",
+            "required": false,
+            "description": "IANA timezone name used to compute period bounds; falls back to the user's stored timezone, then Asia/Bangkok.",
+            "schema": {
+              "type": "string",
+              "example": "Asia/Bangkok"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The budget view after the write. BudgetTouch lists only the changed keys; other keys as today: id, user_id, category_id, scope, project_id, amount, period, currency, status, name, description, note, created_at, updated_at, current_period {start, end, spent, remaining, utilization_pct, over_limit}, child_breakdown [{category_id, name, spent}].",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetTouch"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /saving-goals/{id}/archive:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post: {
+        "tags": [
+          "Saving goals"
+        ],
+        "summary": "Archive a saving goal",
+        "operationId": "archiveSavingGoal",
+        "description": "Sets status=archived, which frees the goal's allocation on the account. Idempotent: an already archived goal is returned unchanged. No request body. 404 NOT_FOUND when missing.",
+        "responses": {
+          "200": {
+            "description": "The saving goal view after the write. SavingGoalTouch lists only the changed keys; other keys as today.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavingGoalTouch"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /saving-goals/{id}/restore:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post: {
+        "tags": [
+          "Saving goals"
+        ],
+        "summary": "Restore an archived saving goal",
+        "operationId": "restoreSavingGoal",
+        "description": "Sets status=active. Idempotent for an already active goal. The stored `allocation_pct` must still fit the account: 400 ALLOCATION_EXCEEDED otherwise (lower it with PUT first). No request body. 404 NOT_FOUND when missing.",
+        "responses": {
+          "200": {
+            "description": "The saving goal view after the write. SavingGoalTouch lists only the changed keys; other keys as today.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavingGoalTouch"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /accounts/{id}/saving-allocations:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    get: {
+        "tags": [
+          "Saving goals"
+        ],
+        "summary": "Saving allocations of one account",
+        "operationId": "getAccountSavingAllocations",
+        "description": "Active goals linked to the account and the allocated / unallocated split (for the per-account pie). `{id}` is the ACCOUNT id. As today: 400 ACCOUNT_NOT_OWNED (not 404) when the account is not the caller's or not active; 400 VALIDATION_ERROR for an invalid id.",
+        "responses": {
+          "200": {
+            "description": "Allocations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavingGoalAccountAllocations"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /scheduled-transactions/upcoming:
+    get: {
+        "tags": [
+          "Scheduled"
+        ],
+        "summary": "Upcoming scheduled items",
+        "operationId": "listScheduledUpcoming",
+        "description": "Active schedules whose next_billing_date is on or before today + `days` (overdue rows are included and show a negative days_until). Totals sum the expense / income rows. \"Today\" is the caller's calendar day, resolved from the profile timezone policy / `X-Timezone` header. Bare object, not enveloped.",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "description": "Look-ahead window. Default 7; a value <= 0 or non-numeric becomes 7; capped at 90.",
+            "schema": {
+              "type": "integer",
+              "default": 7,
+              "maximum": 90
+            }
+          },
+          {
+            "name": "X-Timezone",
+            "in": "header",
+            "description": "IANA timezone hint used when the profile policy follows the device.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Upcoming items and totals.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledUpcomingResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /scheduled-transactions/{id}:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    get: {
+        "tags": [
+          "Scheduled"
+        ],
+        "summary": "Scheduled transaction detail",
+        "operationId": "getScheduled",
+        "description": "The caller's own schedule only; another user's is 404 NOT_FOUND. 400 VALIDATION_ERROR for a malformed id.",
+        "responses": {
+          "200": {
+            "description": "The schedule. The scheduled-transaction view (bare object; ScheduledView lists every key, other keys as today).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    put: {
+        "tags": [
+          "Scheduled"
+        ],
+        "summary": "Edit a scheduled transaction",
+        "operationId": "updateScheduled",
+        "description": "Partial update, see ScheduledUpdateRequest. Returns the updated view. Error codes (400): VALIDATION_ERROR (bad body / id), ACCOUNT_NOT_OWNED (account not the caller's or not active), INVALID_CATEGORY (system category, wrong type or not owned), INSTALLMENT_FIELDS_REQUIRED, RECURRING_EXTRA_FIELDS, INVALID_TRANSITION. 404 NOT_FOUND when the schedule is not the caller's. Unmapped errors are 500.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduledUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated schedule. The scheduled-transaction view (bare object; ScheduledView lists every key, other keys as today).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    delete: {
+        "tags": [
+          "Scheduled"
+        ],
+        "summary": "Delete a scheduled transaction",
+        "operationId": "deleteScheduled",
+        "description": "Hard delete of the schedule row. Returns the legacy envelope with no data. 404 NOT_FOUND if not the caller's.",
+        "responses": {
+          "200": {
+            "description": "{success:true, message:\"Scheduled transaction deleted\"} (no data key).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "success",
+                    "message"
+                  ],
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "description": "Legacy envelope. `data` is omitted (nil, omitempty)."
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /scheduled-transactions/{id}/pause:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post: {
+        "tags": [
+          "Scheduled"
+        ],
+        "summary": "Pause a scheduled transaction",
+        "operationId": "pauseScheduled",
+        "description": "active -> paused. Idempotent when already paused (returns the current view). Any other status (cancelled, completed) is 400 INVALID_TRANSITION. No body.",
+        "responses": {
+          "200": {
+            "description": "The schedule after the transition. The scheduled-transaction view (bare object; ScheduledView lists every key, other keys as today).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /scheduled-transactions/{id}/resume:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post: {
+        "tags": [
+          "Scheduled"
+        ],
+        "summary": "Resume a scheduled transaction",
+        "operationId": "resumeScheduled",
+        "description": "paused -> active. Idempotent when already active. Any other status is 400 INVALID_TRANSITION. No body.",
+        "responses": {
+          "200": {
+            "description": "The schedule after the transition. The scheduled-transaction view (bare object; ScheduledView lists every key, other keys as today).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /scheduled-transactions/{id}/cancel:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post: {
+        "tags": [
+          "Scheduled"
+        ],
+        "summary": "Cancel a scheduled transaction",
+        "operationId": "cancelScheduled",
+        "description": "active or paused -> cancelled (terminal; the row stays and keeps its history). A schedule already cancelled or completed is 400 INVALID_TRANSITION (not idempotent). No body.",
+        "responses": {
+          "200": {
+            "description": "The cancelled schedule. The scheduled-transaction view (bare object; ScheduledView lists every key, other keys as today).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /scheduled-transactions/{id}/history:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    get: {
+        "tags": [
+          "Scheduled"
+        ],
+        "summary": "Transactions generated by a schedule",
+        "operationId": "getScheduledHistory",
+        "description": "Transactions this schedule generated via generate-now, with the count and total. Bare object, not enveloped. 404 NOT_FOUND if not the caller's.",
+        "responses": {
+          "200": {
+            "description": "History rows and totals.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledHistoryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /personal-debts/{id}/cancel:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post: {
+        "tags": [
+          "Debts"
+        ],
+        "summary": "Cancel a debt (forgive / write off)",
+        "operationId": "cancelDebt",
+        "description": "Sets status=cancelled whatever the open amount. Already cancelled -> 400 ALREADY_CANCELLED (as today only the cancelled state is refused; a settled debt can still be cancelled). No body. Returns the bare debt row without `outstanding`.",
+        "responses": {
+          "200": {
+            "description": "The cancelled debt (DebtRecord).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebtRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /personal-debts/split-requests/{notification_id}/accept:
+    parameters: [{"name":"notification_id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}]
+    post: {
+        "tags": [
+          "Debts"
+        ],
+        "summary": "Accept a split request (\"add to my debts\")",
+        "operationId": "acceptDebtSplitRequest",
+        "description": "One-tap action on a split_created notification addressed to the caller: creates the caller's mirror debt (or returns the existing one, idempotent) and marks the notification actioned. No body. Errors: 400 VALIDATION_ERROR (bad id), 400 NOT_SPLIT_REQUEST (wrong notification type, or the split is not addressed to the caller's linked contact), 403 NOT_FOR_YOU, 404 NOT_FOUND (notification), 409 SPLIT_CHANGE_STALE (superseded or the split was removed), 409 NOTIFICATION_STATE_CONFLICT. As today it answers 201 even when the mirror already existed.",
+        "responses": {
+          "201": {
+            "description": "The caller's debt (DebtRecord, direction mirrored from the splitter's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebtRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "409 SPLIT_CHANGE_STALE or NOTIFICATION_STATE_CONFLICT.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
+  /personal-debts/split-changes/{notification_id}/apply:
+    parameters: [{"name":"notification_id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}]
+    post: {
+        "tags": [
+          "Debts"
+        ],
+        "summary": "Apply a split change",
+        "operationId": "applyDebtSplitChange",
+        "description": "One-shot action on a split_changed notification addressed to the caller. A re-amount sets the mirror debt's amount (status recomputed: settled when repaid exactly, else open; cancelled stays); a removal deletes the debt, or zeroes it when it had repayments. Marks the notification actioned. No body. Errors: 400 VALIDATION_ERROR, 400 NOT_SPLIT_CHANGE (wrong type or the debt is not the caller's), 403 NOT_FOR_YOU, 404 NOT_FOUND, 409 NOTIFICATION_ACTIONED (already used), 409 SPLIT_CHANGE_STALE (superseded or the splitter changed it again), 409 NOTIFICATION_STATE_CONFLICT. Returns 200 (not 201).",
+        "responses": {
+          "200": {
+            "description": "What the action did to the caller's debt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebtSplitChangeResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "409 NOTIFICATION_ACTIONED, SPLIT_CHANGE_STALE or NOTIFICATION_STATE_CONFLICT.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+
   # ───────────────────────────── Touch-points ─────────────────────────────
   # Pages not redesigned yet: only the shared-shape change is listed.
   /saving-goals:
@@ -2701,6 +4816,52 @@ paths:
       x-breaking: "linked_account: {id, name, balance, currency} -> AccountRef; balance -> linked_account_balance."
       x-used-by:
         - { page: goals-list, calls: 1 }
+    post: {
+        "tags": [
+          "Saving goals"
+        ],
+        "summary": "Create a saving goal",
+        "operationId": "createSavingGoal",
+        "description": "Creates a goal linked to one of the caller's accounts. When `allocation_pct` is omitted it is filled with the account's remaining capacity (100 minus the sum of ACTIVE goals' allocation); 400 ALLOCATION_EXCEEDED if that is 0 or if the sum would exceed 100. 400 ACCOUNT_NOT_OWNED when the linked account is not the caller's (or not active). Returns 201.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SavingGoalCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The saving goal view after the write. SavingGoalTouch lists only the changed keys; other keys as today.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavingGoalTouch"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
   /saving-goals/{id}:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
@@ -2718,6 +4879,108 @@ paths:
       x-breaking: Same as the list.
       x-used-by:
         - { page: goals-detail, calls: 1 }
+    put: {
+        "tags": [
+          "Saving goals"
+        ],
+        "summary": "Update a saving goal (partial)",
+        "operationId": "updateSavingGoal",
+        "description": "Partial update; `linked_account_id` and status are not editable. For description/note: key absent = unchanged, null or \"\" = cleared. A new `allocation_pct` on an active goal is checked against the other active goals on the account: 400 ALLOCATION_EXCEEDED when the sum would exceed 100. 404 NOT_FOUND when missing.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SavingGoalUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The saving goal view after the write. SavingGoalTouch lists only the changed keys; other keys as today.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavingGoalTouch"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    delete: {
+        "tags": [
+          "Saving goals"
+        ],
+        "summary": "Delete a saving goal (hard delete)",
+        "operationId": "deleteSavingGoal",
+        "description": "Hard-deletes the goal. 404 NOT_FOUND when missing or not the caller's.",
+        "responses": {
+          "200": {
+            "description": "Legacy envelope {success:true, message}; `data` is null so the key is omitted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "success",
+                    "message"
+                  ],
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "message": {
+                      "type": "string",
+                      "example": "Saving goal deleted"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
   /budgets:
     get:
       tags: [Touch-point]
@@ -2737,6 +5000,70 @@ paths:
       x-breaking: "category: CategorySummary -> CategoryRef (superset keys; additive in practice)."
       x-used-by:
         - { page: budgets-list, calls: 1 }
+    post: {
+        "tags": [
+          "Budgets"
+        ],
+        "summary": "Create a budget",
+        "operationId": "createBudget",
+        "description": "Creates a budget on an expense category. `currency` defaults to the user's currency, then THB. `name` absent/null/empty becomes the category's name. scope=project requires `project_id` and the caller must own the project; scope=user must not carry `project_id`. Period bounds and spent are computed in the timezone from the X-Timezone header, else the user's stored timezone, else Asia/Bangkok. Budget errors as today: 400 DUPLICATE_BUDGET (an active budget already exists for this category/period/scope), 400 INVALID_CATEGORY (category is income-type, a system category, or not owned by the budget's user), 403 FORBIDDEN (project-scope budget and the caller is not the project owner), 404 NOT_FOUND (budget not found or not visible). As today: the scope/project_id consistency checks return plain errors that surface as 500, not 400. Returns 201.",
+        "parameters": [
+          {
+            "name": "X-Timezone",
+            "in": "header",
+            "required": false,
+            "description": "IANA timezone name used to compute period bounds; falls back to the user's stored timezone, then Asia/Bangkok.",
+            "schema": {
+              "type": "string",
+              "example": "Asia/Bangkok"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BudgetCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The budget view after the write. BudgetTouch lists only the changed keys; other keys as today: id, user_id, category_id, scope, project_id, amount, period, currency, status, name, description, note, created_at, updated_at, current_period {start, end, spent, remaining, utilization_pct, over_limit}, child_breakdown [{category_id, name, spent}].",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetTouch"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (unexpected failure; also returned for service errors that are not mapped to a code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
   /scheduled-transactions:
     get:
       tags: [Touch-point]
@@ -2756,6 +5083,52 @@ paths:
       x-breaking: account / category become the shared refs (superset keys).
       x-used-by:
         - { page: scheduled-list, calls: 1 }
+    post: {
+        "tags": [
+          "Scheduled"
+        ],
+        "summary": "Create a scheduled transaction",
+        "operationId": "createScheduled",
+        "description": "Creates a recurring or installment schedule (status active). Returns 201 with the scheduled view. Error codes (400): VALIDATION_ERROR (bad body / id), ACCOUNT_NOT_OWNED (account not the caller's or not active), INVALID_CATEGORY (system category, wrong type or not owned), INSTALLMENT_FIELDS_REQUIRED, RECURRING_EXTRA_FIELDS, INVALID_TRANSITION. 404 NOT_FOUND when the schedule is not the caller's. Unmapped errors are 500.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduledCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created schedule (account / category embedded; other keys as today).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
   /personal-debts:
     get:
       tags: [Touch-point]
@@ -2783,6 +5156,52 @@ paths:
       x-breaking: "counterparty_person_name removed from responses; person: PersonRef added."
       x-used-by:
         - { page: debts-list, calls: 1 }
+    post: {
+        "tags": [
+          "Debts"
+        ],
+        "summary": "Create a manual debt",
+        "operationId": "createDebt",
+        "description": "Manual debt (no source transaction, not mirrored). Returns 201 with the bare debt row, no `outstanding` key (as today). 400 VALIDATION_ERROR (bad body), 400 CONTACT_NOT_FOUND (contact not the caller's).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DebtCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created debt (DebtRecord).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebtRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
   /personal-debts/{id}:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
@@ -2800,6 +5219,108 @@ paths:
       x-breaking: Same as the list.
       x-used-by:
         - { page: debt-detail, calls: 1 }
+    put: {
+        "tags": [
+          "Debts"
+        ],
+        "summary": "Edit a debt directly",
+        "operationId": "updateDebt",
+        "description": "Direct edit (barter, forgiveness, math fix). Returns the bare debt row without `outstanding`. 404 NOT_FOUND (not the caller's), 400 CONTACT_NOT_FOUND, 400 INVALID_SETTLED_AMOUNT. See DebtUpdateRequest for null-clearing and the settled-status caveat.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DebtUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated debt (DebtRecord).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebtRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    delete: {
+        "tags": [
+          "Debts"
+        ],
+        "summary": "Delete a debt",
+        "operationId": "deleteDebt",
+        "description": "Hard delete of the caller's debt row. Legacy envelope with no data. 404 NOT_FOUND if not the caller's. As today the handler only deletes the row (transactions that repaid it are not touched here).",
+        "responses": {
+          "200": {
+            "description": "{success:true, message:\"Personal debt deleted\"} (no data key).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "success",
+                    "message"
+                  ],
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "description": "Legacy envelope. `data` is omitted (nil, omitempty)."
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "500 INTERNAL_SERVER_ERROR (Error schema).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
   /personal-debts/people:
     get:
       tags: [Touch-point]
@@ -6474,6 +8995,2206 @@ components:
             "items": {
               "$ref": "#/components/schemas/Category"
             }
+          }
+        }
+      }
+    ProjectView: {
+        "type": "object",
+        "description": "A project (bare object). `members_count` counts members whose status is not `left`; it is present on create / get / list (omitted only when 0) and absent on the PUT response.",
+        "required": [
+          "id",
+          "owner_user_id",
+          "name",
+          "type",
+          "description",
+          "note",
+          "start_date",
+          "end_date",
+          "status",
+          "icon_code",
+          "planned_amount",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "owner_user_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free label, max 30."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_date": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Date"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "end_date": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Date"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "completed",
+              "cancelled",
+              "archived"
+            ]
+          },
+          "icon_code": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IconCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "planned_amount": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Plan-vs-actual single total; null = plan UI off. Display only, never a constraint."
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "members_count": {
+            "type": "integer",
+            "description": "Omitted when 0."
+          }
+        },
+        "example": {
+          "id": "0198f0a0-0000-7000-8000-000000000001",
+          "owner_user_id": "0198f0a0-0000-7000-8000-0000000000a1",
+          "name": "Chiang Mai trip",
+          "type": "trip",
+          "description": null,
+          "note": null,
+          "start_date": "2026-11-01",
+          "end_date": "2026-11-05",
+          "status": "active",
+          "icon_code": null,
+          "planned_amount": 20000,
+          "created_at": "2026-10-12T09:30:00Z",
+          "updated_at": "2026-10-12T09:30:00Z",
+          "members_count": 1
+        }
+      }
+    ProjectListResponse: {
+        "type": "object",
+        "required": [
+          "data",
+          "pagination"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectView"
+            }
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/Page"
+          }
+        }
+      }
+    ProjectCreateRequest: {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "Trimmed server-side."
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 30
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          },
+          "start_date": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Date"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "end_date": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Date"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "icon_code": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IconCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    ProjectUpdateRequest: {
+        "type": "object",
+        "description": "Partial update, owner only. Presence-tracked: `description`, `note` and `planned_amount` - key absent = unchanged; explicit null (or \"\" for the texts) = clear; a value = set. Other fields: absent or null = unchanged.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "type": {
+            "type": "string",
+            "maxLength": 30
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          },
+          "start_date": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "end_date": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "completed",
+              "cancelled",
+              "archived"
+            ]
+          },
+          "icon_code": {
+            "$ref": "#/components/schemas/IconCode"
+          },
+          "planned_amount": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "exclusiveMinimum": 0,
+            "description": "null clears the plan; a number must be > 0."
+          }
+        }
+      }
+    ProjectMember: {
+        "type": "object",
+        "description": "A project member. Linked = user_id set; ad-hoc = user_id null.",
+        "required": [
+          "id",
+          "project_id",
+          "user_id",
+          "display_name",
+          "role",
+          "status",
+          "icon_code",
+          "invited_at",
+          "joined_at",
+          "left_at",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "project_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "user_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "contributor",
+              "viewer"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "active",
+              "left"
+            ]
+          },
+          "icon_code": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IconCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "invited_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "joined_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "left_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/DateTime"
+          }
+        }
+      }
+    ProjectMemberListResponse: {
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectMember"
+            }
+          }
+        }
+      }
+    ProjectAddMemberRequest: {
+        "type": "object",
+        "description": "One of two variants: (a) `email` + `display_name` = invite by email (member status `pending`, notification sent when the email matches a user); (b) `ad_hoc: true` + `display_name` = ad-hoc member (status `active`, no user link). Anything else fails (500, as today).",
+        "properties": {
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "email"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "contributor",
+              "viewer"
+            ],
+            "default": "contributor",
+            "description": "`owner` passes validation but is rejected (500, as today); use transfer-ownership."
+          },
+          "ad_hoc": {
+            "type": "boolean"
+          },
+          "icon_code": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IconCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    ProjectUpdateMemberRequest: {
+        "type": "object",
+        "description": "Absent or null = unchanged.",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "contributor",
+              "viewer"
+            ],
+            "description": "`owner` passes validation but is rejected (500, as today); use transfer-ownership."
+          },
+          "icon_code": {
+            "$ref": "#/components/schemas/IconCode"
+          }
+        }
+      }
+    ProjectTransferOwnershipRequest: {
+        "type": "object",
+        "required": [
+          "new_owner_user_id"
+        ],
+        "properties": {
+          "new_owner_user_id": {
+            "$ref": "#/components/schemas/Uuid"
+          }
+        }
+      }
+    ProjectSplitInput: {
+        "type": "object",
+        "required": [
+          "member_id",
+          "amount"
+        ],
+        "properties": {
+          "member_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              }
+            ],
+            "description": "A member of the same project; must differ from the parent row's transaction_member_id."
+          },
+          "amount": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        }
+      }
+    ProjectTransaction: {
+        "type": "object",
+        "description": "A project (board) row. A parent has parent_project_transaction_id null; a split child points at its parent. Children inherit type / currency / date / note from the parent.",
+        "required": [
+          "id",
+          "project_id",
+          "parent_project_transaction_id",
+          "transaction_member_id",
+          "transaction_member",
+          "record_user_id",
+          "type",
+          "amount",
+          "currency",
+          "date",
+          "note",
+          "description",
+          "tags",
+          "marks",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "project_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "parent_project_transaction_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transaction_member_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "transaction_member": {
+            "$ref": "#/components/schemas/MemberRef"
+          },
+          "record_user_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "expense",
+              "income"
+            ]
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "currency": {
+            "$ref": "#/components/schemas/CurrencyCode"
+          },
+          "date": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Never null."
+          },
+          "marks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Uuid"
+            },
+            "description": "Member ids who marked the row resolved on the board."
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/DateTime"
+          }
+        }
+      }
+    ProjectCreateTransactionRequest: {
+        "type": "object",
+        "required": [
+          "transaction_member_id",
+          "type",
+          "amount",
+          "currency",
+          "date"
+        ],
+        "properties": {
+          "transaction_member_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              }
+            ],
+            "description": "The actor; must be a member of this project."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "expense",
+              "income"
+            ]
+          },
+          "amount": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "currency": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 3
+          },
+          "date": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "tags": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "maxLength": 40
+            },
+            "description": "Trimmed, blanks dropped, case-insensitive duplicates removed (first spelling kept)."
+          },
+          "splits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectSplitInput"
+            },
+            "description": "Sum must be <= amount (1 cent slack); the remainder is the actor's own share."
+          }
+        }
+      }
+    ProjectUpdateTransactionRequest: {
+        "type": "object",
+        "description": "Partial update of a parent row. `description` / `note`: absent = unchanged, null or \"\" clears. `tags` present = replaces (empty list clears). `splits` present = all existing children are deleted and the list re-inserted (empty list removes all); absent = children untouched.",
+        "properties": {
+          "amount": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "date": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "tags": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          "splits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectSplitInput"
+            }
+          }
+        }
+      }
+    ProjectMarkRequest: {
+        "type": "object",
+        "properties": {
+          "marked": {
+            "type": "boolean",
+            "description": "true adds the caller's member id to `marks`, false removes it. Missing = false."
+          }
+        }
+      }
+    ProjectCopyResult: {
+        "type": "object",
+        "required": [
+          "transaction_id"
+        ],
+        "properties": {
+          "transaction_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              }
+            ],
+            "description": "The caller's personal (floating, wallet-less) transaction made from the row; on a repeat call the existing copy's id."
+          }
+        }
+      }
+    ProjectMemberPosition: {
+        "type": "object",
+        "description": "One member's standing: paid = expense parents they recorded as actor; share = their split rows (a parent without splits counts fully as the actor's share); net = paid - share (> 0: others owe them). Income rows are left out.",
+        "required": [
+          "member_id",
+          "user_id",
+          "display_name",
+          "paid",
+          "share",
+          "net"
+        ],
+        "properties": {
+          "member_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "user_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "paid": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "share": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "net": {
+            "$ref": "#/components/schemas/Money"
+          }
+        }
+      }
+    ProjectTagTotal: {
+        "type": "object",
+        "description": "Expense parents grouped by tag; a row with several tags counts under each; untagged rows are name \"\".",
+        "required": [
+          "name",
+          "total",
+          "count"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "total": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "count": {
+            "type": "integer"
+          }
+        }
+      }
+    ProjectSummary: {
+        "type": "object",
+        "required": [
+          "project_id",
+          "total_expense",
+          "total_income",
+          "transaction_count",
+          "member_count",
+          "members",
+          "by_tag"
+        ],
+        "properties": {
+          "project_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "total_expense": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "total_income": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "transaction_count": {
+            "type": "integer",
+            "description": "Parent rows only."
+          },
+          "member_count": {
+            "type": "integer",
+            "description": "Active members."
+          },
+          "my_position": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProjectMemberPosition"
+              }
+            ],
+            "description": "Omitted when the caller has no linked member row in `members`."
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectMemberPosition"
+            },
+            "description": "Active members plus anyone who left but still has money in the project; ordered by paid desc then name."
+          },
+          "by_tag": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectTagTotal"
+            },
+            "description": "Ordered by total desc."
+          },
+          "planned_amount": {
+            "type": "number",
+            "description": "Present only when the project has a plan."
+          },
+          "spent_net": {
+            "type": "number",
+            "description": "Present with planned_amount: sum of expense parents minus sum of income parents."
+          },
+          "remaining": {
+            "type": "number",
+            "description": "Present with planned_amount: planned_amount - spent_net; may be negative."
+          }
+        }
+      }
+    ProjectTag: {
+        "type": "object",
+        "required": [
+          "name",
+          "count"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "description": "Parent rows carrying the tag."
+          }
+        }
+      }
+    ProjectTagListResponse: {
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectTag"
+            }
+          }
+        }
+      }
+    BudgetCreateRequest: {
+        "type": "object",
+        "required": [
+          "category_id",
+          "amount",
+          "period",
+          "scope"
+        ],
+        "properties": {
+          "category_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "amount": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "period": {
+            "type": "string",
+            "enum": [
+              "weekly",
+              "monthly",
+              "yearly"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "user",
+              "project"
+            ]
+          },
+          "project_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Required iff scope=project (caller must own the project); absent/null for scope=user."
+          },
+          "currency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 3,
+            "maxLength": 3,
+            "description": "Default: the user's currency, then THB."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 100,
+            "description": "Absent / null / \"\" = the category's name."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          }
+        },
+        "example": {
+          "category_id": "0191c2a0-0000-7000-8000-000000000001",
+          "amount": 5000,
+          "period": "monthly",
+          "scope": "user"
+        }
+      }
+    BudgetUpdateRequest: {
+        "type": "object",
+        "description": "All keys optional. For name/description/note a present null or \"\" clears the value; an absent key leaves it.",
+        "properties": {
+          "category_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Re-anchor on another expense category."
+          },
+          "amount": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "exclusiveMinimum": 0
+          },
+          "period": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "weekly",
+              "monthly",
+              "yearly",
+              null
+            ]
+          },
+          "currency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 3,
+            "maxLength": 3
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 100
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          }
+        }
+      }
+    BudgetCurrentPeriod: {
+        "type": "object",
+        "required": [
+          "start",
+          "end",
+          "spent",
+          "remaining",
+          "utilization_pct",
+          "over_limit"
+        ],
+        "properties": {
+          "start": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "end": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "spent": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "remaining": {
+            "type": "number",
+            "description": "amount minus spent (can be negative), 2 decimals."
+          },
+          "utilization_pct": {
+            "type": "number",
+            "description": "spent / amount * 100, 2 decimals; 0 when amount is 0."
+          },
+          "over_limit": {
+            "type": "boolean"
+          }
+        }
+      }
+    BudgetChildBreakdownRow: {
+        "type": "object",
+        "required": [
+          "category_id",
+          "name",
+          "spent"
+        ],
+        "properties": {
+          "category_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "spent": {
+            "$ref": "#/components/schemas/Money"
+          }
+        }
+      }
+    BudgetOverviewItem: {
+        "type": "object",
+        "required": [
+          "id",
+          "category_name",
+          "amount",
+          "spent",
+          "over_limit",
+          "utilization_pct"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "category_name": {
+            "type": "string",
+            "description": "\"(archived)\" when the category cannot be resolved."
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "spent": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "over_limit": {
+            "type": "boolean"
+          },
+          "utilization_pct": {
+            "type": "number"
+          }
+        }
+      }
+    BudgetOverview: {
+        "type": "object",
+        "required": [
+          "period",
+          "period_start",
+          "period_end",
+          "scope",
+          "project_id",
+          "total_budget",
+          "total_spent",
+          "total_remaining",
+          "overall_utilization_pct",
+          "budgets_over_limit",
+          "budgets"
+        ],
+        "properties": {
+          "period": {
+            "type": "string",
+            "description": "Echo of the query (default monthly)."
+          },
+          "period_start": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "period_end": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "scope": {
+            "type": "string",
+            "description": "Echo of the query (default user)."
+          },
+          "project_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "total_budget": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "total_spent": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "total_remaining": {
+            "type": "number"
+          },
+          "overall_utilization_pct": {
+            "type": "number"
+          },
+          "budgets_over_limit": {
+            "type": "integer"
+          },
+          "budgets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BudgetOverviewItem"
+            }
+          }
+        },
+        "example": {
+          "period": "monthly",
+          "period_start": "2026-10-01",
+          "period_end": "2026-10-31",
+          "scope": "user",
+          "project_id": null,
+          "total_budget": 8000,
+          "total_spent": 3200.5,
+          "total_remaining": 4799.5,
+          "overall_utilization_pct": 40.01,
+          "budgets_over_limit": 0,
+          "budgets": [
+            {
+              "id": "0191c2a0-0000-7000-8000-000000000002",
+              "category_name": "Food",
+              "amount": 8000,
+              "spent": 3200.5,
+              "over_limit": false,
+              "utilization_pct": 40.01
+            }
+          ]
+        }
+      }
+    SavingGoalCreateRequest: {
+        "type": "object",
+        "required": [
+          "name",
+          "target_amount",
+          "linked_account_id"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "target_amount": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "linked_account_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "allocation_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "exclusiveMinimum": 0,
+            "maximum": 100,
+            "description": "Default: the account's remaining capacity."
+          },
+          "deadline": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Date"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "icon_code": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IconCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          }
+        }
+      }
+    SavingGoalUpdateRequest: {
+        "type": "object",
+        "description": "All keys optional. For description/note a present null or \"\" clears the value; an absent key leaves it.",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "target_amount": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "exclusiveMinimum": 0
+          },
+          "allocation_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          },
+          "deadline": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Date"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "icon_code": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IconCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          }
+        }
+      }
+    SavingGoalAllocationGoal: {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "allocation_pct",
+          "current_amount"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "allocation_pct": {
+            "type": "number"
+          },
+          "current_amount": {
+            "type": "number",
+            "description": "account_balance * allocation_pct / 100, 2 decimals."
+          }
+        }
+      }
+    SavingGoalAccountAllocations: {
+        "type": "object",
+        "required": [
+          "account_id",
+          "account_balance",
+          "currency",
+          "active_goals",
+          "allocated_pct",
+          "unallocated_pct",
+          "unallocated_amount"
+        ],
+        "properties": {
+          "account_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "account_balance": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "currency": {
+            "$ref": "#/components/schemas/CurrencyCode"
+          },
+          "active_goals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SavingGoalAllocationGoal"
+            }
+          },
+          "allocated_pct": {
+            "type": "number"
+          },
+          "unallocated_pct": {
+            "type": "number",
+            "description": "100 minus allocated_pct."
+          },
+          "unallocated_amount": {
+            "type": "number"
+          }
+        },
+        "example": {
+          "account_id": "0191c2a0-0000-7000-8000-000000000001",
+          "account_balance": 10000,
+          "currency": "THB",
+          "active_goals": [
+            {
+              "id": "0191c2a0-0000-7000-8000-000000000003",
+              "name": "Trip",
+              "allocation_pct": 30,
+              "current_amount": 3000
+            }
+          ],
+          "allocated_pct": 30,
+          "unallocated_pct": 70,
+          "unallocated_amount": 7000
+        }
+      }
+    ScheduledView: {
+        "type": "object",
+        "description": "A scheduled transaction as returned by every scheduled write and by the detail read: the stored row plus the embedded account and category refs. Same object as ScheduledTouch with every key listed. `user_id` is returned. description / note are null when empty. Installment-only fields are null for `recurring`.",
+        "required": [
+          "id",
+          "user_id",
+          "account_id",
+          "name",
+          "type",
+          "entry_type",
+          "amount",
+          "category_id",
+          "billing_cycle",
+          "next_billing_date",
+          "day_of_month",
+          "status",
+          "description",
+          "note",
+          "total_amount",
+          "down_payment",
+          "total_installments",
+          "remaining_installments",
+          "interest_rate",
+          "icon_code",
+          "logo_url",
+          "created_at",
+          "updated_at",
+          "account",
+          "category"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "user_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "account_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "expense",
+              "income"
+            ]
+          },
+          "entry_type": {
+            "type": "string",
+            "enum": [
+              "recurring",
+              "installment"
+            ]
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "category_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "billing_cycle": {
+            "type": "string",
+            "enum": [
+              "daily",
+              "weekly",
+              "monthly",
+              "yearly"
+            ]
+          },
+          "next_billing_date": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "day_of_month": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "paused",
+              "cancelled",
+              "completed"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total_amount": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Money"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "down_payment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Money"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "total_installments": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "remaining_installments": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "interest_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "icon_code": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IconCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "account": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AccountRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "category": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CategoryRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "example": {
+          "id": "0191c2a0-0000-7000-8000-0000000000c1",
+          "name": "Netflix",
+          "type": "expense",
+          "entry_type": "recurring",
+          "amount": 419,
+          "billing_cycle": "monthly",
+          "next_billing_date": "2026-11-01",
+          "day_of_month": 1,
+          "status": "active",
+          "description": null,
+          "note": null,
+          "total_amount": null,
+          "down_payment": null,
+          "total_installments": null,
+          "remaining_installments": null,
+          "interest_rate": null
+        }
+      }
+    ScheduledCreateRequest: {
+        "type": "object",
+        "description": "`category_id` is required. entry_type=recurring rejects total_amount / down_payment / total_installments / remaining_installments / interest_rate (400 RECURRING_EXTRA_FIELDS). entry_type=installment requires total_amount and total_installments (400 INSTALLMENT_FIELDS_REQUIRED); remaining_installments may not exceed total_installments (400 VALIDATION_ERROR). day_of_month is computed from next_billing_date. Status starts active.",
+        "required": [
+          "name",
+          "type",
+          "entry_type",
+          "amount",
+          "account_id",
+          "category_id",
+          "billing_cycle",
+          "next_billing_date"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "amount": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "account_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "category_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "billing_cycle": {
+            "type": "string",
+            "enum": [
+              "daily",
+              "weekly",
+              "monthly",
+              "yearly"
+            ]
+          },
+          "next_billing_date": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          },
+          "total_amount": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "exclusiveMinimum": 0
+          },
+          "down_payment": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "total_installments": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "exclusiveMinimum": 0
+          },
+          "remaining_installments": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "interest_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 99.99
+          },
+          "icon_code": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IconCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "expense",
+              "income"
+            ]
+          },
+          "entry_type": {
+            "type": "string",
+            "enum": [
+              "recurring",
+              "installment"
+            ]
+          }
+        }
+      }
+    ScheduledUpdateRequest: {
+        "type": "object",
+        "description": "Partial; every key optional and absent keys are unchanged. `type`, `entry_type` and `status` are not editable (status moves through pause / resume / cancel). description and note are presence-tracked: key absent = unchanged, null or \"\" = cleared. For the other keys a null is the same as absent. remaining_installments may not exceed total_installments (effective values; 400 VALIDATION_ERROR). A new category must match the schedule's type.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "amount": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "account_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "category_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "billing_cycle": {
+            "type": "string",
+            "enum": [
+              "daily",
+              "weekly",
+              "monthly",
+              "yearly"
+            ]
+          },
+          "next_billing_date": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          },
+          "total_amount": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "exclusiveMinimum": 0
+          },
+          "down_payment": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "total_installments": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "exclusiveMinimum": 0
+          },
+          "remaining_installments": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "interest_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 99.99
+          },
+          "icon_code": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IconCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    ScheduledUpcomingItem: {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "next_billing_date",
+          "amount",
+          "days_until",
+          "overdue"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "expense",
+              "income"
+            ]
+          },
+          "next_billing_date": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "days_until": {
+            "type": "integer",
+            "description": "Whole days from the caller's today; negative when overdue."
+          },
+          "overdue": {
+            "type": "boolean",
+            "description": "days_until < 0."
+          }
+        }
+      }
+    ScheduledUpcomingResponse: {
+        "type": "object",
+        "description": "Bare object (not enveloped).",
+        "required": [
+          "data",
+          "total_expense_due",
+          "total_income_due"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScheduledUpcomingItem"
+            }
+          },
+          "total_expense_due": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "total_income_due": {
+            "$ref": "#/components/schemas/Money"
+          }
+        }
+      }
+    ScheduledHistoryItem: {
+        "type": "object",
+        "required": [
+          "id",
+          "amount",
+          "date",
+          "generated_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid",
+            "description": "The generated transaction id."
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "date": {
+            "$ref": "#/components/schemas/Date"
+          },
+          "generated_at": {
+            "$ref": "#/components/schemas/DateTime"
+          }
+        }
+      }
+    ScheduledHistoryResponse: {
+        "type": "object",
+        "description": "Bare object (not enveloped).",
+        "required": [
+          "data",
+          "total_generated",
+          "total_amount_generated"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScheduledHistoryItem"
+            }
+          },
+          "total_generated": {
+            "type": "integer"
+          },
+          "total_amount_generated": {
+            "$ref": "#/components/schemas/Money"
+          }
+        }
+      }
+    DebtRecord: {
+        "type": "object",
+        "description": "A personal debt row WITHOUT the computed `outstanding` key (returned by create / update / cancel / accept-split and inside the split-change result). The GET views add `outstanding` (see DebtTouch). `counterparty_person_name` is not returned; `person` carries the resolved name.",
+        "required": [
+          "id",
+          "user_id",
+          "direction",
+          "counterparty_contact_id",
+          "source_transaction_id",
+          "source_project_transaction_id",
+          "project_id",
+          "amount",
+          "settled_amount",
+          "currency",
+          "status",
+          "description",
+          "note",
+          "created_at",
+          "updated_at",
+          "counterpart_debt_id",
+          "person"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "user_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "i_owe",
+              "owed_to_me"
+            ]
+          },
+          "counterparty_contact_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_transaction_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_project_transaction_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "project_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "settled_amount": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "currency": {
+            "$ref": "#/components/schemas/CurrencyCode"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "settled",
+              "cancelled"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "counterpart_debt_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The mirror row in the other user's book (linked splits), else null."
+          },
+          "person": {
+            "$ref": "#/components/schemas/PersonRef"
+          }
+        }
+      }
+    DebtCreateRequest: {
+        "type": "object",
+        "required": [
+          "direction",
+          "counterparty_person_name",
+          "amount",
+          "currency"
+        ],
+        "properties": {
+          "direction": {
+            "type": "string",
+            "enum": [
+              "i_owe",
+              "owed_to_me"
+            ]
+          },
+          "counterparty_contact_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Must be one of the caller's own contacts (else 400 CONTACT_NOT_FOUND)."
+          },
+          "counterparty_person_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "Required typed name (snapshot); trimmed. The resolved name comes back in `person`."
+          },
+          "amount": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "currency": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 3,
+            "description": "Upper-cased on save."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          }
+        }
+      }
+    DebtUpdateRequest: {
+        "type": "object",
+        "description": "Partial. Absent key = unchanged. An explicit `null` CLEARS counterparty_contact_id, description and note (null-tracked); for the other keys null is the same as absent. settled_amount may not exceed the resulting amount (400 INVALID_SETTLED_AMOUNT). status=settled requires settled_amount >= amount (as today this plain error is NOT mapped, so it answers 500 INTERNAL_SERVER_ERROR).",
+        "properties": {
+          "counterparty_contact_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "counterparty_person_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "amount": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "exclusiveMinimum": 0
+          },
+          "settled_amount": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "currency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 3,
+            "maxLength": 3
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "open",
+              "settled",
+              "cancelled",
+              null
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          }
+        }
+      }
+    DebtSplitChangeResult: {
+        "type": "object",
+        "required": [
+          "result",
+          "debt"
+        ],
+        "properties": {
+          "result": {
+            "type": "string",
+            "enum": [
+              "updated",
+              "deleted",
+              "zeroed"
+            ],
+            "description": "updated = the caller's debt took the new amount; deleted = the person was removed and the debt (no repayments) is gone; zeroed = removed but it had repayments, so the debt stays at amount 0."
+          },
+          "debt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DebtRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "null when result=deleted."
           }
         }
       }
