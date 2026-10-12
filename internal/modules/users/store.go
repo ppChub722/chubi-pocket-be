@@ -40,9 +40,10 @@ func (s *Store) GetProfile(ctx context.Context, id uuid.UUID) (*Profile, error) 
 		WHERE u.id = $1`
 
 	var (
-		prof         Profile
-		iconBytes    []byte
-		prefRaw      []byte
+		prof      Profile
+		iconBytes []byte
+		prefRaw   []byte
+		prefs     map[string]any
 	)
 	err := s.db.QueryRow(ctx, q, id).Scan(
 		&prof.ID, &prof.Username, &prof.Email, &prof.EmailVerifiedAt, &prof.DisplayName,
@@ -61,9 +62,11 @@ func (s *Store) GetProfile(ctx context.Context, id uuid.UUID) (*Profile, error) 
 			return nil, fmt.Errorf("decode icon_code: %w", err)
 		}
 	}
-	if err := json.Unmarshal(prefRaw, &prof.Preferences); err != nil {
+	if err := json.Unmarshal(prefRaw, &prefs); err != nil {
 		return nil, fmt.Errorf("decode preferences: %w", err)
 	}
+	prof.Preferences = prefsFromMap(prefs)
+	prof.Status = apiStatus(prof.Status)
 	return &prof, nil
 }
 
@@ -76,7 +79,7 @@ func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfi
 	}
 	defer tx.Rollback(ctx)
 
-	if req.DisplayName != nil || req.IconCode != nil || req.Currency != nil || req.Email != nil {
+	if req.DisplayName != nil || req.IconCode != nil || req.Email != nil {
 		q := `UPDATE users SET updated_by_user_id = $1`
 		args := []any{id}
 
@@ -91,10 +94,6 @@ func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfi
 			}
 			args = append(args, b)
 			q += fmt.Sprintf(", icon_code = $%d::jsonb", len(args))
-		}
-		if req.Currency != nil {
-			args = append(args, *req.Currency)
-			q += fmt.Sprintf(", currency = $%d", len(args))
 		}
 		if req.Email != nil {
 			args = append(args, *req.Email)

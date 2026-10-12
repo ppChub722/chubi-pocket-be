@@ -11,6 +11,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/contacts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Service struct {
@@ -24,11 +25,19 @@ func NewService(store *Store, txs *transactions.Service) *Service {
 }
 
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateRequest) (*PersonalDebt, error) {
-	return s.store.Create(ctx, userID, req)
+	d, err := s.store.Create(ctx, userID, req)
+	if err != nil {
+		return nil, err
+	}
+	return d, s.fillPersons(ctx, userID, d)
 }
 
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*PersonalDebt, error) {
-	return s.store.GetByID(ctx, userID, id)
+	d, err := s.store.GetByID(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	return d, s.fillPersons(ctx, userID, d)
 }
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*ListResponse, error) {
@@ -45,6 +54,13 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*Li
 	if err != nil {
 		return nil, err
 	}
+	ptrs := make([]*PersonalDebt, len(rows))
+	for i := range rows {
+		ptrs[i] = &rows[i].PersonalDebt
+	}
+	if err := s.fillPersons(ctx, userID, ptrs...); err != nil {
+		return nil, err
+	}
 	totalPages := (total + f.PerPage - 1) / f.PerPage
 	if totalPages == 0 {
 		totalPages = 1
@@ -58,11 +74,19 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*Li
 }
 
 func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (*PersonalDebt, error) {
-	return s.store.Update(ctx, userID, id, req)
+	d, err := s.store.Update(ctx, userID, id, req)
+	if err != nil {
+		return nil, err
+	}
+	return d, s.fillPersons(ctx, userID, d)
 }
 
 func (s *Service) Cancel(ctx context.Context, userID, id uuid.UUID) (*PersonalDebt, error) {
-	return s.store.Cancel(ctx, userID, id)
+	d, err := s.store.Cancel(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	return d, s.fillPersons(ctx, userID, d)
 }
 
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
@@ -74,6 +98,8 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 type SettleResult struct {
 	Transaction any           `json:"transaction,omitempty"` // *transactions.TransactionDetail or nil
 	Debt        *PersonalDebt `json:"debt"`
+	// Post-commit balances of the wallets the payment moved (none: []).
+	AccountBalances []shared.WalletBalance `json:"account_balances"`
 }
 
 // Settle records a settlement event: always a transaction (income for
@@ -163,7 +189,18 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRe
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return &SettleResult{Transaction: created, Debt: updated}, nil
+	if err := s.fillPersons(ctx, userID, updated); err != nil {
+		return nil, err
+	}
+	var touched []uuid.UUID
+	if req.AccountID != nil {
+		touched = append(touched, *req.AccountID)
+	}
+	balances, err := shared.LoadWalletBalances(ctx, s.store.Pool(), touched)
+	if err != nil {
+		return nil, err
+	}
+	return &SettleResult{Transaction: created, Debt: updated, AccountBalances: balances}, nil
 }
 
 func (s *Service) People(ctx context.Context, userID uuid.UUID) (*PeopleResponse, error) {
@@ -345,4 +382,30 @@ func (s *Service) RestoreOnContactDeleteTx(
 	ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID,
 ) (int, error) {
 	return s.store.RestoreOnContactDeleteTx(ctx, tx, userID, contactID)
+}
+
+// fillPersons resolves each debt's counterparty into the shared PersonRef
+// (one query for the whole set): the contact's live name by the one name
+// rule; the stored snapshot only when there is no contact. userID owns the
+// contacts (the debts' owner).
+func (s *Service) fillPersons(ctx context.Context, userID uuid.UUID, debts ...*PersonalDebt) error {
+	var ids []uuid.UUID
+	for _, d := range debts {
+		if d != nil && d.CounterpartyContactID != nil {
+			ids = append(ids, *d.CounterpartyContactID)
+		}
+	}
+	persons, err := shared.LoadPersons(ctx, s.store.Pool(), userID, ids)
+	if err != nil {
+		return err
+	}
+	for _, d := range debts {
+		if d == nil {
+			continue
+		}
+		d.Person = shared.ResolvePerson(persons, shared.PersonKey{
+			ContactID: d.CounterpartyContactID, Snapshot: d.CounterpartyPersonName,
+		})
+	}
+	return nil
 }

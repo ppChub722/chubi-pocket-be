@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 const dateLayout = "2006-01-02"
@@ -197,9 +199,9 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 
 // Pause / Resume / Cancel — explicit transitions, no free PUT status.
 //
-//   active   → paused, cancelled
-//   paused   → active, cancelled
-//   completed/cancelled → (terminal)
+//	active   → paused, cancelled
+//	paused   → active, cancelled
+//	completed/cancelled → (terminal)
 func (s *Service) Pause(
 	ctx context.Context, userID, id uuid.UUID,
 ) (*ScheduledTransactionView, error) {
@@ -322,7 +324,12 @@ func (s *Service) GenerateNow(
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 
+	balances, err := shared.LoadWalletBalances(ctx, s.store.Pool(), []uuid.UUID{sched.AccountID})
+	if err != nil {
+		return nil, err
+	}
 	return &GenerateNowResponse{
+		AccountBalances: balances,
 		GeneratedTransaction: GeneratedTransaction{
 			ID:     txID,
 			Amount: sched.Amount,
@@ -461,23 +468,25 @@ func (s *Service) hydrate(
 			categoryIDs = append(categoryIDs, *r.CategoryID)
 		}
 	}
-	accSnaps, err := s.store.AccountSnapshots(ctx, userID, accountIDs)
+	accRefs, err := shared.LoadAccountRefs(ctx, s.store.Pool(), accountIDs)
 	if err != nil {
 		return nil, err
 	}
-	catSnaps, err := s.store.CategorySnapshots(ctx, userID, categoryIDs)
+	catRefs, err := shared.LoadCategoryRefs(ctx, s.store.Pool(), categoryIDs)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]ScheduledTransactionView, 0, len(rows))
 	for _, r := range rows {
 		v := ScheduledTransactionView{ScheduledTransaction: r}
-		if a, ok := accSnaps[r.AccountID]; ok {
-			v.Account = &AccountRef{ID: a.ID, Name: a.Name}
+		if a, ok := accRefs[r.AccountID]; ok {
+			a := a
+			v.Account = &a
 		}
 		if r.CategoryID != nil {
-			if c, ok := catSnaps[*r.CategoryID]; ok {
-				v.Category = &CategoryRef{ID: c.ID, Name: c.Name}
+			if c, ok := catRefs[*r.CategoryID]; ok {
+				c := c
+				v.Category = &c
 			}
 		}
 		out = append(out, v)

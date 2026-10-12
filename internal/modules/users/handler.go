@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
@@ -15,8 +16,7 @@ type Handler struct {
 	authService *auth.Service
 }
 
-// NewHandler — authService injected so PUT /v1/users/me/password can alias
-// /v1/auth/password (per phase0/be.md) without duplicating logic.
+// NewHandler. authService is kept for wiring compatibility (the PUT /users/me/password alias is gone).
 func NewHandler(s *Service, a *auth.Service) *Handler {
 	return &Handler{service: s, authService: a}
 }
@@ -67,34 +67,6 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	c.JSON(http.StatusOK, prof)
 }
 
-// PUT /v1/users/me/password — alias to /v1/auth/password (phase0/be.md).
-func (h *Handler) ChangePassword(c *gin.Context) {
-	id, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-
-	var req auth.ChangePasswordRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-		return
-	}
-
-	if err := h.authService.ChangePassword(c.Request.Context(), id, req); err != nil {
-		switch {
-		case errors.Is(err, auth.ErrWrongPassword):
-			response.Fail(c, http.StatusUnauthorized, "WRONG_PASSWORD", err.Error(), nil)
-		case errors.Is(err, auth.ErrSamePassword):
-			response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-		default:
-			response.InternalError(c, "Failed to change password", err.Error())
-		}
-		return
-	}
-	response.OK(c, "Password updated successfully", nil)
-}
-
 // POST /v1/users/me/deactivate
 func (h *Handler) Deactivate(c *gin.Context) {
 	id, ok := auth.UserIDFromContext(c)
@@ -107,7 +79,7 @@ func (h *Handler) Deactivate(c *gin.Context) {
 		response.InternalError(c, "Failed to deactivate", err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Account deactivated", "status": "inactive"})
+	h.respondProfile(c, id)
 }
 
 // POST /v1/users/me/reactivate
@@ -117,9 +89,13 @@ func (h *Handler) Reactivate(c *gin.Context) {
 		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
 		return
 	}
-	user, _ := auth.UserFromContext(c)
+	prof, err := h.service.GetProfile(c.Request.Context(), id)
+	if err != nil {
+		response.InternalError(c, "Failed to reactivate", err.Error())
+		return
+	}
 
-	if err := h.service.Reactivate(c.Request.Context(), id, user.Status); err != nil {
+	if err := h.service.Reactivate(c.Request.Context(), id, prof.Status); err != nil {
 		if errors.Is(err, ErrAlreadyActive) {
 			response.Fail(c, http.StatusBadRequest, "ALREADY_ACTIVE", "Account is already active", nil)
 			return
@@ -127,5 +103,14 @@ func (h *Handler) Reactivate(c *gin.Context) {
 		response.InternalError(c, "Failed to reactivate", err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Account reactivated", "status": "active"})
+	h.respondProfile(c, id)
+}
+
+func (h *Handler) respondProfile(c *gin.Context, id uuid.UUID) {
+	prof, err := h.service.GetProfile(c.Request.Context(), id)
+	if err != nil {
+		response.InternalError(c, "Failed to fetch profile", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, prof)
 }

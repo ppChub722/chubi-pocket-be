@@ -61,7 +61,7 @@ func (h *Handler) QuickCreate(c *gin.Context) {
 		mapQuickCreateError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, out)
+	c.JSON(http.StatusOK, out)
 }
 
 // GET /v1/projects
@@ -579,7 +579,7 @@ func (h *Handler) AddBills(c *gin.Context) {
 		mapQuickCreateError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, out)
+	c.JSON(http.StatusOK, out)
 }
 
 // DELETE /v1/projects/:id/bills/:transaction_id — take the caller's own

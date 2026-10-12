@@ -18,24 +18,23 @@ const (
 	TypeTransfer TxType = "transfer"
 )
 
-// Transaction is the DB row. 1b.1 added `source_split_id`; columns deferred to
-// 1b.2 / 1c are `project_id`, `source_project_transaction_id`,
-// `scheduled_transaction_id` — see migrations 000006 + 000013 +
-// product/phase1b/db.md.
+// Transaction is the DB row. AccountID / CategoryID / ProjectID are not sent
+// as-is (API spec v2): the response carries the resolved refs `account`,
+// `category`, `project` instead (TransactionDetail).
 type Transaction struct {
 	ID                         uuid.UUID  `json:"id"`
 	UserID                     uuid.UUID  `json:"user_id"`
-	AccountID                  *uuid.UUID `json:"account_id"` // nil = no wallet (floating)
+	AccountID                  *uuid.UUID `json:"-"` // nil = no wallet (floating)
 	Type                       TxType     `json:"type"`
 	Amount                     float64    `json:"amount"`
-	CategoryID                 *uuid.UUID `json:"category_id"`
+	CategoryID                 *uuid.UUID `json:"-"`
 	Date                       string     `json:"date"` // YYYY-MM-DD; calendar date in user's tz
 	Description                *string    `json:"description"`
 	Note                       *string    `json:"note"`
 	TransferGroupID            *uuid.UUID `json:"transfer_group_id"`
 	SourcePersonalDebtID       *uuid.UUID `json:"source_personal_debt_id"`
 	SourceProjectTransactionID *uuid.UUID `json:"source_project_transaction_id"`
-	ProjectID                  *uuid.UUID `json:"project_id"`
+	ProjectID                  *uuid.UUID `json:"-"`
 	CreatedAt                  time.Time  `json:"created_at"`
 	UpdatedAt                  time.Time  `json:"updated_at"`
 }
@@ -43,7 +42,8 @@ type Transaction struct {
 // SplitInput is the per-debtor row inside POST /v1/transactions{splits:[...]}.
 // Each entry materializes as one personal_debts row on the splitter's side
 // (direction='owed_to_me') + one mirror row on each linked debtor's side
-// (direction='i_owe'). See design/spec/12-personal-debts.md.
+// (direction='i_owe'). See design/spec/12-personal-debts.md. With a contact
+// the shown name follows the contact; PersonName is only the stored fallback.
 type SplitInput struct {
 	PersonName string     `json:"person_name" binding:"required,min=1,max=100"`
 	ContactID  *uuid.UUID `json:"contact_id"  binding:"omitempty"`
@@ -51,11 +51,12 @@ type SplitInput struct {
 }
 
 // SplitEdit — one row of PUT /v1/transactions/:id/splits. With debt_id it
-// keeps / re-amounts that existing split; person_name / contact_id on it
-// change the person in place (rename, another contact, or "contact_id":
-// null back to a free name) unless the split's contact is linked to an app
-// user. Left out = unchanged. Without debt_id it adds a person (same fields
-// as SplitInput).
+// keeps / re-amounts that existing split; contact_id on it switches / links
+// the contact ("contact_id": null back to a free name); person_name renames
+// a free-name split only — on a split with a contact it is ignored (the name
+// follows the contact; Service.EditSplits rewrites it before the hook runs).
+// Left out = unchanged. Without debt_id it adds a person (same fields as
+// SplitInput).
 type SplitEdit struct {
 	DebtID     *uuid.UUID `json:"debt_id"`
 	PersonName string     `json:"person_name" binding:"omitempty,max=100"`
@@ -87,62 +88,62 @@ type EditSplitsRequest struct {
 	Splits *[]SplitEdit `json:"splits" binding:"required,dive"`
 }
 
-// EmbeddedRef is a {id, name} pair used in list/get responses to embed the
-// referenced category or account name without forcing the client to JOIN.
-type EmbeddedRef struct {
-	ID   uuid.UUID `json:"id"`
-	Name string    `json:"name"`
+// SetTagsRequest — PUT /v1/transactions/:id/tags: the caller's whole new tag
+// set for the row ([] clears it).
+type SetTagsRequest struct {
+	TagIDs *[]uuid.UUID `json:"tag_ids" binding:"required"`
 }
 
-// SplitRef — one personal_debts row a split-bill transaction made.
+// SplitRef — one personal_debts row a split-bill transaction made (spec
+// schema Split). Person is resolved by the one person-name rule
+// (shared.PersonNameSQL); DisplayName (JSON person_name) = Person.Name.
 type SplitRef struct {
-	DebtID        uuid.UUID  `json:"debt_id"`
-	PersonName    string     `json:"person_name"`
-	ContactID     *uuid.UUID `json:"contact_id"`
-	Direction     string     `json:"direction"`
-	Amount        float64    `json:"amount"`
-	SettledAmount float64    `json:"settled_amount"`
-	Status        string     `json:"status"`
+	DebtID        uuid.UUID        `json:"debt_id"`
+	Person        shared.PersonRef `json:"person"`
+	DisplayName   string           `json:"person_name"`
+	Direction     string           `json:"direction"`
+	Amount        float64          `json:"amount"`
+	SettledAmount float64          `json:"settled_amount"`
+	Status        string           `json:"status"`
+
+	// PersonName — the stored snapshot (counterparty_person_name); ContactID
+	// — the stored contact. Go-side only (the response shows Person).
+	PersonName string     `json:"-"`
+	ContactID  *uuid.UUID `json:"-"`
 }
 
-// EmbeddedTag enriches a tag ref with icon_code so the FE can render
-// chips inline without a second lookup against its own tags cache.
-type EmbeddedTag struct {
-	ID       uuid.UUID        `json:"id"`
-	Name     string           `json:"name"`
-	IconCode *shared.IconCode `json:"icon_code"`
+// TransferPeer — the other row of a transfer (spec schema TransferPeer).
+// Direction is THIS row's direction (out = the money leaves this wallet).
+type TransferPeer struct {
+	ID        uuid.UUID         `json:"id"`
+	Direction string            `json:"direction"`
+	Account   shared.AccountRef `json:"account"`
 }
 
-// AuthorRef is the denormalized row author embedded on shared-wallet
-// rows (pinned §14 contract) so the FE renders "who logged it" without a
-// second lookup.
-type AuthorRef struct {
-	UserID      uuid.UUID        `json:"user_id"`
-	DisplayName string           `json:"display_name"`
-	IconCode    *shared.IconCode `json:"icon_code"`
-}
-
-// CategoryRender is the read-only rendering of the AUTHOR's category on
-// a shared-wallet row — other members see name + icon but the category
-// itself belongs to the author's taxonomy (spec §14/1.2).
-type CategoryRender struct {
-	Name     string           `json:"name"`
-	IconCode *shared.IconCode `json:"icon_code"`
-}
-
-// TransactionDetail mirrors `Transaction` plus embedded refs + derived flags.
-// Used by GET /v1/transactions and GET /v1/transactions/:id.
+// TransactionDetail is the page-ready row (spec schema Transaction): the
+// same shape in lists, detail and write responses. Built by buildDetails.
 type TransactionDetail struct {
 	Transaction
-	Account      *EmbeddedRef  `json:"account,omitempty"`
-	Category     *EmbeddedRef  `json:"category,omitempty"`
-	Tags         []EmbeddedTag `json:"tags"`
-	HasSplits    bool          `json:"has_splits"`
-	SplitCount   int           `json:"split_count"`
+	// The wallet's currency, else the author's (users.currency).
+	Currency string             `json:"currency"`
+	Account  *shared.AccountRef `json:"account"`
+	// The AUTHOR's category (on a shared wallet other members see it
+	// read-only; see CanEditCategory).
+	Category     *shared.CategoryRef `json:"category"`
+	Tags         []shared.TagRef     `json:"tags"` // the caller's tags on the row
+	Project      *shared.EventRef    `json:"project"`
+	TransferPeer *TransferPeer       `json:"transfer_peer"` // transfer rows only
+	IsRepayment  bool                `json:"is_repayment"`  // source_personal_debt_id is set
 	// The author's share (spec 12 §4.5, shared.ShareAmountExpr): amount −
 	// what others owe on it (split debts, an event row's member splits).
-	// Expense / income only; what reports and budgets count.
-	MyShare *float64 `json:"my_share,omitempty"`
+	// Expense / income only (nil = null for transfers); what reports and
+	// budgets count.
+	MyShare *float64 `json:"my_share"`
+	// The debts this row made in its author's book.
+	SplitCount int `json:"split_count"`
+	// The caller's split debts on the row — detail and write responses
+	// only (nil = null on list rows; [] when none).
+	Splits *[]SplitRef `json:"splits"`
 	// What the caller may do with the row's splits / events (the BE's own
 	// rules, so the client doesn't re-derive them):
 	//   can_split       — the row can carry personal splits at all: expense /
@@ -160,34 +161,40 @@ type TransactionDetail struct {
 	CanSplit      bool `json:"can_split"`
 	CanEditSplits bool `json:"can_edit_splits"`
 	CanJoinEvent  bool `json:"can_join_event"`
-	// The debts this row made in the caller's book — GET /:id only (nil =
-	// key absent on list rows).
-	Splits  *[]SplitRef  `json:"splits,omitempty"`
-	Project *EmbeddedRef `json:"project,omitempty"`
-	IsRecurring  bool          `json:"is_recurring"`
-	IsResolve    bool          `json:"is_resolve"`
-	// Set on POST response only — not returned in lists.
-	AccountBalanceAfter *float64 `json:"account_balance_after,omitempty"`
-	// Shared-wallet decorations (pinned §14 contract). Present only on
-	// rows whose account has more than one active member.
-	CreatedBy       *AuthorRef      `json:"created_by,omitempty"`
-	CategoryRender  *CategoryRender `json:"category_render,omitempty"`
-	IsLocked        *bool           `json:"is_locked,omitempty"`
-	CanEditCategory *bool           `json:"can_edit_category,omitempty"`
+	// Shared wallets (spec §14): created_by is set on rows of a wallet with
+	// more than one active member. is_locked — the row sits on a wallet the
+	// caller is no longer an active member of (read-only for them).
+	// can_edit_category — the caller is the author, the row isn't locked and
+	// its category is a user one (expense / income, not a repayment, system
+	// or transfer row).
+	CreatedBy       *shared.UserRef `json:"created_by"`
+	IsLocked        bool            `json:"is_locked"`
+	CanEditCategory bool            `json:"can_edit_category"`
+
+	// HasSplits — SplitCount > 0 (Go-side convenience).
+	HasSplits bool `json:"-"`
 }
 
-// TransferResponse is returned by `POST /v1/transactions` (and
-// `PUT /v1/transactions/:id` when the targeted row is a transfer).
-//
-// Both rows are returned in full TransactionDetail shape so the client
-// can patch its cache surgically — every transfer mutation touches two
-// rows and two account balances; without both rows the destination's
-// balance display would lag until the next list refresh.
-//
-// Spec §3.1: "for transfers, response includes both rows."
+// TransferResponse — both rows of a transfer (OUT first, IN second), as
+// Create / Update return them to Go callers. The HTTP responses use
+// WriteResult.
 type TransferResponse struct {
 	TransferGroupID uuid.UUID           `json:"transfer_group_id"`
 	Rows            []TransactionDetail `json:"rows"`
+}
+
+// WriteResult — what a transaction write returns over HTTP (spec schema
+// TransactionWriteResult): the row(s) in their final state (both rows of a
+// transfer, OUT first) and the post-write balance of every wallet touched.
+type WriteResult struct {
+	Rows            []TransactionDetail    `json:"rows"`
+	AccountBalances []shared.WalletBalance `json:"account_balances"`
+}
+
+// DeleteResult — DELETE /transactions/:id (spec DeleteTransactionResult).
+type DeleteResult struct {
+	ID              uuid.UUID              `json:"id"`
+	AccountBalances []shared.WalletBalance `json:"account_balances"`
 }
 
 type CreateRequest struct {
@@ -199,11 +206,14 @@ type CreateRequest struct {
 	Description         *string    `json:"description"             binding:"omitempty,max=200"`
 	Note                *string    `json:"note"                    binding:"omitempty,max=500"`
 	TransferToAccountID *uuid.UUID `json:"transfer_to_account_id"  binding:"omitempty"`
+	// TagIDs — the caller's tags, attached in the same DB transaction (a
+	// transfer's go on its OUT row).
+	TagIDs []uuid.UUID `json:"tag_ids" binding:"omitempty"`
 
-	// 1b.1 wires Splits + MyShare. ProjectID stays rejected from clients —
-	// it's auto-derived from SourceProjectTransactionID when set (project
-	// resolve flow). Direct project_id from the body would let any caller
-	// link a personal row to any project they don't belong to.
+	// ProjectID is not accepted (events are joined through the bills
+	// endpoints): a non-nil value is rejected with ErrProjectIDNotAllowed.
+	// The project resolve flow uses SourceProjectTransactionID and the BE
+	// derives the project.
 	Splits                     []SplitInput `json:"splits"                         binding:"omitempty,dive"`
 	MyShare                    *float64     `json:"my_share"                       binding:"omitempty,gt=0"`
 	ProjectID                  *uuid.UUID   `json:"project_id"                     binding:"omitempty"`
@@ -211,16 +221,18 @@ type CreateRequest struct {
 }
 
 // UpdateRequest — partial. Editable: amount, date, category_id, note,
-// account_id (move wallet), transfer_to_account_id (move transfer IN side).
+// account_id (move wallet), transfer_to_account_id (move transfer IN side),
+// tag_ids (present = replace the caller's tag set on the row).
 // type / transfer_group_id still immutable (delete + recreate).
 type UpdateRequest struct {
-	Amount              *float64   `json:"amount"                  binding:"omitempty,gt=0"`
-	Date                *string    `json:"date"                    binding:"omitempty,datetime=2006-01-02"`
-	CategoryID          *uuid.UUID `json:"category_id"             binding:"omitempty"`
-	Description         *string    `json:"description"             binding:"omitempty,max=200"`
-	Note                *string    `json:"note"                    binding:"omitempty,max=500"`
-	AccountID           *uuid.UUID `json:"account_id"              binding:"omitempty"`
-	TransferToAccountID *uuid.UUID `json:"transfer_to_account_id"  binding:"omitempty"`
+	Amount              *float64    `json:"amount"                  binding:"omitempty,gt=0"`
+	Date                *string     `json:"date"                    binding:"omitempty,datetime=2006-01-02"`
+	CategoryID          *uuid.UUID  `json:"category_id"             binding:"omitempty"`
+	Description         *string     `json:"description"             binding:"omitempty,max=200"`
+	Note                *string     `json:"note"                    binding:"omitempty,max=500"`
+	AccountID           *uuid.UUID  `json:"account_id"              binding:"omitempty"`
+	TransferToAccountID *uuid.UUID  `json:"transfer_to_account_id"  binding:"omitempty"`
+	TagIDs              []uuid.UUID `json:"tag_ids"                 binding:"omitempty"`
 
 	// Track presence so callers can explicitly clear nullable fields.
 	categoryIDPresent          bool
@@ -228,6 +240,7 @@ type UpdateRequest struct {
 	notePresent                bool
 	accountIDPresent           bool
 	transferToAccountIDPresent bool
+	tagIDsPresent              bool
 }
 
 func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
@@ -244,13 +257,14 @@ func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
 	_, r.notePresent = probe["note"]
 	_, r.accountIDPresent = probe["account_id"]
 	_, r.transferToAccountIDPresent = probe["transfer_to_account_id"]
+	_, r.tagIDsPresent = probe["tag_ids"]
 	return nil
 }
 
 // CategoryIDChange returns (newID, true) when the request asked to change
 // category_id (newID may be nil → clear). (nil, false) means "leave unchanged".
 func (r *UpdateRequest) CategoryIDChange() (*uuid.UUID, bool) {
-	return r.CategoryID, r.categoryIDPresent
+	return r.CategoryID, r.categoryIDPresent || r.CategoryID != nil
 }
 
 // DescriptionChange / NoteChange: (value, true) when the body carried the
@@ -274,12 +288,19 @@ func (r *UpdateRequest) SetText(description, note *string) {
 // AccountIDChange returns (newID, true) when account_id was present in the
 // request body (newID may be nil → clear to floating). (nil, false) = unchanged.
 func (r *UpdateRequest) AccountIDChange() (*uuid.UUID, bool) {
-	return r.AccountID, r.accountIDPresent
+	return r.AccountID, r.accountIDPresent || r.AccountID != nil
 }
 
 // TransferToAccountIDChange follows the same convention for the IN side of a transfer.
 func (r *UpdateRequest) TransferToAccountIDChange() (*uuid.UUID, bool) {
 	return r.TransferToAccountID, r.transferToAccountIDPresent
+}
+
+// TagIDsChange returns (ids, true) when tag_ids was in the body: the row's
+// tag set (the caller's tags) is replaced by ids (null / [] clears). A
+// non-nil TagIDs set in Go counts too.
+func (r *UpdateRequest) TagIDsChange() ([]uuid.UUID, bool) {
+	return r.TagIDs, r.tagIDsPresent || r.TagIDs != nil
 }
 
 type ListFilter struct {
@@ -294,16 +315,9 @@ type ListFilter struct {
 	TagIDs          []uuid.UUID // rows having ANY of these tags
 	IncludeChildren bool        // with CategoryID: also its subcategories
 	Uncategorized   bool        // only rows with no category
-	Page       int
-	PerPage    int
-	Sort       string // date_desc | date_asc | amount_desc | amount_asc
-}
-
-type Pagination struct {
-	Page       int `json:"page"`
-	PerPage    int `json:"per_page"`
-	Total      int `json:"total"`
-	TotalPages int `json:"total_pages"`
+	Page            int
+	PerPage         int
+	Sort            string // date_desc | date_asc | amount_desc | amount_asc
 }
 
 // Totals — money over the WHOLE filtered set (every page), same WHERE as
@@ -316,9 +330,10 @@ type Totals struct {
 	Count   int     `json:"count"`
 }
 
+// ListResponse — spec schema TransactionList.
 type ListResponse struct {
 	Data       []TransactionDetail `json:"data"`
-	Pagination Pagination          `json:"pagination"`
+	Pagination shared.Page         `json:"pagination"`
 	Totals     Totals              `json:"totals"`
 }
 
@@ -331,16 +346,23 @@ type SummaryRequest struct {
 	GroupBy    string  // empty | day | week | month | category | parent_category | account
 }
 
+// SummaryGroup — spec schema SummaryGroup. Account is set for
+// group_by=account, Category for category / parent_category (null for the
+// uncategorized group and for date groups).
 type SummaryGroup struct {
-	Key   string  `json:"key"`
-	Name  string  `json:"name,omitempty"`
-	Total float64 `json:"total"`
-	Count int     `json:"count"`
+	Key      string              `json:"key"`
+	Name     string              `json:"name"`
+	Account  *shared.AccountRef  `json:"account"`
+	Category *shared.CategoryRef `json:"category"`
+	Total    float64             `json:"total"`
+	Count    int                 `json:"count"`
 	// Income / Expense split the group's total by row type (contract §2).
 	Income  float64 `json:"income"`
 	Expense float64 `json:"expense"`
 }
 
+// SummaryResponse — spec schema TransactionSummary (groups is [] without
+// group_by).
 type SummaryResponse struct {
 	From             string         `json:"from"`
 	To               string         `json:"to"`
@@ -349,5 +371,5 @@ type SummaryResponse struct {
 	TotalExpense     float64        `json:"total_expense"`
 	Net              float64        `json:"net"`
 	TransactionCount int            `json:"transaction_count"`
-	Groups           []SummaryGroup `json:"groups,omitempty"`
+	Groups           []SummaryGroup `json:"groups"`
 }

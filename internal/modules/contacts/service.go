@@ -35,11 +35,11 @@ type UnlinkedName struct {
 }
 
 type Service struct {
-	store     *Store
-	notifs    *notifications.Service
-	absorber  SplitsAbsorber
-	restorer  SplitsRestorer
-	unlinked  UnlinkedNamesProvider
+	store    *Store
+	notifs   *notifications.Service
+	absorber SplitsAbsorber
+	restorer SplitsRestorer
+	unlinked UnlinkedNamesProvider
 }
 
 func NewService(s *Store) *Service {
@@ -49,9 +49,9 @@ func NewService(s *Store) *Service {
 // WithNotificationService wires the notifications dep post-construction. Until
 // it's set, the link-request endpoints return a 500 with a clear "module not
 // wired" message — preferable to nil-deref.
-func (s *Service) WithNotificationService(n *notifications.Service) { s.notifs = n }
-func (s *Service) WithSplitsAbsorber(fn SplitsAbsorber)             { s.absorber = fn }
-func (s *Service) WithSplitsRestorer(fn SplitsRestorer)             { s.restorer = fn }
+func (s *Service) WithNotificationService(n *notifications.Service)   { s.notifs = n }
+func (s *Service) WithSplitsAbsorber(fn SplitsAbsorber)               { s.absorber = fn }
+func (s *Service) WithSplitsRestorer(fn SplitsRestorer)               { s.restorer = fn }
 func (s *Service) WithUnlinkedNamesProvider(fn UnlinkedNamesProvider) { s.unlinked = fn }
 
 // Create inserts a new contact. When absorb_names is set and the splits
@@ -77,15 +77,23 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateContac
 
 // Absorb wraps the splits absorber for the standalone POST /:id/absorb
 // endpoint. Returns 501-style error if the hook isn't wired.
-func (s *Service) Absorb(ctx context.Context, userID, id uuid.UUID, names []string) (int, error) {
+func (s *Service) Absorb(ctx context.Context, userID, id uuid.UUID, names []string) (*AbsorbResult, error) {
 	// Confirm the contact exists + is owned before delegating.
 	if _, err := s.store.GetByID(ctx, userID, id); err != nil {
-		return 0, err
+		return nil, err
 	}
 	if s.absorber == nil {
-		return 0, fmt.Errorf("absorb not wired: splits module missing")
+		return nil, fmt.Errorf("absorb not wired: splits module missing")
 	}
-	return s.absorber(ctx, userID, id, names)
+	n, err := s.absorber(ctx, userID, id, names)
+	if err != nil {
+		return nil, err
+	}
+	c, err := s.store.GetByID(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	return &AbsorbResult{Contact: *c, AbsorbedCount: n}, nil
 }
 
 // UnlinkedNames returns the (name, count) list. Returns empty when the
@@ -99,6 +107,45 @@ func (s *Service) UnlinkedNames(ctx context.Context, userID uuid.UUID) ([]Unlink
 
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Contact, error) {
 	return s.store.GetByID(ctx, userID, id)
+}
+
+// GetDetail is the contact page's read: the contact, plus the absorbable
+// free-text names when withUnlinkedNames (else UnlinkedNames stays nil =
+// JSON null).
+func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, withUnlinkedNames bool) (*ContactDetail, error) {
+	c, err := s.store.GetByID(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	d := &ContactDetail{Contact: *c}
+	if withUnlinkedNames {
+		names, err := s.UnlinkedNames(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		if names == nil {
+			names = []UnlinkedName{}
+		}
+		d.UnlinkedNames = names
+	}
+	return d, nil
+}
+
+// linkResult builds the LinkRequestResult of a link-request action: the
+// notification in its new state and the badges (read after commit).
+func (s *Service) linkResult(ctx context.Context, userID, notificationID uuid.UUID, c *Contact) (*LinkRequestResult, error) {
+	nv, err := shared.LoadNotificationView(ctx, s.store.Pool(), userID, notificationID)
+	if err != nil {
+		return nil, err
+	}
+	if nv == nil {
+		return nil, notifications.ErrNotificationNotFound
+	}
+	badges, err := shared.LoadBadges(ctx, s.store.Pool(), userID)
+	if err != nil {
+		return nil, err
+	}
+	return &LinkRequestResult{Contact: c, Notification: nv, Badges: badges}, nil
 }
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Contact, error) {
@@ -165,17 +212,17 @@ type RequestLinkResponse struct {
 // `contact_link_request` notification iff there's a hit. In both branches
 // the lookup runs and the response is identical (privacy preservation per
 // spec §07/§4.3).
-func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) (RequestLinkResponse, error) {
+func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) (*Contact, error) {
 	if s.notifs == nil {
-		return RequestLinkResponse{}, errors.New("notifications module not wired")
+		return nil, errors.New("notifications module not wired")
 	}
 
 	contact, err := s.store.GetByID(ctx, userID, contactID)
 	if err != nil {
-		return RequestLinkResponse{}, err
+		return nil, err
 	}
 	if contact.LinkedUserID != nil {
-		return RequestLinkResponse{}, ErrAlreadyLinked
+		return nil, ErrAlreadyLinked
 	}
 
 	// Always-execute lookup. Constant-time intent: same code path runs on
@@ -185,7 +232,7 @@ func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) 
 	if contact.Email != nil && *contact.Email != "" {
 		matchedUser, err = s.notifs.LookupUserByEmail(ctx, *contact.Email)
 		if err != nil {
-			return RequestLinkResponse{}, fmt.Errorf("lookup: %w", err)
+			return nil, fmt.Errorf("lookup: %w", err)
 		}
 	}
 
@@ -201,10 +248,10 @@ func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) 
 			ctx, *matchedUser, userID, contactID,
 		)
 		if err != nil {
-			return RequestLinkResponse{}, err
+			return nil, err
 		}
 		if pending {
-			return RequestLinkResponse{Message: "Link request sent"}, nil
+			return contact, nil
 		}
 
 		// Look up sender's display name for the payload.
@@ -214,7 +261,7 @@ func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) 
 
 		tx, err := s.store.Pool().Begin(ctx)
 		if err != nil {
-			return RequestLinkResponse{}, fmt.Errorf("begin: %w", err)
+			return nil, fmt.Errorf("begin: %w", err)
 		}
 		defer tx.Rollback(ctx)
 
@@ -226,15 +273,15 @@ func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) 
 				SenderDisplayName: senderName,
 			},
 		); err != nil {
-			return RequestLinkResponse{}, err
+			return nil, err
 		}
 		if err := tx.Commit(ctx); err != nil {
-			return RequestLinkResponse{}, fmt.Errorf("commit: %w", err)
+			return nil, fmt.Errorf("commit: %w", err)
 		}
 	}
 
 	// Privacy: same response shape on hit and miss.
-	return RequestLinkResponse{Message: "Link request sent"}, nil
+	return contact, nil
 }
 
 // AcceptLinkRequest is called by the recipient. Reads the
@@ -242,7 +289,7 @@ func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) 
 // validates uniqueness in both directions, sets the contact's
 // linked_user_id = caller, and marks the notification actioned. All in
 // one tx.
-func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID uuid.UUID) (*Contact, error) {
+func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID uuid.UUID) (*LinkRequestResult, error) {
 	if s.notifs == nil {
 		return nil, errors.New("notifications module not wired")
 	}
@@ -258,13 +305,13 @@ func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID 
 		return nil, err
 	}
 	if n.Type != notifications.TypeContactLinkRequest {
-		return nil, fmt.Errorf("notification is not a contact_link_request")
+		return nil, ErrNotLinkRequest
 	}
 	if n.ActionedAt != nil || n.DismissedAt != nil {
 		// Idempotent re-accept: re-emit success on already-actioned. Reject
 		// if the notification was previously dismissed.
 		if n.DismissedAt != nil {
-			return nil, errors.New("notification was previously dismissed")
+			return nil, ErrRequestRejected
 		}
 	}
 
@@ -295,7 +342,7 @@ func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID 
 		return nil, ErrAlreadyLinked
 	}
 
-	updated, err := s.store.SetLinkedUserIDTx(ctx, tx, p.SenderUserID, p.ContactID, userID)
+	_, err = s.store.SetLinkedUserIDTx(ctx, tx, p.SenderUserID, p.ContactID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -314,34 +361,39 @@ func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return updated, nil
+	// The linked contact is the SENDER's; the recipient has none yet (they
+	// create or link one next), so no contact is returned.
+	return s.linkResult(ctx, userID, notificationID, nil)
 }
 
 // RejectLinkRequest marks the notification dismissed — the inbox hides
 // dismissed rows entirely (different from Accept, which leaves the row
 // visible-but-actioned for the post-accept tap flow). The sender is
 // not notified; rejection is silent on the sender's side.
-func (s *Service) RejectLinkRequest(ctx context.Context, userID, notificationID uuid.UUID) error {
+func (s *Service) RejectLinkRequest(ctx context.Context, userID, notificationID uuid.UUID) (*LinkRequestResult, error) {
 	if s.notifs == nil {
-		return errors.New("notifications module not wired")
+		return nil, errors.New("notifications module not wired")
 	}
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin: %w", err)
+		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
 	n, err := s.notifs.GetByIDForCallerTx(ctx, tx, userID, notificationID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if n.Type != notifications.TypeContactLinkRequest {
-		return fmt.Errorf("notification is not a contact_link_request")
+		return nil, ErrNotLinkRequest
 	}
 	if _, err := s.notifs.MarkDismissedTx(ctx, tx, userID, notificationID); err != nil {
-		return err
+		return nil, err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.linkResult(ctx, userID, notificationID, nil)
 }
 
 // Unlink clears linked_user_id. Splits keep their contact_id; the linked
@@ -370,10 +422,10 @@ func (s *Service) GetSenderProfile(
 		return nil, err
 	}
 	if n.Type != notifications.TypeContactLinkRequest {
-		return nil, errors.New("notification is not a contact_link_request")
+		return nil, ErrNotLinkRequest
 	}
 	if n.DismissedAt != nil {
-		return nil, errors.New("notification was rejected")
+		return nil, ErrRequestRejected
 	}
 	if n.ActorUserID == nil {
 		return nil, errors.New("notification has no actor")
@@ -394,6 +446,9 @@ func (s *Service) GetSenderProfile(
 			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
 		}
 	}
+	if p.ContactID, err = s.store.ContactLinkedTo(ctx, userID, p.ID); err != nil {
+		return nil, err
+	}
 	return &p, nil
 }
 
@@ -405,7 +460,7 @@ func (s *Service) GetSenderProfile(
 // icon come from the form.
 func (s *Service) CreateLinkedContactFromLinkRequest(
 	ctx context.Context, userID, notificationID uuid.UUID, req CreateLinkedContactRequest,
-) (*Contact, error) {
+) (*LinkRequestResult, error) {
 	if s.notifs == nil {
 		return nil, errors.New("notifications module not wired")
 	}
@@ -442,7 +497,7 @@ func (s *Service) CreateLinkedContactFromLinkRequest(
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return created, nil
+	return s.linkResult(ctx, userID, notificationID, created)
 }
 
 // LinkExistingContactFromLinkRequest is the post-accept "I already have
@@ -456,7 +511,7 @@ func (s *Service) CreateLinkedContactFromLinkRequest(
 func (s *Service) LinkExistingContactFromLinkRequest(
 	ctx context.Context, userID, notificationID, contactID uuid.UUID,
 	req LinkExistingContactRequest,
-) (*Contact, error) {
+) (*LinkRequestResult, error) {
 	if s.notifs == nil {
 		return nil, errors.New("notifications module not wired")
 	}
@@ -526,7 +581,7 @@ func (s *Service) LinkExistingContactFromLinkRequest(
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return updated, nil
+	return s.linkResult(ctx, userID, notificationID, updated)
 }
 
 // verifyAcceptedLinkRequestTx is the shared gate for both post-accept
@@ -546,13 +601,13 @@ func (s *Service) verifyAcceptedLinkRequestTx(
 		return uuid.Nil, err
 	}
 	if n.Type != notifications.TypeContactLinkRequest {
-		return uuid.Nil, errors.New("notification is not a contact_link_request")
+		return uuid.Nil, ErrNotLinkRequest
 	}
 	if n.ActionedAt == nil {
-		return uuid.Nil, errors.New("notification has not been accepted")
+		return uuid.Nil, ErrNotAccepted
 	}
 	if n.DismissedAt != nil {
-		return uuid.Nil, errors.New("notification was rejected")
+		return uuid.Nil, ErrRequestRejected
 	}
 	if n.ActorUserID == nil {
 		return uuid.Nil, errors.New("notification has no actor")

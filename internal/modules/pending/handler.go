@@ -111,11 +111,31 @@ func (h *Handler) Delete(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := h.service.Delete(c.Request.Context(), userID, id); err != nil {
+	out, err := h.service.Delete(c.Request.Context(), userID, id)
+	if err != nil {
 		mapError(c, err)
 		return
 	}
-	response.OK(c, "Pending transaction discarded", nil)
+	c.JSON(http.StatusOK, out)
+}
+
+// POST /v1/pending-transactions/discard — many at once; unknown ids are skipped.
+func (h *Handler) Discard(c *gin.Context) {
+	userID, ok := bindUser(c)
+	if !ok {
+		return
+	}
+	var req DiscardRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	out, err := h.service.Discard(c.Request.Context(), userID, req.IDs)
+	if err != nil {
+		mapError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 // POST /v1/pending-transactions/submit — each draft independently.

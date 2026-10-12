@@ -51,12 +51,8 @@ func scanAccount(row pgx.Row) (*Account, error) {
 			return nil, fmt.Errorf("unmarshal identifiers: %w", err)
 		}
 	}
-	if iconBytes != nil {
-		a.IconCode = new(shared.IconCode)
-		if err := json.Unmarshal(iconBytes, a.IconCode); err != nil {
-			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
-		}
-	}
+	a.IconCode = shared.IconFromJSON(iconBytes)
+	a.Group = shared.AccountGroup(a.Type)
 	return &a, nil
 }
 
@@ -71,6 +67,24 @@ func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Account, er
 	q := `SELECT ` + accountColumns + ` FROM accounts a
 		WHERE a.id = $1 AND ` + shared.ActiveMembershipPredicate("a.id", "$2")
 	a, err := scanAccount(s.db.QueryRow(ctx, q, id, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAccountNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("db error: %w", err)
+	}
+	single := []Account{*a}
+	if err := s.fillMembers(ctx, userID, single); err != nil {
+		return nil, err
+	}
+	return &single[0], nil
+}
+
+// getAnyMember reads a wallet WITHOUT the active-membership gate - only for a
+// caller who is (or was) a member, e.g. an ex-member changing their report
+// scope. my_role / can_edit are those of a non-owner.
+func (s *Store) getAnyMember(ctx context.Context, userID, id uuid.UUID) (*Account, error) {
+	a, err := scanAccount(s.db.QueryRow(ctx, `SELECT `+accountColumns+` FROM accounts a WHERE a.id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrAccountNotFound
 	}
@@ -231,9 +245,6 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequ
 	if req.Type != nil {
 		add("type", *req.Type)
 	}
-	if req.Currency != nil {
-		add("currency", *req.Currency)
-	}
 	if iconCode, present := req.IconCodeChange(); present {
 		var iconJSON []byte
 		if iconCode != nil {
@@ -257,9 +268,6 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequ
 	if note, present := req.NoteChange(); present {
 		add("note", note)
 	}
-	if req.Status != nil {
-		add("status", *req.Status)
-	}
 	if clearCreditFields {
 		// Type changed FROM credit → null out billing fields per spec §3.7.
 		q += ", credit_limit = NULL, statement_date = NULL, payment_due_date = NULL, minimum_payment = NULL"
@@ -276,9 +284,6 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequ
 		if req.MinimumPayment != nil {
 			add("minimum_payment", *req.MinimumPayment)
 		}
-	}
-	if req.SortOrder != nil {
-		add("sort_order", *req.SortOrder)
 	}
 	if req.Identifiers != nil {
 		// Already normalized by the service.
@@ -313,6 +318,53 @@ func (s *Store) Archive(ctx context.Context, userID, id uuid.UUID) error {
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrAccountNotFound
+	}
+	return nil
+}
+
+// Restore flips an archived wallet back to active (owner only; the caller
+// checked ownership).
+func (s *Store) Restore(ctx context.Context, userID, id uuid.UUID) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE accounts SET status = 'active', updated_by_user_id = $1
+		 WHERE id = $2 AND user_id = $1 AND status = 'archived'`, userID, id)
+	if err != nil {
+		return fmt.Errorf("db error: %w", err)
+	}
+	_ = tag // already active = idempotent
+	return nil
+}
+
+// CountArchived counts the archived wallets the caller is an active member
+// of (the "archived" row on the wallets page).
+func (s *Store) CountArchived(ctx context.Context, userID uuid.UUID) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM accounts a
+		WHERE a.status = 'archived' AND `+shared.ActiveMembershipPredicate("a.id", "$1"), userID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count archived: %w", err)
+	}
+	return n, nil
+}
+
+// UserCurrency is the caller's locked currency (users.currency): the one
+// every wallet takes.
+func (s *Store) UserCurrency(ctx context.Context, userID uuid.UUID) (string, error) {
+	var cur string
+	if err := s.db.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, userID).Scan(&cur); err != nil {
+		return "", fmt.Errorf("user currency: %w", err)
+	}
+	return cur, nil
+}
+
+// SetMySortOrder writes the CALLER's own position of a wallet
+// (account_members.sort_order); other members keep theirs.
+func (s *Store) SetMySortOrder(ctx context.Context, userID, accountID uuid.UUID, order int) error {
+	_, err := s.db.Exec(ctx, `UPDATE account_members SET sort_order = $1, updated_at = NOW()
+		WHERE account_id = $2 AND user_id = $3 AND joined_at IS NOT NULL AND left_at IS NULL`,
+		order, accountID, userID)
+	if err != nil {
+		return fmt.Errorf("sort order: %w", err)
 	}
 	return nil
 }

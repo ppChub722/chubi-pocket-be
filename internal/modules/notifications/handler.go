@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -22,11 +23,15 @@ func NewHandler(s *Service) *Handler {
 	return &Handler{service: s}
 }
 
-// GET /v1/notifications
+func unauthorized(c *gin.Context) {
+	response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+}
+
+// GET /v1/notifications — listNotifications.
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		unauthorized(c)
 		return
 	}
 	f := ListFilter{
@@ -36,13 +41,21 @@ func (h *Handler) List(c *gin.Context) {
 		Page:     atoiOr(c.Query("page"), 1),
 		PerPage:  atoiOr(c.Query("per_page"), 20),
 	}
+	for name, v := range map[string]string{"read": f.Read, "actioned": f.Actioned} {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "", "true", "false", "all":
+		default:
+			response.BadRequest(c, "VALIDATION_ERROR", name+" must be true, false or all", nil)
+			return
+		}
+	}
 	if v := c.Query("from"); v != "" {
 		f.From = &v
 	}
 	if v := c.Query("to"); v != "" {
 		f.To = &v
 	}
-	out, err := h.service.List(c.Request.Context(), userID, f)
+	out, err := h.service.ListViews(c.Request.Context(), userID, f)
 	if err != nil {
 		response.InternalError(c, "Failed to list notifications", err.Error())
 		return
@@ -50,11 +63,26 @@ func (h *Handler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/notifications/read-all
+// GET /v1/notifications/unread-count — getUnreadCount.
+func (h *Handler) UnreadCount(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		unauthorized(c)
+		return
+	}
+	b, err := h.service.Badges(c.Request.Context(), userID)
+	if err != nil {
+		response.InternalError(c, "Failed to count unread", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"unread_count": b.UnreadNotifications})
+}
+
+// POST /v1/notifications/read-all — readAllNotifications.
 func (h *Handler) ReadAll(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		unauthorized(c)
 		return
 	}
 	n, err := h.service.MarkReadAll(c.Request.Context(), userID)
@@ -62,16 +90,21 @@ func (h *Handler) ReadAll(c *gin.Context) {
 		response.InternalError(c, "Mark all read failed", err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"marked_read": n})
+	badges, err := h.service.Badges(c.Request.Context(), userID)
+	if err != nil {
+		response.InternalError(c, "Mark all read failed", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, ReadAllResult{MarkedRead: n, Badges: badges})
 }
 
-// POST /v1/notifications/:id/read
+// POST /v1/notifications/:id/read — markNotificationRead.
 func (h *Handler) MarkRead(c *gin.Context) {
 	userID, id, ok := h.bind(c)
 	if !ok {
 		return
 	}
-	out, err := h.service.MarkRead(c.Request.Context(), userID, id)
+	out, err := h.service.MarkReadResult(c.Request.Context(), userID, id)
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -79,13 +112,13 @@ func (h *Handler) MarkRead(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/notifications/:id/actioned
+// POST /v1/notifications/:id/actioned — markNotificationActioned.
 func (h *Handler) MarkActioned(c *gin.Context) {
 	userID, id, ok := h.bind(c)
 	if !ok {
 		return
 	}
-	out, err := h.service.MarkActioned(c.Request.Context(), userID, id)
+	out, err := h.service.MarkActionedResult(c.Request.Context(), userID, id)
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -93,13 +126,13 @@ func (h *Handler) MarkActioned(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/notifications/:id/dismiss
+// POST /v1/notifications/:id/dismiss — dismissNotification.
 func (h *Handler) MarkDismissed(c *gin.Context) {
 	userID, id, ok := h.bind(c)
 	if !ok {
 		return
 	}
-	out, err := h.service.MarkDismissed(c.Request.Context(), userID, id)
+	out, err := h.service.MarkDismissedResult(c.Request.Context(), userID, id)
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -107,7 +140,7 @@ func (h *Handler) MarkDismissed(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// DELETE /v1/notifications/:id
+// DELETE /v1/notifications/:id — deleteNotification.
 func (h *Handler) Delete(c *gin.Context) {
 	userID, id, ok := h.bind(c)
 	if !ok {
@@ -117,17 +150,22 @@ func (h *Handler) Delete(c *gin.Context) {
 		mapServiceError(c, err)
 		return
 	}
-	response.OK(c, "Notification deleted", nil)
+	badges, err := h.service.Badges(c.Request.Context(), userID)
+	if err != nil {
+		response.InternalError(c, "Notification operation failed", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, DeleteResult{ID: id, Badges: badges})
 }
 
-// GET /v1/notifications/settings
+// GET /v1/notifications/settings — getNotificationSettings.
 func (h *Handler) GetSettings(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		unauthorized(c)
 		return
 	}
-	out, err := h.service.GetSettings(c.Request.Context(), userID)
+	out, err := h.service.GetSettingsView(c.Request.Context(), userID)
 	if err != nil {
 		response.InternalError(c, "Failed to get settings", err.Error())
 		return
@@ -135,11 +173,11 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// PUT /v1/notifications/settings
+// PUT /v1/notifications/settings — updateNotificationSettings.
 func (h *Handler) UpdateSettings(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		unauthorized(c)
 		return
 	}
 	var req UpdateSettingsRequest
@@ -147,7 +185,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
-	// Explicit `"default_account_id": null` clears it (contract §5).
+	// Explicit "default_account_id": null clears it (contract section 5).
 	var raw map[string]json.RawMessage
 	if body, ok := c.Get(gin.BodyBytesKey); ok {
 		_ = json.Unmarshal(body.([]byte), &raw)
@@ -155,7 +193,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if v, ok := raw["default_account_id"]; ok && string(v) == "null" {
 		req.ClearDefaultAccount = true
 	}
-	out, err := h.service.UpdateSettings(c.Request.Context(), userID, req)
+	out, err := h.service.UpdateSettingsView(c.Request.Context(), userID, req)
 	switch {
 	case errors.Is(err, ErrTypeNotMutable):
 		response.BadRequest(c, "TYPE_NOT_MUTABLE", err.Error(), nil)
@@ -173,7 +211,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 func (h *Handler) bind(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		unauthorized(c)
 		return uuid.Nil, uuid.Nil, false
 	}
 	id, err := uuid.Parse(c.Param("id"))

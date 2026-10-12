@@ -2,7 +2,6 @@ package transactions
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,9 +24,9 @@ func NewStore(db *pgxpool.Pool) *Store {
 func (s *Store) Pool() *pgxpool.Pool { return s.db }
 
 var (
-	ErrTxNotFound          = errors.New("transaction not found")
-	ErrSourcePTNotFound    = errors.New("source project transaction not found")
-	ErrSourcePTNotForUser  = errors.New("caller is not a member of the source project")
+	ErrTxNotFound         = errors.New("transaction not found")
+	ErrSourcePTNotFound   = errors.New("source project transaction not found")
+	ErrSourcePTNotForUser = errors.New("caller is not a member of the source project")
 )
 
 // LookupSourcePTTx resolves a project_transaction by id and confirms the
@@ -67,6 +66,12 @@ const txColumns = `id, user_id, account_id, type, amount, category_id,
 	to_char(date, 'YYYY-MM-DD') AS date, description, note, transfer_group_id,
 	source_personal_debt_id, source_project_transaction_id, project_id,
 	created_at, updated_at`
+
+// txColumnsT — txColumns qualified with the alias t.
+const txColumnsT = `t.id, t.user_id, t.account_id, t.type, t.amount, t.category_id,
+	to_char(t.date, 'YYYY-MM-DD') AS date, t.description, t.note, t.transfer_group_id,
+	t.source_personal_debt_id, t.source_project_transaction_id, t.project_id,
+	t.created_at, t.updated_at`
 
 func scanTx(row pgx.Row) (*Transaction, error) {
 	var t Transaction
@@ -151,9 +156,10 @@ func (s *Store) CountByCategory(ctx context.Context, categoryID uuid.UUID) (int,
 	return n, err
 }
 
-// List returns a page of TransactionDetail rows joined with embedded
-// account + category refs. Sort = date_desc by default.
-func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]TransactionDetail, int, Totals, error) {
+// List returns a page of rows (Service.List resolves them with
+// buildDetails), the filtered row count and the money totals over the
+// whole filtered set. Sort = date_desc by default.
+func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Transaction, int, Totals, error) {
 	whereClauses := []string{txVisible("t", "$1")}
 	args := []any{userID}
 
@@ -173,8 +179,8 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	if f.Uncategorized {
 		whereClauses = append(whereClauses, "t.category_id IS NULL")
 	}
-	// Search + tags use subqueries, not the SELECT's joins, so the COUNT
-	// query below can share the same WHERE.
+	// Search + tags use subqueries, not joins, so the COUNT query below can
+	// share the same WHERE.
 	if q := strings.TrimSpace(f.Q); q != "" {
 		args = append(args, "%"+shared.EscapeLike(q)+"%")
 		whereClauses = append(whereClauses, fmt.Sprintf(`(t.description ILIKE $%[1]d OR t.note ILIKE $%[1]d
@@ -237,19 +243,10 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	args = append(args, (f.Page-1)*f.PerPage)
 	offsetIdx := len(args)
 
-	q := fmt.Sprintf(`
-		SELECT t.id, t.user_id, t.account_id, t.type, t.amount, t.category_id,
-		       to_char(t.date, 'YYYY-MM-DD') AS date, t.description, t.note, t.transfer_group_id,
-		       t.source_personal_debt_id, t.source_project_transaction_id, t.project_id,
-		       t.created_at, t.updated_at,
-		       a.id, a.name,
-		       c.id, c.name
-		FROM transactions t
-		LEFT JOIN accounts a ON a.id = t.account_id
-		LEFT JOIN categories c ON c.id = t.category_id
+	q := fmt.Sprintf(`SELECT %s FROM transactions t
 		WHERE %s
-		ORDER BY %s
-		LIMIT $%d OFFSET $%d`, where, orderBy, limitIdx, offsetIdx)
+		ORDER BY %s, t.id
+		LIMIT $%d OFFSET $%d`, txColumnsT, where, orderBy, limitIdx, offsetIdx)
 
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
@@ -257,209 +254,18 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	}
 	defer rows.Close()
 
-	out := make([]TransactionDetail, 0, f.PerPage)
+	out := make([]Transaction, 0, f.PerPage)
 	for rows.Next() {
-		var (
-			d       TransactionDetail
-			accID   *uuid.UUID
-			accName *string
-			catID   *uuid.UUID
-			catName *string
-		)
-		err := rows.Scan(
-			&d.ID, &d.UserID, &d.AccountID, &d.Type, &d.Amount, &d.CategoryID,
-			&d.Date, &d.Description, &d.Note, &d.TransferGroupID,
-			&d.SourcePersonalDebtID, &d.SourceProjectTransactionID, &d.ProjectID,
-			&d.CreatedAt, &d.UpdatedAt,
-			&accID, &accName,
-			&catID, &catName,
-		)
+		t, err := scanTx(rows)
 		if err != nil {
 			return nil, 0, Totals{}, fmt.Errorf("scan: %w", err)
 		}
-		if accID != nil && accName != nil {
-			d.Account = &EmbeddedRef{ID: *accID, Name: *accName}
-		}
-		if catID != nil && catName != nil {
-			d.Category = &EmbeddedRef{ID: *catID, Name: *catName}
-		}
-		// Init empty slice so JSON serializes as [] not null. Filled in
-		// the batch-tag query below.
-		d.Tags = []EmbeddedTag{}
-		d.IsResolve = d.SourcePersonalDebtID != nil
-		out = append(out, d)
+		out = append(out, *t)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, Totals{}, err
 	}
-
-	// Batch-fetch tags for the page in a single query, then patch onto
-	// each row by id. Avoids N+1 against the page; with per_page <= 100
-	// this stays a small in-memory join.
-	if err := s.fillTagsForList(ctx, userID, out); err != nil {
-		return nil, 0, Totals{}, fmt.Errorf("fill tags: %w", err)
-	}
-	if err := s.fillHasSplitsForList(ctx, out); err != nil {
-		return nil, 0, Totals{}, fmt.Errorf("fill has_splits: %w", err)
-	}
-	if err := s.fillMyShareForList(ctx, out); err != nil {
-		return nil, 0, Totals{}, fmt.Errorf("fill my_share: %w", err)
-	}
-	if err := s.fillSplitFlagsForList(ctx, userID, out); err != nil {
-		return nil, 0, Totals{}, fmt.Errorf("fill split flags: %w", err)
-	}
-	if err := s.fillSharedInfoForList(ctx, userID, out); err != nil {
-		return nil, 0, Totals{}, fmt.Errorf("fill shared info: %w", err)
-	}
-	if err := s.fillProjectsForList(ctx, out); err != nil {
-		return nil, 0, Totals{}, fmt.Errorf("fill projects: %w", err)
-	}
 	return out, total, totals, nil
-}
-
-// fillSharedInfoForList decorates rows that live on SHARED wallets
-// (active member count > 1) with the pinned-contract fields: denormalized
-// created_by author, category_render (the author's category, read-only
-// for other members), is_locked (caller can no longer move this wallet's
-// numbers — ex-member) and can_edit_category (caller is the row's author
-// and still active). Rows on personal accounts are left untouched.
-// Single batch query per page.
-func (s *Store) fillSharedInfoForList(ctx context.Context, userID uuid.UUID, details []TransactionDetail) error {
-	if len(details) == 0 {
-		return nil
-	}
-	ids := make([]uuid.UUID, len(details))
-	for i := range details {
-		ids[i] = details[i].ID
-	}
-	rows, err := s.db.Query(ctx, `
-		SELECT t.id, t.user_id, u.display_name, u.icon_code,
-		       c.name, c.icon_code,
-		       (SELECT COUNT(*) FROM account_members am
-		         WHERE am.account_id = t.account_id
-		           AND am.joined_at IS NOT NULL AND am.left_at IS NULL) AS active_members,
-		       `+shared.ActiveMembershipPredicate("t.account_id", "$2")+` AS caller_active
-		FROM transactions t
-		JOIN users u ON u.id = t.user_id
-		LEFT JOIN categories c ON c.id = t.category_id
-		WHERE t.id = ANY($1)`, ids, userID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	type sharedInfo struct {
-		createdBy       *AuthorRef
-		categoryRender  *CategoryRender
-		isLocked        bool
-		canEditCategory bool
-		shared          bool
-	}
-	infoByID := make(map[uuid.UUID]sharedInfo, len(details))
-	for rows.Next() {
-		var (
-			txID          uuid.UUID
-			authorID      uuid.UUID
-			authorName    string
-			authorIcon    []byte
-			catName       *string
-			catIcon       []byte
-			activeMembers int
-			callerActive  bool
-		)
-		if err := rows.Scan(&txID, &authorID, &authorName, &authorIcon,
-			&catName, &catIcon, &activeMembers, &callerActive); err != nil {
-			return err
-		}
-		if activeMembers <= 1 {
-			continue
-		}
-		info := sharedInfo{shared: true}
-		info.createdBy = &AuthorRef{UserID: authorID, DisplayName: authorName}
-		if authorIcon != nil {
-			info.createdBy.IconCode = new(shared.IconCode)
-			if err := json.Unmarshal(authorIcon, info.createdBy.IconCode); err != nil {
-				return fmt.Errorf("unmarshal author icon_code: %w", err)
-			}
-		}
-		if catName != nil {
-			info.categoryRender = &CategoryRender{Name: *catName}
-			if catIcon != nil {
-				info.categoryRender.IconCode = new(shared.IconCode)
-				if err := json.Unmarshal(catIcon, info.categoryRender.IconCode); err != nil {
-					return fmt.Errorf("unmarshal category icon_code: %w", err)
-				}
-			}
-		}
-		info.isLocked = !callerActive
-		info.canEditCategory = authorID == userID && callerActive
-		infoByID[txID] = info
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for i := range details {
-		info, ok := infoByID[details[i].ID]
-		if !ok || !info.shared {
-			continue
-		}
-		details[i].CreatedBy = info.createdBy
-		details[i].CategoryRender = info.categoryRender
-		isLocked, canEdit := info.isLocked, info.canEditCategory
-		details[i].IsLocked = &isLocked
-		details[i].CanEditCategory = &canEdit
-	}
-	return nil
-}
-
-// fillSplitFlagsForList sets can_split / can_edit_splits / can_join_event
-// for callerUserID (one batch query; rules on TransactionDetail).
-func (s *Store) fillSplitFlagsForList(ctx context.Context, callerUserID uuid.UUID, details []TransactionDetail) error {
-	if len(details) == 0 {
-		return nil
-	}
-	ids := make([]uuid.UUID, len(details))
-	for i := range details {
-		ids[i] = details[i].ID
-	}
-	rows, err := s.db.Query(ctx, `
-		SELECT t.id,
-		       t.type IN ('income', 'expense') AND t.source_personal_debt_id IS NULL
-		         AND NOT COALESCE(c.is_system, FALSE),
-		       `+shared.EventBillPredicate("t")+`,
-		       EXISTS (SELECT 1 FROM personal_debts d
-		               WHERE d.source_transaction_id = t.id AND d.user_id = t.user_id
-		                 AND (d.settled_amount > 0.005 OR d.status = 'cancelled')),
-		       t.user_id = $2
-		FROM transactions t
-		LEFT JOIN categories c ON c.id = t.category_id
-		WHERE t.id = ANY($1)`, ids, callerUserID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	type flags struct{ split, edit, join bool }
-	byID := make(map[uuid.UUID]flags, len(details))
-	for rows.Next() {
-		var (
-			id                               uuid.UUID
-			billable, eventBill, closed, own bool
-		)
-		if err := rows.Scan(&id, &billable, &eventBill, &closed, &own); err != nil {
-			return err
-		}
-		// An event bill's own splits stay on it when it moves (only the
-		// board splits travel), so a repaid one doesn't block the move.
-		byID[id] = flags{split: billable, edit: billable && own, join: billable && own && (eventBill || !closed)}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for i := range details {
-		f := byID[details[i].ID]
-		details[i].CanSplit, details[i].CanEditSplits, details[i].CanJoinEvent = f.split, f.edit, f.join
-	}
-	return nil
 }
 
 // EventSplitsTotal — for an event bill (shared.EventBillPredicate), Σ the
@@ -473,179 +279,6 @@ func (s *Store) EventSplitsTotal(ctx context.Context, txID uuid.UUID) (float64, 
 		ELSE 0 END
 		FROM transactions t WHERE t.id = $1`, txID).Scan(&total)
 	return total, err
-}
-
-// fillMyShareForList sets my_share on every expense / income row (one
-// batch query, same fragment as the reports).
-func (s *Store) fillMyShareForList(ctx context.Context, details []TransactionDetail) error {
-	if len(details) == 0 {
-		return nil
-	}
-	ids := make([]uuid.UUID, len(details))
-	for i := range details {
-		ids[i] = details[i].ID
-	}
-	rows, err := s.db.Query(ctx, `SELECT t.id, `+shared.ShareAmountExpr("t")+`
-		FROM transactions t WHERE t.id = ANY($1) AND t.type IN ('income', 'expense')`, ids)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	byID := make(map[uuid.UUID]float64, len(details))
-	for rows.Next() {
-		var (
-			id    uuid.UUID
-			share float64
-		)
-		if err := rows.Scan(&id, &share); err != nil {
-			return err
-		}
-		byID[id] = share
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for i := range details {
-		if v, ok := byID[details[i].ID]; ok {
-			details[i].MyShare = &v
-		}
-	}
-	return nil
-}
-
-// fillHasSplitsForList counts the debts every row made (the splitter's side
-// of a split-bill transaction) → split_count + has_splits. Single batch
-// query against the personal_debts.source_transaction_id index.
-func (s *Store) fillHasSplitsForList(ctx context.Context, details []TransactionDetail) error {
-	if len(details) == 0 {
-		return nil
-	}
-	ids := make([]uuid.UUID, len(details))
-	for i := range details {
-		ids[i] = details[i].ID
-	}
-	rows, err := s.db.Query(ctx, `
-		SELECT source_transaction_id, COUNT(*)
-		FROM personal_debts
-		WHERE source_transaction_id = ANY($1)
-		GROUP BY source_transaction_id`, ids)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	countByID := make(map[uuid.UUID]int, len(details))
-	for rows.Next() {
-		var (
-			id uuid.UUID
-			n  int
-		)
-		if err := rows.Scan(&id, &n); err != nil {
-			return err
-		}
-		countByID[id] = n
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for i := range details {
-		details[i].SplitCount = countByID[details[i].ID]
-		details[i].HasSplits = details[i].SplitCount > 0
-	}
-	return nil
-}
-
-// fillProjectsForList embeds {id, name} for rows that carry a project_id.
-// One query per page.
-func (s *Store) fillProjectsForList(ctx context.Context, details []TransactionDetail) error {
-	var ids []uuid.UUID
-	for i := range details {
-		if details[i].ProjectID != nil {
-			ids = append(ids, *details[i].ProjectID)
-		}
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	rows, err := s.db.Query(ctx, `SELECT id, name FROM projects WHERE id = ANY($1)`, ids)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	names := make(map[uuid.UUID]string, len(ids))
-	for rows.Next() {
-		var (
-			id   uuid.UUID
-			name string
-		)
-		if err := rows.Scan(&id, &name); err != nil {
-			return err
-		}
-		names[id] = name
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for i := range details {
-		if p := details[i].ProjectID; p != nil {
-			if name, ok := names[*p]; ok {
-				details[i].Project = &EmbeddedRef{ID: *p, Name: name}
-			}
-		}
-	}
-	return nil
-}
-
-// fillTagsForList populates `d.Tags` for every row in `details` via one
-// query against the transaction_tags junction. No-op when the slice is
-// empty.
-func (s *Store) fillTagsForList(ctx context.Context, userID uuid.UUID, details []TransactionDetail) error {
-	if len(details) == 0 {
-		return nil
-	}
-	ids := make([]uuid.UUID, len(details))
-	for i := range details {
-		ids[i] = details[i].ID
-	}
-	rows, err := s.db.Query(ctx, `
-		SELECT tt.transaction_id, t.id, t.name, t.icon_code
-		FROM tags t
-		JOIN transaction_tags tt ON tt.tag_id = t.id
-		WHERE tt.transaction_id = ANY($1) AND t.user_id = $2
-		ORDER BY tt.transaction_id, LOWER(t.name)`,
-		ids, userID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	tagsByTx := make(map[uuid.UUID][]EmbeddedTag, len(details))
-	for rows.Next() {
-		var (
-			txID      uuid.UUID
-			tag       EmbeddedTag
-			iconBytes []byte
-		)
-		if err := rows.Scan(&txID, &tag.ID, &tag.Name, &iconBytes); err != nil {
-			return err
-		}
-		if iconBytes != nil {
-			tag.IconCode = new(shared.IconCode)
-			if err := json.Unmarshal(iconBytes, tag.IconCode); err != nil {
-				return fmt.Errorf("unmarshal tag icon_code: %w", err)
-			}
-		}
-		tagsByTx[txID] = append(tagsByTx[txID], tag)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	for i := range details {
-		if t := tagsByTx[details[i].ID]; t != nil {
-			details[i].Tags = t
-		}
-	}
-	return nil
 }
 
 // --- Tx-aware writes (called via balance helper) ---
@@ -773,7 +406,6 @@ func (s *Store) UpdateRowTx(
 	return t, nil
 }
 
-
 // DeleteRowTx removes a single transactions row by id. Caller (service)
 // already reversed the balance and authorized the actor — members may
 // delete other members' rows on shared wallets, so no author filter here.
@@ -789,28 +421,74 @@ func (s *Store) DeleteRowTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) error 
 	return nil
 }
 
-// SplitsFor — the debts transaction txID made in userID's book (GET
-// /transactions/:id). A shared-wallet member who isn't the author gets
-// none: the debts are the author's.
-func (s *Store) SplitsFor(ctx context.Context, userID, txID uuid.UUID) ([]SplitRef, error) {
-	rows, err := s.db.Query(ctx, `
-		SELECT id, counterparty_person_name, counterparty_contact_id, direction,
-		       amount, settled_amount, status
-		FROM personal_debts
-		WHERE source_transaction_id = $1 AND user_id = $2
-		ORDER BY created_at, id`, txID, userID)
-	if err != nil {
-		return nil, fmt.Errorf("splits: %w", err)
+// ReplaceTagsTx makes the caller's tags on txID exactly tagIDs (other
+// users' tags on a shared-wallet row are theirs and stay). Every id must be
+// one of the caller's tags → ErrTagNotFound.
+func (s *Store) ReplaceTagsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, tagIDs []uuid.UUID) error {
+	if err := verifyTagsTx(ctx, tx, userID, tagIDs); err != nil {
+		return err
 	}
-	defer rows.Close()
-	out := []SplitRef{}
-	for rows.Next() {
-		var r SplitRef
-		if err := rows.Scan(&r.DebtID, &r.PersonName, &r.ContactID, &r.Direction,
-			&r.Amount, &r.SettledAmount, &r.Status); err != nil {
-			return nil, fmt.Errorf("splits scan: %w", err)
+	if tagIDs == nil {
+		tagIDs = []uuid.UUID{}
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM transaction_tags tt USING tags t
+		WHERE tt.tag_id = t.id AND tt.transaction_id = $1 AND t.user_id = $2
+		  AND NOT (tt.tag_id = ANY($3))`, txID, userID, tagIDs); err != nil {
+		return fmt.Errorf("detach tags: %w", err)
+	}
+	return attachTagsTx(ctx, tx, userID, txID, tagIDs)
+}
+
+// AttachTagsTx adds the caller's tags to txID (existing pairs stay).
+func (s *Store) AttachTagsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, tagIDs []uuid.UUID) error {
+	if len(tagIDs) == 0 {
+		return nil
+	}
+	if err := verifyTagsTx(ctx, tx, userID, tagIDs); err != nil {
+		return err
+	}
+	return attachTagsTx(ctx, tx, userID, txID, tagIDs)
+}
+
+func verifyTagsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, tagIDs []uuid.UUID) error {
+	ids := uniqueUUIDs(tagIDs)
+	if len(ids) == 0 {
+		return nil
+	}
+	var n int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM tags WHERE user_id = $1 AND id = ANY($2)`,
+		userID, ids).Scan(&n); err != nil {
+		return fmt.Errorf("tag ownership: %w", err)
+	}
+	if n != len(ids) {
+		return ErrTagNotFound
+	}
+	return nil
+}
+
+func attachTagsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, tagIDs []uuid.UUID) error {
+	ids := uniqueUUIDs(tagIDs)
+	if len(ids) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO transaction_tags (transaction_id, tag_id, created_by_user_id)
+		SELECT $1, unnest($2::uuid[]), $3
+		ON CONFLICT (transaction_id, tag_id) DO NOTHING`, txID, ids, userID); err != nil {
+		return fmt.Errorf("attach tags: %w", err)
+	}
+	return nil
+}
+
+func uniqueUUIDs(ids []uuid.UUID) []uuid.UUID {
+	seen := make(map[uuid.UUID]bool, len(ids))
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
 		}
-		out = append(out, r)
 	}
-	return out, rows.Err()
+	return out
 }

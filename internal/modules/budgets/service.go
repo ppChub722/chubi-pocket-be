@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 const (
@@ -127,11 +129,18 @@ func (s *Service) List(
 		if catErr != nil {
 			cat = &CategoryRef{ID: row.CategoryID, Name: "(archived)"}
 		}
-		v, err := s.buildView(ctx, userID, &row, cat, headerTZ)
+		v, err := s.buildViewRaw(ctx, userID, &row, cat, headerTZ)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, *v)
+	}
+	ptrs := make([]*BudgetView, len(out))
+	for i := range out {
+		ptrs[i] = &out[i]
+	}
+	if err := s.attachCategories(ctx, ptrs); err != nil {
+		return nil, err
 	}
 	return &ListResponse{Data: out}, nil
 }
@@ -308,6 +317,38 @@ func (s *Service) Overview(
 func (s *Service) buildView(
 	ctx context.Context, userID uuid.UUID, b *Budget, cat *CategoryRef, headerTZ string,
 ) (*BudgetView, error) {
+	v, err := s.buildViewRaw(ctx, userID, b, cat, headerTZ)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachCategories(ctx, []*BudgetView{v}); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// attachCategories replaces each view's category with the shared CategoryRef
+// (one query for the whole page).
+func (s *Service) attachCategories(ctx context.Context, views []*BudgetView) error {
+	ids := make([]uuid.UUID, 0, len(views))
+	for _, v := range views {
+		ids = append(ids, v.CategoryID)
+	}
+	refs, err := shared.LoadCategoryRefs(ctx, s.store.Pool(), ids)
+	if err != nil {
+		return err
+	}
+	for _, v := range views {
+		if r, ok := refs[v.CategoryID]; ok {
+			v.Category = r
+		}
+	}
+	return nil
+}
+
+func (s *Service) buildViewRaw(
+	ctx context.Context, userID uuid.UUID, b *Budget, cat *CategoryRef, headerTZ string,
+) (*BudgetView, error) {
 	loc, _, err := s.ResolveTimezone(ctx, userID, headerTZ)
 	if err != nil {
 		return nil, err
@@ -325,9 +366,8 @@ func (s *Service) buildView(
 	}
 	return &BudgetView{
 		Budget: *b,
-		Category: CategorySummary{
-			ID: cat.ID, Name: cat.Name, IconCode: cat.IconCode,
-		},
+		// Placeholder; attachCategories swaps in the full shared ref.
+		Category: shared.CategoryRef{ID: cat.ID, Name: cat.Name, Type: "expense", IconCode: cat.IconCode, ParentID: cat.ParentID},
 		CurrentPeriod: CurrentPeriod{
 			Start: pStart, End: pEnd,
 			Spent:          round2(spent.Total),

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +15,8 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
+// Handler — the /transactions routes (API spec v2: bare bodies on success,
+// response.Fail errors).
 type Handler struct {
 	service *Service
 }
@@ -22,7 +25,7 @@ func NewHandler(s *Service) *Handler {
 	return &Handler{service: s}
 }
 
-// POST /v1/transactions
+// POST /v1/transactions — 201 TransactionWriteResult.
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -36,7 +39,7 @@ func (h *Handler) Create(c *gin.Context) {
 		return
 	}
 
-	res, err := h.service.Create(c.Request.Context(), userID, req)
+	res, err := h.service.CreateWrite(c.Request.Context(), userID, req)
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -44,7 +47,7 @@ func (h *Handler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, res)
 }
 
-// GET /v1/transactions
+// GET /v1/transactions — TransactionList.
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -56,6 +59,12 @@ func (h *Handler) List(c *gin.Context) {
 		Page:    1,
 		PerPage: 20,
 		Sort:    c.DefaultQuery("sort", "date_desc"),
+	}
+	switch f.Sort {
+	case "date_desc", "date_asc", "amount_desc", "amount_asc":
+	default:
+		response.BadRequest(c, "VALIDATION_ERROR", "sort must be date_desc, date_asc, amount_desc or amount_asc", nil)
+		return
 	}
 	if v := c.Query("page"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -108,11 +117,17 @@ func (h *Handler) List(c *gin.Context) {
 		t := TxType(v)
 		f.Type = &t
 	}
-	if v := c.Query("from"); v != "" {
-		f.From = &v
-	}
-	if v := c.Query("to"); v != "" {
-		f.To = &v
+	for _, p := range []struct {
+		key string
+		dst **string
+	}{{"from", &f.From}, {"to", &f.To}} {
+		if v := c.Query(p.key); v != "" {
+			if !validDate(v) {
+				response.BadRequest(c, "VALIDATION_ERROR", p.key+" must be YYYY-MM-DD", nil)
+				return
+			}
+			*p.dst = &v
+		}
 	}
 	if c.Query("no_wallet") == "true" {
 		f.NoWallet = true
@@ -126,7 +141,7 @@ func (h *Handler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// GET /v1/transactions/:id
+// GET /v1/transactions/:id — Transaction (splits filled).
 func (h *Handler) Get(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -146,7 +161,8 @@ func (h *Handler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, d)
 }
 
-// PUT /v1/transactions/:id
+// PUT /v1/transactions/:id — TransactionWriteResult (both rows for a
+// transfer).
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -164,18 +180,15 @@ func (h *Handler) Update(c *gin.Context) {
 		return
 	}
 
-	res, err := h.service.Update(c.Request.Context(), userID, id, req)
+	res, err := h.service.UpdateWrite(c.Request.Context(), userID, id, req)
 	if err != nil {
 		mapServiceError(c, err)
 		return
 	}
-	// res is either *TransactionDetail (single) or *TransferResponse
-	// (transfer pair). c.JSON marshals whichever we got — same
-	// polymorphic dispatch as the create handler.
 	c.JSON(http.StatusOK, res)
 }
 
-// DELETE /v1/transactions/:id
+// DELETE /v1/transactions/:id — DeleteTransactionResult.
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -187,14 +200,80 @@ func (h *Handler) Delete(c *gin.Context) {
 		return
 	}
 
-	if err := h.service.Delete(c.Request.Context(), userID, id); err != nil {
+	res, err := h.service.DeleteWrite(c.Request.Context(), userID, id)
+	if err != nil {
 		mapServiceError(c, err)
 		return
 	}
-	response.OK(c, "Transaction deleted", nil)
+	c.JSON(http.StatusOK, res)
 }
 
-// GET /v1/transactions/summary
+// PUT /v1/transactions/:id/splits — replace the split list (see
+// EditSplits); returns the Transaction.
+func (h *Handler) EditSplits(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	var req EditSplitsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	out, err := h.service.EditSplits(c.Request.Context(), userID, id, *req.Splits)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// PUT /v1/transactions/:id/tags — replace the caller's tag set on the row;
+// returns the Transaction.
+func (h *Handler) SetTags(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	var req SetTagsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	out, err := h.service.SetTags(c.Request.Context(), userID, id, *req.TagIDs)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// GET /v1/transactions/form-options — FormOptions.
+func (h *Handler) FormOptions(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	out, err := h.service.FormOptions(c.Request.Context(), userID)
+	if err != nil {
+		response.InternalError(c, "Failed to load form options", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// GET /v1/transactions/summary — TransactionSummary.
 func (h *Handler) Summary(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -204,12 +283,19 @@ func (h *Handler) Summary(c *gin.Context) {
 
 	from := c.Query("from")
 	to := c.Query("to")
-	if from == "" || to == "" {
+	if !validDate(from) || !validDate(to) {
 		response.BadRequest(c, "VALIDATION_ERROR", "from and to are required (YYYY-MM-DD)", nil)
 		return
 	}
 
 	req := SummaryRequest{From: from, To: to, GroupBy: c.Query("group_by")}
+	switch req.GroupBy {
+	case "", "day", "week", "month", "category", "parent_category", "account":
+	default:
+		response.BadRequest(c, "VALIDATION_ERROR",
+			"group_by must be day, week, month, category, parent_category or account", nil)
+		return
+	}
 	if v := c.Query("account_id"); v != "" {
 		id, err := uuid.Parse(v)
 		if err != nil {
@@ -245,6 +331,11 @@ func (h *Handler) Summary(c *gin.Context) {
 
 // --- Helpers ---
 
+func validDate(s string) bool {
+	_, err := time.Parse("2006-01-02", s)
+	return err == nil
+}
+
 func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -264,6 +355,8 @@ func mapServiceError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusForbidden, "FORBIDDEN", "Category not accessible", nil)
 	case errors.Is(err, ErrCategoryTypeMismatch):
 		response.BadRequest(c, "CATEGORY_TYPE_MISMATCH", err.Error(), nil)
+	case errors.Is(err, ErrTagNotFound):
+		response.BadRequest(c, "TAG_NOT_FOUND", "Tag not found", nil)
 	case errors.Is(err, ErrSplitContactNotFound):
 		response.BadRequest(c, "CONTACT_NOT_FOUND", "Split contact not found", nil)
 	case errors.Is(err, ErrTransferSameAccount):
@@ -303,8 +396,6 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, ErrSplitContactArchived):
 		response.Fail(c, http.StatusConflict, "CONTACT_ARCHIVED", err.Error(), nil)
-	case errors.Is(err, ErrSplitIdentityLocked):
-		response.Fail(c, http.StatusUnprocessableEntity, "SPLIT_IDENTITY_LOCKED", err.Error(), nil)
 	case errors.Is(err, ErrSplitsExceedShare):
 		response.BadRequest(c, "SPLITS_EXCEED_SHARE", err.Error(), nil)
 	case errors.Is(err, ErrAmountInvalid):
@@ -313,28 +404,3 @@ func mapServiceError(c *gin.Context, err error) {
 		response.InternalError(c, "Transaction operation failed", err.Error())
 	}
 }
-
-// PUT /v1/transactions/:id/splits — replace the split list (see EditSplits).
-func (h *Handler) EditSplits(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-	var req EditSplitsRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-		return
-	}
-	out, err := h.service.EditSplits(c.Request.Context(), userID, id, *req.Splits)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}
-

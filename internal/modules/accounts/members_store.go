@@ -2,7 +2,6 @@ package accounts
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -27,6 +26,9 @@ var (
 	ErrOwnerMustTransfer = errors.New("owner must transfer ownership before leaving while other active members exist")
 	ErrAccountHasMembers = errors.New("account has other active members; remove them or transfer ownership first")
 	ErrScopeNotAllowed   = errors.New("ex-members may only use report_scope 'none' or 'own'")
+	ErrNotInvite         = errors.New("notification is not an account_invite")
+	ErrInvalidInclude    = errors.New("include must be summary and/or members")
+	ErrInvalidDate       = errors.New("from / to must be YYYY-MM-DD")
 )
 
 const memberColumns = `id, account_id, user_id, role, report_scope,
@@ -300,7 +302,7 @@ func (s *Store) TransferOwnershipTx(
 // pending invites, then past members (most recent departure first).
 // Voided invites (joined_at NULL + left_at set — an invite that was
 // rejected or withdrawn, never an actual member) are excluded.
-func (s *Store) ListMembersByAccount(ctx context.Context, accountID uuid.UUID) ([]MemberHistoryView, error) {
+func (s *Store) ListMembersByAccount(ctx context.Context, callerID, accountID uuid.UUID) ([]MemberHistoryView, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT am.id, am.user_id, u.display_name, u.icon_code, am.role,
 		       am.joined_at, am.left_at
@@ -324,16 +326,12 @@ func (s *Store) ListMembersByAccount(ctx context.Context, accountID uuid.UUID) (
 			m         MemberHistoryView
 			iconBytes []byte
 		)
-		if err := rows.Scan(&m.ID, &m.UserID, &m.DisplayName, &iconBytes,
+		if err := rows.Scan(&m.ID, &m.UserID, &m.Name, &iconBytes,
 			&m.Role, &m.JoinedAt, &m.LeftAt); err != nil {
 			return nil, fmt.Errorf("scan member history: %w", err)
 		}
-		if iconBytes != nil {
-			m.IconCode = new(shared.IconCode)
-			if err := json.Unmarshal(iconBytes, m.IconCode); err != nil {
-				return nil, fmt.Errorf("unmarshal member icon_code: %w", err)
-			}
-		}
+		m.IconCode = shared.IconFromJSON(iconBytes)
+		m.IsMe = m.UserID == callerID
 		switch {
 		case m.LeftAt != nil:
 			m.Status = "left"
@@ -357,6 +355,8 @@ func (s *Store) fillMembers(ctx context.Context, callerID uuid.UUID, accs []Acco
 	for i := range accs {
 		accs[i].Members = []MemberView{}
 		accs[i].MyReportScope = ReportScopeNone
+		accs[i].MyRole = MemberRoleMember
+		accs[i].CanEdit = false
 	}
 	if len(accs) == 0 {
 		return nil
@@ -369,7 +369,7 @@ func (s *Store) fillMembers(ctx context.Context, callerID uuid.UUID, accs []Acco
 	}
 	rows, err := s.db.Query(ctx, `
 		SELECT am.account_id, am.id, am.user_id, u.display_name, u.icon_code,
-		       am.role, am.joined_at, am.report_scope
+		       am.role, am.joined_at, am.report_scope, am.sort_order
 		FROM account_members am
 		JOIN users u ON u.id = am.user_id
 		WHERE am.account_id = ANY($1)
@@ -385,17 +385,14 @@ func (s *Store) fillMembers(ctx context.Context, callerID uuid.UUID, accs []Acco
 			m         MemberView
 			iconBytes []byte
 			scope     string
+			sortOrder int
 		)
-		if err := rows.Scan(&accountID, &m.ID, &m.UserID, &m.DisplayName, &iconBytes,
-			&m.Role, &m.JoinedAt, &scope); err != nil {
+		if err := rows.Scan(&accountID, &m.ID, &m.UserID, &m.Name, &iconBytes,
+			&m.Role, &m.JoinedAt, &scope, &sortOrder); err != nil {
 			return fmt.Errorf("scan member: %w", err)
 		}
-		if iconBytes != nil {
-			m.IconCode = new(shared.IconCode)
-			if err := json.Unmarshal(iconBytes, m.IconCode); err != nil {
-				return fmt.Errorf("unmarshal member icon_code: %w", err)
-			}
-		}
+		m.IconCode = shared.IconFromJSON(iconBytes)
+		m.IsMe = m.UserID == callerID
 		i, ok := idx[accountID]
 		if !ok {
 			continue
@@ -403,6 +400,9 @@ func (s *Store) fillMembers(ctx context.Context, callerID uuid.UUID, accs []Acco
 		accs[i].Members = append(accs[i].Members, m)
 		if m.UserID == callerID {
 			accs[i].MyReportScope = scope
+			accs[i].MyRole = m.Role
+			accs[i].CanEdit = m.Role == MemberRoleOwner
+			accs[i].SortOrder = sortOrder
 		}
 	}
 	if err := rows.Err(); err != nil {

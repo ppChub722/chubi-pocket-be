@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -62,26 +63,42 @@ func (s *Store) DueScheduled(ctx context.Context, userID uuid.UUID, until string
 	return out, rows.Err()
 }
 
-// CategoryIcons — icon_code by category id (caller's own categories).
-func (s *Store) CategoryIcons(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]*shared.IconCode, error) {
-	out := make(map[uuid.UUID]*shared.IconCode, len(ids))
-	if len(ids) == 0 {
-		return out, nil
-	}
-	rows, err := s.db.Query(ctx,
-		`SELECT id, icon_code FROM categories WHERE user_id = $1 AND id = ANY($2)`, userID, ids)
+// attentionTypes — notification types that can still await an answer
+// (shared.AwaitsAnswer); a READ row of any other type has left the block.
+var attentionTypes = []string{
+	"contact_link_request", "account_invite", "split_created", "split_changed",
+	"split_paid", "project_tx_recorded_for_you", "project_tx_changed",
+}
+
+// AttentionIDs — the ids of the caller's notifications that belong in the
+// ต้องจัดการ block, newest first (inbox order): not dismissed AND (unread OR
+// awaiting an answer). The awaiting rule is shared.AwaitsAnswer; SQL only
+// narrows the candidates to unread rows and read rows of a type that can
+// await.
+func (s *Store) AttentionIDs(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id, type, payload, read_at, actioned_at, dismissed_at
+		FROM notifications
+		WHERE recipient_user_id = $1 AND dismissed_at IS NULL
+		  AND (read_at IS NULL OR (actioned_at IS NULL AND type = ANY($2)))
+		ORDER BY created_at DESC, id DESC`, userID, attentionTypes)
 	if err != nil {
-		return nil, fmt.Errorf("category icons: %w", err)
+		return nil, fmt.Errorf("attention: %w", err)
 	}
 	defer rows.Close()
+	out := make([]uuid.UUID, 0)
 	for rows.Next() {
-		var id uuid.UUID
-		var icon []byte
-		if err := rows.Scan(&id, &icon); err != nil {
+		var (
+			id                              uuid.UUID
+			typ                             string
+			payload                         []byte
+			readAt, actionedAt, dismissedAt *time.Time
+		)
+		if err := rows.Scan(&id, &typ, &payload, &readAt, &actionedAt, &dismissedAt); err != nil {
 			return nil, err
 		}
-		if out[id], err = decodeIcon(icon); err != nil {
-			return nil, err
+		if readAt == nil || shared.AwaitsAnswer(typ, actionedAt, dismissedAt, payload) {
+			out = append(out, id)
 		}
 	}
 	return out, rows.Err()

@@ -41,11 +41,9 @@ func TestDetailSplitsAndProject(t *testing.T) {
 	if split.Splits == nil || len(*split.Splits) != 2 {
 		t.Fatalf("create response splits = %v, want 2", split.Splits)
 	}
-	if s := (*split.Splits)[1]; s.PersonName != "Beam" || s.Amount != 100 || s.Direction != "owed_to_me" {
+	if s := (*split.Splits)[1]; s.PersonName != "Beam" || s.DisplayName != "Beam" || s.Person.Name != "Beam" ||
+		s.Amount != 100 || s.Direction != "owed_to_me" {
 		t.Errorf("create response second split = %+v", s)
-	}
-	if split.AccountBalanceAfter == nil {
-		t.Errorf("create response lost account_balance_after")
 	}
 	if split.Account == nil {
 		t.Errorf("create response lost the account ref")
@@ -118,7 +116,7 @@ func TestDetailSplitsAndProject(t *testing.T) {
 }
 
 // TestWalletlessSplitCurrency — a wallet-less bill's split debts take the
-// user's currency (they used to be stored with currency '').
+// user's currency (they used to be stored with currency ”).
 func TestWalletlessSplitCurrency(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()

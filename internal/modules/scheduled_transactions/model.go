@@ -66,20 +66,10 @@ type ScheduledTransaction struct {
 
 // ScheduledTransactionView extends the row with embedded account /
 // category snapshots so the FE list/detail can render directly.
-type AccountRef struct {
-	ID   uuid.UUID `json:"id"`
-	Name string    `json:"name"`
-}
-
-type CategoryRef struct {
-	ID   uuid.UUID `json:"id"`
-	Name string    `json:"name"`
-}
-
 type ScheduledTransactionView struct {
 	ScheduledTransaction
-	Account  *AccountRef  `json:"account,omitempty"`
-	Category *CategoryRef `json:"category,omitempty"`
+	Account  *shared.AccountRef  `json:"account"`
+	Category *shared.CategoryRef `json:"category"`
 }
 
 // CreateRequest — `entry_type='recurring'` rejects installment-only
@@ -185,14 +175,15 @@ type GeneratedTransaction struct {
 }
 
 type ScheduleUpdated struct {
-	NextBillingDate       string  `json:"next_billing_date"`
-	RemainingInstallments *int    `json:"remaining_installments"`
-	Status                string  `json:"status"`
+	NextBillingDate       string `json:"next_billing_date"`
+	RemainingInstallments *int   `json:"remaining_installments"`
+	Status                string `json:"status"`
 }
 
 type GenerateNowResponse struct {
-	GeneratedTransaction GeneratedTransaction `json:"generated_transaction"`
-	ScheduleUpdated      ScheduleUpdated      `json:"schedule_updated"`
+	GeneratedTransaction GeneratedTransaction   `json:"generated_transaction"`
+	ScheduleUpdated      ScheduleUpdated        `json:"schedule_updated"`
+	AccountBalances      []shared.WalletBalance `json:"account_balances"`
 }
 
 // HistoryItem and HistoryResponse back GET :id/history.

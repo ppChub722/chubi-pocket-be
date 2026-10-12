@@ -16,29 +16,19 @@ const (
 
 // SavingGoal — stored row, no computed fields.
 type SavingGoal struct {
-	ID                uuid.UUID        `json:"id"`
-	UserID            uuid.UUID        `json:"user_id"`
-	Name              string           `json:"name"`
-	TargetAmount      float64          `json:"target_amount"`
-	LinkedAccountID   uuid.UUID        `json:"linked_account_id"`
-	AllocationPct     float64          `json:"allocation_pct"`
-	Deadline          *string          `json:"deadline"` // YYYY-MM-DD
-	IconCode          *shared.IconCode `json:"icon_code"`
-	Status            string           `json:"status"`
-	Description       *string          `json:"description"`
-	Note              *string          `json:"note"`
-	CreatedAt         time.Time        `json:"created_at"`
-	UpdatedAt         time.Time        `json:"updated_at"`
-}
-
-// LinkedAccountSummary — embedded in SavingGoalView read responses so
-// the FE can render the linked account label / balance without a
-// second round-trip.
-type LinkedAccountSummary struct {
-	ID       uuid.UUID `json:"id"`
-	Name     string    `json:"name"`
-	Balance  float64   `json:"balance"`
-	Currency string    `json:"currency"`
+	ID              uuid.UUID        `json:"id"`
+	UserID          uuid.UUID        `json:"user_id"`
+	Name            string           `json:"name"`
+	TargetAmount    float64          `json:"target_amount"`
+	LinkedAccountID uuid.UUID        `json:"linked_account_id"`
+	AllocationPct   float64          `json:"allocation_pct"`
+	Deadline        *string          `json:"deadline"` // YYYY-MM-DD
+	IconCode        *shared.IconCode `json:"icon_code"`
+	Status          string           `json:"status"`
+	Description     *string          `json:"description"`
+	Note            *string          `json:"note"`
+	CreatedAt       time.Time        `json:"created_at"`
+	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
 // SavingGoalView extends SavingGoal with computed progress fields.
@@ -47,13 +37,14 @@ type LinkedAccountSummary struct {
 // false if balance drops below target).
 type SavingGoalView struct {
 	SavingGoal
-	LinkedAccount   LinkedAccountSummary `json:"linked_account"`
-	Currency        string               `json:"currency"`
-	CurrentAmount   float64              `json:"current_amount"`
-	ProgressPct     float64              `json:"progress_pct"`
-	IsCompleted     bool                 `json:"is_completed"`
-	RemainingAmount float64              `json:"remaining_amount"`
-	DaysRemaining   *int                 `json:"days_remaining"`
+	LinkedAccount        shared.AccountRef `json:"linked_account"`
+	LinkedAccountBalance float64           `json:"linked_account_balance"`
+	Currency             string            `json:"currency"`
+	CurrentAmount        float64           `json:"current_amount"`
+	ProgressPct          float64           `json:"progress_pct"`
+	IsCompleted          bool              `json:"is_completed"`
+	RemainingAmount      float64           `json:"remaining_amount"`
+	DaysRemaining        *int              `json:"days_remaining"`
 }
 
 // CreateRequest — `allocation_pct` is optional. When omitted, the

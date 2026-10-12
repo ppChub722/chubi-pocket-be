@@ -10,7 +10,7 @@ import (
 
 type Tag struct {
 	ID          uuid.UUID        `json:"id"`
-	UserID      uuid.UUID        `json:"user_id"`
+	UserID      uuid.UUID        `json:"-"`
 	Name        string           `json:"name"`
 	Description *string          `json:"description"`
 	Note        *string          `json:"note"`
@@ -52,6 +52,11 @@ func (r *UpdateTagRequest) DescriptionChange() (*string, bool) {
 
 func (r *UpdateTagRequest) NoteChange() (*string, bool) {
 	return shared.TextChange(r.Note, r.notePresent)
+}
+
+// DeletedResult - spec DeletedResult.
+type DeletedResult struct {
+	ID uuid.UUID `json:"id"`
 }
 
 type ListResponse struct {

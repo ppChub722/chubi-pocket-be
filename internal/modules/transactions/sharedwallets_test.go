@@ -242,7 +242,7 @@ func TestSharedWalletAuthzMatrix(t *testing.T) {
 	if rowM.CreatedBy == nil || rowM.CreatedBy.UserID != f.member {
 		t.Errorf("create response: created_by = %+v, want member author", rowM.CreatedBy)
 	}
-	if rowM.CanEditCategory == nil || !*rowM.CanEditCategory {
+	if !rowM.CanEditCategory {
 		t.Errorf("create response: can_edit_category should be true for the author")
 	}
 
@@ -258,8 +258,21 @@ func TestSharedWalletAuthzMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ex-member reads own old row: %v", err)
 	}
-	if got.IsLocked == nil || !*got.IsLocked {
-		t.Errorf("ex-member's own old row should be is_locked=true, got %+v", got.IsLocked)
+	if !got.IsLocked || got.CanEditCategory {
+		t.Errorf("ex-member's own old row: is_locked=%v can_edit_category=%v, want true/false",
+			got.IsLocked, got.CanEditCategory)
+	}
+	// A co-member sees the owner's row with its author and the owner's
+	// category, read-only for them.
+	seen, err := f.svc.Get(ctx, f.member, rowO.ID)
+	if err != nil {
+		t.Fatalf("member reads owner's row: %v", err)
+	}
+	if seen.CreatedBy == nil || seen.CreatedBy.UserID != f.owner || seen.CreatedBy.DisplayName != "Owner" ||
+		seen.Category == nil || seen.Category.ID != f.ownerCat || seen.Category.Name != "Owner Food" ||
+		seen.CanEditCategory || seen.IsLocked {
+		t.Errorf("member's view of owner row: created_by=%+v category=%+v can_edit_category=%v is_locked=%v",
+			seen.CreatedBy, seen.Category, seen.CanEditCategory, seen.IsLocked)
 	}
 
 	// Ledger view: ?account_id=wallet shows ALL authors to a member.

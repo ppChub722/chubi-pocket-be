@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -13,13 +14,14 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 var (
-	ErrCreditFieldMismatch    = errors.New("credit_limit is required for credit_card / pay_later types; other types must not set credit fields")
-	ErrTypeChangeNeedsLimit   = errors.New("changing account type to a credit type requires credit_limit")
-	ErrBalanceNotEditable     = errors.New("balance is not directly editable; use POST /v1/accounts/:id/adjust-balance")
-	ErrAdjustNoOp             = errors.New("new_balance equals current balance — nothing to adjust")
+	ErrCreditFieldMismatch  = errors.New("credit_limit is required for credit_card / pay_later types; other types must not set credit fields")
+	ErrTypeChangeNeedsLimit = errors.New("changing account type to a credit type requires credit_limit")
+	ErrBalanceNotEditable   = errors.New("balance is not directly editable; use POST /v1/accounts/:id/adjust-balance")
+	ErrAdjustNoOp           = errors.New("new_balance equals current balance — nothing to adjust")
 )
 
 type Service struct {
@@ -47,43 +49,162 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, accType st
 	return s.store.List(ctx, userID, status, accType)
 }
 
-// Summary computes income/expense/net for an account in a date range,
-// filtered to **reportable** transactions only — categories with
-// `include_in_report = false` (Opening Balance, Adjustment, Transfer
-// In/Out, Lending, Reimbursements) are excluded. Spec §03/§2.7 +
-// §05/§4.14c. Uncategorized rows count (still real activity).
-func (s *Service) Summary(ctx context.Context, userID, accountID uuid.UUID, from, to string) (*SummaryResponse, error) {
-	a, err := s.store.GetByID(ctx, userID, accountID)
+// ListPage is the wallets page read: the list plus its totals and the
+// archived count (spec AccountList).
+func (s *Service) ListPage(ctx context.Context, userID uuid.UUID, status, accType string) (*AccountList, error) {
+	accs, err := s.List(ctx, userID, status, accType)
 	if err != nil {
 		return nil, err
+	}
+	currency, err := s.store.UserCurrency(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	archived, err := s.store.CountArchived(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return &AccountList{
+		Data:          accs,
+		Total:         len(accs),
+		Totals:        buildTotals(accs, currency),
+		ArchivedCount: archived,
+	}, nil
+}
+
+// buildTotals sums the wallets in the user's currency (other-currency legacy
+// wallets are only counted). assets = balances of asset-group wallets;
+// liabilities = what credit_card / pay_later wallets owe (a negative balance
+// is debt); net = assets - liabilities.
+func buildTotals(accs []Account, currency string) AccountTotals {
+	t := AccountTotals{Currency: currency, ByType: []TypeTotal{}}
+	byType := map[string]*TypeTotal{}
+	for _, a := range accs {
+		if a.IsShared {
+			t.SharedCount++
+		}
+		if a.Currency != currency {
+			t.OtherCurrencyCount++
+			continue
+		}
+		if a.IsShared {
+			t.SharedBalance += a.Balance
+		}
+		tt := byType[a.Type]
+		if tt == nil {
+			tt = &TypeTotal{Type: a.Type}
+			byType[a.Type] = tt
+		}
+		tt.Count++
+		tt.Balance += a.Balance
+		if a.Group == "liability" {
+			t.Liabilities -= a.Balance
+			t.CreditUsed -= a.Balance
+			if a.CreditLimit != nil {
+				t.CreditLimit += *a.CreditLimit
+			}
+		} else {
+			t.Assets += a.Balance
+		}
+	}
+	for _, typ := range []string{TypeCash, TypeBank, TypeEWallet, TypeCreditCard, TypePayLater} {
+		if tt := byType[typ]; tt != nil {
+			tt.Balance = round2(tt.Balance)
+			t.ByType = append(t.ByType, *tt)
+		}
+	}
+	t.Assets, t.Liabilities = round2(t.Assets), round2(t.Liabilities)
+	t.CreditUsed, t.CreditLimit = round2(t.CreditUsed), round2(t.CreditLimit)
+	t.SharedBalance = round2(t.SharedBalance)
+	t.Net = round2(t.Assets - t.Liabilities)
+	return t
+}
+
+func round2(v float64) float64 { return math.Round(v*100) / 100 }
+
+// GetDetail is the wallet page read: the wallet; include lists the optional
+// blocks ("summary" for from..to, default the current month; "members" for
+// the full membership history). Archived wallets work too.
+func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, include []string, from, to string) (*AccountDetail, error) {
+	wantSummary, wantMembers := false, false
+	for _, inc := range include {
+		switch strings.TrimSpace(inc) {
+		case "summary":
+			wantSummary = true
+		case "members":
+			wantMembers = true
+		case "":
+		default:
+			return nil, ErrInvalidInclude
+		}
+	}
+	for _, d := range []string{from, to} {
+		if d == "" {
+			continue
+		}
+		if _, err := time.Parse("2006-01-02", d); err != nil {
+			return nil, ErrInvalidDate
+		}
+	}
+	a, err := s.store.GetByID(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	out := &AccountDetail{Account: *a}
+	if wantSummary {
+		if out.Summary, err = s.Summary(ctx, userID, id, from, to); err != nil {
+			return nil, err
+		}
+	}
+	if wantMembers {
+		if out.MembersHistory, err = s.store.ListMembersByAccount(ctx, userID, id); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// Summary computes income/expense/net for an account in a date range
+// (default: the current month), filtered to **reportable** transactions only
+// - categories with `include_in_report = false` (Opening Balance,
+// Adjustment, Transfer In/Out, Lending, Reimbursements) are excluded.
+// Uncategorized rows count (still real activity).
+func (s *Service) Summary(ctx context.Context, userID, accountID uuid.UUID, from, to string) (*AccountSummary, error) {
+	if _, err := s.store.GetByID(ctx, userID, accountID); err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	if from == "" {
+		from = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).Format("2006-01-02")
+	}
+	if to == "" {
+		to = time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, now.Location()).Format("2006-01-02")
 	}
 	income, expense, count, err := s.store.SummaryAggregate(ctx, accountID, from, to)
 	if err != nil {
 		return nil, err
 	}
-	return &SummaryResponse{
-		AccountID:        a.ID,
-		Balance:          a.Balance,
-		Currency:         a.Currency,
+	return &AccountSummary{
 		From:             from,
 		To:               to,
 		TotalIncome:      income,
 		TotalExpense:     expense,
-		Net:              income - expense,
+		Net:              round2(income - expense),
 		TransactionCount: count,
 	}, nil
 }
 
 // --- Create ---
 
-func (s *Service) Create(ctx context.Context, userID uuid.UUID, userCurrency string, req CreateRequest) (*Account, error) {
+func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateRequest) (*Account, error) {
 	if err := s.validateCreditFields(req.Type, req); err != nil {
 		return nil, err
 	}
 
-	currency := userCurrency
-	if req.Currency != nil && *req.Currency != "" {
-		currency = *req.Currency
+	// A wallet takes the user's (locked) currency; the body has no say.
+	currency, err := s.store.UserCurrency(ctx, userID)
+	if err != nil {
+		return nil, err
 	}
 	identifiers, err := NormalizeIdentifiers(req.Identifiers)
 	if err != nil {
@@ -161,6 +282,9 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 	if err != nil {
 		return nil, err
 	}
+	if !current.CanEdit {
+		return nil, ErrNotOwner
+	}
 
 	// Determine effective type after this update.
 	effectiveType := current.Type
@@ -199,6 +323,12 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 	if _, err := s.store.Update(ctx, userID, id, req, clearCreditFields); err != nil {
 		return nil, err
 	}
+	// sort_order is the caller's own position (not a column of the wallet).
+	if req.SortOrder != nil {
+		if err := s.store.SetMySortOrder(ctx, userID, id, *req.SortOrder); err != nil {
+			return nil, err
+		}
+	}
 	// Re-fetch for the members[] / my_report_scope / is_shared shape.
 	return s.store.GetByID(ctx, userID, id)
 }
@@ -220,7 +350,7 @@ func (s *Service) AddIdentifier(ctx context.Context, userID, id uuid.UUID, in Id
 
 // --- Adjust balance ---
 
-func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID, req AdjustBalanceRequest) (*AdjustBalanceResponse, error) {
+func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID, req AdjustBalanceRequest) (*AdjustBalanceResult, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -258,11 +388,23 @@ func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 
-	current.Balance = newBalance
-	return &AdjustBalanceResponse{
-		Account:                 current,
-		AdjustmentTransactionID: created.ID,
-	}, nil
+	_ = newBalance
+
+	// Final state: the wallet, the adjustment row as the transactions module
+	// returns it, and the wallet's balance after the write.
+	acc, err := s.store.GetByID(ctx, userID, accountID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.txs.Get(ctx, userID, created.ID)
+	if err != nil {
+		return nil, err
+	}
+	balances, err := shared.LoadWalletBalances(ctx, s.store.Pool(), []uuid.UUID{accountID})
+	if err != nil {
+		return nil, err
+	}
+	return &AdjustBalanceResult{Account: acc, Transaction: row, AccountBalances: balances}, nil
 }
 
 // --- Archive ---
@@ -270,18 +412,41 @@ func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID
 // Archive soft-deletes (status='archived'). Spec §14/2 rule 5: a wallet
 // with other active members cannot be deleted or archived away — the
 // owner must be the only active member.
-func (s *Service) Archive(ctx context.Context, userID, id uuid.UUID) error {
-	if _, err := s.store.GetByID(ctx, userID, id); err != nil {
-		return err
+func (s *Service) Archive(ctx context.Context, userID, id uuid.UUID) (*Account, error) {
+	a, err := s.store.GetByID(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	if !a.CanEdit {
+		return nil, ErrNotOwner
 	}
 	n, err := s.store.CountActiveMembers(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if n > 1 {
-		return ErrAccountHasMembers
+		return nil, ErrAccountHasMembers
 	}
-	return s.store.Archive(ctx, userID, id)
+	if err := s.store.Archive(ctx, userID, id); err != nil {
+		return nil, err
+	}
+	return s.store.GetByID(ctx, userID, id)
+}
+
+// Restore brings an archived wallet back (owner only); an active one is
+// returned as is.
+func (s *Service) Restore(ctx context.Context, userID, id uuid.UUID) (*Account, error) {
+	a, err := s.store.GetByID(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	if !a.CanEdit {
+		return nil, ErrNotOwner
+	}
+	if err := s.store.Restore(ctx, userID, id); err != nil {
+		return nil, err
+	}
+	return s.store.GetByID(ctx, userID, id)
 }
 
 // --- Validation ---

@@ -80,7 +80,7 @@ func (h *Handler) Reorder(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
-	out, err := h.service.Reorder(c.Request.Context(), userID, req.Items)
+	out, err := h.service.ReorderPage(c.Request.Context(), userID, req.Items)
 	switch {
 	case errors.Is(err, ErrReorderForbidden):
 		response.Fail(c, http.StatusForbidden, "FORBIDDEN", err.Error(), nil)
@@ -89,6 +89,22 @@ func (h *Handler) Reorder(c *gin.Context) {
 	case err != nil:
 		mapServiceError(c, err)
 	default:
-		c.JSON(http.StatusOK, gin.H{"data": out})
+		c.JSON(http.StatusOK, out)
 	}
+}
+
+// ReorderPage saves the caller's order and answers the active list (with its
+// totals) in the new order.
+func (s *Service) ReorderPage(ctx context.Context, userID uuid.UUID, items []ReorderItem) (*AccountList, error) {
+	seen := make(map[uuid.UUID]bool, len(items))
+	for _, it := range items {
+		if seen[it.ID] {
+			return nil, ErrReorderDuplicate
+		}
+		seen[it.ID] = true
+	}
+	if err := s.store.ReorderTx(ctx, userID, items); err != nil {
+		return nil, err
+	}
+	return s.ListPage(ctx, userID, StatusActive, "")
 }

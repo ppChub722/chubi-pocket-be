@@ -3,6 +3,7 @@ package dashboard
 import (
 	"github.com/google/uuid"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -14,6 +15,8 @@ const (
 	topCategoriesMax = 4 // the rest is folded into other_expense
 	trendMonths      = 6
 	recentMax        = 5
+	pendingMax       = 5  // drafts listed in the รอยืนยัน block
+	attentionMax     = 10 // notifications listed in the ต้องจัดการ block
 )
 
 // Upcoming item kinds.
@@ -43,6 +46,9 @@ type Response struct {
 	Debts         DebtsTile                        `json:"debts"`
 	SavingGoals   GoalsTile                        `json:"saving_goals"`
 	Recent        []transactions.TransactionDetail `json:"recent"`
+	Pending       PendingBlock                     `json:"pending"`
+	Attention     AttentionBlock                   `json:"attention"`
+	Badges        shared.Badges                    `json:"badges"`
 }
 
 type NetWorth struct {
@@ -60,13 +66,25 @@ type Totals struct {
 }
 
 // CategorySlice is one top-level (parent) expense category.
-// CategoryID nil = uncategorized.
+// Category nil = uncategorized.
 type CategorySlice struct {
-	CategoryID *uuid.UUID       `json:"category_id"`
-	Name       string           `json:"name"`
-	IconCode   *shared.IconCode `json:"icon_code"`
-	Expense    float64          `json:"expense"`
-	Count      int              `json:"count"`
+	Category *shared.CategoryRef `json:"category"`
+	Expense  float64             `json:"expense"`
+	Count    int                 `json:"count"`
+}
+
+// PendingBlock — the รอยืนยัน group: ALL the caller's drafts counted in
+// Total, the newest pendingMax listed (resolved).
+type PendingBlock struct {
+	Total int                          `json:"total"`
+	Items []pending.PendingTransaction `json:"items"`
+}
+
+// AttentionBlock — the notifications of the ต้องจัดการ card: Total =
+// max(unread badge, matching rows); Items = the first attentionMax.
+type AttentionBlock struct {
+	Total int                       `json:"total"`
+	Items []shared.NotificationView `json:"items"`
 }
 
 type TrendPoint struct {

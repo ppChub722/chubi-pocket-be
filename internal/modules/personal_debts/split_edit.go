@@ -23,6 +23,7 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 var (
@@ -105,6 +106,20 @@ func (s *Service) EditForTransactionTx(
 	for _, id := range order {
 		d := existing[id]
 		newAmount, ok := kept[id]
+		if ident, swap := idents[id]; ok && swap && ident.replace {
+			// A linked person swapped for someone else: this person is taken
+			// off (told "removed") and the new one added with the amount.
+			if err := s.notifySplitChangeTx(ctx, tx, d, 0, notifications.SplitChangeRemoved); err != nil {
+				return err
+			}
+			if err := removeDebtTx(ctx, tx, d); err != nil {
+				return fmt.Errorf("remove split: %w", err)
+			}
+			added = append(added, transactions.SplitInput{
+				PersonName: ident.name, ContactID: ident.contactID, OwedAmount: newAmount,
+			})
+			continue
+		}
 		switch {
 		case !ok:
 			if err := s.notifySplitChangeTx(ctx, tx, d, 0, notifications.SplitChangeRemoved); err != nil {
@@ -139,14 +154,26 @@ type identityEdit struct {
 	name      string
 	contactID *uuid.UUID // the split's contact after the edit; nil = a free name
 	newLink   bool       // contactID is a different contact than before
+	// replace — the split's contact is linked to an app user and the contact
+	// changes: not an in-place edit but remove + add (owner 2026-10-12), so
+	// the old partner hears "removed" and the new one hears split_created.
+	replace bool
 }
 
 // checkIdentityEditTx — does kept split d change its person? person_name /
 // contact_id left out (or equal) = unchanged; "contact_id": null drops the
-// contact (back to a free name). Locked only when d's contact is linked to
-// another app user — they may hold a mirror → ErrSplitIdentityLocked
-// (remove + add instead). Free names and contacts without an app account
-// change in place; a new contact's name is the default.
+// contact (back to a free name).
+//
+// The name rule is enforced here, not trusted from the caller:
+//   - the contact is unchanged and not nil → the sent name is IGNORED (a
+//     contact split shows the contact's live name; there is no in-place rename);
+//   - the contact changes to another one → the name is always that contact's
+//     resolved name (shared.PersonNameSQL), whatever was sent;
+//   - no contact before and after (a free name) → a new name renames in place.
+//
+// Free names and contacts without an app account change in place; when d's
+// contact is linked to another app user (they may hold a mirror) and the
+// contact changes, the edit is a replace — see identityEdit.replace.
 func checkIdentityEditTx(
 	ctx context.Context, tx pgx.Tx, userID uuid.UUID, d *PersonalDebt, e transactions.SplitEdit,
 ) (identityEdit, bool, error) {
@@ -156,27 +183,29 @@ func checkIdentityEditTx(
 		out.contactID = e.ContactID
 	}
 	contactChanged := !sameUUID(out.contactID, d.CounterpartyContactID)
+	if !contactChanged && out.contactID != nil {
+		return identityEdit{}, false, nil // same contact: the name is not editable
+	}
 	nameChanged := name != "" && name != d.CounterpartyPersonName
 	if !nameChanged && !contactChanged {
 		return identityEdit{}, false, nil
 	}
-	if linkedPartnerTx(ctx, tx, d) != nil {
-		return identityEdit{}, false, transactions.ErrSplitIdentityLocked
-	}
-	if name != "" {
-		out.name = name
-	}
-	if contactChanged && out.contactID != nil {
-		if err := assertSplitContactTx(ctx, tx, userID, *out.contactID); err != nil {
-			return identityEdit{}, false, err
+	out.replace = contactChanged && linkedPartnerTx(ctx, tx, d) != nil
+	if out.contactID == nil {
+		// A free name (no contact before or after / the contact dropped).
+		if name != "" {
+			out.name = name
 		}
-		out.newLink = true
-		if name == "" {
-			if err := tx.QueryRow(ctx, `SELECT display_name FROM contacts WHERE id = $1`,
-				*out.contactID).Scan(&out.name); err != nil {
-				return identityEdit{}, false, fmt.Errorf("contact name: %w", err)
-			}
-		}
+		return out, true, nil
+	}
+	if err := assertSplitContactTx(ctx, tx, userID, *out.contactID); err != nil {
+		return identityEdit{}, false, err
+	}
+	out.newLink = true
+	if err := tx.QueryRow(ctx, `SELECT `+shared.PersonNameSQL("c", "lu")+`
+		FROM contacts c LEFT JOIN users lu ON lu.id = c.linked_user_id
+		WHERE c.id = $1`, *out.contactID).Scan(&out.name); err != nil {
+		return identityEdit{}, false, fmt.Errorf("contact name: %w", err)
 	}
 	return out, true, nil
 }
@@ -399,6 +428,9 @@ func (s *Service) ApplySplitChange(ctx context.Context, userID, notificationID u
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
+	}
+	if err := s.fillPersons(ctx, userID, out.Debt); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

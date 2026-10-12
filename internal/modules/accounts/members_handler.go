@@ -10,26 +10,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
-// GET /v1/accounts/:id/members — full membership history (active +
-// pending + left) for the members screen. Active members only.
-func (h *Handler) ListMembers(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-	out, err := h.service.ListMembers(c.Request.Context(), userID, id)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, ListMembersResponse{Data: out})
-}
-
 // POST /v1/accounts/:id/members — invite a linked contact or an email
 // (notification pattern).
 func (h *Handler) InviteMember(c *gin.Context) {
@@ -47,12 +27,11 @@ func (h *Handler) InviteMember(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
-	m, err := h.service.InviteMember(c.Request.Context(), userID, id, req)
-	if err != nil {
+	if _, err := h.service.InviteMember(c.Request.Context(), userID, id, req); err != nil {
 		mapServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, m)
+	h.membersResult(c, http.StatusCreated, userID, id)
 }
 
 // DELETE /v1/accounts/:id/members/:member_id — leave / remove (sets left_at).
@@ -71,12 +50,12 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid member id", nil)
 		return
 	}
-	m, err := h.service.RemoveMember(c.Request.Context(), userID, id, memberID)
-	if err != nil {
+	if _, err := h.service.RemoveMember(c.Request.Context(), userID, id, memberID); err != nil {
 		mapServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, m)
+	// Leaving yourself answers {account: null, members: []}.
+	h.membersResult(c, http.StatusOK, userID, id)
 }
 
 // POST /v1/accounts/:id/transfer-ownership
@@ -99,7 +78,7 @@ func (h *Handler) TransferOwnership(c *gin.Context) {
 		mapServiceError(c, err)
 		return
 	}
-	response.OK(c, "Ownership transferred", nil)
+	h.membersResult(c, http.StatusOK, userID, id)
 }
 
 // PUT /v1/accounts/:id/report-scope — caller's own membership row.
@@ -158,9 +137,20 @@ func (h *Handler) RejectInvite(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
 		return
 	}
-	if err := h.service.RejectInvite(c.Request.Context(), userID, notifID); err != nil {
+	out, err := h.service.RejectInvite(c.Request.Context(), userID, notifID)
+	if err != nil {
 		mapServiceError(c, err)
 		return
 	}
-	response.OK(c, "Wallet invite rejected", nil)
+	c.JSON(http.StatusOK, out)
+}
+
+// membersResult answers a member write with the final state (MembersResult).
+func (h *Handler) membersResult(c *gin.Context, status int, userID, accountID uuid.UUID) {
+	out, err := h.service.MembersResult(c.Request.Context(), userID, accountID)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(status, out)
 }

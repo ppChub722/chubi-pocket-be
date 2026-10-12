@@ -40,7 +40,7 @@ func NewHandler(info Info) *Handler {
 
 // Version implements GET /v1/app/version (public, never blocked).
 func (h *Handler) Version(c *gin.Context) {
-	response.OK(c, "App version", h.info)
+	c.JSON(http.StatusOK, h.info.view())
 }
 
 // Middleware blocks builds older than MinBuild. No header, or one that
@@ -66,4 +66,25 @@ func (h *Handler) Middleware(exempt ...string) gin.HandlerFunc {
 			h.info)
 		c.Abort()
 	}
+}
+
+// VersionInfo is the spec schema VersionInfo (bare body of GET /app/version):
+// every key present, message_* null when empty.
+type VersionInfo struct {
+	MinBuild    int     `json:"min_build"`
+	LatestBuild int     `json:"latest_build"`
+	DownloadURL string  `json:"download_url"`
+	MessageTH   *string `json:"message_th"`
+	MessageEN   *string `json:"message_en"`
+}
+
+func (i Info) view() VersionInfo {
+	v := VersionInfo{MinBuild: i.MinBuild, LatestBuild: i.LatestBuild, DownloadURL: i.DownloadURL}
+	if i.MessageTH != "" {
+		v.MessageTH = &i.MessageTH
+	}
+	if i.MessageEN != "" {
+		v.MessageEN = &i.MessageEN
+	}
+	return v
 }

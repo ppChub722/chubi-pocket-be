@@ -8,7 +8,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// Profile is the response shape for GET /v1/users/me — full identity + preferences.
+// Profile is the spec schema Profile (GET /v1/users/me): identity + preferences.
 // Mirrors the response example in design/spec/02-users.md §2.1.
 type Profile struct {
 	ID              uuid.UUID        `json:"id"`
@@ -19,7 +19,7 @@ type Profile struct {
 	Currency        string           `json:"currency"`
 	IconCode        *shared.IconCode `json:"icon_code"`
 	Status          string           `json:"status"`
-	Preferences     map[string]any   `json:"preferences"`
+	Preferences     Preferences      `json:"preferences"`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
 }
@@ -27,7 +27,6 @@ type Profile struct {
 type UpdateProfileRequest struct {
 	DisplayName *string          `json:"display_name" binding:"omitempty,min=1,max=100"`
 	IconCode    *shared.IconCode `json:"icon_code"    binding:"omitempty"`
-	Currency    *string          `json:"currency"     binding:"omitempty,len=3"`
 	// Email is editable post-registration. When set, it must be a valid
 	// address; uniqueness is enforced by the DB index on `users.email` —
 	// duplicates surface as ErrEmailExists at the service layer. Pass nil
@@ -58,4 +57,34 @@ func ValidatePreferenceKeys(prefs map[string]any) (string, bool) {
 		}
 	}
 	return "", true
+}
+
+// Preferences is the spec's known preference keys; every key is always
+// present (null when unset).
+type Preferences struct {
+	Timezone      *string `json:"timezone"`
+	Theme         *string `json:"theme"`
+	Language      *string `json:"language"`
+	FeeCategoryID *string `json:"fee_category_id"`
+}
+
+func prefsFromMap(m map[string]any) Preferences {
+	str := func(k string) *string {
+		if v, ok := m[k].(string); ok && v != "" {
+			return &v
+		}
+		return nil
+	}
+	return Preferences{
+		Timezone: str("timezone"), Theme: str("theme"), Language: str("language"),
+		FeeCategoryID: str(PrefFeeCategoryID),
+	}
+}
+
+// apiStatus maps the stored users.status (active | inactive) to the API enum.
+func apiStatus(stored string) string {
+	if stored == "active" {
+		return "active"
+	}
+	return "deactivated"
 }

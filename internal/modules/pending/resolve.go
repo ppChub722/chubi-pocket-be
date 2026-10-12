@@ -1,0 +1,156 @@
+package pending
+
+import (
+	"context"
+
+	"github.com/google/uuid"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
+)
+
+// Missing keys (spec DraftResolved.missing).
+const (
+	missingAccount    = "account_id"
+	missingTransferTo = "transfer_to_account_id"
+	missingCategory   = "category_id"
+	missingTags       = "tag_ids"
+	missingProject    = "project_id"
+	missingContact    = "contact_id"
+)
+
+// ResolveDrafts resolves the ids of every draft with ONE query per kind
+// (wallets, categories, events, tags, contacts), whatever the number of
+// drafts. out[i] belongs to drafts[i]. A dangling id is null in the result
+// and its draft key is listed in Missing.
+func ResolveDrafts(ctx context.Context, q shared.Querier, userID uuid.UUID, drafts []Draft) ([]DraftResolved, error) {
+	var accIDs, catIDs, eventIDs, tagIDs, contactIDs []uuid.UUID
+	for _, d := range drafts {
+		if d.AccountID != nil {
+			accIDs = append(accIDs, *d.AccountID)
+		}
+		if d.TransferToAccountID != nil {
+			accIDs = append(accIDs, *d.TransferToAccountID)
+		}
+		if d.CategoryID != nil {
+			catIDs = append(catIDs, *d.CategoryID)
+		}
+		if d.ProjectID != nil {
+			eventIDs = append(eventIDs, *d.ProjectID)
+		}
+		tagIDs = append(tagIDs, d.TagIDs...)
+		for _, sp := range d.Splits {
+			if sp.ContactID != nil {
+				contactIDs = append(contactIDs, *sp.ContactID)
+			}
+		}
+	}
+	accounts, err := shared.LoadAccountRefs(ctx, q, accIDs)
+	if err != nil {
+		return nil, err
+	}
+	cats, err := shared.LoadCategoryRefs(ctx, q, catIDs)
+	if err != nil {
+		return nil, err
+	}
+	events, err := shared.LoadEventRefs(ctx, q, eventIDs)
+	if err != nil {
+		return nil, err
+	}
+	tagRefs, err := shared.LoadTagRefs(ctx, q, userID, tagIDs)
+	if err != nil {
+		return nil, err
+	}
+	persons, err := shared.LoadPersons(ctx, q, userID, contactIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]DraftResolved, len(drafts))
+	for i, d := range drafts {
+		r := DraftResolved{Tags: []shared.TagRef{}, Splits: []ResolvedSplit{}, Missing: []string{}}
+		if d.AccountID != nil {
+			if a, ok := accounts[*d.AccountID]; ok {
+				r.Account = &a
+			} else {
+				r.Missing = append(r.Missing, missingAccount)
+			}
+		}
+		if d.TransferToAccountID != nil {
+			if a, ok := accounts[*d.TransferToAccountID]; ok {
+				r.TransferToAccount = &a
+			} else {
+				r.Missing = append(r.Missing, missingTransferTo)
+			}
+		}
+		if d.CategoryID != nil {
+			if c, ok := cats[*d.CategoryID]; ok {
+				r.Category = &c
+			} else {
+				r.Missing = append(r.Missing, missingCategory)
+			}
+		}
+		tagGone := false
+		for _, id := range d.TagIDs {
+			if t, ok := tagRefs[id]; ok {
+				r.Tags = append(r.Tags, t)
+			} else {
+				tagGone = true
+			}
+		}
+		if tagGone {
+			r.Missing = append(r.Missing, missingTags)
+		}
+		if d.ProjectID != nil {
+			if e, ok := events[*d.ProjectID]; ok {
+				r.Project = &e
+			} else {
+				r.Missing = append(r.Missing, missingProject)
+			}
+		}
+		contactGone := false
+		for _, sp := range d.Splits {
+			if sp.ContactID != nil {
+				if _, ok := persons[*sp.ContactID]; !ok {
+					contactGone = true
+				}
+			}
+			r.Splits = append(r.Splits, ResolvedSplit{
+				Person:     shared.ResolvePerson(persons, shared.PersonKey{ContactID: sp.ContactID, Snapshot: sp.PersonName}),
+				OwedAmount: sp.OwedAmount,
+			})
+		}
+		if contactGone {
+			r.Missing = append(r.Missing, missingContact)
+		}
+		out[i] = r
+	}
+	return out, nil
+}
+
+// ResolveRows fills Resolved on every row (one batch for the whole slice).
+func ResolveRows(ctx context.Context, q shared.Querier, userID uuid.UUID, rows []PendingTransaction) error {
+	drafts := make([]Draft, len(rows))
+	for i := range rows {
+		drafts[i] = rows[i].Draft
+	}
+	res, err := ResolveDrafts(ctx, q, userID, drafts)
+	if err != nil {
+		return err
+	}
+	for i := range rows {
+		rows[i].Resolved = res[i]
+	}
+	return nil
+}
+
+// Resolver — resolves drafts for a user against a pool; what the slip /
+// text import (another package) uses for its `resolved` blocks.
+type Resolver struct{ db shared.Querier }
+
+// NewResolver — db is the pool.
+func NewResolver(db shared.Querier) *Resolver { return &Resolver{db: db} }
+
+// Resolve — see ResolveDrafts.
+func (r *Resolver) Resolve(ctx context.Context, userID uuid.UUID, drafts []Draft) ([]DraftResolved, error) {
+	return ResolveDrafts(ctx, r.db, userID, drafts)
+}

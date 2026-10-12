@@ -10,16 +10,16 @@ import (
 // Notification trigger types. Stored in `notifications.type` and CHECK'd
 // at the DB level by migration 000015.
 const (
-	TypeSplitCreated             = "split_created"
-	TypeSplitPaid                = "split_paid"
-	TypeSplitReceived            = "split_received" // retired 2026-10-08 — no longer sent
-	TypeProjectTxRecordedForYou  = "project_tx_recorded_for_you"
-	TypeProjectTxChanged         = "project_tx_changed"
-	TypeProjectInvite            = "project_invite"
-	TypeContactLinkRequest       = "contact_link_request"
-	TypeAccountInvite            = "account_invite"
-	TypeProjectAdded             = "project_added"
-	TypeSplitChanged             = "split_changed" // 2026-10-10: a split I'm in was re-amounted / removed
+	TypeSplitCreated            = "split_created"
+	TypeSplitPaid               = "split_paid"
+	TypeSplitReceived           = "split_received" // retired 2026-10-08 — no longer sent
+	TypeProjectTxRecordedForYou = "project_tx_recorded_for_you"
+	TypeProjectTxChanged        = "project_tx_changed"
+	TypeProjectInvite           = "project_invite"
+	TypeContactLinkRequest      = "contact_link_request"
+	TypeAccountInvite           = "account_invite"
+	TypeProjectAdded            = "project_added"
+	TypeSplitChanged            = "split_changed" // 2026-10-10: a split I'm in was re-amounted / removed
 )
 
 // Notification is the DB row.
@@ -158,7 +158,7 @@ type SplitPaidPayload struct {
 	PayerTransactionID *uuid.UUID `json:"payer_transaction_id"`
 	// Set when the recipient'"'"'s auto-action already recorded the receipt.
 	RecordedTransactionID *uuid.UUID `json:"recorded_transaction_id"`
-	ProjectID          *uuid.UUID `json:"project_id"`
+	ProjectID             *uuid.UUID `json:"project_id"`
 	// The recipient's own debt row (contract §5) — the deep link opens it.
 	RecipientDebtID *uuid.UUID `json:"recipient_debt_id"`
 }
@@ -179,12 +179,12 @@ type ProjectTxRecordedPayload struct {
 }
 
 type ProjectTxChangedPayload struct {
-	ProjectTransactionID uuid.UUID                  `json:"project_transaction_id"`
-	ProjectID            uuid.UUID                  `json:"project_id"`
-	EditorUserID         uuid.UUID                  `json:"editor_user_id"`
-	EditorDisplayName    string                     `json:"editor_display_name"`
-	ChangeKind           string                     `json:"change_kind"` // "edited" | "deleted"
-	Diff                 map[string][2]interface{}  `json:"diff,omitempty"`
+	ProjectTransactionID uuid.UUID                 `json:"project_transaction_id"`
+	ProjectID            uuid.UUID                 `json:"project_id"`
+	EditorUserID         uuid.UUID                 `json:"editor_user_id"`
+	EditorDisplayName    string                    `json:"editor_display_name"`
+	ChangeKind           string                    `json:"change_kind"` // "edited" | "deleted"
+	Diff                 map[string][2]interface{} `json:"diff,omitempty"`
 	// The recipient's personal copy (source_project_transaction_id) —
 	// created by the auto-action, or the one to update.
 	PersonalTransactionID *uuid.UUID `json:"personal_transaction_id"`
@@ -223,19 +223,19 @@ type AccountInvitePayload struct {
 // by the underlying splits / shared wallet, so there is NO accept/reject
 // action (leave-project is always available from the project page).
 type ProjectAddedPayload struct {
-	ProjectMemberID   uuid.UUID `json:"project_member_id"`
-	ProjectID         uuid.UUID `json:"project_id"`
-	ProjectName       string    `json:"project_name"`
-	AdderUserID       uuid.UUID `json:"adder_user_id"`
-	AdderDisplayName  string    `json:"adder_display_name"`
+	ProjectMemberID  uuid.UUID `json:"project_member_id"`
+	ProjectID        uuid.UUID `json:"project_id"`
+	ProjectName      string    `json:"project_name"`
+	AdderUserID      uuid.UUID `json:"adder_user_id"`
+	AdderDisplayName string    `json:"adder_display_name"`
 }
 
 // PersonalUpdate — new values for a personal copy after its project row
 // changed. The amount keeps the copy's basis: a full-amount copy follows
 // the new total, a share-only copy follows the new share.
 type PersonalUpdate struct {
-	Amount float64 `json:"amount"`
-	Date   string  `json:"date"`
+	Amount      float64 `json:"amount"`
+	Date        string  `json:"date"`
 	Description *string `json:"description"`
-	Note   *string `json:"note"`
+	Note        *string `json:"note"`
 }

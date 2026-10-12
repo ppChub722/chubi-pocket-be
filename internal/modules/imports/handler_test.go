@@ -101,7 +101,7 @@ func TestParseTextEchoes(t *testing.T) {
 		strings.NewReader(`{"text":"กาแฟ 65"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := do(r, req)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "กาแฟ 65") {
+	if w.Code != http.StatusOK || w.Body.String() != `{"pending":[]}` {
 		t.Fatalf("got %d %s", w.Code, w.Body)
 	}
 	if !strings.Contains(logs.String(), "parse text OK") {

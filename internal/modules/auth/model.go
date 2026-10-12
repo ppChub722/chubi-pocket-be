@@ -11,17 +11,17 @@ import (
 // User is the canonical identity object. Owned by the auth module per
 // design/spec/01-auth.md; the users module reads/writes the editable subset.
 type User struct {
-	ID              uuid.UUID  `json:"id"`
-	Username        string     `json:"username"`
-	Email           *string    `json:"email"`
-	EmailVerifiedAt *time.Time `json:"email_verified_at"`
-	DisplayName     string     `json:"display_name"`
-	PasswordHash    string     `json:"-"`
-	Currency        string     `json:"currency"`
+	ID              uuid.UUID        `json:"id"`
+	Username        string           `json:"username"`
+	Email           *string          `json:"email"`
+	EmailVerifiedAt *time.Time       `json:"email_verified_at"`
+	DisplayName     string           `json:"display_name"`
+	PasswordHash    string           `json:"-"`
+	Currency        string           `json:"currency"`
 	IconCode        *shared.IconCode `json:"icon_code"`
-	Status          string     `json:"status"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	Status          string           `json:"status"`
+	CreatedAt       time.Time        `json:"created_at"`
+	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
 type RegisterRequest struct {
@@ -43,11 +43,43 @@ type ChangePasswordRequest struct {
 }
 
 type AuthResponse struct {
-	User  User      `json:"user"`
+	User  AuthUser  `json:"user"`
 	Token TokenInfo `json:"token"`
 }
 
 type TokenInfo struct {
 	AccessToken string `json:"access_token"`
 	ExpiresIn   int    `json:"expires_in"`
+}
+
+// AuthUser is the spec schema AuthUser (the user inside a register / login
+// response). Status is the API enum: active | deactivated.
+type AuthUser struct {
+	ID              uuid.UUID        `json:"id"`
+	Username        string           `json:"username"`
+	Email           *string          `json:"email"`
+	EmailVerifiedAt *time.Time       `json:"email_verified_at"`
+	DisplayName     string           `json:"display_name"`
+	Currency        string           `json:"currency"`
+	IconCode        *shared.IconCode `json:"icon_code"`
+	Status          string           `json:"status"`
+	CreatedAt       time.Time        `json:"created_at"`
+	UpdatedAt       time.Time        `json:"updated_at"`
+}
+
+// APIStatus maps the stored users.status to the API enum.
+func APIStatus(stored string) string {
+	if stored == "active" {
+		return "active"
+	}
+	return "deactivated"
+}
+
+// AuthView is the API shape of the user.
+func (u *User) AuthView() AuthUser {
+	return AuthUser{
+		ID: u.ID, Username: u.Username, Email: u.Email, EmailVerifiedAt: u.EmailVerifiedAt,
+		DisplayName: u.DisplayName, Currency: u.Currency, IconCode: u.IconCode,
+		Status: APIStatus(u.Status), CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
+	}
 }

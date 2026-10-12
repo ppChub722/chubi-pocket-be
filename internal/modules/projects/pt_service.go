@@ -64,7 +64,7 @@ func (s *Service) CreateProjectTransaction(
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return pt, nil
+	return pt, s.attachMembers(ctx, callerUserID, pt)
 }
 
 // UpdateProjectTransaction edits a parent row and (optionally) full-replaces
@@ -116,7 +116,7 @@ func (s *Service) UpdateProjectTransaction(
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return updated, nil
+	return updated, s.attachMembers(ctx, callerUserID, updated)
 }
 
 // DeleteProjectTransaction removes a parent (FK-cascading its children) or
@@ -197,12 +197,19 @@ func (s *Service) ListPT(ctx context.Context, callerUserID, projectID uuid.UUID,
 	if err != nil {
 		return nil, err
 	}
+	ptrs := make([]*ProjectTransaction, len(rows))
+	for i := range rows {
+		ptrs[i] = &rows[i]
+	}
+	if err := s.attachMembers(ctx, callerUserID, ptrs...); err != nil {
+		return nil, err
+	}
 	totalPages := (total + perPage - 1) / perPage
 	if totalPages == 0 {
 		totalPages = 1
 	}
 	return &ListPTResponse{
-		Data: rows,
+		Data:       rows,
 		Pagination: Pagination{Page: page, PerPage: perPage, Total: total, TotalPages: totalPages},
 	}, nil
 }
@@ -226,7 +233,11 @@ func (s *Service) ToggleMark(
 	if current.ProjectID != projectID {
 		return nil, ErrPTNotFound
 	}
-	return s.store.ToggleMark(ctx, projectID, ptID, member.ID, marked)
+	pt, err := s.store.ToggleMark(ctx, projectID, ptID, member.ID, marked)
+	if err != nil {
+		return nil, err
+	}
+	return pt, s.attachMembers(ctx, callerUserID, pt)
 }
 
 func (s *Service) Summary(ctx context.Context, callerUserID, projectID uuid.UUID) (*SummaryResponse, error) {

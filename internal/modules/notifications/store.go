@@ -108,32 +108,36 @@ func (s *Store) InsertTx(
 
 // List returns the caller's notification rows + unread count + total.
 func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Notification, int, int, error) {
-	whereClauses := []string{"recipient_user_id = $1"}
+	whereClauses := []string{"n.recipient_user_id = $1"}
 	args := []any{userID}
 
 	switch strings.ToLower(strings.TrimSpace(f.Read)) {
 	case "true":
-		whereClauses = append(whereClauses, "read_at IS NOT NULL")
+		whereClauses = append(whereClauses, "n.read_at IS NOT NULL")
 	case "false":
-		whereClauses = append(whereClauses, "read_at IS NULL")
+		whereClauses = append(whereClauses, "n.read_at IS NULL")
 	}
 	switch strings.ToLower(strings.TrimSpace(f.Actioned)) {
 	case "true":
-		whereClauses = append(whereClauses, "actioned_at IS NOT NULL")
+		whereClauses = append(whereClauses, "n.actioned_at IS NOT NULL")
 	case "false":
-		whereClauses = append(whereClauses, "actioned_at IS NULL")
+		whereClauses = append(whereClauses, "n.actioned_at IS NULL")
 	}
 	if f.Type != "" {
 		args = append(args, f.Type)
-		whereClauses = append(whereClauses, fmt.Sprintf("type = $%d", len(args)))
+		whereClauses = append(whereClauses, fmt.Sprintf("n.type = $%d", len(args)))
 	}
 	if f.From != nil {
 		args = append(args, *f.From)
-		whereClauses = append(whereClauses, fmt.Sprintf("created_at >= $%d::timestamptz", len(args)))
+		whereClauses = append(whereClauses, fmt.Sprintf("n.created_at >= $%d::timestamptz", len(args)))
 	}
 	if f.To != nil {
 		args = append(args, *f.To)
-		whereClauses = append(whereClauses, fmt.Sprintf("created_at <= $%d::timestamptz", len(args)))
+		if len(*f.To) == 10 { // a calendar date: the whole day counts
+			whereClauses = append(whereClauses, fmt.Sprintf("n.created_at < ($%d::date + 1)", len(args)))
+		} else {
+			whereClauses = append(whereClauses, fmt.Sprintf("n.created_at <= $%d::timestamptz", len(args)))
+		}
 	}
 	where := strings.Join(whereClauses, " AND ")
 
@@ -142,7 +146,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Not
 		unreadCount int
 	)
 	if err := s.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM notifications WHERE `+where, args...).Scan(&total); err != nil {
+		`SELECT COUNT(*) FROM notifications n WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, 0, fmt.Errorf("count: %w", err)
 	}
 	if err := s.db.QueryRow(ctx,
@@ -279,7 +283,6 @@ func (s *Store) GetByIDForCallerTx(ctx context.Context, tx pgx.Tx, userID, id uu
 	}
 	return n, nil
 }
-
 
 func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	tag, err := s.db.Exec(ctx,
@@ -475,7 +478,6 @@ func (s *Store) IsActiveWalletMember(ctx context.Context, userID, accountID uuid
 	}
 	return ok, nil
 }
-
 
 // SupersedeSplitNoticesTx — see Service.SupersedeSplitNoticesTx.
 func (s *Store) SupersedeSplitNoticesTx(ctx context.Context, tx pgx.Tx, recipientUserID uuid.UUID, notifType string, splitID uuid.UUID) error {

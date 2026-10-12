@@ -39,16 +39,16 @@ const (
 )
 
 type Project struct {
-	ID           uuid.UUID        `json:"id"`
-	OwnerUserID  uuid.UUID        `json:"owner_user_id"`
-	Name         string           `json:"name"`
-	Type         *string          `json:"type"`
-	Description  *string          `json:"description"`
-	Note         *string          `json:"note"`
-	StartDate    *string          `json:"start_date"`
-	EndDate      *string          `json:"end_date"`
-	Status       string           `json:"status"`
-	IconCode     *shared.IconCode `json:"icon_code"`
+	ID          uuid.UUID        `json:"id"`
+	OwnerUserID uuid.UUID        `json:"owner_user_id"`
+	Name        string           `json:"name"`
+	Type        *string          `json:"type"`
+	Description *string          `json:"description"`
+	Note        *string          `json:"note"`
+	StartDate   *string          `json:"start_date"`
+	EndDate     *string          `json:"end_date"`
+	Status      string           `json:"status"`
+	IconCode    *shared.IconCode `json:"icon_code"`
 	// Plan-vs-actual single total (spec §10/4.23). NULL = plan UI off.
 	// Display-only — never a constraint; no validation references it.
 	PlannedAmount *float64  `json:"planned_amount"`
@@ -88,23 +88,26 @@ type ProjectMember struct {
 // project_member ids who have flagged this row "resolved on the board"; it
 // is independent of personal-book actions.
 type ProjectTransaction struct {
-	ID                         uuid.UUID        `json:"id"`
-	ProjectID                  uuid.UUID        `json:"project_id"`
-	ParentProjectTransactionID *uuid.UUID       `json:"parent_project_transaction_id"`
-	TransactionMemberID        uuid.UUID        `json:"transaction_member_id"`
-	RecordUserID               uuid.UUID        `json:"record_user_id"`
-	Type                       string           `json:"type"`
-	Amount                     float64          `json:"amount"`
-	Currency                   string           `json:"currency"`
-	Date                       string           `json:"date"`
-	Note                       *string          `json:"note"`
-	Description                *string          `json:"description"`
+	ID                         uuid.UUID  `json:"id"`
+	ProjectID                  uuid.UUID  `json:"project_id"`
+	ParentProjectTransactionID *uuid.UUID `json:"parent_project_transaction_id"`
+	TransactionMemberID        uuid.UUID  `json:"transaction_member_id"`
+	// The member, resolved (live profile name for linked members); filled by
+	// the service before a response.
+	TransactionMember shared.MemberRef `json:"transaction_member"`
+	RecordUserID      uuid.UUID        `json:"record_user_id"`
+	Type              string           `json:"type"`
+	Amount            float64          `json:"amount"`
+	Currency          string           `json:"currency"`
+	Date              string           `json:"date"`
+	Note              *string          `json:"note"`
+	Description       *string          `json:"description"`
 	// Free labels shared by the project's members (replaced the per-row
 	// category, migration 47). Never null — empty when untagged.
-	Tags                       []string         `json:"tags"`
-	Marks                      []uuid.UUID      `json:"marks"`
-	CreatedAt                  time.Time        `json:"created_at"`
-	UpdatedAt                  time.Time        `json:"updated_at"`
+	Tags      []string    `json:"tags"`
+	Marks     []uuid.UUID `json:"marks"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
 }
 
 // --- Request bodies ---
@@ -202,13 +205,13 @@ type ProjectSplitInput struct {
 }
 
 type CreateProjectTransactionRequest struct {
-	TransactionMemberID uuid.UUID           `json:"transaction_member_id" binding:"required"`
-	Type                string              `json:"type"                  binding:"required,oneof=expense income"`
-	Amount              float64             `json:"amount"                binding:"required,gt=0"`
-	Currency            string              `json:"currency"              binding:"required,len=3"`
-	Date                string              `json:"date"                  binding:"required,datetime=2006-01-02"`
-	Note                *string             `json:"note"                  binding:"omitempty,max=500"`
-	Description         *string             `json:"description"           binding:"omitempty,max=200"`
+	TransactionMemberID uuid.UUID `json:"transaction_member_id" binding:"required"`
+	Type                string    `json:"type"                  binding:"required,oneof=expense income"`
+	Amount              float64   `json:"amount"                binding:"required,gt=0"`
+	Currency            string    `json:"currency"              binding:"required,len=3"`
+	Date                string    `json:"date"                  binding:"required,datetime=2006-01-02"`
+	Note                *string   `json:"note"                  binding:"omitempty,max=500"`
+	Description         *string   `json:"description"           binding:"omitempty,max=200"`
 	// Names — trimmed and de-duplicated (case-insensitive) by the BE; a new
 	// name just starts being used, there's nothing to create first.
 	Tags   []string            `json:"tags"   binding:"omitempty,max=20,dive,max=40"`
@@ -220,10 +223,10 @@ type CreateProjectTransactionRequest struct {
 // (possibly empty) slice, all existing children are deleted and the slice
 // is re-inserted.
 type UpdateProjectTransactionRequest struct {
-	Amount           *float64             `json:"amount"            binding:"omitempty,gt=0"`
-	Date             *string              `json:"date"              binding:"omitempty,datetime=2006-01-02"`
-	Note             *string              `json:"note"              binding:"omitempty,max=500"`
-	Description      *string              `json:"description"       binding:"omitempty,max=200"`
+	Amount      *float64 `json:"amount"            binding:"omitempty,gt=0"`
+	Date        *string  `json:"date"              binding:"omitempty,datetime=2006-01-02"`
+	Note        *string  `json:"note"              binding:"omitempty,max=500"`
+	Description *string  `json:"description"       binding:"omitempty,max=200"`
 	// Present → replaces the row's tags (empty list clears them).
 	Tags   *[]string            `json:"tags"   binding:"omitempty,max=20,dive,max=40"`
 	Splits *[]ProjectSplitInput `json:"splits" binding:"omitempty,dive"`
@@ -294,6 +297,9 @@ type QuickCreateResponse struct {
 	// The new bill created by the call — lets the client attach tags.
 	// Absent when the call only pulled existing bills.
 	TransactionID *uuid.UUID `json:"transaction_id,omitempty"`
+	// Post-commit balances of the wallet of the NEW bill (pulling existing bills
+	// moves no money: []).
+	AccountBalances []shared.WalletBalance `json:"account_balances"`
 }
 
 // AddBillsRequest — POST /v1/projects/:id/bills: a new bill and/or
@@ -348,10 +354,10 @@ type SummaryResponse struct {
 	MemberCount      int       `json:"member_count"`
 	// Contract §6a — expense parents only. my_position omitted when the
 	// caller isn't a member.
-	MyPosition *MemberPosition `json:"my_position,omitempty"`
-	Members    []MemberPosition `json:"members"`
-	ByTag      []TagTotal       `json:"by_tag"`
-	PlannedAmount    *float64  `json:"planned_amount,omitempty"`
-	SpentNet         *float64  `json:"spent_net,omitempty"`
-	Remaining        *float64  `json:"remaining,omitempty"`
+	MyPosition    *MemberPosition  `json:"my_position,omitempty"`
+	Members       []MemberPosition `json:"members"`
+	ByTag         []TagTotal       `json:"by_tag"`
+	PlannedAmount *float64         `json:"planned_amount,omitempty"`
+	SpentNet      *float64         `json:"spent_net,omitempty"`
+	Remaining     *float64         `json:"remaining,omitempty"`
 }

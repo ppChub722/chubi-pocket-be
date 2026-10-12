@@ -33,13 +33,17 @@ const (
 // Category mirrors the row in `categories`. system_kind is omitted from JSON
 // (it's a backend implementation detail; clients see is_system + display name).
 type Category struct {
-	ID              uuid.UUID        `json:"id"`
-	UserID          uuid.UUID        `json:"user_id"`
-	Name            string           `json:"name"`
-	Type            string           `json:"type"`
-	ParentID        *uuid.UUID       `json:"parent_id"`
+	ID       uuid.UUID  `json:"id"`
+	UserID   uuid.UUID  `json:"-"`
+	Name     string     `json:"name"`
+	Type     string     `json:"type"`
+	ParentID *uuid.UUID `json:"parent_id"`
+	// Depth: 1 = root. Path: the ancestors root -> parent (empty for a root).
+	// Both are filled by the service (decorate), not by the row scan.
+	Depth           int              `json:"depth"`
+	Path            []PathItem       `json:"path"`
 	IsSystem        bool             `json:"is_system"`
-	SystemKind      *string          `json:"-"`
+	SystemKind      *string          `json:"system_kind"`
 	IconCode        *shared.IconCode `json:"icon_code"`
 	SortOrder       int              `json:"sort_order"`
 	IncludeInReport bool             `json:"include_in_report"`
@@ -56,11 +60,12 @@ type Category struct {
 type CategoryDetail struct {
 	Category
 	ParentName       *string `json:"parent_name"`
-	Depth            int     `json:"depth"`
 	ChildCount       int     `json:"child_count"`
 	TransactionCount int     `json:"transaction_count"`
 	// BudgetCount = budgets deleted along with this category (FK CASCADE).
 	BudgetCount int `json:"budget_count"`
+	// IsFeeCategory: this is the user's fee category (user_preferences.fee_category_id).
+	IsFeeCategory bool `json:"is_fee_category"`
 }
 
 type CreateCategoryRequest struct {
@@ -147,6 +152,19 @@ type ReorderEntry struct {
 	ID        uuid.UUID  `json:"id"         binding:"required"`
 	ParentID  *uuid.UUID `json:"parent_id"`
 	SortOrder int        `json:"sort_order" binding:"min=0"`
+}
+
+// PathItem - one ancestor in Category.path.
+type PathItem struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
+}
+
+// DeleteCategoryResult - spec DeleteCategoryResult: the children shifted up
+// to the grandparent, as returned AFTER the shift.
+type DeleteCategoryResult struct {
+	ID         uuid.UUID  `json:"id"`
+	Reparented []Category `json:"reparented"`
 }
 
 type ListResponse struct {

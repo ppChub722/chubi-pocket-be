@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/apidoc"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/accounts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/appversion"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
@@ -26,6 +27,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/dashboard"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports/ocr"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/me"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
@@ -99,6 +101,7 @@ func main() {
 	notificationsStore := notifications.NewStore(dbPool)
 	notificationsService := notifications.NewService(notificationsStore)
 	notificationsHandler := notifications.NewHandler(notificationsService)
+	meService := me.NewService(dbPool)
 
 	// Projects. Project transactions support splits (parent + child rows in
 	// project_transactions). Personal-book mirror creation is FE-side via
@@ -116,6 +119,7 @@ func main() {
 	budgetsStore := budgets.NewStore(dbPool)
 	budgetsService := budgets.NewService(budgetsStore)
 	budgetsHandler := budgets.NewHandler(budgetsService)
+	meHandler := me.NewHandler(meService.WithBudgets(budgetsService).WithDebts(personalDebtsService))
 
 	// Scheduled transactions (Phase 1c). generate-now is the dev/dogfood
 	// trigger; Phase 3 wires the same logic into an hourly cron.
@@ -145,6 +149,7 @@ func main() {
 	providersStore := providers.NewStore(dbPool)
 	providersHandler := providers.NewHandler(providersStore)
 	importsHandler.WithImportLogs(imports.NewLogStore(dbPool).Write, providersStore.Known)
+	importsHandler.WithResolver(pending.NewResolver(dbPool).Resolve)
 	// OCR dump (0.3.1 tuning) — OCR_DUMP=1 compares every mode on each slip;
 	// never in production. See imports/ocr_dump.go.
 	if cfg.OCR.Dump && cfg.App.Env != "production" {
@@ -301,6 +306,15 @@ func main() {
 		MessageEN:   cfg.Version.MessageEN,
 	})
 
+	// The API document (dev hub reads it). Registered on the engine, not the
+	// group: it must stay readable by an app build the version check rejects.
+	// Public locally; in production any logged-in user.
+	openapiHandlers := []gin.HandlerFunc{apidoc.NewHandler(r).Serve}
+	if cfg.App.Env == "production" {
+		openapiHandlers = append([]gin.HandlerFunc{auth.Middleware(cfg, authStore)}, openapiHandlers...)
+	}
+	r.GET("/api/v1/openapi.json", openapiHandlers...)
+
 	api := r.Group("/api/v1")
 	{
 		// Builds older than MIN_APP_BUILD get 426 on every route but this one.
@@ -318,9 +332,9 @@ func main() {
 			protected.POST("/auth/logout", authHandler.Logout)
 			protected.PUT("/auth/password", authHandler.ChangePassword)
 
+			protected.GET("/me/counts", meHandler.Counts)
 			protected.GET("/users/me", usersHandler.GetMe)
 			protected.PUT("/users/me", usersHandler.UpdateMe)
-			protected.PUT("/users/me/password", usersHandler.ChangePassword)
 			protected.POST("/users/me/deactivate", usersHandler.Deactivate)
 			protected.POST("/users/me/reactivate", usersHandler.Reactivate)
 			protected.GET("/users/me/packs", packPermsHandler.ListMyPacks)
@@ -336,7 +350,6 @@ func main() {
 			// Tags (Phase 1a)
 			protected.POST("/tags", tagsHandler.Create)
 			protected.GET("/tags", tagsHandler.List)
-			protected.GET("/tags/:id", tagsHandler.Get)
 			protected.PUT("/tags/:id", tagsHandler.Update)
 			protected.DELETE("/tags/:id", tagsHandler.Delete)
 
@@ -348,13 +361,12 @@ func main() {
 			protected.POST("/accounts/invites/:notification_id/accept", accountsHandler.AcceptInvite)
 			protected.POST("/accounts/invites/:notification_id/reject", accountsHandler.RejectInvite)
 			protected.GET("/accounts/:id", accountsHandler.Get)
+			protected.POST("/accounts/:id/restore", accountsHandler.Restore)
 			protected.PUT("/accounts/:id", accountsHandler.Update)
 			protected.DELETE("/accounts/:id", accountsHandler.Delete)
 			protected.POST("/accounts/:id/adjust-balance", accountsHandler.AdjustBalance)
 			protected.POST("/accounts/:id/identifiers", accountsHandler.AddIdentifier)
-			protected.GET("/accounts/:id/summary", accountsHandler.Summary)
 			// Shared-wallet membership (spec §14).
-			protected.GET("/accounts/:id/members", accountsHandler.ListMembers)
 			protected.POST("/accounts/:id/members", accountsHandler.InviteMember)
 			protected.DELETE("/accounts/:id/members/:member_id", accountsHandler.RemoveMember)
 			protected.POST("/accounts/:id/transfer-ownership", accountsHandler.TransferOwnership)
@@ -368,12 +380,12 @@ func main() {
 			protected.POST("/transactions", transactionsHandler.Create)
 			protected.GET("/transactions", transactionsHandler.List)
 			protected.GET("/transactions/summary", transactionsHandler.Summary)
+			protected.GET("/transactions/form-options", transactionsHandler.FormOptions)
 			protected.GET("/transactions/:id", transactionsHandler.Get)
 			protected.PUT("/transactions/:id", transactionsHandler.Update)
 			protected.PUT("/transactions/:id/splits", transactionsHandler.EditSplits)
+			protected.PUT("/transactions/:id/tags", transactionsHandler.SetTags)
 			protected.DELETE("/transactions/:id", transactionsHandler.Delete)
-			protected.POST("/transactions/:id/tags", tagsHandler.Attach)
-			protected.DELETE("/transactions/:id/tags/:tag_id", tagsHandler.Detach)
 
 			// Contacts (Phase 1b.1 + 1b.2 link-request endpoints).
 			// Static-path-before-param: /unlinked-names AND /link-requests/...
@@ -413,6 +425,7 @@ func main() {
 
 			// Notifications (Phase 1b.2). Static paths first.
 			protected.GET("/notifications", notificationsHandler.List)
+			protected.GET("/notifications/unread-count", notificationsHandler.UnreadCount)
 			protected.POST("/notifications/read-all", notificationsHandler.ReadAll)
 			protected.GET("/notifications/settings", notificationsHandler.GetSettings)
 			protected.PUT("/notifications/settings", notificationsHandler.UpdateSettings)
@@ -491,6 +504,7 @@ func main() {
 			protected.GET("/pending-transactions", pendingHandler.List)
 			protected.POST("/pending-transactions", pendingHandler.Create)
 			protected.POST("/pending-transactions/submit", pendingHandler.Submit)
+			protected.POST("/pending-transactions/discard", pendingHandler.Discard)
 			protected.POST("/pending-transactions/scan-slip", importsHandler.ScanSlip)
 			protected.POST("/pending-transactions/parse-text", importsHandler.ParseText)
 			protected.POST("/slip-imports/check", importsHandler.CheckSlips)

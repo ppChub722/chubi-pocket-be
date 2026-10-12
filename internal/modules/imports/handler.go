@@ -25,8 +25,10 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports/ocr"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports/slip"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/providers"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // maxSlipBytes — a phone screenshot of a slip is well under this.
@@ -47,6 +49,9 @@ type Handler struct {
 	// yet. nil → not written. Wired in main (WithImportLogs).
 	writeLog      func(ctx context.Context, l ImportLog) error
 	providerKnown func(ctx context.Context, scheme, code string) (bool, error)
+	// resolve fills each draft's `resolved` block (wallets, category, tags,
+	// event, split persons). nil → empty blocks. Wired in main (WithResolver).
+	resolve func(ctx context.Context, userID uuid.UUID, drafts []pending.Draft) ([]pending.DraftResolved, error)
 
 	mu   sync.Mutex
 	seen map[uuid.UUID]map[string]bool // user → scanned file keys
@@ -106,7 +111,7 @@ func (h *Handler) CheckSlips(c *gin.Context) {
 	h.log.Info("imports: slip check OK (stub)",
 		"user_id", uid, "sent", req.Files,
 		"new", out.NewFiles, "seen", out.SeenFiles)
-	response.OK(c, "Slip check received (stub)", out)
+	c.JSON(http.StatusOK, out)
 }
 
 // DELETE /v1/slip-imports — forget every scanned file ("ล้างประวัติการสแกน").
@@ -120,7 +125,7 @@ func (h *Handler) ResetSlips(c *gin.Context) {
 	delete(h.seen, uid)
 	h.mu.Unlock()
 	h.log.Info("imports: slip history cleared (stub)", "user_id", uid, "forgot", n)
-	response.OK(c, "Slip history cleared (stub)", gin.H{"forgot": n})
+	c.JSON(http.StatusOK, gin.H{"forgot": n})
 }
 
 // POST /v1/pending-transactions/scan-slip — multipart: `image` (the slip,
@@ -241,6 +246,10 @@ func (h *Handler) ScanSlip(c *gin.Context) {
 			}
 		}
 		out.Pending = buildPending(parsed, transRef, bankCode, dc)
+		if err := h.resolveItems(c.Request.Context(), uid, out.Pending); err != nil {
+			response.InternalError(c, "Reading the slip failed", nil)
+			return
+		}
 	}
 
 	h.noteIssues(c.Request.Context(), uid, bankCode, transRef, out)
@@ -252,7 +261,7 @@ func (h *Handler) ScanSlip(c *gin.Context) {
 		"size", file.Size, "content_type", contentType,
 		"psm", res.PSM, "ocr_ms", res.OCRMs,
 		"conf", res.Conf, "lines", len(res.Lines), "chars", len([]rune(res.Text)))
-	response.OK(c, "Slip read", out)
+	c.JSON(http.StatusOK, out)
 }
 
 // POST /v1/pending-transactions/parse-text
@@ -267,13 +276,44 @@ func (h *Handler) ParseText(c *gin.Context) {
 		return
 	}
 	h.log.Info("imports: parse text OK (stub)", "user_id", uid, "text", req.Text)
-	response.OK(c, "Text received (stub)", req)
+	c.JSON(http.StatusOK, ParseTextResult{Pending: []PendingItem{}})
 }
 
 // WithDraftContext sets how a user's wallets + fee category are loaded
 // for the drafts.
 func (h *Handler) WithDraftContext(fn func(ctx context.Context, userID uuid.UUID) (DraftContext, error)) {
 	h.draftContext = fn
+}
+
+// WithResolver sets how a draft's ids are resolved for the `resolved` block
+// of every PendingItem (pending.NewResolver(pool).Resolve).
+func (h *Handler) WithResolver(fn func(ctx context.Context, userID uuid.UUID, drafts []pending.Draft) ([]pending.DraftResolved, error)) {
+	h.resolve = fn
+}
+
+// resolveItems fills Resolved on every item — one batch for all of them.
+func (h *Handler) resolveItems(ctx context.Context, uid uuid.UUID, items []PendingItem) error {
+	drafts := make([]pending.Draft, len(items))
+	for i := range items {
+		drafts[i] = items[i].Draft
+	}
+	var res []pending.DraftResolved
+	if h.resolve != nil {
+		var err error
+		if res, err = h.resolve(ctx, uid, drafts); err != nil {
+			return err
+		}
+	}
+	for i := range items {
+		if i < len(res) {
+			items[i].Resolved = res[i]
+		} else {
+			items[i].Resolved = pending.DraftResolved{
+				Tags: []shared.TagRef{}, Splits: []pending.ResolvedSplit{}, Missing: []string{},
+			}
+		}
+	}
+	return nil
 }
 
 // WithImportLogs sets where import logs go and how a provider code is

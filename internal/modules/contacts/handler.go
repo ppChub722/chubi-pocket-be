@@ -2,13 +2,16 @@ package contacts
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -82,7 +85,7 @@ func (h *Handler) Get(c *gin.Context) {
 	if !ok {
 		return
 	}
-	out, err := h.service.Get(c.Request.Context(), userID, id)
+	out, err := h.service.GetDetail(c.Request.Context(), userID, id, includes(c, "unlinked_names"))
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -168,10 +171,7 @@ func (h *Handler) Delete(c *gin.Context) {
 		mapServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"message":         "Contact deleted",
-		"splits_restored": splitsRestored,
-	})
+	c.JSON(http.StatusOK, DeleteContactResult{ID: id, SplitsRestored: splitsRestored})
 }
 
 // POST /v1/contacts/:id/absorb
@@ -185,19 +185,17 @@ func (h *Handler) Absorb(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req struct {
-		Names []string `json:"names" binding:"required,min=1,dive,min=1"`
-	}
+	var req AbsorbRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
-	count, err := h.service.Absorb(c.Request.Context(), userID, id, req.Names)
+	out, err := h.service.Absorb(c.Request.Context(), userID, id, req.Names)
 	if err != nil {
 		mapServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"absorbed_count": count})
+	c.JSON(http.StatusOK, out)
 }
 
 // POST /v1/contacts/:id/request-link
@@ -251,11 +249,12 @@ func (h *Handler) RejectLinkRequest(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
 		return
 	}
-	if err := h.service.RejectLinkRequest(c.Request.Context(), userID, notifID); err != nil {
+	out, err := h.service.RejectLinkRequest(c.Request.Context(), userID, notifID)
+	if err != nil {
 		mapServiceError(c, err)
 		return
 	}
-	response.OK(c, "Link request rejected", nil)
+	c.JSON(http.StatusOK, out)
 }
 
 // GET /v1/contacts/link-requests/:notification_id/sender-profile
@@ -300,7 +299,7 @@ func (h *Handler) CreateLinkedContact(c *gin.Context) {
 		return
 	}
 	var req CreateLinkedContactRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
@@ -338,7 +337,7 @@ func (h *Handler) LinkExistingContact(c *gin.Context) {
 		return
 	}
 	var req LinkExistingContactRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
@@ -383,7 +382,10 @@ func (h *Handler) UnlinkedNames(c *gin.Context) {
 		response.InternalError(c, "Failed to list unlinked names", err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": out})
+	if out == nil {
+		out = []UnlinkedName{}
+	}
+	c.JSON(http.StatusOK, UnlinkedNameList{Data: out})
 }
 
 func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
@@ -409,7 +411,25 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "NOT_LINKED", "Contact is not linked", nil)
 	case errors.Is(err, ErrCannotLinkSelf):
 		response.BadRequest(c, "CANNOT_LINK_SELF", "Cannot link a contact to yourself", nil)
+	case errors.Is(err, notifications.ErrNotificationNotFound), errors.Is(err, notifications.ErrNotForYou), errors.Is(err, ErrNotLinkRequest):
+		response.NotFound(c, "NOT_FOUND", "Link request not found")
+	case errors.Is(err, ErrRequestRejected):
+		response.Fail(c, http.StatusConflict, "REQUEST_REJECTED", "The link request was rejected", nil)
+	case errors.Is(err, ErrNotAccepted):
+		response.Fail(c, http.StatusConflict, "NOT_ACCEPTED", "Accept the link request first", nil)
+	case errors.Is(err, notifications.ErrStateConflict):
+		response.Fail(c, http.StatusConflict, "STATE_CONFLICT", "The link request was already answered", nil)
 	default:
 		response.InternalError(c, "Contact operation failed", err.Error())
 	}
+}
+
+// includes reports whether the comma-separated ?include= list has name.
+func includes(c *gin.Context, name string) bool {
+	for _, p := range strings.Split(c.Query("include"), ",") {
+		if strings.TrimSpace(p) == name {
+			return true
+		}
+	}
+	return false
 }

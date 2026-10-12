@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -54,6 +55,10 @@ func newSplitEditFixture(t *testing.T) *splitEditFixture {
 		if err := f.notifs.SeedSettings(ctx, seed, u); err != nil {
 			t.Fatalf("seed settings: %v", err)
 		}
+	}
+	// A linked contact resolves to the user's live profile name: make it the contact's.
+	if _, err := seed.Exec(ctx, `UPDATE users SET display_name = 'Partner' WHERE id = $1`, f.partner); err != nil {
+		t.Fatalf("partner name: %v", err)
 	}
 	f.partnerContact = uuid.New()
 	if _, err := seed.Exec(ctx, `INSERT INTO contacts (id, user_id, display_name, linked_user_id, status)
@@ -372,7 +377,7 @@ func TestRepaymentLifecycle(t *testing.T) {
 
 // TestEditSplitsIdentity — a saved split without a contact can be renamed
 // or linked to a contact in place, keeping its repayments; a split whose
-// contact is linked to an app user can't change its person (owner 2026-10-10/11).
+// contact is linked to an app user is renamed in place or swapped for someone else (remove + add).
 func TestEditSplitsIdentity(t *testing.T) {
 	f := newSplitEditFixture(t)
 	s := f.splits(t)
@@ -425,6 +430,9 @@ func TestEditSplitsIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := seed.Exec(f.ctx, `UPDATE users SET display_name = 'Bee' WHERE id = $1`, bee); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.notifs.SeedSettings(f.ctx, seed, bee); err != nil {
 		t.Fatalf("seed settings: %v", err)
 	}
@@ -460,16 +468,80 @@ func TestEditSplitsIdentity(t *testing.T) {
 		t.Errorf("Bee's mirror amount = %v (err %v), want 100", mirrorAmount, err)
 	}
 
-	// A split whose contact is linked to an app user is fixed: rename or
-	// swap → 422; the same name / contact sent back is no change.
-	if err := f.edit(t, ident(s["Bee"], "Beatrice", nil), keep(s["Partner"], 100)); !errors.Is(err, transactions.ErrSplitIdentityLocked) {
-		t.Errorf("rename a linked split: err = %v", err)
+	// A split with a contact: the sent name is ignored (the contact's live name
+	// shows; no in-place rename), so a "rename" keeping the contact changes
+	// nothing and is silent; the same name / contact sent back is no change.
+	beeNotifs := countNotifs(bee, "split_created") + countNotifs(bee, "split_changed")
+	if err := f.edit(t, ident(s["Bee"], "Beatrice", nil), keep(s["Partner"], 100)); err != nil {
+		t.Fatalf("rename a contact split: %v", err)
 	}
-	if err := f.edit(t, keep(s["Bee"], 100), ident(s["Partner"], "", &beeContact)); !errors.Is(err, transactions.ErrSplitIdentityLocked) {
-		t.Errorf("swap a linked split's contact: err = %v", err)
+	s = f.splits(t)
+	if _, ok := s["Beatrice"]; ok {
+		t.Fatalf("a contact split must not be renamed in place: %+v", s)
+	}
+	if r, ok := s["Bee"]; !ok || r.DebtID != beamID || r.ContactID == nil || *r.ContactID != beeContact {
+		t.Fatalf("contact split after a name-only edit = %+v, want unchanged (Bee, same debt and contact)", s["Bee"])
+	}
+	if n := countNotifs(bee, "split_created") + countNotifs(bee, "split_changed"); n != beeNotifs {
+		t.Errorf("a name-only edit notified Bee: %d -> %d", beeNotifs, n)
 	}
 	if err := f.edit(t, ident(s["Bee"], "Bee", &beeContact), keep(s["Partner"], 100)); err != nil {
 		t.Errorf("unchanged identity sent back: %v", err)
+	}
+
+	// Swapping a linked person (owner 2026-10-12) = remove + add with the
+	// amount. Partner (linked, nothing repaid) → a free name.
+	partnerBefore := countNotifs(f.partner, "split_created") + countNotifs(f.partner, "split_changed")
+	partnerRow := keep(s["Partner"], 100)
+	partnerRow.PersonName, partnerRow.ContactIDSet = "Cousin", true
+	if err := f.edit(t, partnerRow, keep(s["Bee"], 100)); err != nil {
+		t.Fatalf("swap a linked split to a free name: %v", err)
+	}
+	s = f.splits(t)
+	if _, ok := s["Partner"]; ok {
+		t.Errorf("the old linked split should be gone (nothing repaid)")
+	}
+	cousin, ok := s["Cousin"]
+	if !ok || cousin.Amount != 100 || cousin.ContactID != nil || cousin.DebtID == s["Bee"].DebtID {
+		t.Fatalf("new split = %+v, want a new free-name row of 100", cousin)
+	}
+	if n := countNotifs(f.partner, "split_created") + countNotifs(f.partner, "split_changed"); n < partnerBefore {
+		t.Errorf("old partner notifications vanished: %d -> %d", partnerBefore, n)
+	}
+	if ch := f.changes(t); len(ch) != 1 || !strings.Contains(string(ch[0].Payload), `"removed"`) {
+		t.Errorf("old Partner should hear one split_changed (removed), got %d", len(ch))
+	}
+
+	// Bee's split (50 repaid) → Partner's contact: Bee's row stays at 0 (what
+	// they paid shows as overpaid) and hears "removed"; Partner hears
+	// split_created for the new row.
+	beeChanged := countNotifs(bee, "split_changed")
+	partnerCreated := countNotifs(f.partner, "split_created")
+	beeRow := keep(s["Bee"], 100)
+	beeRow.ContactID, beeRow.ContactIDSet = &f.partnerContact, true
+	if err := f.edit(t, beeRow, keep(s["Cousin"], 100)); err != nil {
+		t.Fatalf("swap a linked split to another linked contact: %v", err)
+	}
+	s = f.splits(t)
+	var old *transactions.SplitRef
+	for _, r := range f.splits(t) {
+		if r.DebtID == beamID {
+			r := r
+			old = &r
+		}
+	}
+	if old == nil || old.Amount != 0 || old.SettledAmount != 50 {
+		t.Errorf("old Bee split = %+v, want amount 0 with 50 repaid", old)
+	}
+	np, ok := s["Partner"]
+	if !ok || np.Amount != 100 || np.SettledAmount != 0 || np.ContactID == nil || *np.ContactID != f.partnerContact {
+		t.Fatalf("new Partner split = %+v, want a fresh row of 100", np)
+	}
+	if n := countNotifs(bee, "split_changed"); n != beeChanged+1 {
+		t.Errorf("Bee's split_changed = %d, want %d", n, beeChanged+1)
+	}
+	if n := countNotifs(f.partner, "split_created"); n != partnerCreated+1 {
+		t.Errorf("Partner's split_created = %d, want %d", n, partnerCreated+1)
 	}
 }
 
@@ -537,11 +609,14 @@ func TestEditSplitsIdentityUnlinkedContact(t *testing.T) {
 	x, y := newContact("Xan", nil), newContact("Yod", nil)
 	check("link to Xan (no app account)", edit(kept(&x, true, "")), "Xan", &x)
 	check("switch to Yod", edit(kept(&y, true, "")), "Yod", &y)
-	check("rename, keeping Yod", edit(kept(nil, false, "Yodsawee")), "Yodsawee", &y)
+	check("name-only edit keeping Yod (name ignored)", edit(kept(nil, false, "Yodsawee")), "Yod", &y)
 	check("back to a free name", edit(kept(nil, true, "Beam")), "Beam", nil)
 
 	// Linking to an app user still tells them, like a new split.
 	bee := testdb.User(t, f.pool)
+	if _, err := f.pool.Exec(f.ctx, `UPDATE users SET display_name = 'Bee' WHERE id = $1`, bee); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		_, _ = f.pool.Exec(f.ctx, `DELETE FROM notifications WHERE recipient_user_id = $1`, bee)
 		_, _ = f.pool.Exec(f.ctx, `DELETE FROM personal_debts WHERE user_id = $1`, bee)
@@ -557,8 +632,17 @@ func TestEditSplitsIdentityUnlinkedContact(t *testing.T) {
 		t.Errorf("split_created to Bee = %d (err %v), want 1", n, err)
 	}
 
-	// Now linked to an app user → locked, even back to a free name.
-	if err := f.edit(t, kept(nil, true, "Beam"), keep(f.splits(t)["Partner"], 100)); !errors.Is(err, transactions.ErrSplitIdentityLocked) {
-		t.Errorf("drop a linked contact: err = %v", err)
+	// Now linked to an app user → back to a free name = remove + add: Bee's
+	// row stays at 0 with the 30 repaid, a fresh "Beam" row of 100 appears.
+	if err := f.edit(t, kept(nil, true, "Beam"), keep(f.splits(t)["Partner"], 100)); err != nil {
+		t.Fatalf("drop a linked contact: %v", err)
+	}
+	var oldAmount, oldSettled float64
+	if err := f.pool.QueryRow(f.ctx, `SELECT amount, settled_amount FROM personal_debts WHERE id = $1`,
+		beamID).Scan(&oldAmount, &oldSettled); err != nil || oldAmount != 0 || oldSettled != 30 {
+		t.Errorf("old Bee row = %v / %v (err %v), want 0 with 30 repaid", oldAmount, oldSettled, err)
+	}
+	if r, ok := f.splits(t)["Beam"]; !ok || r.DebtID == beamID || r.Amount != 100 || r.ContactID != nil {
+		t.Errorf("new split = %+v, want a fresh free-name row of 100", r)
 	}
 }

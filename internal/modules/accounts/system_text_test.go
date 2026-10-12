@@ -29,7 +29,7 @@ func TestSystemRowsHaveNoCannedText(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	acc, err := svc.Create(ctx, uid, "THB", CreateRequest{Name: "Opening", Type: "bank", Balance: 500})
+	acc, err := svc.Create(ctx, uid, CreateRequest{Name: "Opening", Type: "bank", Balance: 500})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

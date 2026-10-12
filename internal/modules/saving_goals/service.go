@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Service struct {
@@ -73,7 +75,7 @@ func (s *Service) Create(
 	v := buildView(*row, AccountSnapshot{
 		ID: acc.ID, Name: acc.Name, Balance: acc.Balance, Currency: acc.Currency,
 	})
-	return &v, nil
+	return s.withRef(ctx, v)
 }
 
 func (s *Service) Get(
@@ -96,7 +98,7 @@ func (s *Service) Get(
 		}
 	}
 	v := buildView(*g, *acc)
-	return &v, nil
+	return s.withRef(ctx, v)
 }
 
 func (s *Service) List(
@@ -127,6 +129,9 @@ func (s *Service) List(
 			continue
 		}
 		out = append(out, v)
+	}
+	if err := s.attachRefs(ctx, out); err != nil {
+		return nil, err
 	}
 	return &ListResponse{Data: out}, nil
 }
@@ -180,7 +185,7 @@ func (s *Service) Update(
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	v := buildView(*updated, *acc)
-	return &v, nil
+	return s.withRef(ctx, v)
 }
 
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
@@ -231,7 +236,7 @@ func (s *Service) transitionStatus(
 		}
 		_ = tx.Commit(ctx)
 		v := buildView(*current, *acc)
-		return &v, nil
+		return s.withRef(ctx, v)
 	}
 
 	// Restore guard — re-check capacity using the current goal's
@@ -267,7 +272,7 @@ func (s *Service) transitionStatus(
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	v := buildView(*updated, *acc)
-	return &v, nil
+	return s.withRef(ctx, v)
 }
 
 // AccountAllocations — backs `GET /accounts/:id/saving-allocations`.
@@ -328,14 +333,14 @@ func buildView(g SavingGoal, acc AccountSnapshot) SavingGoalView {
 
 	v := SavingGoalView{
 		SavingGoal: g,
-		LinkedAccount: LinkedAccountSummary{
-			ID: acc.ID, Name: acc.Name, Balance: acc.Balance, Currency: acc.Currency,
-		},
-		Currency:        acc.Currency,
-		CurrentAmount:   current,
-		ProgressPct:     progressPct,
-		IsCompleted:     current >= g.TargetAmount,
-		RemainingAmount: round2(remaining),
+		// LinkedAccount is completed by attachRefs (shared AccountRef, batch).
+		LinkedAccount:        shared.AccountRef{ID: acc.ID, Name: acc.Name, Currency: acc.Currency, Group: "asset"},
+		LinkedAccountBalance: acc.Balance,
+		Currency:             acc.Currency,
+		CurrentAmount:        current,
+		ProgressPct:          progressPct,
+		IsCompleted:          current >= g.TargetAmount,
+		RemainingAmount:      round2(remaining),
 	}
 	if g.Deadline != nil && *g.Deadline != "" {
 		if d, err := time.Parse("2006-01-02", *g.Deadline); err == nil {
@@ -348,4 +353,31 @@ func buildView(g SavingGoal, acc AccountSnapshot) SavingGoalView {
 
 func round2(f float64) float64 {
 	return math.Round(f*100) / 100
+}
+
+// attachRefs replaces each view's linked_account with the shared AccountRef
+// (one query for the whole page).
+func (s *Service) attachRefs(ctx context.Context, views []SavingGoalView) error {
+	ids := make([]uuid.UUID, 0, len(views))
+	for _, v := range views {
+		ids = append(ids, v.LinkedAccountID)
+	}
+	refs, err := shared.LoadAccountRefs(ctx, s.store.Pool(), ids)
+	if err != nil {
+		return err
+	}
+	for i := range views {
+		if r, ok := refs[views[i].LinkedAccountID]; ok {
+			views[i].LinkedAccount = r
+		}
+	}
+	return nil
+}
+
+func (s *Service) withRef(ctx context.Context, v SavingGoalView) (*SavingGoalView, error) {
+	one := []SavingGoalView{v}
+	if err := s.attachRefs(ctx, one); err != nil {
+		return nil, err
+	}
+	return &one[0], nil
 }

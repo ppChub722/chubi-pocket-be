@@ -184,6 +184,9 @@ func (s *Service) AcceptSplitRequest(ctx context.Context, userID, notificationID
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
+	if err := s.fillPersons(ctx, userID, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -48,7 +49,7 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthRespo
 		return nil, err
 	}
 
-	currency := req.Currency
+	currency := strings.ToUpper(req.Currency)
 	if currency == "" {
 		currency = "THB"
 	}
@@ -138,7 +139,7 @@ func (s *Service) issueAuthResponse(user *User) (*AuthResponse, error) {
 		return nil, err
 	}
 	return &AuthResponse{
-		User: *user,
+		User: user.AuthView(),
 		Token: TokenInfo{
 			AccessToken: token,
 			ExpiresIn:   int(s.cfg.JWT.ExpirationTime.Seconds()),

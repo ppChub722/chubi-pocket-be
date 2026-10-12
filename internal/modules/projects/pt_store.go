@@ -467,3 +467,52 @@ func (s *Store) MemberByUserID(ctx context.Context, projectID, userID uuid.UUID)
 	}
 	return m, nil
 }
+
+// LoadMemberRefs resolves project members into the shared MemberRef: a
+// linked member shows the user's live profile name / icon, an ad-hoc member
+// its own; is_me = the member is callerUserID.
+func (s *Store) LoadMemberRefs(ctx context.Context, callerUserID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]shared.MemberRef, error) {
+	out := map[uuid.UUID]shared.MemberRef{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT pm.id, pm.user_id,
+			COALESCE(u.display_name, pm.display_name), COALESCE(u.icon_code, pm.icon_code)
+		FROM project_members pm LEFT JOIN users u ON u.id = pm.user_id
+		WHERE pm.id = ANY($1::uuid[])`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("member refs: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			r    shared.MemberRef
+			icon []byte
+		)
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Name, &icon); err != nil {
+			return nil, err
+		}
+		r.Icon = shared.IconFromJSON(icon)
+		r.IsMe = r.UserID != nil && *r.UserID == callerUserID
+		out[r.ID] = r
+	}
+	return out, rows.Err()
+}
+
+// attachMembers fills transaction_member on every row (one query).
+func (s *Service) attachMembers(ctx context.Context, callerUserID uuid.UUID, pts ...*ProjectTransaction) error {
+	ids := make([]uuid.UUID, 0, len(pts))
+	for _, pt := range pts {
+		ids = append(ids, pt.TransactionMemberID)
+	}
+	refs, err := s.store.LoadMemberRefs(ctx, callerUserID, ids)
+	if err != nil {
+		return err
+	}
+	for _, pt := range pts {
+		if r, ok := refs[pt.TransactionMemberID]; ok {
+			pt.TransactionMember = r
+		}
+	}
+	return nil
+}

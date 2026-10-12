@@ -31,7 +31,10 @@ func (s *Service) FeeCategoryID(ctx context.Context, userID uuid.UUID) (*uuid.UU
 	if err != nil {
 		return nil, err
 	}
-	str, _ := prof.Preferences[PrefFeeCategoryID].(string)
+	str := ""
+	if prof.Preferences.FeeCategoryID != nil {
+		str = *prof.Preferences.FeeCategoryID
+	}
 	if str == "" {
 		return nil, nil
 	}
@@ -56,6 +59,11 @@ func (s *Service) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdatePro
 	if len(req.Preferences) > 0 {
 		if k, ok := ValidatePreferenceKeys(req.Preferences); !ok {
 			return nil, fmt.Errorf("%w: %q", ErrUnknownPreferenceKey, k)
+		}
+		for k, v := range req.Preferences {
+			if _, isStr := v.(string); v != nil && !isStr {
+				return nil, fmt.Errorf("%w: %q must be a string or null", ErrUnknownPreferenceKey, k)
+			}
 		}
 		if v, ok := req.Preferences[PrefFeeCategoryID]; ok && v != nil {
 			str, _ := v.(string)

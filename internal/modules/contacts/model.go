@@ -13,52 +13,57 @@ const (
 	StatusArchived = "archived"
 )
 
-// Contact: nickname column was retired in migration 29. The user's chosen
-// label for a person is now display_name only.
-//
-// For LINKED contacts the FE displays `linked_user_display_name` and
-// `linked_user_email` (live-projected from the linked user's row) in
-// preference to the contact's own stored values. The contact's stored
-// `display_name` / `email` are kept as a snapshot fallback for when
-// the contact is later unlinked. Spec §4.4 covers the same pattern for
-// `icon_code`.
+// LinkedUser - spec schema LinkedUser: the app user a contact is linked to
+// (live profile values).
+type LinkedUser struct {
+	ID          uuid.UUID        `json:"id"`
+	DisplayName string           `json:"display_name"`
+	Email       *string          `json:"email"`
+	IconCode    *shared.IconCode `json:"icon_code"`
+}
+
+// Contact - spec schema Contact. Name is the resolved display name
+// (shared.PersonNameSQL: nickname when set and shown, else the linked user's
+// live profile name, else display_name). Email / IconCode are resolved too:
+// the linked user's when linked, else the contact's own.
 type Contact struct {
 	ID           uuid.UUID        `json:"id"`
-	UserID       uuid.UUID        `json:"user_id"`
+	UserID       uuid.UUID        `json:"-"`
+	Name         string           `json:"name"`
+	Nickname     *string          `json:"nickname"`
+	ShowNickname bool             `json:"show_nickname"`
 	DisplayName  string           `json:"display_name"`
 	Email        *string          `json:"email"`
 	Phone        *string          `json:"phone"`
 	Description  *string          `json:"description"`
 	Note         *string          `json:"note"`
 	IconCode     *shared.IconCode `json:"icon_code"`
-	LinkedUserID *uuid.UUID       `json:"linked_user_id"`
-	// LinkedUserIconCode mirrors the linked user's profile icon at read time.
-	// NULL when the contact isn't linked or the linked user has no icon set.
-	// Spec §4.4: client renders this in preference to icon_code when present.
-	LinkedUserIconCode *shared.IconCode `json:"linked_user_icon_code"`
-	// LinkedUserDisplayName / LinkedUserEmail mirror the linked user's
-	// display_name / email at read time. NULL when not linked. Same
-	// "client renders this in preference to the contact's own value"
-	// rule applies — driven by the post-1c policy that linked-contact
-	// fields source from the user record.
-	LinkedUserDisplayName *string `json:"linked_user_display_name"`
-	LinkedUserEmail       *string `json:"linked_user_email"`
-	Status                string  `json:"status"`
+	LinkedUserID *uuid.UUID       `json:"-"`
+	LinkedUser   *LinkedUser      `json:"linked_user"`
+	Status       string           `json:"status"`
 	// LastUsedAt is bumped whenever this contact is referenced by a new
-	// personal_debts row. Drives the FE typeahead "recent first" sort.
-	// Nullable: contacts that haven't been used yet sort last.
+	// personal_debts row (drives the "recent first" typeahead sort).
 	LastUsedAt *time.Time `json:"last_used_at"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
+// ContactDetail - spec schema ContactDetail: the contact plus the
+// absorbable free-text names (only with ?include=unlinked_names, else null).
+type ContactDetail struct {
+	Contact
+	UnlinkedNames []UnlinkedName `json:"unlinked_names"`
+}
+
 type CreateContactRequest struct {
-	DisplayName string           `json:"display_name" binding:"required,min=1,max=100"`
-	Email       *string          `json:"email"        binding:"omitempty,email,max=255"`
-	Phone       *string          `json:"phone"        binding:"omitempty,max=50"`
-	Description *string          `json:"description"  binding:"omitempty,max=200"`
-	Note        *string          `json:"note"         binding:"omitempty,max=500"`
-	IconCode    *shared.IconCode `json:"icon_code"    binding:"omitempty"`
+	DisplayName  string           `json:"display_name" binding:"required,min=1,max=100"`
+	Nickname     *string          `json:"nickname"     binding:"omitempty,max=100"`
+	ShowNickname *bool            `json:"show_nickname"`
+	Email        *string          `json:"email"        binding:"omitempty,email,max=255"`
+	Phone        *string          `json:"phone"        binding:"omitempty,max=50"`
+	Description  *string          `json:"description"  binding:"omitempty,max=200"`
+	Note         *string          `json:"note"         binding:"omitempty,max=500"`
+	IconCode     *shared.IconCode `json:"icon_code"    binding:"omitempty"`
 	// AbsorbNames wires existing free-text person_names from the caller's
 	// personal_debts to the new contact in the same call. Case-insensitive
 	// exact match against counterparty_person_name.
@@ -66,23 +71,27 @@ type CreateContactRequest struct {
 }
 
 type UpdateContactRequest struct {
-	DisplayName *string          `json:"display_name" binding:"omitempty,min=1,max=100"`
-	Email       *string          `json:"email"        binding:"omitempty,email,max=255"`
-	Phone       *string          `json:"phone"        binding:"omitempty,max=50"`
-	Description *string          `json:"description"  binding:"omitempty,max=200"`
-	Note        *string          `json:"note"         binding:"omitempty,max=500"`
-	IconCode    *shared.IconCode `json:"icon_code"    binding:"omitempty"`
+	DisplayName  *string          `json:"display_name" binding:"omitempty,min=1,max=100"`
+	Nickname     *string          `json:"nickname"     binding:"omitempty,max=100"`
+	ShowNickname *bool            `json:"show_nickname"`
+	Email        *string          `json:"email"        binding:"omitempty,email,max=255"`
+	Phone        *string          `json:"phone"        binding:"omitempty,max=50"`
+	Description  *string          `json:"description"  binding:"omitempty,max=200"`
+	Note         *string          `json:"note"         binding:"omitempty,max=500"`
+	IconCode     *shared.IconCode `json:"icon_code"    binding:"omitempty"`
 
 	descriptionPresent bool
 	notePresent        bool
+	nicknamePresent    bool
 }
 
 // UnmarshalJSON records which keys the body carried: an absent description /
-// note stays as is; null or "" clears it.
+// note / nickname stays as is; null or "" clears it.
 func (r *UpdateContactRequest) UnmarshalJSON(data []byte) error {
 	type alias UpdateContactRequest
 	present, err := shared.DecodeTracked(data, (*alias)(r))
 	r.descriptionPresent, r.notePresent = present["description"], present["note"]
+	r.nicknamePresent = present["nickname"]
 	return err
 }
 
@@ -94,6 +103,10 @@ func (r *UpdateContactRequest) NoteChange() (*string, bool) {
 	return shared.TextChange(r.Note, r.notePresent)
 }
 
+func (r *UpdateContactRequest) NicknameChange() (*string, bool) {
+	return shared.TextChange(r.Nickname, r.nicknamePresent)
+}
+
 type CreateContactResponse struct {
 	Contact       Contact `json:"contact"`
 	AbsorbedCount int     `json:"absorbed_count"`
@@ -103,26 +116,50 @@ type ListResponse struct {
 	Data []Contact `json:"data"`
 }
 
-// SenderProfile is the slim user shape returned by
-// `GET /v1/contacts/link-requests/:id/sender-profile`. The endpoint is
-// gated to "caller has a contact_link_request notification from this
-// user that hasn't been dismissed/rejected", so we don't leak random
-// users' emails. (Allowed even when the request is already actioned —
-// the post-accept tap flow needs the sender's profile to render the
-// locked display_name/email fields on the create-linked form.)
+// AbsorbRequest - spec AbsorbRequest.
+type AbsorbRequest struct {
+	Names []string `json:"names" binding:"required,min=1,dive,min=1"`
+}
+
+// AbsorbResult - spec AbsorbResult.
+type AbsorbResult struct {
+	Contact       Contact `json:"contact"`
+	AbsorbedCount int     `json:"absorbed_count"`
+}
+
+// DeleteContactResult - spec DeleteContactResult.
+type DeleteContactResult struct {
+	ID             uuid.UUID `json:"id"`
+	SplitsRestored int       `json:"splits_restored"`
+}
+
+// LinkRequestResult - spec LinkRequestResult.
+type LinkRequestResult struct {
+	Contact      *Contact                 `json:"contact"`
+	Notification *shared.NotificationView `json:"notification"`
+	Badges       shared.Badges            `json:"badges"`
+}
+
+// UnlinkedNameList - spec UnlinkedNameList.
+type UnlinkedNameList struct {
+	Data []UnlinkedName `json:"data"`
+}
+
+// SenderProfile - spec SenderProfile: the sender of a link request, plus
+// the caller's own contact that already links to that sender (null when
+// none). Gated to "caller has a contact_link_request notification from this
+// user that wasn't rejected", so random users' emails don't leak.
 type SenderProfile struct {
 	ID          uuid.UUID        `json:"id"`
 	DisplayName string           `json:"display_name"`
 	Email       *string          `json:"email"`
 	IconCode    *shared.IconCode `json:"icon_code"`
+	ContactID   *uuid.UUID       `json:"contact_id"`
 }
 
-// LinkExistingContactRequest is the body of
+// LinkExistingContactRequest is the optional body of
 // `POST /v1/contacts/link-requests/:id/link-existing-contact/:contact_id`.
-// All fields optional — they're additional B-side updates the form may
-// want to apply at link time. display_name / email are NOT included
-// because for linked contacts those are projected from the sender's
-// users row at read time.
+// All fields optional - additional B-side updates applied at link time.
 type LinkExistingContactRequest struct {
 	Phone       *string          `json:"phone"     binding:"omitempty,max=50"`
 	Description *string          `json:"description" binding:"omitempty,max=200"`
@@ -130,12 +167,9 @@ type LinkExistingContactRequest struct {
 	IconCode    *shared.IconCode `json:"icon_code" binding:"omitempty"`
 }
 
-// CreateLinkedContactRequest is the body of
-// `POST /v1/contacts/link-requests/:id/create-linked-contact`. Like
-// LinkExistingContactRequest, no display_name/email — the BE pulls
-// those from the sender's user record at create time and stores them
-// as the contact's snapshot (used as fallback if the contact is later
-// unlinked).
+// CreateLinkedContactRequest is the optional body of
+// `POST /v1/contacts/link-requests/:id/create-linked-contact`. No
+// display_name/email - the BE pulls those from the sender's user record.
 type CreateLinkedContactRequest struct {
 	Phone       *string          `json:"phone"     binding:"omitempty,max=50"`
 	Description *string          `json:"description" binding:"omitempty,max=200"`

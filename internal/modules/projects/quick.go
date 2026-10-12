@@ -29,6 +29,7 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 var (
@@ -150,7 +151,20 @@ func (s *Service) QuickCreate(
 	if err != nil {
 		return nil, err
 	}
-	return &QuickCreateResponse{Project: *full, LinkedCount: linked, TransactionID: newTxID}, nil
+	balances, err := s.newBillBalances(ctx, req.NewTransaction)
+	if err != nil {
+		return nil, err
+	}
+	return &QuickCreateResponse{Project: *full, LinkedCount: linked, TransactionID: newTxID, AccountBalances: balances}, nil
+}
+
+// newBillBalances — balances of the wallet the new bill posted to (none: []).
+func (s *Service) newBillBalances(ctx context.Context, bill *transactions.CreateRequest) ([]shared.WalletBalance, error) {
+	var ids []uuid.UUID
+	if bill != nil && bill.AccountID != nil {
+		ids = append(ids, *bill.AccountID)
+	}
+	return shared.LoadWalletBalances(ctx, s.store.Pool(), ids)
 }
 
 // AddBills implements POST /v1/projects/:id/bills — the same bill pull as
@@ -181,7 +195,11 @@ func (s *Service) AddBills(
 	if err != nil {
 		return nil, err
 	}
-	return &QuickCreateResponse{Project: *full, LinkedCount: linked, TransactionID: newTxID}, nil
+	balances, err := s.newBillBalances(ctx, req.NewTransaction)
+	if err != nil {
+		return nil, err
+	}
+	return &QuickCreateResponse{Project: *full, LinkedCount: linked, TransactionID: newTxID, AccountBalances: balances}, nil
 }
 
 // AddNewBillTx creates a new bill through the normal personal path and puts

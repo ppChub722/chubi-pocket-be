@@ -211,7 +211,7 @@ func (h *Handler) Settle(c *gin.Context) {
 		mapServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, out)
+	c.JSON(http.StatusOK, out)
 }
 
 func parseIDParam(c *gin.Context) (uuid.UUID, bool) {

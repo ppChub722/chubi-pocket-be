@@ -3,6 +3,7 @@ package accounts
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -10,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -23,7 +25,7 @@ func NewHandler(s *Service) *Handler {
 
 // POST /v1/accounts
 func (h *Handler) Create(c *gin.Context) {
-	user, ok := auth.UserFromContext(c)
+	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
 		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
 		return
@@ -35,7 +37,7 @@ func (h *Handler) Create(c *gin.Context) {
 		return
 	}
 
-	a, err := h.service.Create(c.Request.Context(), user.ID, user.Currency, req)
+	a, err := h.service.Create(c.Request.Context(), userID, req)
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -58,12 +60,12 @@ func (h *Handler) List(c *gin.Context) {
 	}
 	accType := c.Query("type")
 
-	accs, err := h.service.List(c.Request.Context(), userID, status, accType)
+	out, err := h.service.ListPage(c.Request.Context(), userID, status, accType)
 	if err != nil {
 		response.InternalError(c, "Failed to list accounts", err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, ListResponse{Data: accs, Total: len(accs)})
+	c.JSON(http.StatusOK, out)
 }
 
 // GET /v1/accounts/:id
@@ -78,7 +80,11 @@ func (h *Handler) Get(c *gin.Context) {
 		return
 	}
 
-	a, err := h.service.Get(c.Request.Context(), userID, id)
+	var include []string
+	for _, v := range c.QueryArray("include") {
+		include = append(include, strings.Split(v, ",")...)
+	}
+	a, err := h.service.GetDetail(c.Request.Context(), userID, id, include, c.Query("from"), c.Query("to"))
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -191,15 +197,16 @@ func (h *Handler) Delete(c *gin.Context) {
 		return
 	}
 
-	if err := h.service.Archive(c.Request.Context(), userID, id); err != nil {
+	a, err := h.service.Archive(c.Request.Context(), userID, id)
+	if err != nil {
 		mapServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Account archived", "status": "archived"})
+	c.JSON(http.StatusOK, a)
 }
 
-// GET /v1/accounts/:id/summary
-func (h *Handler) Summary(c *gin.Context) {
+// POST /v1/accounts/:id/restore (owner only)
+func (h *Handler) Restore(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
 		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
@@ -209,22 +216,12 @@ func (h *Handler) Summary(c *gin.Context) {
 	if !ok {
 		return
 	}
-
-	from := c.Query("from")
-	to := c.Query("to")
-	if to == "" {
-		to = time.Now().Format("2006-01-02")
-	}
-	if from == "" {
-		from = time.Now().AddDate(0, 0, -30).Format("2006-01-02")
-	}
-
-	res, err := h.service.Summary(c.Request.Context(), userID, id, from, to)
+	a, err := h.service.Restore(c.Request.Context(), userID, id)
 	if err != nil {
 		mapServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, res)
+	c.JSON(http.StatusOK, a)
 }
 
 // --- Helpers ---
@@ -261,11 +258,15 @@ func mapServiceError(c *gin.Context, err error) {
 	case errors.Is(err, ErrNotOwner):
 		response.Fail(c, http.StatusForbidden, "NOT_OWNER", "Only the account owner can perform this action", nil)
 	case errors.Is(err, ErrOwnerMustTransfer):
-		response.Fail(c, http.StatusConflict, "OWNER_MUST_TRANSFER", err.Error(), nil)
+		response.BadRequest(c, "OWNER_MUST_TRANSFER", err.Error(), nil)
 	case errors.Is(err, ErrAccountHasMembers):
 		response.Fail(c, http.StatusConflict, "ACCOUNT_HAS_MEMBERS", err.Error(), nil)
 	case errors.Is(err, ErrScopeNotAllowed):
-		response.BadRequest(c, "SCOPE_NOT_ALLOWED", err.Error(), nil)
+		response.Fail(c, http.StatusForbidden, "SCOPE_NOT_ALLOWED", err.Error(), nil)
+	case errors.Is(err, ErrInvalidInclude), errors.Is(err, ErrInvalidDate):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, ErrNotInvite), errors.Is(err, notifications.ErrNotificationNotFound), errors.Is(err, notifications.ErrNotForYou):
+		response.NotFound(c, "NOT_FOUND", "Invite not found")
 	case errors.Is(err, ErrInvalidIdentifier), errors.Is(err, ErrTooManyIdentifiers):
 		response.BadRequest(c, "INVALID_IDENTIFIER", err.Error(), nil)
 	case errors.Is(err, ErrCreditFieldMismatch):

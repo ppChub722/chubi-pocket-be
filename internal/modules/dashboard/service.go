@@ -12,9 +12,11 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/accounts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/budgets"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 const dateLayout = "2006-01-02"
@@ -74,6 +76,8 @@ func (s *Service) Get(ctx context.Context, userID uuid.UUID, month, headerTZ str
 		Trend:         []TrendPoint{},
 		Upcoming:      Upcoming{Days: upcomingDays, Items: []UpcomingItem{}},
 		Recent:        []transactions.TransactionDetail{},
+		Pending:       PendingBlock{Items: []pending.PendingTransaction{}},
+		Attention:     AttentionBlock{Items: []shared.NotificationView{}},
 	}
 
 	// Each block writes only its own fields, so the goroutines never
@@ -92,6 +96,8 @@ func (s *Service) Get(ctx context.Context, userID uuid.UUID, month, headerTZ str
 	g.Go(func() error { return s.fillDebts(gctx, userID, out) })
 	g.Go(func() error { return s.fillGoals(gctx, userID, out) })
 	g.Go(func() error { return s.fillRecent(gctx, userID, out) })
+	g.Go(func() error { return s.fillPending(gctx, userID, out) })
+	g.Go(func() error { return s.fillAttention(gctx, userID, out) })
 	var scheduled []scheduledRow
 	g.Go(func() error {
 		var err error
@@ -143,20 +149,26 @@ func (s *Service) fillCategories(ctx context.Context, userID uuid.UUID, start, e
 			out.OtherExpense += grp.Expense
 			continue
 		}
-		slice := CategorySlice{Name: grp.Name, Expense: grp.Expense, Count: grp.Count}
+		slice := CategorySlice{Expense: grp.Expense, Count: grp.Count}
 		if id, err := uuid.Parse(grp.Key); err == nil {
-			slice.CategoryID = &id
 			ids = append(ids, id)
+			slice.Category = &shared.CategoryRef{ID: id} // filled below
 		}
 		out.TopCategories = append(out.TopCategories, slice)
 	}
-	icons, err := s.store.CategoryIcons(ctx, userID, ids)
+	refs, err := shared.LoadCategoryRefs(ctx, s.store.db, ids)
 	if err != nil {
 		return err
 	}
 	for i := range out.TopCategories {
-		if id := out.TopCategories[i].CategoryID; id != nil {
-			out.TopCategories[i].IconCode = icons[*id]
+		c := out.TopCategories[i].Category
+		if c == nil {
+			continue
+		}
+		if ref, ok := refs[c.ID]; ok {
+			out.TopCategories[i].Category = &ref
+		} else {
+			out.TopCategories[i].Category = nil
 		}
 	}
 	out.OtherExpense = round2(out.OtherExpense)
@@ -333,4 +345,46 @@ func daysBetween(from, to time.Time) int {
 
 func round2(f float64) float64 {
 	return math.Round(f*100) / 100
+}
+
+// fillPending — the pending block: every draft counted, the newest few
+// listed with their resolved refs.
+func (s *Service) fillPending(ctx context.Context, userID uuid.UUID, out *Response) error {
+	ps := pending.NewStore(s.store.db)
+	total, err := ps.Count(ctx, userID)
+	if err != nil {
+		return err
+	}
+	rows, err := ps.Newest(ctx, userID, pendingMax)
+	if err != nil {
+		return err
+	}
+	if err := pending.ResolveRows(ctx, s.store.db, userID, rows); err != nil {
+		return err
+	}
+	out.Pending = PendingBlock{Total: total, Items: rows}
+	return nil
+}
+
+// fillAttention — the notifications of the ต้องจัดการ card, plus the badges.
+func (s *Service) fillAttention(ctx context.Context, userID uuid.UUID, out *Response) error {
+	badges, err := shared.LoadBadges(ctx, s.store.db, userID)
+	if err != nil {
+		return err
+	}
+	ids, err := s.store.AttentionIDs(ctx, userID)
+	if err != nil {
+		return err
+	}
+	total := max(badges.UnreadNotifications, len(ids))
+	if len(ids) > attentionMax {
+		ids = ids[:attentionMax]
+	}
+	items, err := shared.LoadNotificationViews(ctx, s.store.db, userID, ids)
+	if err != nil {
+		return err
+	}
+	out.Badges = badges
+	out.Attention = AttentionBlock{Total: total, Items: items}
+	return nil
 }

@@ -31,43 +31,79 @@ var (
 	ErrAlreadyLinked   = errors.New("contact is already linked")
 	ErrNotLinked       = errors.New("contact is not linked")
 	ErrCannotLinkSelf  = errors.New("cannot link a contact to yourself")
+	// Link-request notification gates (mapped to 404 / 409 by the handler).
+	ErrNotLinkRequest  = errors.New("notification is not a contact_link_request")
+	ErrRequestRejected = errors.New("link request was rejected")
+	ErrNotAccepted     = errors.New("link request has not been accepted")
 )
 
-// linked_user_* are projected via scalar subqueries so they work in both
-// SELECT and INSERT/UPDATE ... RETURNING. NULL when the contact isn't
-// linked. Spec §4.4 + post-1c policy: client picks linked_user_* fields
-// over the contact's own stored copies when present, so the linked
-// person's name / email / icon stays in sync with their account.
-const contactColumns = `id, user_id, display_name, email, phone, description, note, icon_code,
-	linked_user_id, status, last_used_at, created_at, updated_at,
-	(SELECT icon_code    FROM users WHERE id = contacts.linked_user_id) AS linked_user_icon_code,
-	(SELECT display_name FROM users WHERE id = contacts.linked_user_id) AS linked_user_display_name,
-	(SELECT email        FROM users WHERE id = contacts.linked_user_id) AS linked_user_email`
+// rowQuerier - satisfied by *pgxpool.Pool and pgx.Tx.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// contactSelect reads a contact with everything resolved in one statement:
+// name by the one person-name rule (shared.PersonNameSQL), email / icon from
+// the linked user when linked, and the linked_user block. The linked user's
+// row comes from the LEFT JOIN, so writes re-read through it (no RETURNING).
+var contactSelect = `SELECT c.id, c.user_id,
+	COALESCE(` + shared.PersonNameSQL("c", "lu") + `, c.display_name),
+	c.nickname, c.show_nickname, c.display_name,
+	CASE WHEN lu.id IS NOT NULL THEN lu.email ELSE c.email END,
+	c.phone, c.description, c.note, ` + shared.PersonIconSQL("c", "lu") + `,
+	c.linked_user_id, c.status, c.last_used_at, c.created_at, c.updated_at,
+	lu.id, lu.display_name, lu.email, lu.icon_code
+	FROM contacts c LEFT JOIN users lu ON lu.id = c.linked_user_id`
 
 func scanContact(row pgx.Row) (*Contact, error) {
-	var c Contact
-	var iconBytes, linkedIconBytes []byte
+	var (
+		c         Contact
+		iconBytes []byte
+		luID      *uuid.UUID
+		luName    *string
+		luEmail   *string
+		luIcon    []byte
+	)
 	err := row.Scan(
-		&c.ID, &c.UserID, &c.DisplayName, &c.Email, &c.Phone, &c.Description, &c.Note, &iconBytes,
+		&c.ID, &c.UserID, &c.Name, &c.Nickname, &c.ShowNickname, &c.DisplayName,
+		&c.Email, &c.Phone, &c.Description, &c.Note, &iconBytes,
 		&c.LinkedUserID, &c.Status, &c.LastUsedAt, &c.CreatedAt, &c.UpdatedAt,
-		&linkedIconBytes, &c.LinkedUserDisplayName, &c.LinkedUserEmail,
+		&luID, &luName, &luEmail, &luIcon,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if iconBytes != nil {
-		c.IconCode = new(shared.IconCode)
-		if err := json.Unmarshal(iconBytes, c.IconCode); err != nil {
-			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
+	c.IconCode = shared.IconFromJSON(iconBytes)
+	if luID != nil {
+		lu := &LinkedUser{ID: *luID, Email: luEmail, IconCode: shared.IconFromJSON(luIcon)}
+		if luName != nil {
+			lu.DisplayName = *luName
 		}
-	}
-	if linkedIconBytes != nil {
-		c.LinkedUserIconCode = new(shared.IconCode)
-		if err := json.Unmarshal(linkedIconBytes, c.LinkedUserIconCode); err != nil {
-			return nil, fmt.Errorf("unmarshal linked_user_icon_code: %w", err)
-		}
+		c.LinkedUser = lu
 	}
 	return &c, nil
+}
+
+func (s *Store) get(ctx context.Context, q rowQuerier, userID, id uuid.UUID) (*Contact, error) {
+	c, err := scanContact(q.QueryRow(ctx, contactSelect+` WHERE c.id = $1 AND c.user_id = $2`, id, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrContactNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("db error: %w", err)
+	}
+	return c, nil
+}
+
+func iconJSON(ic *shared.IconCode) ([]byte, error) {
+	if ic == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(ic)
+	if err != nil {
+		return nil, fmt.Errorf("marshal icon_code: %w", err)
+	}
+	return b, nil
 }
 
 func (s *Store) Create(ctx context.Context, userID uuid.UUID, req CreateContactRequest) (*Contact, error) {
@@ -75,35 +111,29 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, req CreateContactR
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
-	var iconJSON []byte
-	if req.IconCode != nil {
-		var err error
-		if iconJSON, err = json.Marshal(req.IconCode); err != nil {
-			return nil, fmt.Errorf("marshal icon_code: %w", err)
-		}
+	icon, err := iconJSON(req.IconCode)
+	if err != nil {
+		return nil, err
 	}
-
-	q := `INSERT INTO contacts
-		(id, user_id, display_name, email, phone, description, note, icon_code, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $2, $2)
-		RETURNING ` + contactColumns
-
-	c, err := scanContact(s.db.QueryRow(ctx, q,
-		id, userID, strings.TrimSpace(req.DisplayName),
-		req.Email, req.Phone, shared.CleanText(req.Description), shared.CleanText(req.Note), iconJSON,
-	))
+	show := true
+	if req.ShowNickname != nil {
+		show = *req.ShowNickname
+	}
+	_, err = s.db.Exec(ctx, `INSERT INTO contacts
+		(id, user_id, display_name, nickname, show_nickname, email, phone, description, note, icon_code,
+		 created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $2, $2)`,
+		id, userID, strings.TrimSpace(req.DisplayName), shared.CleanText(req.Nickname), show,
+		req.Email, req.Phone, shared.CleanText(req.Description), shared.CleanText(req.Note), icon)
 	if err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
 	}
-	return c, nil
+	return s.get(ctx, s.db, userID, id)
 }
 
 // CreateLinkedTx inserts a new contact already linked to [linkedUserID]
-// inside the producer's tx. Used by the AcceptWithContact flow when the
-// recipient creates a fresh contact for the requesting user.
-//
-// Skips the absorb-names step (the recipient form doesn't surface that —
-// it's a quick prefill). Display name is required by the caller.
+// inside the producer's tx (the recipient creates a contact for the
+// requesting user). Display name is the sender's, frozen as the snapshot.
 func (s *Store) CreateLinkedTx(
 	ctx context.Context, tx pgx.Tx,
 	userID, linkedUserID uuid.UUID,
@@ -115,43 +145,34 @@ func (s *Store) CreateLinkedTx(
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
-	var iconJSON []byte
-	if iconCode != nil {
-		if iconJSON, err = json.Marshal(iconCode); err != nil {
-			return nil, fmt.Errorf("marshal icon_code: %w", err)
-		}
+	icon, err := iconJSON(iconCode)
+	if err != nil {
+		return nil, err
 	}
-	q := `INSERT INTO contacts
+	if _, err := tx.Exec(ctx, `INSERT INTO contacts
 		(id, user_id, display_name, email, phone, description, note, icon_code, linked_user_id,
 		 created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $2, $2)
-		RETURNING ` + contactColumns
-	c, err := scanContact(tx.QueryRow(ctx, q,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $2, $2)`,
 		id, userID, strings.TrimSpace(displayName),
-		email, phone, shared.CleanText(description), shared.CleanText(note), iconJSON, linkedUserID,
-	))
-	if err != nil {
+		email, phone, shared.CleanText(description), shared.CleanText(note), icon, linkedUserID,
+	); err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
 	}
-	return c, nil
+	return s.get(ctx, tx, userID, id)
 }
 
 func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Contact, error) {
-	q := `SELECT ` + contactColumns + `
-		FROM contacts WHERE id = $1 AND user_id = $2`
-	c, err := scanContact(s.db.QueryRow(ctx, q, id, userID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrContactNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("db error: %w", err)
-	}
-	return c, nil
+	return s.get(ctx, s.db, userID, id)
 }
 
-// ListFilter mirrors the §3.2 query params. status="" means active-only by
-// spec default; status="all" matches both. linked is *bool to distinguish
-// "filter unset" from "filter linked=false".
+// GetByIDTx fetches under tx (no row lock).
+func (s *Store) GetByIDTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) (*Contact, error) {
+	return s.get(ctx, tx, userID, id)
+}
+
+// ListFilter mirrors the query params. status="" means active-only by spec
+// default; status="all" matches both. linked is *bool to distinguish "filter
+// unset" from "filter linked=false".
 type ListFilter struct {
 	Status string
 	Linked *bool
@@ -159,48 +180,50 @@ type ListFilter struct {
 }
 
 func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Contact, error) {
-	q := `SELECT ` + contactColumns + ` FROM contacts WHERE user_id = $1`
+	resolved := `COALESCE(` + shared.PersonNameSQL("c", "lu") + `, c.display_name)`
+	q := contactSelect + ` WHERE c.user_id = $1`
 	args := []any{userID}
 
 	switch strings.ToLower(strings.TrimSpace(f.Status)) {
 	case "", "active":
-		q += ` AND status = 'active'`
+		q += ` AND c.status = 'active'`
 	case "archived":
-		q += ` AND status = 'archived'`
+		q += ` AND c.status = 'archived'`
 	case "all":
 		// no filter
 	default:
 		// Treat unknown values as default (active) rather than 500-ing.
-		q += ` AND status = 'active'`
+		q += ` AND c.status = 'active'`
 	}
 
 	if f.Linked != nil {
 		if *f.Linked {
-			q += ` AND linked_user_id IS NOT NULL`
+			q += ` AND c.linked_user_id IS NOT NULL`
 		} else {
-			q += ` AND linked_user_id IS NULL`
+			q += ` AND c.linked_user_id IS NULL`
 		}
 	}
 
-	// Contract §8: name, email (own or the linked user's) or phone. Phone
-	// compares digits only, and only when the query has digits.
+	// Search: the resolved name, nickname, own name, email (own or the linked
+	// user's) - and phone digits when the query has digits.
 	if s := strings.TrimSpace(f.Search); s != "" {
 		args = append(args, "%"+shared.EscapeLike(strings.ToLower(s))+"%")
 		n := len(args)
-		cond := fmt.Sprintf(`LOWER(display_name) LIKE $%[1]d
-			OR LOWER(COALESCE(email, '')) LIKE $%[1]d
-			OR LOWER(COALESCE((SELECT email FROM users WHERE id = contacts.linked_user_id), '')) LIKE $%[1]d`, n)
+		cond := fmt.Sprintf(`LOWER(%[2]s) LIKE $%[1]d
+			OR LOWER(COALESCE(c.nickname, '')) LIKE $%[1]d
+			OR LOWER(c.display_name) LIKE $%[1]d
+			OR LOWER(COALESCE(lu.display_name, '')) LIKE $%[1]d
+			OR LOWER(COALESCE(c.email, '')) LIKE $%[1]d
+			OR LOWER(COALESCE(lu.email, '')) LIKE $%[1]d`, n, resolved)
 		if digits := onlyDigits(s); digits != "" {
 			args = append(args, "%"+digits+"%")
-			cond += fmt.Sprintf(` OR regexp_replace(COALESCE(phone, ''), '\D', '', 'g') LIKE $%d`, len(args))
+			cond += fmt.Sprintf(` OR regexp_replace(COALESCE(c.phone, ''), '\D', '', 'g') LIKE $%d`, len(args))
 		}
 		q += ` AND (` + cond + `)`
 	}
 
-	// Recent-first ranking: contacts the user just split with float to the
-	// top of the typeahead. Alphabetical falls in for ties / never-used.
-	q += ` ORDER BY last_used_at DESC NULLS LAST,
-		LOWER(display_name)`
+	// Active first, then by the resolved name, case-insensitive.
+	q += ` ORDER BY (c.status = 'active') DESC, LOWER(` + resolved + `), c.id`
 
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
@@ -219,7 +242,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Con
 	return out, rows.Err()
 }
 
-// Update applies a partial patch. Only non-nil fields in req are written.
+// Update applies a partial patch. Only present fields in req are written.
 // Returns the refreshed row.
 func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateContactRequest) (*Contact, error) {
 	q := `UPDATE contacts SET updated_by_user_id = $1`
@@ -228,6 +251,14 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCont
 	if req.DisplayName != nil {
 		args = append(args, strings.TrimSpace(*req.DisplayName))
 		q += fmt.Sprintf(", display_name = $%d", len(args))
+	}
+	if v, ok := req.NicknameChange(); ok {
+		args = append(args, v)
+		q += fmt.Sprintf(", nickname = $%d", len(args))
+	}
+	if req.ShowNickname != nil {
+		args = append(args, *req.ShowNickname)
+		q += fmt.Sprintf(", show_nickname = $%d", len(args))
 	}
 	if req.Email != nil {
 		args = append(args, *req.Email)
@@ -255,16 +286,16 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCont
 	}
 
 	args = append(args, id)
-	q += fmt.Sprintf(` WHERE id = $%d AND user_id = $1 RETURNING `, len(args)) + contactColumns
+	q += fmt.Sprintf(` WHERE id = $%d AND user_id = $1`, len(args))
 
-	c, err := scanContact(s.db.QueryRow(ctx, q, args...))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrContactNotFound
-	}
+	tag, err := s.db.Exec(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
 	}
-	return c, nil
+	if tag.RowsAffected() == 0 {
+		return nil, ErrContactNotFound
+	}
+	return s.get(ctx, s.db, userID, id)
 }
 
 // SetStatus flips active <-> archived. Returns ErrAlreadyArchived /
@@ -281,19 +312,11 @@ func (s *Store) SetStatus(ctx context.Context, userID, id uuid.UUID, target stri
 	if target == StatusActive && current.Status != StatusArchived {
 		return nil, ErrNotArchived
 	}
-
-	q := `UPDATE contacts
-		SET status = $1, updated_by_user_id = $2
-		WHERE id = $3 AND user_id = $2
-		RETURNING ` + contactColumns
-	c, err := scanContact(s.db.QueryRow(ctx, q, target, userID, id))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrContactNotFound
-	}
-	if err != nil {
+	if _, err := s.db.Exec(ctx, `UPDATE contacts SET status = $1, updated_by_user_id = $2
+		WHERE id = $3 AND user_id = $2`, target, userID, id); err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
 	}
-	return c, nil
+	return s.get(ctx, s.db, userID, id)
 }
 
 // SetLinkedUserIDTx sets contacts.linked_user_id inside the caller's tx.
@@ -301,21 +324,19 @@ func (s *Store) SetStatus(ctx context.Context, userID, id uuid.UUID, target stri
 func (s *Store) SetLinkedUserIDTx(
 	ctx context.Context, tx pgx.Tx, ownerUserID, contactID, linkedUserID uuid.UUID,
 ) (*Contact, error) {
-	q := `UPDATE contacts SET linked_user_id = $1, updated_by_user_id = $2
-		WHERE id = $3 AND user_id = $2
-		RETURNING ` + contactColumns
-	c, err := scanContact(tx.QueryRow(ctx, q, linkedUserID, ownerUserID, contactID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrContactNotFound
-	}
+	tag, err := tx.Exec(ctx, `UPDATE contacts SET linked_user_id = $1, updated_by_user_id = $2
+		WHERE id = $3 AND user_id = $2`, linkedUserID, ownerUserID, contactID)
 	if err != nil {
 		return nil, fmt.Errorf("set linked_user_id: %w", err)
 	}
-	return c, nil
+	if tag.RowsAffected() == 0 {
+		return nil, ErrContactNotFound
+	}
+	return s.get(ctx, tx, ownerUserID, contactID)
 }
 
 // ClearLinkedUserID is the unlink path. Returns ErrNotLinked if the contact
-// wasn't linked to begin with.
+// wasn't linked to begin with. The contact keeps its stored display_name.
 func (s *Store) ClearLinkedUserID(ctx context.Context, userID, contactID uuid.UUID) (*Contact, error) {
 	current, err := s.GetByID(ctx, userID, contactID)
 	if err != nil {
@@ -324,15 +345,32 @@ func (s *Store) ClearLinkedUserID(ctx context.Context, userID, contactID uuid.UU
 	if current.LinkedUserID == nil {
 		return nil, ErrNotLinked
 	}
-	q := `UPDATE contacts SET linked_user_id = NULL, updated_by_user_id = $1
-		WHERE id = $2 AND user_id = $1
-		RETURNING ` + contactColumns
-	return scanContact(s.db.QueryRow(ctx, q, userID, contactID))
+	if _, err := s.db.Exec(ctx, `UPDATE contacts SET linked_user_id = NULL, updated_by_user_id = $1
+		WHERE id = $2 AND user_id = $1`, userID, contactID); err != nil {
+		return nil, fmt.Errorf("db error: %w", err)
+	}
+	return s.get(ctx, s.db, userID, contactID)
+}
+
+// ContactLinkedTo returns the caller's contact that links to linkedUserID
+// (nil when none).
+func (s *Store) ContactLinkedTo(ctx context.Context, userID, linkedUserID uuid.UUID) (*uuid.UUID, error) {
+	var id uuid.UUID
+	err := s.db.QueryRow(ctx, `SELECT id FROM contacts WHERE user_id = $1 AND linked_user_id = $2
+		ORDER BY created_at LIMIT 1`, userID, linkedUserID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("db error: %w", err)
+	}
+	return &id, nil
 }
 
 // LinkExistsBetween returns true if EITHER:
 //   - userA already has any contact with linked_user_id = userB, OR
 //   - userB already has any contact with linked_user_id = userA.
+//
 // Used by link-request accept to enforce uniqueness in both directions.
 func (s *Store) LinkExistsBetween(ctx context.Context, tx pgx.Tx, userA, userB uuid.UUID) (bool, error) {
 	var n int
@@ -347,24 +385,7 @@ func (s *Store) LinkExistsBetween(ctx context.Context, tx pgx.Tx, userA, userB u
 	return n > 0, nil
 }
 
-// GetByIDTx fetches under tx (no row lock). Used by link-request accept
-// after the notification row is locked.
-func (s *Store) GetByIDTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) (*Contact, error) {
-	q := `SELECT ` + contactColumns + `
-		FROM contacts WHERE id = $1 AND user_id = $2`
-	c, err := scanContact(tx.QueryRow(ctx, q, id, userID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrContactNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("db error: %w", err)
-	}
-	return c, nil
-}
-
-// Delete hard-deletes the contact. In 1b.1 there are no shared_expense_splits
-// rows referencing it, so no person_name restoration is needed yet. 1b.1.b
-// will inject a SplitsRestorer that runs the UPDATE before this DELETE.
+// Delete hard-deletes the contact.
 func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	tag, err := s.db.Exec(ctx,
 		`DELETE FROM contacts WHERE id = $1 AND user_id = $2`, id, userID)
@@ -377,7 +398,7 @@ func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	return nil
 }
 
-// onlyDigits keeps 0-9 — phone search compares digits only (contract §8).
+// onlyDigits keeps 0-9 - phone search compares digits only (contract 8).
 func onlyDigits(s string) string {
 	var b strings.Builder
 	for _, r := range s {

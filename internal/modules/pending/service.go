@@ -13,6 +13,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 const dateLayout = "2006-01-02"
@@ -40,6 +41,9 @@ func NewService(store *Store, txs *transactions.Service, tg *tags.Service, debts
 func (s *Service) List(ctx context.Context, userID uuid.UUID) (*ListResponse, error) {
 	rows, err := s.store.List(ctx, userID)
 	if err != nil {
+		return nil, err
+	}
+	if err := ResolveRows(ctx, s.store.Pool(), userID, rows); err != nil {
 		return nil, err
 	}
 	return &ListResponse{Data: rows, Count: len(rows)}, nil
@@ -80,6 +84,9 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 		}
 		out = append(out, *p)
 	}
+	if err := ResolveRows(ctx, s.store.Pool(), userID, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -87,17 +94,70 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 	if err := checkDraft(req.Draft); err != nil {
 		return nil, err
 	}
-	return s.store.UpdateDraft(ctx, userID, id, req.Draft)
+	p, err := s.store.UpdateDraft(ctx, userID, id, req.Draft)
+	if err != nil {
+		return nil, err
+	}
+	return p, s.resolveOne(ctx, userID, p)
 }
 
-func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
-	return s.store.Delete(ctx, userID, id)
+func (s *Service) resolveOne(ctx context.Context, userID uuid.UUID, p *PendingTransaction) error {
+	rows := []PendingTransaction{*p}
+	if err := ResolveRows(ctx, s.store.Pool(), userID, rows); err != nil {
+		return err
+	}
+	p.Resolved = rows[0].Resolved
+	return nil
+}
+
+// Delete discards one draft (ErrPendingNotFound when it isn't the caller's).
+func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (*DiscardResult, error) {
+	if err := s.store.Delete(ctx, userID, id); err != nil {
+		return nil, err
+	}
+	n, err := s.store.Count(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return &DiscardResult{Discarded: []uuid.UUID{id}, Skipped: []uuid.UUID{}, RemainingCount: n}, nil
+}
+
+// Discard removes many drafts; unknown / foreign ids are skipped.
+func (s *Service) Discard(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) (*DiscardResult, error) {
+	gone, err := s.store.DeleteMany(ctx, userID, ids)
+	if err != nil {
+		return nil, err
+	}
+	removed := map[uuid.UUID]bool{}
+	out := &DiscardResult{Discarded: []uuid.UUID{}, Skipped: []uuid.UUID{}}
+	for _, id := range gone {
+		removed[id] = true
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if removed[id] {
+			out.Discarded = append(out.Discarded, id)
+		} else {
+			out.Skipped = append(out.Skipped, id)
+		}
+	}
+	if out.RemainingCount, err = s.store.Count(ctx, userID); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Submit turns each draft into its real effect, independently: one that
-// fails stays pending with its reason; the others go through.
+// fails stays pending with its reason; the others go through. The answer
+// carries the created rows, the post-submit balance of every wallet they
+// touched and the badges, so the page patches itself from it.
 func (s *Service) Submit(ctx context.Context, userID uuid.UUID, req SubmitRequest) (*SubmitResponse, error) {
 	out := &SubmitResponse{Submitted: []Submitted{}, Failed: []Failed{}}
+	var touched []uuid.UUID
 	seen := map[uuid.UUID]bool{}
 	for _, id := range req.IDs {
 		if seen[id] {
@@ -109,16 +169,87 @@ func (s *Service) Submit(ctx context.Context, userID uuid.UUID, req SubmitReques
 			out.Failed = append(out.Failed, Failed{ID: id, Error: toSubmitError(err)})
 			continue
 		}
+		before := s.accountsOfTarget(ctx, userID, p)
 		txID, err := s.submitOne(ctx, userID, p)
 		if err != nil {
 			e := toSubmitError(err)
 			_ = s.store.SetError(ctx, userID, id, e)
-			out.Failed = append(out.Failed, Failed{ID: id, Error: e})
+			f := Failed{ID: id, Error: e}
+			if cur, gerr := s.store.Get(ctx, userID, id); gerr == nil {
+				if rerr := s.resolveOne(ctx, userID, cur); rerr != nil {
+					return nil, rerr
+				}
+				f.Pending = cur
+			}
+			out.Failed = append(out.Failed, f)
 			continue
 		}
-		out.Submitted = append(out.Submitted, Submitted{ID: id, TransactionID: txID})
+		rows, err := s.rowsOf(ctx, userID, txID)
+		if err != nil {
+			return nil, err
+		}
+		for i := range rows {
+			if rows[i].AccountID != nil {
+				touched = append(touched, *rows[i].AccountID)
+			}
+		}
+		touched = append(touched, before...)
+		out.Submitted = append(out.Submitted, Submitted{ID: id, Rows: rows, TransactionID: txID})
+	}
+	var err error
+	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.store.Pool(), touched); err != nil {
+		return nil, err
+	}
+	if out.Badges, err = shared.LoadBadges(ctx, s.store.Pool(), userID); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+// accountsOfTarget — the wallets an update_tx draft's target sits on now
+// (the edit may move it off them, they still change).
+func (s *Service) accountsOfTarget(ctx context.Context, userID uuid.UUID, p *PendingTransaction) []uuid.UUID {
+	if p.Kind != KindUpdateTx || p.TargetTransactionID == nil {
+		return nil
+	}
+	d, err := s.txs.Get(ctx, userID, *p.TargetTransactionID)
+	if err != nil {
+		return nil
+	}
+	var ids []uuid.UUID
+	if d.AccountID != nil {
+		ids = append(ids, *d.AccountID)
+	}
+	if d.TransferPeer != nil {
+		ids = append(ids, d.TransferPeer.Account.ID)
+	}
+	return ids
+}
+
+// rowsOf — the created transaction in its final shape; a transfer returns
+// both rows, OUT first.
+func (s *Service) rowsOf(ctx context.Context, userID uuid.UUID, txID *uuid.UUID) ([]transactions.TransactionDetail, error) {
+	rows := []transactions.TransactionDetail{}
+	if txID == nil {
+		return rows, nil
+	}
+	d, err := s.txs.Get(ctx, userID, *txID)
+	if err != nil {
+		return nil, err
+	}
+	rows = append(rows, *d)
+	if d.TransferPeer != nil {
+		peer, err := s.txs.Get(ctx, userID, d.TransferPeer.ID)
+		if err != nil {
+			return nil, err
+		}
+		if d.TransferPeer.Direction == "out" {
+			rows = []transactions.TransactionDetail{*d, *peer}
+		} else {
+			rows = []transactions.TransactionDetail{*peer, *d}
+		}
+	}
+	return rows, nil
 }
 
 func (s *Service) submitOne(ctx context.Context, userID uuid.UUID, p *PendingTransaction) (*uuid.UUID, error) {

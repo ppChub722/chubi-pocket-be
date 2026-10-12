@@ -23,14 +23,14 @@ const (
 
 // ScanResult — what scan-slip answers for one image: what was read
 // (Slip) and the pending drafts it becomes (Pending, saved in 0.3.3).
-// Unknown → key absent.
+// Every key is always present ("" / null when unknown), except `ocr`.
 type ScanResult struct {
 	V        int           `json:"v"`
 	Status   Status        `json:"status"`
-	FileKey  string        `json:"file_key,omitempty"`
-	TransRef string        `json:"trans_ref,omitempty"`
-	BankCode string        `json:"bank_code,omitempty"`
-	Slip     *slip.Slip    `json:"slip,omitempty"`
+	FileKey  string        `json:"file_key"`
+	TransRef string        `json:"trans_ref"`
+	BankCode string        `json:"bank_code"`
+	Slip     *slip.Slip    `json:"slip"`
 	Pending  []PendingItem `json:"pending"`
 	// Only with debug=1 (the Imports lab).
 	OCR *ocr.Result `json:"ocr,omitempty"`
@@ -38,10 +38,11 @@ type ScanResult struct {
 
 // PendingItem — one pending_transactions row, as-is.
 type PendingItem struct {
-	Source    string        `json:"source"` // "ocr"
-	Kind      string        `json:"kind"`   // "create"
-	Draft     pending.Draft `json:"draft"`
-	SourceRef SlipRef       `json:"source_ref"`
+	Source    string                `json:"source"` // "ocr"
+	Kind      string                `json:"kind"`   // "create"
+	Draft     pending.Draft         `json:"draft"`
+	Resolved  pending.DraftResolved `json:"resolved"`
+	SourceRef SlipRef               `json:"source_ref"`
 }
 
 // SlipRef — the row's source_ref: what the draft can't hold (the time,
@@ -74,3 +75,9 @@ const (
 	partMain   = "main"
 	partFee    = "fee"
 )
+
+// ParseTextResult — what parse-text answers: the drafts the text becomes
+// (a stub for now: none).
+type ParseTextResult struct {
+	Pending []PendingItem `json:"pending"`
+}

@@ -2,7 +2,6 @@ package personal_debts
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,10 +24,10 @@ func NewStore(db *pgxpool.Pool) *Store {
 func (s *Store) Pool() *pgxpool.Pool { return s.db }
 
 var (
-	ErrDebtNotFound      = errors.New("personal debt not found")
-	ErrAlreadySettled    = errors.New("debt is already settled")
-	ErrAlreadyCancelled  = errors.New("debt is already cancelled")
-	ErrOverpayment       = errors.New("settle amount exceeds outstanding")
+	ErrDebtNotFound     = errors.New("personal debt not found")
+	ErrAlreadySettled   = errors.New("debt is already settled")
+	ErrAlreadyCancelled = errors.New("debt is already cancelled")
+	ErrOverpayment      = errors.New("settle amount exceeds outstanding")
 	// Repaid more than owed (amount edited below repaid) — nothing to settle.
 	ErrDebtOverpaid = errors.New("this debt is already repaid in full or overpaid")
 	// ErrInvalidSettled — an update would leave settled_amount > amount
@@ -516,26 +515,23 @@ func (s *Store) AutoBumpInTx(
 // People aggregates open debts grouped by counterparty (contact_id when
 // present, else lower(person_name)) and computes net position per person.
 func (s *Store) People(ctx context.Context, userID uuid.UUID) ([]PersonRow, float64, float64, error) {
+	// The display name is the one name rule (shared.PersonNameSQL): live
+	// nickname / linked profile / contact name; the snapshot only when the
+	// debt has no contact. Grouping stays: contact id, else lower(snapshot).
 	q := `
 		WITH grouped AS (
 			SELECT
-				counterparty_contact_id,
-				LOWER(COALESCE(
-					(SELECT c.display_name FROM contacts c
-					 WHERE c.id = pd.counterparty_contact_id
-					   AND c.user_id = pd.user_id),
-					pd.counterparty_person_name
-				)) AS group_key,
-				COALESCE(
-					(SELECT c.display_name FROM contacts c
-					 WHERE c.id = pd.counterparty_contact_id
-					   AND c.user_id = pd.user_id),
-					pd.counterparty_person_name
-				) AS display_name,
-				direction,
-				(amount - settled_amount) AS outstanding
+				pd.counterparty_contact_id,
+				LOWER(COALESCE(` + shared.PersonNameSQL("c", "lu") + `, pd.counterparty_person_name)) AS group_key,
+				COALESCE(` + shared.PersonNameSQL("c", "lu") + `, pd.counterparty_person_name) AS display_name,
+				` + shared.PersonIconSQL("c", "lu") + ` AS icon_code,
+				lu.id AS linked_user_id,
+				pd.direction,
+				(pd.amount - pd.settled_amount) AS outstanding
 			FROM personal_debts pd
-			WHERE user_id = $1 AND status = 'open'
+			LEFT JOIN contacts c ON c.id = pd.counterparty_contact_id AND c.user_id = pd.user_id
+			LEFT JOIN users lu ON lu.id = c.linked_user_id
+			WHERE pd.user_id = $1 AND pd.status = 'open'
 		)
 		SELECT
 			counterparty_contact_id,
@@ -546,9 +542,8 @@ func (s *Store) People(ctx context.Context, userID uuid.UUID) ([]PersonRow, floa
 			COALESCE(SUM(GREATEST(outstanding, 0)) FILTER (WHERE direction = 'i_owe'), 0) +
 			COALESCE(SUM(GREATEST(-outstanding, 0)) FILTER (WHERE direction = 'owed_to_me'), 0) AS i_owe,
 			COUNT(*) AS open_count,
-			-- contract §7: the contact's icon (NULL for free-text names).
-			(SELECT c.icon_code FROM contacts c
-			 WHERE c.id = counterparty_contact_id AND c.user_id = $1) AS icon_code
+			(ARRAY_AGG(icon_code))[1] AS icon_code,
+			(ARRAY_AGG(linked_user_id))[1] AS linked_user_id
 		FROM grouped
 		GROUP BY counterparty_contact_id, group_key
 		ORDER BY ABS(
@@ -567,17 +562,19 @@ func (s *Store) People(ctx context.Context, userID uuid.UUID) ([]PersonRow, floa
 	for rows.Next() {
 		var r PersonRow
 		var icon []byte
+		var linked *uuid.UUID
+		var name string
 		if err := rows.Scan(
-			&r.ContactID, &r.DisplayName,
-			&r.OwedToMeOpen, &r.IOweOpen, &r.OpenCount, &icon,
+			&r.ContactID, &name,
+			&r.OwedToMeOpen, &r.IOweOpen, &r.OpenCount, &icon, &linked,
 		); err != nil {
 			return nil, 0, 0, err
 		}
-		if icon != nil {
-			r.IconCode = new(shared.IconCode)
-			if err := json.Unmarshal(icon, r.IconCode); err != nil {
-				return nil, 0, 0, fmt.Errorf("unmarshal icon_code: %w", err)
-			}
+		r.Person = shared.PersonRef{
+			Name: name, ContactID: r.ContactID, Linked: linked != nil, LinkedUserID: linked,
+		}
+		if r.ContactID != nil {
+			r.Person.IconCode = shared.IconFromJSON(icon)
 		}
 		r.NetPosition = r.OwedToMeOpen - r.IOweOpen
 		out = append(out, r)

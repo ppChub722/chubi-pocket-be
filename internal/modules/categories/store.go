@@ -36,7 +36,7 @@ const categoryColumns = `id, user_id, name, type, parent_id, is_system, system_k
 	status, created_at, updated_at`
 
 func scanCategory(row pgx.Row) (*Category, error) {
-	var c Category
+	c := Category{Depth: 1, Path: []PathItem{}}
 	var iconBytes []byte
 	err := row.Scan(
 		&c.ID, &c.UserID, &c.Name, &c.Type, &c.ParentID, &c.IsSystem, &c.SystemKind,
@@ -574,4 +574,95 @@ func (s *Store) CountBudgets(ctx context.Context, id uuid.UUID) (int, error) {
 	err := s.db.QueryRow(ctx,
 		`SELECT COUNT(*) FROM budgets WHERE category_id = $1`, id).Scan(&n)
 	return n, err
+}
+
+// IsFeeCategory - this category is the user's fee category
+// (user_preferences.preferences->>'fee_category_id').
+func (s *Store) IsFeeCategory(ctx context.Context, userID, id uuid.UUID) (bool, error) {
+	var is bool
+	err := s.db.QueryRow(ctx,
+		`SELECT COALESCE(preferences->>'fee_category_id' = $2::text, FALSE) FROM user_preferences WHERE user_id = $1`,
+		userID, id.String()).Scan(&is)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return is, err
+}
+
+// ChildIDs returns the ids of every direct child (any status).
+func (s *Store) ChildIDs(ctx context.Context, userID, id uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT id FROM categories WHERE parent_id = $1 AND user_id = $2 ORDER BY sort_order, created_at`, id, userID)
+	if err != nil {
+		return nil, fmt.Errorf("child ids: %w", err)
+	}
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var cid uuid.UUID
+		if err := rows.Scan(&cid); err != nil {
+			return nil, err
+		}
+		out = append(out, cid)
+	}
+	return out, rows.Err()
+}
+
+// ByIDs returns the caller's categories by id, in the order of ids.
+func (s *Store) ByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]Category, error) {
+	out := make([]Category, 0, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT `+categoryColumns+` FROM categories
+		WHERE user_id = $1 AND id = ANY($2)`, userID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("by ids: %w", err)
+	}
+	defer rows.Close()
+	byID := map[uuid.UUID]Category{}
+	for rows.Next() {
+		c, err := scanCategory(rows)
+		if err != nil {
+			return nil, err
+		}
+		byID[c.ID] = *c
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		if c, ok := byID[id]; ok {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// TreeNames loads (id -> name, parent) of all the user's categories (any
+// status) in one query, for depth / path computation.
+func (s *Store) TreeNames(ctx context.Context, userID uuid.UUID) (map[uuid.UUID]TreeNode, error) {
+	rows, err := s.db.Query(ctx, `SELECT id, name, parent_id FROM categories WHERE user_id = $1`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("tree: %w", err)
+	}
+	defer rows.Close()
+	out := map[uuid.UUID]TreeNode{}
+	for rows.Next() {
+		var (
+			id uuid.UUID
+			n  TreeNode
+		)
+		if err := rows.Scan(&id, &n.Name, &n.ParentID); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
+// TreeNode - a category's name and parent.
+type TreeNode struct {
+	Name     string
+	ParentID *uuid.UUID
 }

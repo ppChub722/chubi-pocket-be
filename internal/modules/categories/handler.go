@@ -131,14 +131,12 @@ func (h *Handler) Delete(c *gin.Context) {
 		return
 	}
 
-	status, err := h.service.Delete(c.Request.Context(), userID, id)
+	out, err := h.service.Delete(c.Request.Context(), userID, id)
 	if err != nil {
 		mapServiceError(c, err)
 		return
 	}
-
-	msg := "Category deleted"
-	c.JSON(http.StatusOK, gin.H{"message": msg, "status": status})
+	c.JSON(http.StatusOK, out)
 }
 
 // PATCH /v1/categories/reorder — bulk-rewrites (parent_id, sort_order) for

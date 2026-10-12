@@ -57,26 +57,6 @@ func (h *Handler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, ListResponse{Data: tags})
 }
 
-// GET /v1/tags/:id
-func (h *Handler) Get(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-
-	t, err := h.service.Get(c.Request.Context(), userID, id)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, t)
-}
-
 // PUT /v1/tags/:id
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
@@ -103,58 +83,6 @@ func (h *Handler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, t)
 }
 
-// POST /v1/transactions/:id/tags
-func (h *Handler) Attach(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-	txID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid transaction id", nil)
-		return
-	}
-
-	var req AttachRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-		return
-	}
-
-	tags, err := h.service.AttachTags(c.Request.Context(), userID, txID, req.TagIDs)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, ListResponse{Data: tags})
-}
-
-// DELETE /v1/transactions/:id/tags/:tag_id
-func (h *Handler) Detach(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-	txID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid transaction id", nil)
-		return
-	}
-	tagID, err := uuid.Parse(c.Param("tag_id"))
-	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid tag id", nil)
-		return
-	}
-
-	if err := h.service.DetachTag(c.Request.Context(), userID, txID, tagID); err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	response.OK(c, "Tag removed from transaction", nil)
-}
-
 // DELETE /v1/tags/:id
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
@@ -171,7 +99,7 @@ func (h *Handler) Delete(c *gin.Context) {
 		mapServiceError(c, err)
 		return
 	}
-	response.OK(c, "Tag deleted", nil)
+	c.JSON(http.StatusOK, DeletedResult{ID: id})
 }
 
 func parseIDParam(c *gin.Context) (uuid.UUID, bool) {

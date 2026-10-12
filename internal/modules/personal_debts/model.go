@@ -10,8 +10,8 @@ import (
 
 // Direction values. Per-row from the row-owner's perspective.
 const (
-	DirectionIOwe       = "i_owe"        // counterparty is the creditor
-	DirectionOwedToMe   = "owed_to_me"   // counterparty is the debtor
+	DirectionIOwe     = "i_owe"      // counterparty is the creditor
+	DirectionOwedToMe = "owed_to_me" // counterparty is the debtor
 )
 
 // Status values. Direction-agnostic.
@@ -34,24 +34,27 @@ const (
 //   - debtor-side rows auto-created when the creditor splits with a linked
 //     contact (the debtor has no transaction in their book yet).
 type PersonalDebt struct {
-	ID                          uuid.UUID  `json:"id"`
-	UserID                      uuid.UUID  `json:"user_id"`
-	Direction                   string     `json:"direction"`
-	CounterpartyContactID       *uuid.UUID `json:"counterparty_contact_id"`
-	CounterpartyPersonName      string     `json:"counterparty_person_name"`
-	SourceTransactionID         *uuid.UUID `json:"source_transaction_id"`
-	SourceProjectTransactionID  *uuid.UUID `json:"source_project_transaction_id"`
-	ProjectID                   *uuid.UUID `json:"project_id"`
-	Amount                      float64    `json:"amount"`
-	SettledAmount               float64    `json:"settled_amount"`
-	Currency                    string     `json:"currency"`
-	Status                      string     `json:"status"`
-	Description                 *string    `json:"description"`
-	Note                        *string    `json:"note"`
-	CreatedAt                   time.Time  `json:"created_at"`
-	UpdatedAt                   time.Time  `json:"updated_at"`
+	ID                         uuid.UUID  `json:"id"`
+	UserID                     uuid.UUID  `json:"user_id"`
+	Direction                  string     `json:"direction"`
+	CounterpartyContactID      *uuid.UUID `json:"counterparty_contact_id"`
+	CounterpartyPersonName     string     `json:"-"` // typed snapshot; responses carry `person`
+	SourceTransactionID        *uuid.UUID `json:"source_transaction_id"`
+	SourceProjectTransactionID *uuid.UUID `json:"source_project_transaction_id"`
+	ProjectID                  *uuid.UUID `json:"project_id"`
+	Amount                     float64    `json:"amount"`
+	SettledAmount              float64    `json:"settled_amount"`
+	Currency                   string     `json:"currency"`
+	Status                     string     `json:"status"`
+	Description                *string    `json:"description"`
+	Note                       *string    `json:"note"`
+	CreatedAt                  time.Time  `json:"created_at"`
+	UpdatedAt                  time.Time  `json:"updated_at"`
 	// The mirror row in the other user's book (linked splits, §5).
 	CounterpartDebtID *uuid.UUID `json:"counterpart_debt_id"`
+	// Person — the counterparty resolved by the one name rule (filled by the
+	// service before a response; live contact name, snapshot only without a contact).
+	Person shared.PersonRef `json:"person"`
 }
 
 // PersonalDebtView extends the row with computed `outstanding`.
@@ -86,7 +89,7 @@ type UpdateRequest struct {
 
 	// Set by the handler when the body carries an explicit null (contract
 	// §7) — a nil pointer alone can't tell "absent" from "clear it".
-	ClearContact bool `json:"-"`
+	ClearContact     bool `json:"-"`
 	ClearDescription bool `json:"-"`
 	ClearNote        bool `json:"-"`
 }
@@ -100,21 +103,21 @@ type UpdateRequest struct {
 type SettleRequest struct {
 	// Optional — nil records a floating (no-wallet) transaction.
 	AccountID *uuid.UUID `json:"account_id"`
-	Amount    *float64  `json:"amount"     binding:"omitempty,gt=0"`
+	Amount    *float64   `json:"amount"     binding:"omitempty,gt=0"`
 	// description absent → the debt's own description.
-	Date      *string   `json:"date"       binding:"omitempty,datetime=2006-01-02"`
+	Date        *string `json:"date"       binding:"omitempty,datetime=2006-01-02"`
 	Description *string `json:"description" binding:"omitempty,max=200"`
-	Note      *string   `json:"note"       binding:"omitempty,max=500"`
+	Note        *string `json:"note"       binding:"omitempty,max=500"`
 }
 
 type ListFilter struct {
-	Direction              string
-	Status                 string
-	CounterpartyContactID  *uuid.UUID
-	From                   *string
-	To                     *string
-	Page                   int
-	PerPage                int
+	Direction             string
+	Status                string
+	CounterpartyContactID *uuid.UUID
+	From                  *string
+	To                    *string
+	Page                  int
+	PerPage               int
 }
 
 type Pagination struct {
@@ -131,19 +134,18 @@ type ListResponse struct {
 
 // PersonRow groups debts by counterparty in the people view.
 type PersonRow struct {
-	ContactID            *uuid.UUID `json:"contact_id"`
-	DisplayName          string     `json:"display_name"`
-	OwedToMeOpen         float64    `json:"owed_to_me_open"`
-	IOweOpen             float64    `json:"i_owe_open"`
-	NetPosition          float64    `json:"net_position"`         // positive = they owe me (net)
-	OpenCount            int        `json:"open_count"`
-	IconCode             *shared.IconCode `json:"icon_code"` // contact's icon; nil for free-text names
+	ContactID    *uuid.UUID       `json:"contact_id"`
+	OwedToMeOpen float64          `json:"owed_to_me_open"`
+	IOweOpen     float64          `json:"i_owe_open"`
+	NetPosition  float64          `json:"net_position"` // positive = they owe me (net)
+	OpenCount    int              `json:"open_count"`
+	Person       shared.PersonRef `json:"person"`
 }
 
 type PeopleResponse struct {
-	Data            []PersonRow `json:"data"`
-	TotalOwedToMe   float64     `json:"total_owed_to_me"`
-	TotalIOwe       float64     `json:"total_i_owe"`
-	NetPosition     float64     `json:"net_position"`
-	Currency        string      `json:"currency"`
+	Data          []PersonRow `json:"data"`
+	TotalOwedToMe float64     `json:"total_owed_to_me"`
+	TotalIOwe     float64     `json:"total_i_owe"`
+	NetPosition   float64     `json:"net_position"`
+	Currency      string      `json:"-"` // not in the spec (listDebtPeople): amounts are in the user's currency
 }

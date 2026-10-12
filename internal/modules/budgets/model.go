@@ -49,13 +49,6 @@ type Budget struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
-// CategorySummary — embedded snapshot used in read responses.
-type CategorySummary struct {
-	ID       uuid.UUID        `json:"id"`
-	Name     string           `json:"name"`
-	IconCode *shared.IconCode `json:"icon_code,omitempty"`
-}
-
 // CurrentPeriod — period-boundary snapshot + spend computed at read.
 type CurrentPeriod struct {
 	Start          string  `json:"start"` // YYYY-MM-DD
@@ -76,7 +69,7 @@ type ChildBreakdownRow struct {
 // BudgetView — read-shape with computed fields.
 type BudgetView struct {
 	Budget
-	Category       CategorySummary     `json:"category"`
+	Category       shared.CategoryRef  `json:"category"`
 	CurrentPeriod  CurrentPeriod       `json:"current_period"`
 	ChildBreakdown []ChildBreakdownRow `json:"child_breakdown"`
 }

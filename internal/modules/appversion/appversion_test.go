@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/apidoc/apitest"
 )
 
 func newRouter(info Info) *gin.Engine {
@@ -41,27 +43,24 @@ func TestVersionEndpoint(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	var body struct {
-		Success bool           `json:"success"`
-		Data    map[string]any `json:"data"`
-	}
+	apitest.Conform(t, "getAppVersion", w.Code, w.Body.Bytes())
+	var body map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]any{
 		"min_build": 41.0, "latest_build": 42.0,
 		"download_url": "https://appdistribution.firebase.dev/i/test", "message_th": "อัปเดตแอปก่อนนะ",
+		"message_en": nil,
 	}
-	if !body.Success || len(body.Data) != len(want) {
+	if len(body) != len(want) {
 		t.Fatalf("body = %s", w.Body)
 	}
 	for k, v := range want {
-		if body.Data[k] != v {
-			t.Errorf("data.%s = %v, want %v", k, body.Data[k], v)
+		got, ok := body[k]
+		if !ok || got != v {
+			t.Errorf("%s = %v (present %v), want %v", k, got, ok, v)
 		}
-	}
-	if _, ok := body.Data["message_en"]; ok {
-		t.Error("message_en should be absent when not set")
 	}
 }
 

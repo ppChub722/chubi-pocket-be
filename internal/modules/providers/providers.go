@@ -30,8 +30,8 @@ type Provider struct {
 	NameEN    string    `json:"name_en"`
 	ShortName *string   `json:"short_name"`
 	Color     *string   `json:"color"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt time.Time `json:"-"`
+	UpdatedAt time.Time `json:"-"`
 }
 
 type ListResponse struct {

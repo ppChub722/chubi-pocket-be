@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // Pending transactions — drafts waiting to be confirmed (owner design
@@ -53,6 +54,7 @@ type PendingTransaction struct {
 	Source              string          `json:"source"`
 	Kind                string          `json:"kind"`
 	Draft               Draft           `json:"draft"`
+	Resolved            DraftResolved   `json:"resolved"`
 	TargetDebtID        *uuid.UUID      `json:"target_debt_id"`
 	TargetTransactionID *uuid.UUID      `json:"target_transaction_id"`
 	SourceRef           json.RawMessage `json:"source_ref"`
@@ -80,24 +82,63 @@ type UpdateRequest struct {
 	Draft Draft `json:"draft"`
 }
 
-// SubmitRequest — POST /pending-transactions/submit.
-type SubmitRequest struct {
+// IdsRequest — POST /pending-transactions/submit and /discard.
+type IdsRequest struct {
 	IDs []uuid.UUID `json:"ids" binding:"required,min=1,max=100"`
 }
 
+// SubmitRequest — POST /pending-transactions/submit.
+type SubmitRequest = IdsRequest
+
+// DiscardRequest — POST /pending-transactions/discard.
+type DiscardRequest = IdsRequest
+
+// DiscardResult — what a discard removed.
+type DiscardResult struct {
+	Discarded      []uuid.UUID `json:"discarded"`
+	Skipped        []uuid.UUID `json:"skipped"`
+	RemainingCount int         `json:"remaining_count"`
+}
+
+// ResolvedSplit — one draft split, its person resolved by the one name rule.
+type ResolvedSplit struct {
+	Person     shared.PersonRef `json:"person"`
+	OwedAmount float64          `json:"owed_amount"`
+}
+
+// DraftResolved — read-only (spec schema DraftResolved): the draft's ids
+// resolved so the page renders without other calls. A dangling id is null
+// here and its draft key is listed in Missing.
+type DraftResolved struct {
+	Account           *shared.AccountRef  `json:"account"`
+	TransferToAccount *shared.AccountRef  `json:"transfer_to_account"`
+	Category          *shared.CategoryRef `json:"category"`
+	Tags              []shared.TagRef     `json:"tags"`
+	Project           *shared.EventRef    `json:"project"`
+	Splits            []ResolvedSplit     `json:"splits"`
+	Missing           []string            `json:"missing"`
+}
+
 type Submitted struct {
-	ID            uuid.UUID  `json:"id"`
-	TransactionID *uuid.UUID `json:"transaction_id"`
+	ID uuid.UUID `json:"id"`
+	// Rows — the created row(s) in their final state (a transfer: OUT first).
+	Rows []transactions.TransactionDetail `json:"rows"`
+	// TransactionID — the row the draft became (Go side only).
+	TransactionID *uuid.UUID `json:"-"`
 }
 
 type Failed struct {
 	ID    uuid.UUID   `json:"id"`
 	Error SubmitError `json:"error"`
+	// Pending — the draft with last_error set; nil when it no longer exists.
+	Pending *PendingTransaction `json:"pending"`
 }
 
 // SubmitResponse — each draft independently: the ones that went through
 // are gone from pending; the ones that failed stay with their reason.
 type SubmitResponse struct {
-	Submitted []Submitted `json:"submitted"`
-	Failed    []Failed    `json:"failed"`
+	Submitted       []Submitted            `json:"submitted"`
+	Failed          []Failed               `json:"failed"`
+	AccountBalances []shared.WalletBalance `json:"account_balances"`
+	Badges          shared.Badges          `json:"badges"`
 }

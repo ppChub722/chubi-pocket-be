@@ -141,3 +141,49 @@ func (s *Store) DeleteTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) e
 	_, err := tx.Exec(ctx, `DELETE FROM pending_transactions WHERE id = $1 AND user_id = $2`, id, userID)
 	return err
 }
+
+// Newest — the first `limit` drafts, newest first (the Home block).
+func (s *Store) Newest(ctx context.Context, userID uuid.UUID, limit int) ([]PendingTransaction, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+pendingColumns+` FROM pending_transactions
+		WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2`, userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("newest pending: %w", err)
+	}
+	defer rows.Close()
+	out := make([]PendingTransaction, 0, limit)
+	for rows.Next() {
+		p, err := scanPending(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+// Count — how many drafts the user has.
+func (s *Store) Count(ctx context.Context, userID uuid.UUID) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM pending_transactions WHERE user_id = $1`, userID).Scan(&n)
+	return n, err
+}
+
+// DeleteMany removes the caller's drafts among ids; returns the ids that
+// existed (and are now gone).
+func (s *Store) DeleteMany(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := s.db.Query(ctx, `DELETE FROM pending_transactions
+		WHERE id = ANY($1) AND user_id = $2 RETURNING id`, ids, userID)
+	if err != nil {
+		return nil, fmt.Errorf("discard pending: %w", err)
+	}
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}

@@ -2,10 +2,10 @@ package transactions
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -30,18 +30,19 @@ var (
 	ErrAmountInvalid               = errors.New("amount must be > 0")
 	ErrSplitContactNotFound        = errors.New("split contact not found or not owned")
 	// PUT /transactions/:id/splits (owner 2026-10-10).
-	ErrSplitsAuthorOnly     = errors.New("only the transaction's author can change its splits")
-	ErrSplitsExceedAmount   = errors.New("splits add up to more than the transaction amount")
-	ErrSplitUnknownDebt     = errors.New("debt_id is not one of this transaction's splits (or is listed twice)")
-	ErrSplitPersonRequired  = errors.New("person_name is required for a new split")
-	ErrSplitContactArchived = errors.New("split contact is archived")
-	ErrSplitIdentityLocked  = errors.New("a split with a contact can't change its person; remove it and add a new one")
-	ErrSplitsExceedShare    = errors.New("splits add up to more than your share of this event bill")
+	ErrSplitsAuthorOnly            = errors.New("only the transaction's author can change its splits")
+	ErrSplitsExceedAmount          = errors.New("splits add up to more than the transaction amount")
+	ErrSplitUnknownDebt            = errors.New("debt_id is not one of this transaction's splits (or is listed twice)")
+	ErrSplitPersonRequired         = errors.New("person_name is required for a new split")
+	ErrSplitContactArchived        = errors.New("split contact is archived")
+	ErrSplitsExceedShare           = errors.New("splits add up to more than your share of this event bill")
 	ErrCategoryRequiredForTransfer = errors.New("transfer category is auto-set; do not pass category_id")
 	ErrTransferRequiresAccount     = errors.New("account_id is required for type=transfer")
 	ErrMoveTransferNeedsToAccount  = errors.New("transfer_to_account_id is required when moving a transfer's account")
 	ErrTransferEditCurrency        = errors.New("cannot edit currency on a transfer; delete and recreate")
 	ErrTransferCategoryEdit        = errors.New("cannot change category on a transfer; delete and recreate")
+	// tag_ids / PUT /:id/tags: every id must be one of the caller's tags.
+	ErrTagNotFound = errors.New("tag not found")
 	// System-category rows (Opening Balance, Adjustment) are bookkeeping
 	// reflections of account-level operations and aren't user-mutable
 	// directly — see spec §03/§3.4 (account edit), §03/§2.5 (adjust),
@@ -109,10 +110,10 @@ func NewService(s *Store, cats *categories.Service) *Service {
 	return &Service{store: s, cats: cats}
 }
 
-func (s *Service) WithDebtsCreator(fn DebtsCreator)     { s.debtsCreator = fn }
-func (s *Service) WithSplitsEditor(fn SplitsEditor)     { s.splitsEditor = fn }
-func (s *Service) WithDebtValidator(fn DebtValidator)   { s.debtValid = fn }
-func (s *Service) WithDebtAutoBumper(fn DebtAutoBumper) { s.debtBumper = fn }
+func (s *Service) WithDebtsCreator(fn DebtsCreator)               { s.debtsCreator = fn }
+func (s *Service) WithSplitsEditor(fn SplitsEditor)               { s.splitsEditor = fn }
+func (s *Service) WithDebtValidator(fn DebtValidator)             { s.debtValid = fn }
+func (s *Service) WithDebtAutoBumper(fn DebtAutoBumper)           { s.debtBumper = fn }
 func (s *Service) WithDebtSettledAdjuster(fn DebtSettledAdjuster) { s.debtAdjust = fn }
 
 // CountByCategory exposes the underlying count to categories.Service via the
@@ -154,14 +155,14 @@ func (s *Service) CreateSystemInTx(
 
 	accID := accountID // local copy for pointer
 	row := &Transaction{
-		UserID:     userID,
-		AccountID:  &accID,
-		Type:       txType,
-		Amount:     amount,
-		CategoryID: &cat.ID,
-		Date:       date,
+		UserID:      userID,
+		AccountID:   &accID,
+		Type:        txType,
+		Amount:      amount,
+		CategoryID:  &cat.ID,
+		Date:        date,
 		Description: description,
-		Note:       note,
+		Note:        note,
 	}
 	created, err := s.store.InsertRowTx(ctx, tx, row)
 	if err != nil {
@@ -177,14 +178,17 @@ func (s *Service) CreateSystemInTx(
 
 // --- Read ---
 
+// Get — GET /transactions/:id: the page-ready row with its splits.
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*TransactionDetail, error) {
 	t, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
 		return nil, err
 	}
-	return s.hydrate(ctx, userID, t)
+	return detailOf(ctx, s.store.db, userID, t)
 }
 
+// List — GET /transactions: a page of page-ready rows (splits null) plus
+// totals over the whole filtered set.
 func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*ListResponse, error) {
 	if f.Page <= 0 {
 		f.Page = 1
@@ -200,129 +204,33 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*Li
 	if err != nil {
 		return nil, err
 	}
-	totalPages := (total + f.PerPage - 1) / f.PerPage
-	if totalPages == 0 {
-		totalPages = 1
+	data, err := buildDetails(ctx, s.store.db, userID, rows, false)
+	if err != nil {
+		return nil, err
 	}
 	return &ListResponse{
-		Data: rows,
-		Pagination: Pagination{
-			Page:       f.Page,
-			PerPage:    f.PerPage,
-			Total:      total,
-			TotalPages: totalPages,
-		},
-		Totals: totals,
+		Data:       data,
+		Pagination: shared.NewPage(f.Page, f.PerPage, total),
+		Totals:     totals,
 	}, nil
 }
 
-// hydrate fills the embedded account + category names for a single Transaction.
-func (s *Service) hydrate(ctx context.Context, userID uuid.UUID, t *Transaction) (*TransactionDetail, error) {
-	d := &TransactionDetail{Transaction: *t, Tags: []EmbeddedTag{}, IsResolve: t.SourcePersonalDebtID != nil}
-	if t.SourcePersonalDebtID == nil {
-		single := []TransactionDetail{*d}
-		if err := s.store.fillHasSplitsForList(ctx, single); err == nil {
-			*d = single[0]
-		}
-	}
-	withShare := []TransactionDetail{*d}
-	if err := s.store.fillMyShareForList(ctx, withShare); err == nil {
-		*d = withShare[0]
-	}
-	withFlags := []TransactionDetail{*d}
-	if err := s.store.fillSplitFlagsForList(ctx, userID, withFlags); err == nil {
-		*d = withFlags[0]
-	}
-	splits, err := s.store.SplitsFor(ctx, userID, t.ID)
-	if err != nil {
-		return nil, err
-	}
-	d.Splits = &splits
-	if t.ProjectID != nil {
-		var name string
-		if err := s.store.db.QueryRow(ctx, `SELECT name FROM projects WHERE id = $1`,
-			*t.ProjectID).Scan(&name); err == nil {
-			d.Project = &EmbeddedRef{ID: *t.ProjectID, Name: name}
-		}
-	}
-	// Account ref — bare query rather than importing accounts module.
-	if t.AccountID != nil {
-		var accName string
-		if err := s.store.db.QueryRow(ctx,
-			`SELECT name FROM accounts WHERE id = $1`,
-			*t.AccountID).Scan(&accName); err == nil {
-			d.Account = &EmbeddedRef{ID: *t.AccountID, Name: accName}
-		}
-	}
-	if t.CategoryID != nil {
-		// Author-scoped lookup: the category belongs to the row's author,
-		// not necessarily the caller (shared wallets). Callers who aren't
-		// the author get the read-only CategoryRender instead.
-		c, err := s.cats.GetCategoryRow(ctx, t.UserID, *t.CategoryID)
-		if err == nil {
-			d.Category = &EmbeddedRef{ID: c.ID, Name: c.Name}
-		}
-	}
-	// Shared-wallet decorations (created_by / category_render / is_locked /
-	// can_edit_category). Same batch filler as the list path, on a
-	// single-row slice.
-	single := []TransactionDetail{*d}
-	if err := s.store.fillSharedInfoForList(ctx, userID, single); err == nil {
-		*d = single[0]
-	}
-	// Tags — bare query against the junction. Avoids importing the tags
-	// module purely for an embedded ref slice; the data we need is just
-	// id / name / color / icon.
-	rows, err := s.store.db.Query(ctx, `
-		SELECT t.id, t.name, t.icon_code
-		FROM tags t
-		JOIN transaction_tags tt ON tt.tag_id = t.id
-		WHERE tt.transaction_id = $1 AND t.user_id = $2
-		ORDER BY LOWER(t.name)`,
-		t.ID, userID)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var (
-				tag       EmbeddedTag
-				iconBytes []byte
-			)
-			if err := rows.Scan(&tag.ID, &tag.Name, &iconBytes); err == nil {
-				if iconBytes != nil {
-					tag.IconCode = new(shared.IconCode)
-					_ = json.Unmarshal(iconBytes, tag.IconCode)
-				}
-				d.Tags = append(d.Tags, tag)
-			}
-		}
-	}
-	return d, nil
-}
-
-// buildTransferResponse hydrates both rows of a transfer (OUT first, IN
-// second by convention) and wraps them in a TransferResponse. Used by
-// both create and update so the client always sees the same envelope
-// for transfer mutations.
-func (s *Service) buildTransferResponse(
-	ctx context.Context, userID, groupID uuid.UUID, outRow, inRow *Transaction,
+// buildTransferResponse resolves both rows of a transfer (OUT first, IN
+// second) through q (the pool, or the write's tx before commit).
+func buildTransferResponse(
+	ctx context.Context, q shared.Querier, userID, groupID uuid.UUID, outRow, inRow *Transaction,
 ) (*TransferResponse, error) {
-	outDetail, err := s.hydrate(ctx, userID, outRow)
+	rows, err := buildDetails(ctx, q, userID, []Transaction{*outRow, *inRow}, true)
 	if err != nil {
 		return nil, err
 	}
-	inDetail, err := s.hydrate(ctx, userID, inRow)
-	if err != nil {
-		return nil, err
-	}
-	return &TransferResponse{
-		TransferGroupID: groupID,
-		Rows:            []TransactionDetail{*outDetail, *inDetail},
-	}, nil
+	return &TransferResponse{TransferGroupID: groupID, Rows: rows}, nil
 }
 
 // --- Create (the atomic balance flow) ---
 
-// Create opens a tx, calls CreateInTx, commits. Used by HTTP handler.
+// Create opens a tx, calls CreateInTx, commits. Returns what CreateInTx
+// returns (the rows are already in their final state).
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateRequest) (any, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -337,24 +245,48 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit tx: %w", err)
 	}
-	// Expense / income: answer with the same detail GET /:id gives (splits,
-	// tags, project, shared-wallet fields). The row is already committed,
-	// so a failed read-back falls back to the in-tx response, not an error.
-	if d, ok := res.(*TransactionDetail); ok {
-		if full, err := s.hydrate(ctx, userID, &d.Transaction); err == nil {
-			full.AccountBalanceAfter = d.AccountBalanceAfter
-			return full, nil
-		}
-	}
 	return res, nil
 }
 
-// CreateInTx writes the transaction(s) and balance delta(s) inside `tx`.
-// Used by both Service.Create AND accounts.Service for the opening-balance
-// and adjust-balance flows that compose the account write with the
-// transaction write in one atomic tx.
+// CreateWrite — POST /transactions: Create, answered as a WriteResult (the
+// row(s) + the post-commit balances of the wallets they sit on).
+func (s *Service) CreateWrite(ctx context.Context, userID uuid.UUID, req CreateRequest) (*WriteResult, error) {
+	res, err := s.Create(ctx, userID, req)
+	if err != nil {
+		return nil, err
+	}
+	var rows []TransactionDetail
+	switch r := res.(type) {
+	case *TransactionDetail:
+		rows = []TransactionDetail{*r}
+	case *TransferResponse:
+		rows = r.Rows
+	default:
+		return nil, fmt.Errorf("create: unexpected result %T", res)
+	}
+	var touched []uuid.UUID
+	for i := range rows {
+		if rows[i].AccountID != nil {
+			touched = append(touched, *rows[i].AccountID)
+		}
+	}
+	return s.writeResult(ctx, rows, touched)
+}
+
+func (s *Service) writeResult(ctx context.Context, rows []TransactionDetail, touched []uuid.UUID) (*WriteResult, error) {
+	balances, err := shared.LoadWalletBalances(ctx, s.store.db, touched)
+	if err != nil {
+		return nil, err
+	}
+	return &WriteResult{Rows: rows, AccountBalances: balances}, nil
+}
+
+// CreateInTx writes the transaction(s), their tags and balance delta(s)
+// inside `tx`. Used by both Service.Create AND accounts.Service for the
+// opening-balance and adjust-balance flows that compose the account write
+// with the transaction write in one atomic tx.
 //
-// Returns:
+// Returns (rows resolved inside tx, final state):
 //   - For expense/income: (*TransactionDetail, nil)
 //   - For transfer:        (*TransferResponse, nil)
 func (s *Service) CreateInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, req CreateRequest) (any, error) {
@@ -384,8 +316,8 @@ func (s *Service) validateCreateCommon(req CreateRequest) error {
 		}
 	}
 	if req.ProjectID != nil {
-		// Direct project_id is still rejected; the project resolve flow
-		// uses source_project_transaction_id and the BE auto-derives.
+		// Not accepted: the project resolve flow uses
+		// source_project_transaction_id and the BE derives the project.
 		return ErrProjectIDNotAllowed
 	}
 	if req.SourceProjectTransactionID != nil && req.Type == TypeTransfer {
@@ -482,27 +414,10 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 		return nil, err
 	}
 
-	d := &TransactionDetail{Transaction: *created, HasSplits: len(req.Splits) > 0, SplitCount: len(req.Splits)}
-
 	if req.AccountID != nil {
 		delta := signedDelta(req.Type, req.Amount, false)
-		newBalance, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *req.AccountID, delta)
-		if err != nil {
+		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *req.AccountID, delta); err != nil {
 			return nil, err
-		}
-		d.AccountBalanceAfter = &newBalance
-
-		var accName string
-		_ = tx.QueryRow(ctx,
-			`SELECT name FROM accounts WHERE id = $1`, *req.AccountID).Scan(&accName)
-		d.Account = &EmbeddedRef{ID: *req.AccountID, Name: accName}
-	}
-
-	var cat *categories.Category
-	if categoryID != nil {
-		cat, _ = s.cats.GetCategoryRow(ctx, userID, *categoryID)
-		if cat != nil {
-			d.Category = &EmbeddedRef{ID: cat.ID, Name: cat.Name}
 		}
 	}
 
@@ -511,35 +426,10 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 			return nil, err
 		}
 	}
-
-	// Shared-wallet decorations — only relevant when there's an account.
-	if req.AccountID != nil {
-		var activeMembers int
-		_ = tx.QueryRow(ctx, `
-			SELECT COUNT(*) FROM account_members
-			WHERE account_id = $1 AND joined_at IS NOT NULL AND left_at IS NULL`,
-			*req.AccountID).Scan(&activeMembers)
-		if activeMembers > 1 {
-			var authorName string
-			var iconBytes []byte
-			_ = tx.QueryRow(ctx,
-				`SELECT display_name, icon_code FROM users WHERE id = $1`,
-				userID).Scan(&authorName, &iconBytes)
-			var authorIcon *shared.IconCode
-			if iconBytes != nil {
-				authorIcon = new(shared.IconCode)
-				_ = json.Unmarshal(iconBytes, authorIcon)
-			}
-			d.CreatedBy = &AuthorRef{UserID: userID, DisplayName: authorName, IconCode: authorIcon}
-			if cat != nil {
-				d.CategoryRender = &CategoryRender{Name: cat.Name, IconCode: cat.IconCode}
-			}
-			isLocked, canEdit := false, true
-			d.IsLocked = &isLocked
-			d.CanEditCategory = &canEdit
-		}
+	if err := s.store.AttachTagsTx(ctx, tx, userID, created.ID, req.TagIDs); err != nil {
+		return nil, err
 	}
-	return d, nil
+	return detailOf(ctx, tx, userID, created)
 }
 
 // CreateInTxWithSourceDebt is called by personal_debts.Service.Settle when
@@ -618,29 +508,18 @@ func (s *Service) CreateInTxWithSourceDebt(
 	if err != nil {
 		return nil, err
 	}
-	var balanceAfter *float64
 	if req.AccountID != nil {
-		newBalance, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *req.AccountID, delta)
-		if err != nil {
+		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *req.AccountID, delta); err != nil {
 			return nil, err
 		}
-		balanceAfter = &newBalance
 	}
 
 	// Bump settled_amount on the personal_debt.
 	if err := s.debtBumper(ctx, tx, userID, debtID, req.Amount); err != nil {
 		return nil, err
 	}
-
-	d := &TransactionDetail{
-		Transaction:         *created,
-		AccountBalanceAfter: balanceAfter,
-		IsResolve:           true,
-		Category:            &EmbeddedRef{ID: sysCat.ID, Name: sysCat.Name},
-	}
-	return d, nil
+	return detailOf(ctx, tx, userID, created)
 }
-
 
 func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, req CreateRequest) (*TransferResponse, error) {
 	src := *req.AccountID
@@ -720,20 +599,15 @@ func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 		return nil, err
 	}
 
-	resp, err := s.buildTransferResponse(ctx, userID, groupID, outRow, inRow)
-	if err != nil {
+	// A transfer's tags go on its OUT row (as a submitted draft's do).
+	if err := s.store.AttachTagsTx(ctx, tx, userID, outRow.ID, req.TagIDs); err != nil {
 		return nil, err
 	}
-	return resp, nil
+	return buildTransferResponse(ctx, tx, userID, groupID, outRow, inRow)
 }
 
 // --- Update ---
 
-// Update returns either *TransactionDetail (single row) or
-// *TransferResponse (transfer pair). The handler marshals whichever it
-// gets — same polymorphic-return shape as Create. Mirrors the spec §3.1
-// "for transfers, response includes both rows" rule and lets the FE
-// surgically refresh both rows + both account balances after one PUT.
 // UpdateInTx — a non-transfer row edit inside the caller's transaction,
 // under the same rules as Update (row authz, system rows read-only).
 // Used by the project "update to match" auto-action (contract §5).
@@ -751,11 +625,49 @@ func (s *Service) UpdateInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUI
 	if err := s.checkNotSystemRow(ctx, current); err != nil {
 		return err
 	}
-	_, err = s.updateSingleInTx(ctx, tx, userID, current, req)
-	return err
+	if _, err = s.updateSingleInTx(ctx, tx, userID, current, req); err != nil {
+		return err
+	}
+	return s.replaceTagsIfSent(ctx, tx, userID, id, req)
 }
 
+// updated — what an edit wrote: the final row(s) (a transfer's OUT row
+// first) and every wallet it touched (before and after a move).
+type updated struct {
+	rows    []Transaction
+	group   *uuid.UUID // transfers
+	touched []uuid.UUID
+}
+
+// Update returns either *TransactionDetail (single row) or
+// *TransferResponse (transfer pair) — for Go callers; the HTTP handler uses
+// UpdateWrite.
 func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (any, error) {
+	u, err := s.update(ctx, userID, id, req)
+	if err != nil {
+		return nil, err
+	}
+	if u.group != nil {
+		return buildTransferResponse(ctx, s.store.db, userID, *u.group, &u.rows[0], &u.rows[1])
+	}
+	return detailOf(ctx, s.store.db, userID, &u.rows[0])
+}
+
+// UpdateWrite — PUT /transactions/:id: the edited row(s) and the
+// post-commit balances of every wallet the edit touched.
+func (s *Service) UpdateWrite(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (*WriteResult, error) {
+	u, err := s.update(ctx, userID, id, req)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := buildDetails(ctx, s.store.db, userID, u.rows, true)
+	if err != nil {
+		return nil, err
+	}
+	return s.writeResult(ctx, rows, u.touched)
+}
+
+func (s *Service) update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (*updated, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -767,40 +679,50 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		return nil, err
 	}
 
+	var out updated
 	if current.Type == TypeTransfer {
-		outRow, inRow, err := s.updateTransferInTx(ctx, tx, userID, current, req)
+		outRow, inRow, touched, err := s.updateTransferInTx(ctx, tx, userID, current, req)
 		if err != nil {
 			return nil, err
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit: %w", err)
+		out = updated{rows: []Transaction{*outRow, *inRow}, group: current.TransferGroupID, touched: touched}
+	} else {
+		// Shared-wallet authz (spec §14/2): active members may edit any
+		// member's rows EXCEPT category_id (author-only); ex-members can no
+		// longer touch their own old rows on the wallet they left.
+		if err := s.authorizeRowMutation(ctx, userID, current, req); err != nil {
+			return nil, err
 		}
-		return s.buildTransferResponse(ctx, userID, *outRow.TransferGroupID, outRow, inRow)
+		// Non-transfer with a system category (Opening Balance / Adjustment)
+		// is read-only — the user can't directly edit the auto-created
+		// bookkeeping row. They mutate the account-level state instead
+		// (account edit / adjust-balance), which writes new transactions.
+		if err := s.checkNotSystemRow(ctx, current); err != nil {
+			return nil, err
+		}
+		row, err := s.updateSingleInTx(ctx, tx, userID, current, req)
+		if err != nil {
+			return nil, err
+		}
+		out = updated{rows: []Transaction{*row}, touched: nonNilIDs(current.AccountID, row.AccountID)}
 	}
-
-	// Shared-wallet authz (spec §14/2): active members may edit any
-	// member's rows EXCEPT category_id (author-only); ex-members can no
-	// longer touch their own old rows on the wallet they left.
-	if err := s.authorizeRowMutation(ctx, userID, current, req); err != nil {
-		return nil, err
-	}
-
-	// Non-transfer with a system category (Opening Balance / Adjustment)
-	// is read-only — the user can't directly edit the auto-created
-	// bookkeeping row. They mutate the account-level state instead
-	// (account edit / adjust-balance), which writes new transactions.
-	if err := s.checkNotSystemRow(ctx, current); err != nil {
-		return nil, err
-	}
-
-	updated, err := s.updateSingleInTx(ctx, tx, userID, current, req)
-	if err != nil {
+	if err := s.replaceTagsIfSent(ctx, tx, userID, id, req); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return s.hydrate(ctx, userID, updated)
+	return &out, nil
+}
+
+// replaceTagsIfSent — tag_ids in an edit replace the caller's tags on the
+// edited row.
+func (s *Service) replaceTagsIfSent(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, req UpdateRequest) error {
+	ids, ok := req.TagIDsChange()
+	if !ok {
+		return nil
+	}
+	return s.store.ReplaceTagsTx(ctx, tx, userID, id, ids)
 }
 
 // authorizeRowMutation applies the shared-wallet co-ownership rules
@@ -906,34 +828,20 @@ func (s *Service) updateSingleInTx(
 
 	descVal, descChanged := req.DescriptionChange()
 	noteVal, noteChanged := req.NoteChange()
-	updated, err := s.store.UpdateRowTx(ctx, tx, userID, current.ID,
+	return s.store.UpdateRowTx(ctx, tx, userID, current.ID,
 		req.Amount, req.Date,
 		newCatID, catChange,
 		descVal, descChanged,
 		noteVal, noteChanged,
 		newAccID, accChange)
-	if err != nil {
-		return nil, err
-	}
-	return updated, nil
 }
 
-// updateTransferInTx applies amount/date/note changes to both rows of
-// a transfer in one tx, re-balancing both accounts atomically. Returns
-// (outRow, inRow) so the caller can build a TransferResponse — both
-// rows are needed by the client to refresh its cache surgically.
-func (s *Service) updateTransferInTx(
-	ctx context.Context, tx pgx.Tx, userID uuid.UUID,
-	current *Transaction, req UpdateRequest,
-) (*Transaction, *Transaction, error) {
-	if _, catChange := req.CategoryIDChange(); catChange {
-		return nil, nil, ErrTransferCategoryEdit
-	}
+// transferPair loads both rows of current's transfer and tells OUT from IN
+// by the AUTHOR's Transfer OUT system category (categories are per user).
+func (s *Service) transferPair(ctx context.Context, current *Transaction) (outRow, inRow *Transaction, err error) {
 	if current.TransferGroupID == nil {
 		return nil, nil, fmt.Errorf("transfer row has no transfer_group_id")
 	}
-
-	// Fetch both rows
 	pair, err := s.store.GetByGroupID(ctx, *current.TransferGroupID)
 	if err != nil {
 		return nil, nil, err
@@ -941,14 +849,10 @@ func (s *Service) updateTransferInTx(
 	if len(pair) != 2 {
 		return nil, nil, fmt.Errorf("transfer pair has %d rows; expected 2", len(pair))
 	}
-
-	// Identify OUT vs IN by category — the pair carries the AUTHOR's
-	// Transfer OUT/IN system categories (per-user), not the caller's.
 	outCat, err := s.cats.SystemFor(ctx, current.UserID, categories.SystemTransferOut)
 	if err != nil {
 		return nil, nil, err
 	}
-	var outRow, inRow *Transaction
 	for i := range pair {
 		if pair[i].CategoryID != nil && *pair[i].CategoryID == outCat.ID {
 			outRow = &pair[i]
@@ -959,18 +863,44 @@ func (s *Service) updateTransferInTx(
 	if outRow == nil || inRow == nil {
 		return nil, nil, fmt.Errorf("could not identify OUT/IN rows of transfer")
 	}
+	return outRow, inRow, nil
+}
+
+// updateTransferInTx applies amount/date/text/wallet changes to both rows
+// of a transfer in one tx, re-balancing the accounts atomically. Returns
+// (outRow, inRow, every wallet touched before and after).
+func (s *Service) updateTransferInTx(
+	ctx context.Context, tx pgx.Tx, userID uuid.UUID,
+	current *Transaction, req UpdateRequest,
+) (*Transaction, *Transaction, []uuid.UUID, error) {
+	if _, catChange := req.CategoryIDChange(); catChange {
+		return nil, nil, nil, ErrTransferCategoryEdit
+	}
+	outRow, inRow, err := s.transferPair(ctx, current)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	// A transfer mutation moves money on BOTH accounts — the caller needs
 	// active membership on both (shared-wallet rules §14/2; ex-author →
 	// ROW_LOCKED, foreign non-member side → not found).
 	if err := s.authorizePairMutation(ctx, userID, current, outRow, inRow); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	newOutAccID, outAccChange := req.AccountIDChange()
 	newInAccID, inAccChange := req.TransferToAccountIDChange()
 	if outAccChange != inAccChange {
-		return nil, nil, ErrMoveTransferNeedsToAccount
+		return nil, nil, nil, ErrMoveTransferNeedsToAccount
+	}
+	if outAccChange {
+		// Both sides stay on a wallet, and on different ones.
+		if newOutAccID == nil || newInAccID == nil {
+			return nil, nil, nil, ErrTransferRequiresAccount
+		}
+		if *newOutAccID == *newInAccID {
+			return nil, nil, nil, ErrTransferSameAccount
+		}
 	}
 
 	effectiveAmount := current.Amount
@@ -978,67 +908,48 @@ func (s *Service) updateTransferInTx(
 		effectiveAmount = *req.Amount
 	}
 
-	// Collect all account IDs involved (old + new) for locking.
-	lockSet := map[uuid.UUID]struct{}{}
-	if outRow.AccountID != nil {
-		lockSet[*outRow.AccountID] = struct{}{}
-	}
-	if inRow.AccountID != nil {
-		lockSet[*inRow.AccountID] = struct{}{}
-	}
-	if newOutAccID != nil {
-		lockSet[*newOutAccID] = struct{}{}
-	}
-	if newInAccID != nil {
-		lockSet[*newInAccID] = struct{}{}
-	}
-	lockIDs := make([]uuid.UUID, 0, len(lockSet))
-	for id := range lockSet {
-		lockIDs = append(lockIDs, id)
-	}
+	// Every account involved (old + new), for locking and the response.
+	touched := nonNilIDs(outRow.AccountID, inRow.AccountID, newOutAccID, newInAccID)
+	lockIDs := uniqueUUIDs(touched)
 	sort.Slice(lockIDs, func(i, j int) bool { return uuidLess(lockIDs[i], lockIDs[j]) })
 	if err := s.store.LockAccountsForUpdate(ctx, tx, lockIDs); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if outAccChange {
 		// Move both sides: reverse old accounts, apply to new accounts.
 		if outRow.AccountID != nil {
 			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *outRow.AccountID, current.Amount); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 		if inRow.AccountID != nil {
 			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *inRow.AccountID, -current.Amount); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
-		if newOutAccID != nil {
-			if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *newOutAccID); err != nil {
-				return nil, nil, err
-			}
-			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *newOutAccID, -effectiveAmount); err != nil {
-				return nil, nil, err
-			}
+		if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *newOutAccID); err != nil {
+			return nil, nil, nil, err
 		}
-		if newInAccID != nil {
-			if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *newInAccID); err != nil {
-				return nil, nil, err
-			}
-			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *newInAccID, effectiveAmount); err != nil {
-				return nil, nil, err
-			}
+		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *newOutAccID, -effectiveAmount); err != nil {
+			return nil, nil, nil, err
+		}
+		if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *newInAccID); err != nil {
+			return nil, nil, nil, err
+		}
+		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *newInAccID, effectiveAmount); err != nil {
+			return nil, nil, nil, err
 		}
 	} else if req.Amount != nil && *req.Amount != current.Amount {
 		old, new := current.Amount, *req.Amount
 		if outRow.AccountID != nil {
 			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *outRow.AccountID, old-new); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 		if inRow.AccountID != nil {
 			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *inRow.AccountID, new-old); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 	}
@@ -1049,57 +960,82 @@ func (s *Service) updateTransferInTx(
 	updatedOut, err := s.store.UpdateRowTx(ctx, tx, userID, outRow.ID,
 		req.Amount, req.Date, nil, false, descVal, descChanged, noteVal, noteChanged, newOutAccID, outAccChange)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	updatedIn, err := s.store.UpdateRowTx(ctx, tx, userID, inRow.ID,
 		req.Amount, req.Date, nil, false, descVal, descChanged, noteVal, noteChanged, newInAccID, inAccChange)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-
-	return updatedOut, updatedIn, nil
+	return updatedOut, updatedIn, touched, nil
 }
 
 // --- Delete ---
 
+// Delete removes a row (both rows of a transfer) and reverses its balance.
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
+	_, err := s.delete(ctx, userID, id)
+	return err
+}
+
+// DeleteWrite — DELETE /transactions/:id: the deleted id and the
+// post-commit balances of every wallet the delete touched.
+func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID) (*DeleteResult, error) {
+	touched, err := s.delete(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	balances, err := shared.LoadWalletBalances(ctx, s.store.db, touched)
+	if err != nil {
+		return nil, err
+	}
+	return &DeleteResult{ID: id, AccountBalances: balances}, nil
+}
+
+// delete returns the wallets it moved money on.
+func (s *Service) delete(ctx context.Context, userID, id uuid.UUID) ([]uuid.UUID, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
 	current, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	var touched []uuid.UUID
 	if current.Type == TypeTransfer {
-		if err := s.deleteTransferInTx(ctx, tx, userID, current); err != nil {
-			return err
+		if touched, err = s.deleteTransferInTx(ctx, tx, userID, current); err != nil {
+			return nil, err
 		}
 	} else {
 		// Shared-wallet authz: same matrix as Update (delete never
 		// carries a category change, hence the zero-value request).
 		if err := s.authorizeRowMutation(ctx, userID, current, UpdateRequest{}); err != nil {
-			return err
+			return nil, err
 		}
 		// Non-transfer with a system category (Opening Balance,
 		// Adjustment) is undeletable — silently dropping it would
 		// leave the cached `accounts.balance` honest but the audit
 		// trail would lie. Reverse via the account-level operation.
 		if err := s.checkDeletable(ctx, current); err != nil {
-			return err
+			return nil, err
 		}
 		if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
-			return err
+			return nil, err
 		}
 		// A debt repayment: what it repaid comes off the debt.
 		if err := s.adjustRepaymentTx(ctx, tx, current, -current.Amount); err != nil {
-			return err
+			return nil, err
 		}
+		touched = nonNilIDs(current.AccountID)
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return touched, nil
 }
 
 // authorizePairMutation is the transfer-pair variant of
@@ -1178,73 +1114,73 @@ func (s *Service) deleteSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	return s.store.DeleteRowTx(ctx, tx, current.ID)
 }
 
-func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) error {
-	if current.TransferGroupID == nil {
-		return fmt.Errorf("transfer row missing transfer_group_id")
-	}
-	pair, err := s.store.GetByGroupID(ctx, *current.TransferGroupID)
+// deleteTransferInTx deletes both rows of a transfer and reverses both
+// balances; returns the wallets touched (OUT first).
+func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) ([]uuid.UUID, error) {
+	outRow, inRow, err := s.transferPair(ctx, current)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if len(pair) != 2 {
-		return fmt.Errorf("transfer pair has %d rows; expected 2", len(pair))
-	}
-
-	// Author-scoped system-category lookup — see updateTransferInTx.
-	outCat, err := s.cats.SystemFor(ctx, current.UserID, categories.SystemTransferOut)
-	if err != nil {
-		return err
-	}
-	var outRow, inRow *Transaction
-	for i := range pair {
-		if pair[i].CategoryID != nil && *pair[i].CategoryID == outCat.ID {
-			outRow = &pair[i]
-		} else {
-			inRow = &pair[i]
-		}
-	}
-	if outRow == nil || inRow == nil {
-		return fmt.Errorf("could not identify OUT/IN rows")
-	}
-
 	if err := s.authorizePairMutation(ctx, userID, current, outRow, inRow); err != nil {
-		return err
+		return nil, err
 	}
 
-	var lockIDs []uuid.UUID
-	if outRow.AccountID != nil {
-		lockIDs = append(lockIDs, *outRow.AccountID)
-	}
-	if inRow.AccountID != nil {
-		lockIDs = append(lockIDs, *inRow.AccountID)
-	}
+	touched := nonNilIDs(outRow.AccountID, inRow.AccountID)
+	lockIDs := uniqueUUIDs(touched)
 	sort.Slice(lockIDs, func(i, j int) bool { return uuidLess(lockIDs[i], lockIDs[j]) })
 	if len(lockIDs) > 0 {
 		if err := s.store.LockAccountsForUpdate(ctx, tx, lockIDs); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	// Reverse balances
 	if outRow.AccountID != nil {
 		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *outRow.AccountID, current.Amount); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if inRow.AccountID != nil {
 		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *inRow.AccountID, -current.Amount); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	// Delete both rows
 	if err := s.store.DeleteRowTx(ctx, tx, outRow.ID); err != nil {
-		return err
+		return nil, err
 	}
 	if err := s.store.DeleteRowTx(ctx, tx, inRow.ID); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return touched, nil
+}
+
+// --- Tags ---
+
+// SetTags — PUT /transactions/:id/tags: the caller's tags on the row become
+// exactly tagIDs ([] clears). Same row rules as an edit (visible row; a row
+// on a wallet the caller left is read-only). Returns the row, final state.
+func (s *Service) SetTags(ctx context.Context, userID, id uuid.UUID, tagIDs []uuid.UUID) (*TransactionDetail, error) {
+	current, err := s.store.GetByID(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeRowMutation(ctx, userID, current, UpdateRequest{}); err != nil {
+		return nil, err
+	}
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := s.store.ReplaceTagsTx(ctx, tx, userID, id, tagIDs); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.Get(ctx, userID, id)
 }
 
 // --- Summary ---
@@ -1276,43 +1212,49 @@ func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequ
 		args = append(args, string(*req.Type))
 		whereClauses = append(whereClauses, fmt.Sprintf("t.type = $%d", len(args)))
 	}
-	where := joinAnd(whereClauses)
+	where := strings.Join(whereClauses, " AND ")
 
 	var (
 		totalIncome  float64
 		totalExpense float64
 		count        int
+		currency     string
 	)
 	q := `SELECT
 		COALESCE(SUM(` + shareT + `) FILTER (WHERE t.type = 'income'),  0),
 		COALESCE(SUM(` + shareT + `) FILTER (WHERE t.type = 'expense'), 0),
-		COUNT(*)
+		COUNT(*),
+		COALESCE((SELECT currency FROM users WHERE id = $1), 'THB')
 		FROM ` + summaryFrom + ` WHERE ` + where
-	if err := s.store.db.QueryRow(ctx, q, args...).Scan(&totalIncome, &totalExpense, &count); err != nil {
+	if err := s.store.db.QueryRow(ctx, q, args...).Scan(&totalIncome, &totalExpense, &count, &currency); err != nil {
 		return nil, fmt.Errorf("summary: %w", err)
 	}
 
 	resp := &SummaryResponse{
 		From:             req.From,
 		To:               req.To,
-		Currency:         "THB", // Phase 1 single-currency assumption
+		Currency:         currency, // user-level, locked
 		TotalIncome:      totalIncome,
 		TotalExpense:     totalExpense,
 		Net:              totalIncome - totalExpense,
 		TransactionCount: count,
+		Groups:           []SummaryGroup{},
 	}
 
+	var err error
 	switch req.GroupBy {
 	case "category":
-		resp.Groups, _ = s.summaryByCategory(ctx, where, args, false)
+		resp.Groups, err = s.summaryByCategory(ctx, where, args, false)
 	case "parent_category":
-		resp.Groups, _ = s.summaryByCategory(ctx, where, args, true)
+		resp.Groups, err = s.summaryByCategory(ctx, where, args, true)
 	case "account":
-		resp.Groups, _ = s.summaryByAccount(ctx, where, args)
+		resp.Groups, err = s.summaryByAccount(ctx, where, args)
 	case "day", "week", "month":
-		resp.Groups, _ = s.summaryByDate(ctx, where, args, req.GroupBy)
+		resp.Groups, err = s.summaryByDate(ctx, where, args, req.GroupBy)
 	}
-
+	if err != nil {
+		return nil, err
+	}
 	return resp, nil
 }
 
@@ -1330,8 +1272,8 @@ var summaryAmounts = `COALESCE(SUM(` + shareT + `), 0), COUNT(*),
 		COALESCE(SUM(` + shareT + `) FILTER (WHERE t.type = 'expense'), 0)`
 
 // summaryByCategory groups by leaf category, or — rollup=true — by the
-// top-level parent (categories are 2 levels deep). Uncategorized rows
-// come back as key "" / name "" so the client can localise the label.
+// top-level parent. Uncategorized rows come back as key "" / name "" /
+// category null so the client can localise the label.
 func (s *Service) summaryByCategory(ctx context.Context, where string, args []any, rollup bool) ([]SummaryGroup, error) {
 	keyExpr, nameExpr, join := "c.id", "c.name", ""
 	if rollup {
@@ -1343,7 +1285,22 @@ func (s *Service) summaryByCategory(ctx context.Context, where string, args []an
 		WHERE %[6]s
 		GROUP BY %[1]s, %[2]s
 		ORDER BY 3 DESC`, keyExpr, nameExpr, summaryAmounts, summaryFrom, join, where)
-	return s.scanSummary(ctx, q, args)
+	groups, err := s.scanSummary(ctx, q, args)
+	if err != nil {
+		return nil, err
+	}
+	refs, err := shared.LoadCategoryRefs(ctx, s.store.db, groupKeyIDs(groups))
+	if err != nil {
+		return nil, err
+	}
+	for i := range groups {
+		if id, err := uuid.Parse(groups[i].Key); err == nil {
+			if r, ok := refs[id]; ok {
+				groups[i].Category = &r
+			}
+		}
+	}
+	return groups, nil
 }
 
 func (s *Service) summaryByAccount(ctx context.Context, where string, args []any) ([]SummaryGroup, error) {
@@ -1353,7 +1310,32 @@ func (s *Service) summaryByAccount(ctx context.Context, where string, args []any
 		WHERE ` + where + `
 		GROUP BY a.id, a.name
 		ORDER BY 3 DESC`
-	return s.scanSummary(ctx, q, args)
+	groups, err := s.scanSummary(ctx, q, args)
+	if err != nil {
+		return nil, err
+	}
+	refs, err := shared.LoadAccountRefs(ctx, s.store.db, groupKeyIDs(groups))
+	if err != nil {
+		return nil, err
+	}
+	for i := range groups {
+		if id, err := uuid.Parse(groups[i].Key); err == nil {
+			if r, ok := refs[id]; ok {
+				groups[i].Account = &r
+			}
+		}
+	}
+	return groups, nil
+}
+
+func groupKeyIDs(groups []SummaryGroup) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(groups))
+	for _, g := range groups {
+		if id, err := uuid.Parse(g.Key); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func (s *Service) summaryByDate(ctx context.Context, where string, args []any, period string) ([]SummaryGroup, error) {
@@ -1402,13 +1384,13 @@ func uuidLess(a, b uuid.UUID) bool {
 	return false
 }
 
-func joinAnd(parts []string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += " AND "
+// nonNilIDs — the set ids, in order (duplicates kept; callers dedupe).
+func nonNilIDs(ids ...*uuid.UUID) []uuid.UUID {
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if id != nil {
+			out = append(out, *id)
 		}
-		out += p
 	}
 	return out
 }
@@ -1463,7 +1445,8 @@ func (s *Service) ClearSplitsTx(ctx context.Context, tx pgx.Tx, userID, txID uui
 // EditSplits — PUT /v1/transactions/:id/splits (owner 2026-10-10): the
 // whole new split list for an expense / income the caller wrote. The debt
 // rows (and the linked partners' notifications) are personal_debts'
-// business, reached through the SplitsEditor hook inside this tx.
+// business, reached through the SplitsEditor hook inside this tx. Returns
+// the row, final state (its splits are the new list).
 func (s *Service) EditSplits(ctx context.Context, userID, id uuid.UUID, edits []SplitEdit) (*TransactionDetail, error) {
 	if s.splitsEditor == nil {
 		return nil, ErrSplitsNotSupportedYet
@@ -1515,6 +1498,10 @@ func (s *Service) EditSplits(ctx context.Context, userID, id uuid.UUID, edits []
 		current.AccountID, userID).Scan(&currency); err != nil {
 		return nil, fmt.Errorf("currency: %w", err)
 	}
+	edits, err = contactNamesTx(ctx, tx, userID, current.ID, edits)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.splitsEditor(ctx, tx, current.ID, userID, string(current.Type), currency, current.Description, edits); err != nil {
 		return nil, err
 	}
@@ -1522,6 +1509,94 @@ func (s *Service) EditSplits(ctx context.Context, userID, id uuid.UUID, edits []
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return s.Get(ctx, userID, id)
+}
+
+// contactNamesTx applies the person rule to an edit list (owner
+// 2026-10-12): a split WITH a contact takes the contact's name — a sent
+// person_name is ignored. Returns a copy where, per row:
+//   - kept split, same contact          → person_name "" (unchanged)
+//   - kept / new split, a new contact   → the contact's resolved name (the
+//     stored snapshot follows the contact)
+//   - kept split back to a free name    → person_name as sent; blank keeps
+//     the name the contact showed
+//   - free-name split                   → person_name as sent (rename)
+//
+// An unknown debt_id or contact is left for the editor hook to reject.
+func contactNamesTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, edits []SplitEdit) ([]SplitEdit, error) {
+	if len(edits) == 0 {
+		return edits, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT id, counterparty_contact_id FROM personal_debts
+		WHERE source_transaction_id = $1 AND user_id = $2`, txID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("split contacts: %w", err)
+	}
+	stored := map[uuid.UUID]*uuid.UUID{}
+	var contactIDs []uuid.UUID
+	for rows.Next() {
+		var (
+			id      uuid.UUID
+			contact *uuid.UUID
+		)
+		if err := rows.Scan(&id, &contact); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("split contacts scan: %w", err)
+		}
+		stored[id] = contact
+		if contact != nil {
+			contactIDs = append(contactIDs, *contact)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, e := range edits {
+		if e.ContactID != nil {
+			contactIDs = append(contactIDs, *e.ContactID)
+		}
+	}
+	persons, err := shared.LoadPersons(ctx, tx, userID, contactIDs)
+	if err != nil {
+		return nil, err
+	}
+	nameOf := func(contactID uuid.UUID) string {
+		if p, ok := persons[contactID]; ok {
+			return p.Name
+		}
+		return ""
+	}
+
+	out := make([]SplitEdit, len(edits))
+	copy(out, edits)
+	for i := range out {
+		e := &out[i]
+		if e.DebtID == nil {
+			if e.ContactID != nil {
+				if n := nameOf(*e.ContactID); n != "" {
+					e.PersonName = n
+				}
+			}
+			continue
+		}
+		before, known := stored[*e.DebtID]
+		if !known {
+			continue
+		}
+		after := before
+		if e.ContactIDSet || e.ContactID != nil {
+			after = e.ContactID
+		}
+		switch {
+		case after != nil && before != nil && *after == *before:
+			e.PersonName = ""
+		case after != nil:
+			e.PersonName = nameOf(*after)
+		case before != nil && strings.TrimSpace(e.PersonName) == "":
+			e.PersonName = nameOf(*before)
+		}
+	}
+	return out, nil
 }
 
 // checkDeletable — rows in a system category (opening balance, adjustment)
@@ -1543,4 +1618,3 @@ func (s *Service) adjustRepaymentTx(ctx context.Context, tx pgx.Tx, t *Transacti
 	}
 	return s.debtAdjust(ctx, tx, t.UserID, *t.SourcePersonalDebtID, delta)
 }
-

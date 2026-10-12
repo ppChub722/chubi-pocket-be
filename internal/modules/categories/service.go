@@ -84,7 +84,11 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateCatego
 		Description:     req.Description,
 		Note:            req.Note,
 	}
-	return s.store.Create(ctx, c)
+	created, err := s.store.Create(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	return s.decorateOne(ctx, userID, created)
 }
 
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*CategoryDetail, error) {
@@ -92,8 +96,7 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*CategoryDetai
 	if err != nil {
 		return nil, err
 	}
-	depth, err := s.store.DepthFromParent(ctx, c.ParentID)
-	if err != nil {
+	if _, err := s.decorateOne(ctx, userID, c); err != nil {
 		return nil, err
 	}
 	childCount, err := s.store.CountChildren(ctx, c.ID)
@@ -109,9 +112,14 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*CategoryDetai
 		return nil, fmt.Errorf("count budgets: %w", err)
 	}
 
+	isFee, err := s.store.IsFeeCategory(ctx, userID, c.ID)
+	if err != nil {
+		return nil, fmt.Errorf("fee category: %w", err)
+	}
+
 	out := &CategoryDetail{
 		Category:         *c,
-		Depth:            depth,
+		IsFeeCategory:    isFee,
 		ChildCount:       childCount,
 		TransactionCount: txCount,
 		BudgetCount:      budgetCount,
@@ -129,10 +137,14 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]C
 	if f.Status == "" {
 		f.Status = "active"
 	}
-	return s.store.List(ctx, userID, f)
+	cats, err := s.store.List(ctx, userID, f)
+	if err != nil {
+		return nil, err
+	}
+	return s.decorate(ctx, userID, cats)
 }
 
-func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCategoryRequest) (*Category, error) {
+func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCategoryRequest) (*CategoryDetail, error) {
 	current, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
 		return nil, err
@@ -195,7 +207,7 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCa
 
 	iconCode, iconCodeChanged := req.IconCodeChange()
 
-	return s.store.Update(ctx, userID, id, UpdateFields{
+	if _, err := s.store.Update(ctx, userID, id, UpdateFields{
 		Name:              name,
 		ParentID:          newParent,
 		ParentIDChange:    parentChanged,
@@ -206,7 +218,10 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCa
 		DescriptionChange: descChanged,
 		Note:              note,
 		NoteChange:        noteChanged,
-	})
+	}); err != nil {
+		return nil, err
+	}
+	return s.Get(ctx, userID, id)
 }
 
 // Delete always hard-deletes (owner decision 2026-10-07; replaces the old
@@ -214,21 +229,34 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCa
 // Transactions / scheduled transactions using it drop to "no category"
 // (FK SET NULL); its budgets go with it (FK CASCADE, migration 000043).
 // Returns "deleted" — kept in the response for client compatibility.
-func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (status string, err error) {
+func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (*DeleteCategoryResult, error) {
 	current, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if current.IsSystem {
-		return "", fmt.Errorf("%w: system categories cannot be deleted", ErrSystemImmutable)
+		return nil, fmt.Errorf("%w: system categories cannot be deleted", ErrSystemImmutable)
+	}
+	childIDs, err := s.store.ChildIDs(ctx, userID, id)
+	if err != nil {
+		return nil, err
 	}
 	if err := s.store.ReparentChildren(ctx, userID, id); err != nil {
-		return "", err
+		return nil, err
 	}
 	if err := s.store.HardDelete(ctx, userID, id); err != nil {
-		return "", err
+		return nil, err
 	}
-	return "deleted", nil
+	// The shifted children, read AFTER the shift (new parent, depth, path).
+	moved, err := s.store.ByIDs(ctx, userID, childIDs)
+	if err != nil {
+		return nil, err
+	}
+	moved, err = s.decorate(ctx, userID, moved)
+	if err != nil {
+		return nil, err
+	}
+	return &DeleteCategoryResult{ID: id, Reparented: moved}, nil
 }
 
 // Reorder applies a batch (parent_id, sort_order) rewrite to the user's
@@ -246,7 +274,11 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (status stri
 // On any failure → no rows change.
 func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []ReorderEntry) ([]Category, error) {
 	if len(entries) == 0 {
-		return s.store.List(ctx, userID, ListFilter{Status: "active"})
+		cats, err := s.store.List(ctx, userID, ListFilter{Status: "active"})
+		if err != nil {
+			return nil, err
+		}
+		return s.decorate(ctx, userID, cats)
 	}
 
 	// 1. Pre-load the user's full active set so we can validate without
@@ -336,7 +368,11 @@ func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []Reord
 		}
 	}
 
-	return s.store.ReorderTx(ctx, userID, entries)
+	out, err := s.store.ReorderTx(ctx, userID, entries)
+	if err != nil {
+		return nil, err
+	}
+	return s.decorate(ctx, userID, out)
 }
 
 // --- Internal helpers ---
@@ -408,4 +444,39 @@ func (s *Service) subtreeDepth(ctx context.Context, id uuid.UUID) (int, error) {
 		curr = next
 	}
 	return depth, nil
+}
+
+// decorate fills depth and path (ancestors root -> parent) on every row from
+// ONE tree query, so a list never walks parents per row.
+func (s *Service) decorate(ctx context.Context, userID uuid.UUID, cats []Category) ([]Category, error) {
+	if len(cats) == 0 {
+		return cats, nil
+	}
+	tree, err := s.store.TreeNames(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range cats {
+		path := []PathItem{}
+		for p, hops := cats[i].ParentID, 0; p != nil && hops < 8; hops++ {
+			n, ok := tree[*p]
+			if !ok {
+				break
+			}
+			path = append([]PathItem{{ID: *p, Name: n.Name}}, path...)
+			p = n.ParentID
+		}
+		cats[i].Path = path
+		cats[i].Depth = len(path) + 1
+	}
+	return cats, nil
+}
+
+func (s *Service) decorateOne(ctx context.Context, userID uuid.UUID, c *Category) (*Category, error) {
+	out, err := s.decorate(ctx, userID, []Category{*c})
+	if err != nil {
+		return nil, err
+	}
+	*c = out[0]
+	return c, nil
 }
