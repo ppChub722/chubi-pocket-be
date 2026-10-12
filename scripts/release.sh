@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
-# One release, end to end, from a brief folder written by Lead
-# (template + format: chubi-pocket-docs/ai/templates/release-brief/).
+# Deploy one release from its git tags (Lead commits, tags and pushes;
+# DevOps never does). Given a brief folder (template + format:
+# chubi-pocket-docs/ai/templates/release-brief/):
 #
 #   ./scripts/release.sh --dry-run <brief-dir>   # read-only: preflight + the plan
 #   ./scripts/release.sh <brief-dir>             # do it
+#   options: --skip-checks     redeploy / rollback of an already-checked tag
+#            --keep-worktrees  leave the tag checkouts in place afterwards
 #
-# Steps: preflight → checks → bump pubspec → commits → push → deploy BE →
-# APK → prod .env → verify → offsite backup copy → docs entry + commit →
-# tags → summary.
+# Steps: resolve tag v<version> in be/app/docs → check the be and app tags out
+# into clean worktrees (the team's main trees are never touched) → checks →
+# backup → migrate → deploy BE from the tag → APK from the tag → prod .env →
+# verify → offsite backup copy → release entry in the MAIN docs tree
+# (uncommitted: Lead commits it) → summary.
 #
-# Stops at the first problem. Safe to re-run after a failure: every step
-# first looks at whether it is already done (release commit by subject,
-# prod image label, LATEST_APP_BUILD, tags, the docs entry) and skips it.
-# Facts it can't re-read (check results, APK upload, backup name) live in
-# <brief-dir>/.state; logs in <brief-dir>/logs/; the final summary in
-# <brief-dir>/summary.txt.
+# Redeploy / rollback = the same command with an older VERSION. Migrations are
+# never rolled back: a tag older than prod's migration level is refused.
+#
+# Stops at the first problem. Safe to re-run after a failure: every step first
+# looks at whether it is already done (prod image label, LATEST_APP_BUILD,
+# the entry file) and skips it. Facts it can't re-read (check results, APK
+# upload, backup name) live in <brief-dir>/.state; logs in <brief-dir>/logs/;
+# the final summary in <brief-dir>/summary.txt.
 #
 # Run from Git Bash on the dev machine (any cwd).
 set -euo pipefail
@@ -33,23 +40,28 @@ DOCS_DIR="$ROOT/chubi-pocket-docs"
 INFRA_DIR="$(cd "$ROOT/../ppforge-infra" && pwd)"
 FLUTTER="$HOME/fvm/versions/3.47.3/bin/flutter"
 [[ -x "$FLUTTER" ]] || FLUTTER="$APP_DIR/.fvm/flutter_sdk/bin/flutter"
+# Short path on purpose: Gradle on Windows chokes on long ones.
+WORK_ROOT="${RELEASE_WORK:-/c/chubi-rel}"
 
 # ── args ────────────────────────────────────────────────────────────────
 DRY=false
+SKIP_CHECKS=false
+KEEP=false
 BRIEF=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY=true ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --skip-checks) SKIP_CHECKS=true ;;
+    --keep-worktrees) KEEP=true ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) BRIEF="$1" ;;
   esac
   shift
 done
-[[ -n "$BRIEF" && -d "$BRIEF" ]] || { echo "usage: release.sh [--dry-run] <brief-dir>" >&2; exit 2; }
+[[ -n "$BRIEF" && -d "$BRIEF" ]] || { echo "usage: release.sh [--dry-run] [--skip-checks] [--keep-worktrees] <brief-dir>" >&2; exit 2; }
 BRIEF="$(cd "$BRIEF" && pwd)"
-# State and logs are written into the brief folder: inside a repo they would
-# end up in a release commit (`git add -A`).
+# State and logs are written into the brief folder: keep it out of the repos.
 for d in "$BE_DIR" "$APP_DIR" "$DOCS_DIR"; do
   [[ "$BRIEF/" != "$d/"* ]] || { echo "brief folder is inside $(basename "$d") — copy it outside the repos" >&2; exit 2; }
 done
@@ -77,16 +89,7 @@ state_set() {
   mv "$STATE.tmp" "$STATE"
 }
 
-dirty_count() { g "$1" status --porcelain --untracked-files=all | wc -l | tr -d ' '; }
 short() { g "$1" rev-parse --short "$2"; }
-# The commit whose subject is exactly $2 (newest 100), or nothing.
-find_commit() {
-  local h s
-  while IFS=$'\t' read -r h s; do
-    [[ "$s" == "$2" ]] && { echo "$h"; return 0; }
-  done < <(g "$1" log -n 100 --format='%H%x09%s')
-  return 0
-}
 
 # key=value lines about prod, in one ssh round trip.
 read_prod() {
@@ -108,140 +111,156 @@ http_code() { curl -s -o /dev/null -m 10 -w '%{http_code}' "$1" || true; }
 # ── brief ───────────────────────────────────────────────────────────────
 say "brief: $BRIEF"
 [[ -f "$BRIEF/brief.env" ]] || die "brief.env missing"
-VERSION="" EXPECT_MIGRATIONS="" MIN_APP_BUILD="" BE_PATHS="" APP_PATHS="" DOCS_PATHS="" QA=""
+VERSION="" EXPECT_MIGRATIONS="" MIN_APP_BUILD="" QA="" SKIP_BE="n" SKIP_APP="n"
 while IFS= read -r line || [[ -n "$line" ]]; do
   line="${line%$'\r'}"
   [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
-  [[ "$line" =~ ^(VERSION|EXPECT_MIGRATIONS|MIN_APP_BUILD|BE_PATHS|APP_PATHS|DOCS_PATHS|QA)=(.*)$ ]] \
+  [[ "$line" =~ ^(VERSION|EXPECT_MIGRATIONS|MIN_APP_BUILD|QA|SKIP_BE|SKIP_APP)=(.*)$ ]] \
     || die "brief.env: unknown line: $line"
-  val="${BASH_REMATCH[2]}"; val="${val%\"}"; val="${val#\"}"
+  val="${BASH_REMATCH[2]}"; val="${val%%#*}"; val="${val%"${val##*[![:space:]]}"}"
+  val="${val%\"}"; val="${val#\"}"
   printf -v "${BASH_REMATCH[1]}" '%s' "$val"
 done < "$BRIEF/brief.env"
 
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$ ]] || die "VERSION '$VERSION' is not like 0.3.1-8"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$ ]] || die "VERSION '$VERSION' is not like 0.3.1-9"
 [[ "$EXPECT_MIGRATIONS" == none || "$EXPECT_MIGRATIONS" =~ ^[0-9]+( [0-9]+)*$ ]] \
   || die "EXPECT_MIGRATIONS must be 'none' or numbers like '53 54'"
 [[ "$MIN_APP_BUILD" == unchanged || "$MIN_APP_BUILD" =~ ^[0-9]+$ ]] \
   || die "MIN_APP_BUILD must be 'unchanged' or a build number"
-for k in BE_PATHS APP_PATHS DOCS_PATHS; do
-  [[ "${!k}" == any || "${!k}" =~ ^[0-9]+$ ]] || die "$k must be a number or 'any'"
-done
 [[ "$QA" == y || "$QA" == n ]] || die "QA must be y or n"
-
-msg_subject() { [[ -f "$BRIEF/$1" ]] && head -1 "$BRIEF/$1" | tr -d '\r' || true; }
-# Commit messages without CRs (the brief may be written on Windows).
-msg_file() { tr -d '\r' < "$BRIEF/$1" > "$LOGS/$1"; echo "$LOGS/$1"; }
-BE_SUBJ="$(msg_subject be.msg)"
-APP_SUBJ="$(msg_subject app.msg)"
-DOCS_SUBJ="$(msg_subject docs.msg)"
-[[ -n "$DOCS_SUBJ" ]] || die "docs.msg missing or empty"
+[[ "$SKIP_BE" == y || "$SKIP_BE" == n ]] || die "SKIP_BE must be y or n"
+[[ "$SKIP_APP" == y || "$SKIP_APP" == n ]] || die "SKIP_APP must be y or n"
 [[ -f "$BRIEF/entry.md" ]] || die "entry.md missing"
-# A repo with BE_PATHS / APP_PATHS = 0 gets no release commit, deploy or tag.
-HAS_BE=true;  [[ "$BE_PATHS" == 0 ]] && HAS_BE=false
-HAS_APP=true; [[ "$APP_PATHS" == 0 ]] && HAS_APP=false
-$HAS_BE  && [[ -z "$BE_SUBJ" ]]  && die "be.msg missing or empty (BE_PATHS=$BE_PATHS)"
-$HAS_APP && [[ -z "$APP_SUBJ" ]] && die "app.msg missing or empty (APP_PATHS=$APP_PATHS)"
-ok "version $VERSION · migrations $EXPECT_MIGRATIONS · MIN $MIN_APP_BUILD · QA $QA"
+HAS_BE=true;  [[ "$SKIP_BE" == y ]] && HAS_BE=false
+HAS_APP=true; [[ "$SKIP_APP" == y ]] && HAS_APP=false
+TAG="v$VERSION"
+ok "version $VERSION (tag $TAG) · migrations $EXPECT_MIGRATIONS · MIN $MIN_APP_BUILD · QA $QA$($HAS_BE || echo ' · BE skipped')$($HAS_APP || echo ' · app skipped')"
+$SKIP_CHECKS && warn "--skip-checks: the tags are deployed without running the checks"
 
-# ── preflight ───────────────────────────────────────────────────────────
+# ── preflight: the tags ─────────────────────────────────────────────────
 say "preflight"
-for d in "$BE_DIR" "$APP_DIR" "$DOCS_DIR"; do
-  name="$(basename "$d")"
-  [[ "$(g "$d" rev-parse --abbrev-ref HEAD)" == main ]] || die "$name is not on main"
-  g "$d" fetch -q origin
-  behind="$(g "$d" rev-list --count HEAD..origin/main)"
-  [[ "$behind" == 0 ]] || die "$name is $behind commit(s) behind origin/main"
-done
-
-BE_REL=""; APP_REL=""; DOCS_REL=""
-$HAS_BE  && BE_REL="$(find_commit "$BE_DIR" "$BE_SUBJ")"
-$HAS_APP && APP_REL="$(find_commit "$APP_DIR" "$APP_SUBJ")"
-DOCS_REL="$(find_commit "$DOCS_DIR" "$DOCS_SUBJ")"
-
-check_paths() { # repo-dir expected release-commit
-  local name n; name="$(basename "$1")"
-  if [[ -n "$3" ]]; then skip "$name: release commit $(short "$1" "$3") already made"; return; fi
-  n="$(dirty_count "$1")"
-  if [[ "$2" == any ]]; then ok "$name: $n changed paths (not checked)"
-  elif [[ "$n" == "$2" ]]; then ok "$name: $n changed paths, as briefed"
-  else die "$name has $n changed paths, the brief says $2 (git status --porcelain --untracked-files=all)"
-  fi
+resolve_tag() { # repo-dir → commit (full) of the pushed tag, or die
+  local d="$1" name c; name="$(basename "$1")"
+  g "$d" fetch -q origin --tags
+  c="$(g "$d" rev-parse -q --verify "refs/tags/$TAG^{commit}" || true)"
+  [[ -n "$c" ]] || die "$name: tag $TAG not found (Lead creates and pushes it)"
+  [[ -n "$(g "$d" ls-remote --tags origin "refs/tags/$TAG")" ]] || die "$name: tag $TAG is not pushed to origin"
+  echo "$c"
 }
-$HAS_BE  && check_paths "$BE_DIR" "$BE_PATHS" "$BE_REL"
-$HAS_APP && check_paths "$APP_DIR" "$APP_PATHS" "$APP_REL"
-check_paths "$DOCS_DIR" "$DOCS_PATHS" "$DOCS_REL"
+BE_COMMIT="$(resolve_tag "$BE_DIR")"
+APP_COMMIT="$(resolve_tag "$APP_DIR")"
+DOCS_COMMIT="$(resolve_tag "$DOCS_DIR")"
+BE_SHORT="$(short "$BE_DIR" "$BE_COMMIT")"
+APP_SHORT="$(short "$APP_DIR" "$APP_COMMIT")"
+ok "$TAG: be $BE_SHORT · app $APP_SHORT · docs $(short "$DOCS_DIR" "$DOCS_COMMIT")"
+BE_SUBJ="$(g "$BE_DIR" log -1 --format=%s "$BE_COMMIT")"
+APP_SUBJ="$(g "$APP_DIR" log -1 --format=%s "$APP_COMMIT")"
+
+if $HAS_APP; then
+  tag_ver="$(g "$APP_DIR" show "$APP_COMMIT:pubspec.yaml" | tr -d '\r' | grep -m1 '^version:' || true)"
+  [[ "$tag_ver" == "version: $VERSION"* ]] \
+    || die "app tag $TAG has '$tag_ver' in pubspec.yaml, expected 'version: $VERSION+…' (Lead bumps it before tagging)"
+  BUILD="$(g "$APP_DIR" rev-list --count "$APP_COMMIT")"
+  ok "app build will be $BUILD (Firebase $((2000 + BUILD)))"
+fi
 
 PROD="$(read_prod)" || die "cannot reach the VPS over ssh"
 [[ "$(http_code "$API/health")" == 200 ]] || die "prod /health is not 200"
 ok "prod: BE $(prod label) · migration $(prod migration) · LATEST $(prod LATEST_APP_BUILD) · MIN $(prod MIN_APP_BUILD) · health 200"
 [[ "$(prod migration)" != *DIRTY* ]] || die "prod migration state is DIRTY"
+CUR_LATEST="$(prod LATEST_APP_BUILD)"
 
-# What the BE release ships: its release commit, or HEAD (made from the tree).
-if $HAS_BE; then BE_TARGET="${BE_REL:-}"; else BE_TARGET="$(g "$BE_DIR" rev-parse HEAD)"; fi
 BE_DEPLOYED=false
-[[ -n "$BE_TARGET" && "$(prod label)" == "$(short "$BE_DIR" "$BE_TARGET")" ]] && BE_DEPLOYED=true
+new_migs=none
+tag_newest=""
+if $HAS_BE; then
+  [[ "$(prod label)" == "$BE_SHORT" ]] && BE_DEPLOYED=true
+  tag_migs="$(g "$BE_DIR" ls-tree --name-only "$BE_COMMIT:migrations" | sed -n 's/^0*\([0-9][0-9]*\)_.*\.up\.sql$/\1/p')"
+  tag_newest="$(printf '%s\n' $tag_migs | sort -n | tail -1)"
+  prod_mig="$(prod migration)"; prod_mig="${prod_mig%% *}"
+  if ! $BE_DEPLOYED && [[ "$prod_mig" =~ ^[0-9]+$ ]] && (( prod_mig > tag_newest )); then
+    die "prod migration $prod_mig is newer than the tag's newest ($tag_newest): migrations are not rolled back — restore from a dump, or pick a newer tag"
+  fi
+  # New migrations = files in the tag that prod doesn't have yet.
+  new_migs=""
+  for m in $tag_migs; do
+    [[ " $(prod migration_files) " == *" $m "* ]] || new_migs="$new_migs $m"
+  done
+  new_migs="${new_migs# }"; [[ -n "$new_migs" ]] || new_migs=none
+  if $BE_DEPLOYED; then
+    skip "migrations: BE already deployed (prod at $(prod migration))"
+  elif [[ "$new_migs" == "$EXPECT_MIGRATIONS" ]]; then
+    ok "new migrations: $new_migs (as briefed)"
+  else
+    die "new migrations in the tag: '$new_migs', the brief expects '$EXPECT_MIGRATIONS'"
+  fi
+fi
 
-# New migrations = files in the BE tree that prod doesn't have yet.
-tree_migs="$(ls -1 "$BE_DIR/migrations" | sed -n 's/^0*\([0-9][0-9]*\)_.*\.up\.sql$/\1/p')"
-new_migs=""
-for m in $tree_migs; do
-  [[ " $(prod migration_files) " == *" $m "* ]] || new_migs="$new_migs $m"
-done
-new_migs="${new_migs# }"; [[ -n "$new_migs" ]] || new_migs=none
-if $BE_DEPLOYED; then
-  skip "migrations: BE already deployed (prod at $(prod migration))"
-elif [[ "$new_migs" == "$EXPECT_MIGRATIONS" ]]; then
-  ok "new migrations: $new_migs (as briefed)"
-else
-  die "new migrations in the tree: '$new_migs', the brief expects '$EXPECT_MIGRATIONS'"
-fi
-if ! $HAS_BE && ! $BE_DEPLOYED; then
-  die "the brief has no BE changes, but prod runs $(prod label) and BE HEAD is $(short "$BE_DIR" HEAD)"
-fi
-
-# Build = app commit count of the release commit.
-if $HAS_APP; then
-  if [[ -n "$APP_REL" ]]; then BUILD="$(g "$APP_DIR" rev-list --count "$APP_REL")"
-  else BUILD="$(( $(g "$APP_DIR" rev-list --count HEAD) + 1 ))"; fi
-  ok "app build will be $BUILD (Firebase $((2000 + BUILD)))"
-fi
+# LATEST only ever goes up: a redeploy / rollback to an older tag keeps it.
+WANT_LATEST="$CUR_LATEST"
+if $HAS_APP && (( BUILD > CUR_LATEST )); then WANT_LATEST="$BUILD"; fi
 WANT_MIN="$(prod MIN_APP_BUILD)"; [[ "$MIN_APP_BUILD" == unchanged ]] || WANT_MIN="$MIN_APP_BUILD"
+
+# ── worktrees ───────────────────────────────────────────────────────────
+say "worktrees (clean checkouts of the tags)"
+WT="$WORK_ROOT/$VERSION"
+BE_WT="$WT/be"; APP_WT="$WT/app"
+add_worktree() { # repo-dir worktree-dir commit
+  local d="$2"
+  if [[ -d "$d" ]]; then
+    if [[ "$(g "$d" rev-parse HEAD 2>/dev/null || true)" == "$3" && -z "$(g "$d" status --porcelain 2>/dev/null | head -1)" ]]; then
+      skip "$(basename "$1"): $d already at $TAG"; return
+    fi
+    g "$1" worktree remove --force "$d" >/dev/null 2>&1 || rm -rf "$d"
+  fi
+  g "$1" worktree prune
+  mkdir -p "$(dirname "$d")"
+  g "$1" worktree add -q --detach "$d" "$3"
+  ok "$(basename "$1"): $TAG → $d"
+}
+if $DRY; then
+  $HAS_BE  && plan "check out be $TAG into $BE_WT"
+  $HAS_APP && plan "check out app $TAG into $APP_WT"
+else
+  $HAS_BE  && add_worktree "$BE_DIR" "$BE_WT" "$BE_COMMIT"
+  $HAS_APP && add_worktree "$APP_DIR" "$APP_WT" "$APP_COMMIT"
+fi
 
 # ── checks ──────────────────────────────────────────────────────────────
 say "checks"
-need_be_checks=false;  $HAS_BE  && [[ -z "$BE_REL" ]]  && need_be_checks=true
-need_app_checks=false; $HAS_APP && [[ -z "$APP_REL" ]] && need_app_checks=true
-
-be_checks() {
-  cd "$BE_DIR"
+be_checks() { # in the worktree
+  cd "$BE_WT"
   go vet ./... || { echo "CHECK go vet failed"; return 1; }
   local rc=0
   TEST_DATABASE_URL="$TEST_DB" go test -count=1 -v ./... || rc=$?
   return $rc
 }
 app_checks() {
-  cd "$APP_DIR"
+  cd "$APP_WT"
   "$FLUTTER" analyze || return 1
   "$FLUTTER" test
 }
-
-if ! $need_be_checks && ! $need_app_checks; then
-  skip "release commits already made — checks ran before them"
+need_be_checks=false;  $HAS_BE  && [[ "$(state_get checks_be_for)"  != "$BE_COMMIT"  ]] && need_be_checks=true
+need_app_checks=false; $HAS_APP && [[ "$(state_get checks_app_for)" != "$APP_COMMIT" ]] && need_app_checks=true
+if $SKIP_CHECKS; then
+  warn "checks skipped (--skip-checks)"
+  state_set checks_be "skipped"; state_set checks_app "skipped"
+elif ! $need_be_checks && ! $need_app_checks; then
+  skip "checks already ran on these tags"
   [[ -n "$(state_get checks_be)$(state_get checks_app)" ]] \
     && skip "BE $(state_get checks_be) · app $(state_get checks_app)"
 else
   if $need_be_checks; then
     # DB tests SKIP (not fail) when the DB is down or behind, so check it first.
-    newest="$(printf '%s\n' $tree_migs | sort -n | tail -1)"
     local_ver="$(MSYS_NO_PATHCONV=1 docker exec chubi_pocket_db psql -U chubadmin -d chubi_pocket_db -Atc \
       "SELECT version FROM schema_migrations WHERE NOT dirty" 2>/dev/null || true)"
-    [[ "$local_ver" == "$newest" ]] \
-      || die "local test DB (:5433) is at '${local_ver:-unreachable}', the tree's newest migration is $newest — run scripts/local-deploy.sh first"
+    [[ "$local_ver" == "$tag_newest" ]] \
+      || die "local test DB (:5433) is at '${local_ver:-unreachable}', the tag's newest migration is $tag_newest — migrate the local DB first (Lead: ask for a local deploy), or use --skip-checks for a rollback"
     ok "local test DB at migration $local_ver"
   fi
   if $DRY; then
-    $need_be_checks  && plan "run BE: go vet ./... + go test -count=1 -v ./... (TEST_DATABASE_URL :5433), require 0 failed / 0 skipped"
-    $need_app_checks && plan "run app: flutter analyze + flutter test"
+    $need_be_checks  && plan "run BE in the worktree: go vet ./... + go test -count=1 -v ./... (TEST_DATABASE_URL :5433), require 0 failed / 0 skipped"
+    $need_app_checks && plan "run app in the worktree: flutter analyze + flutter test"
   else
     pids=()
     $need_be_checks  && { be_checks  > "$LOGS/checks-be.log"  2>&1 & pids+=("be:$!"); }
@@ -255,6 +274,7 @@ else
       [[ "$fail" == 0 && "$skp" == 0 && " $failed " != *" be "* ]] \
         || die "BE checks: $pass passed / $fail failed / $skp skipped (see $l)"
       state_set checks_be "go vet clean, go test $pass passed / 0 failed / 0 skipped"
+      state_set checks_be_for "$BE_COMMIT"
       ok "BE: $(state_get checks_be)"
     fi
     if $need_app_checks; then
@@ -263,91 +283,44 @@ else
       grep -aq 'No issues found!' "$l" || die "flutter analyze reported issues (see $l)"
       n="$(grep -ao '+[0-9]*[^:]*: All tests passed' "$l" | tail -1 | grep -o '[0-9]*' | head -1)"
       state_set checks_app "analyze clean, flutter test ${n:-?} passed"
+      state_set checks_app_for "$APP_COMMIT"
       ok "app: $(state_get checks_app)"
     fi
   fi
 fi
 
-# ── commits ─────────────────────────────────────────────────────────────
-say "commits"
-if $HAS_APP; then
-  if [[ -n "$APP_REL" ]]; then
-    skip "app: $(short "$APP_DIR" "$APP_REL") $APP_SUBJ"
-  else
-    num="${VERSION##*-}"; [[ "$VERSION" == *-* ]] || num=0
-    cur="$(grep -m1 '^version:' "$APP_DIR/pubspec.yaml" | tr -d '\r')"
-    want="version: $VERSION+$num"
-    if $DRY; then
-      [[ "$cur" == "$want" ]] || plan "bump pubspec '$cur' → '$want'"
-      plan "commit app ($(dirty_count "$APP_DIR") paths): $APP_SUBJ"
-    else
-      [[ "$cur" == "$want" ]] || sed -i "s/^version: .*/$want/" "$APP_DIR/pubspec.yaml"
-      g "$APP_DIR" add -A
-      g "$APP_DIR" commit -q -F "$(msg_file app.msg)"
-      APP_REL="$(g "$APP_DIR" rev-parse HEAD)"
-      ok "app: $(short "$APP_DIR" "$APP_REL") (build $(g "$APP_DIR" rev-list --count HEAD))"
-    fi
-  fi
-fi
-if $HAS_BE; then
-  if [[ -n "$BE_REL" ]]; then
-    skip "be: $(short "$BE_DIR" "$BE_REL") $BE_SUBJ"
-  elif $DRY; then
-    plan "commit be ($(dirty_count "$BE_DIR") paths): $BE_SUBJ"
-  else
-    g "$BE_DIR" add -A
-    g "$BE_DIR" commit -q -F "$(msg_file be.msg)"
-    BE_REL="$(g "$BE_DIR" rev-parse HEAD)"; BE_TARGET="$BE_REL"
-    ok "be: $(short "$BE_DIR" "$BE_REL")"
-  fi
-fi
-
-# ── push ────────────────────────────────────────────────────────────────
-say "push"
-push_repo() {
-  local name ahead; name="$(basename "$1")"
-  if $DRY && [[ -z "$2" ]]; then plan "push $name (after its commit)"; return; fi
-  ahead="$(g "$1" rev-list --count origin/main..HEAD)"
-  if [[ "$ahead" == 0 ]]; then skip "$name: in sync with origin"
-  elif $DRY; then plan "push $name ($ahead commit(s))"
-  else g "$1" push -q origin main; ok "$name: pushed $ahead commit(s)"; fi
-}
-$HAS_BE  && push_repo "$BE_DIR" "$BE_REL"
-$HAS_APP && push_repo "$APP_DIR" "$APP_REL"
-
 # ── deploy BE ───────────────────────────────────────────────────────────
 say "deploy BE"
-if $BE_DEPLOYED; then
+if ! $HAS_BE; then
+  skip "BE skipped (SKIP_BE=y)"
+elif $BE_DEPLOYED; then
   skip "prod already runs $(prod label)"
-  [[ -n "$(state_get backup)" ]] || state_set backup "$(prod dump) (newest; deploy ran earlier)"
+  $DRY || [[ -n "$(state_get backup)" ]] || state_set backup "$(prod dump) (newest; deploy ran earlier)"
 elif $DRY; then
-  plan "run deploy.sh --skip-apk (backup → migrate → swap → health; new migrations: $new_migs)"
+  plan "run deploy.sh --skip-apk --dir $BE_WT (backup → migrate → swap → health; new migrations: $new_migs)"
 else
-  [[ "$(g "$BE_DIR" rev-parse HEAD)" == "$BE_TARGET" ]] \
-    || die "BE HEAD is not the release commit $(short "$BE_DIR" "$BE_TARGET") — deploy.sh would ship the wrong commit"
-  "$BE_DIR/scripts/deploy.sh" --skip-apk 2>&1 | tee "$LOGS/deploy.log" \
+  "$BE_DIR/scripts/deploy.sh" --skip-apk --dir "$BE_WT" 2>&1 | tee "$LOGS/deploy.log" \
     || die "deploy.sh failed (see $LOGS/deploy.log)"
   dump="$(sed -n 's/.*latest dump: //p' "$LOGS/deploy.log" | tail -1)"
   state_set backup "$dump"
-  ok "BE live: $(short "$BE_DIR" "$BE_TARGET") · backup $dump"
+  ok "BE live: $BE_SHORT · backup $dump"
 fi
 
 # ── APK ─────────────────────────────────────────────────────────────────
 say "APK"
 if ! $HAS_APP; then
-  skip "no app changes in this release"
+  skip "app skipped (SKIP_APP=y)"
 elif [[ "$(state_get apk)" == "$BUILD" ]]; then
   skip "build $BUILD already uploaded (Firebase $(state_get firebase))"
-elif (( $(prod LATEST_APP_BUILD) >= BUILD )); then
-  # LATEST is only raised after the upload, so the APK went out earlier.
-  skip "prod LATEST_APP_BUILD=$(prod LATEST_APP_BUILD) ≥ $BUILD — APK uploaded in an earlier run"
-  [[ -n "$(state_get firebase)" ]] || state_set firebase "$((2000 + BUILD))"
+elif (( CUR_LATEST >= BUILD )); then
+  # LATEST is only raised after the upload, so the APK went out earlier
+  # (or this tag is older than what testers already have: redeploy / rollback).
+  skip "prod LATEST_APP_BUILD=$CUR_LATEST ≥ $BUILD — APK already out (or older); LATEST is never lowered"
+  $DRY || [[ -n "$(state_get firebase)" ]] || state_set firebase "$((2000 + BUILD))"
 elif $DRY; then
-  plan "run release-apk.sh → build $BUILD to firsttester (Firebase $((2000 + BUILD)))"
+  plan "run release-apk.sh --dir $APP_WT → build $BUILD to firsttester (Firebase $((2000 + BUILD)))"
 else
-  [[ "$(g "$APP_DIR" rev-parse HEAD)" == "$APP_REL" ]] \
-    || die "app HEAD is not the release commit — release-apk.sh would build the wrong tree"
-  "$APP_DIR/scripts/release-apk.sh" 2>&1 | tee "$LOGS/apk.log" \
+  "$APP_DIR/scripts/release-apk.sh" --dir "$APP_WT" -m "$VERSION — $APP_SUBJ ($APP_SHORT)" 2>&1 | tee "$LOGS/apk.log" \
     || die "release-apk.sh failed (see $LOGS/apk.log)"
   fb="$(grep -ao 'uploaded new release [^ ]* ([0-9]*)' "$LOGS/apk.log" | grep -o '([0-9]*)' | tr -d '()' | tail -1)"
   state_set apk "$BUILD"
@@ -357,7 +330,6 @@ fi
 
 # ── prod .env ───────────────────────────────────────────────────────────
 say "prod .env"
-WANT_LATEST="$(prod LATEST_APP_BUILD)"; $HAS_APP && WANT_LATEST="$BUILD"
 if [[ "$(prod LATEST_APP_BUILD)" == "$WANT_LATEST" && "$(prod MIN_APP_BUILD)" == "$WANT_MIN" ]]; then
   skip "already LATEST_APP_BUILD=$WANT_LATEST · MIN_APP_BUILD=$WANT_MIN"
 elif $DRY; then
@@ -366,7 +338,7 @@ else
   if ! ssh_vps "V='$VERSION' L='$WANT_LATEST' M='$WANT_MIN' bash -s" <<'REMOTE' 2>&1 | tee "$LOGS/env.log"; then
 set -euo pipefail
 cd /srv/chubi
-grep -q '^LATEST_APP_BUILD=' .env && grep -q '^MIN_APP_BUILD=' .env || { echo "keys missing in .env"; exit 1; }
+sudo grep -q '^LATEST_APP_BUILD=' .env && sudo grep -q '^MIN_APP_BUILD=' .env || { echo "keys missing in .env"; exit 1; }
 [[ -e ".env.bak-$V" ]] || sudo cp -p .env ".env.bak-$V"
 sudo sed -i -e "s/^LATEST_APP_BUILD=.*/LATEST_APP_BUILD=$L/" -e "s/^MIN_APP_BUILD=.*/MIN_APP_BUILD=$M/" .env
 sudo grep -E '^(LATEST|MIN)_APP_BUILD=' .env
@@ -381,7 +353,7 @@ fi
 # ── verify ──────────────────────────────────────────────────────────────
 say "verify"
 if $DRY; then
-  plan "check /health 200 · app/version min $WANT_MIN latest $WANT_LATEST · unauthenticated /transactions 401 · app log errors 0 · prod label = BE release"
+  plan "check /health 200 · app/version min $WANT_MIN latest $WANT_LATEST · unauthenticated /transactions 401 · app log errors 0 · prod label = $BE_SHORT"
   VERIFY="(dry-run)"
 else
   PROD="$(read_prod)"
@@ -395,7 +367,7 @@ else
   [[ "$vmin" == "$WANT_MIN" && "$vlat" == "$WANT_LATEST" ]] || problems+=" app/version=$vmin/$vlat"
   [[ "$u" == 401 ]] || problems+=" unauth=$u"
   [[ "$(prod errors)" == 0 ]] || problems+=" log-errors=$(prod errors)"
-  [[ "$(prod label)" == "$(short "$BE_DIR" "$BE_TARGET")" ]] || problems+=" label=$(prod label)"
+  if $HAS_BE; then [[ "$(prod label)" == "$BE_SHORT" ]] || problems+=" label=$(prod label)"; fi
   [[ "$(prod migration)" != *DIRTY* ]] || problems+=" migration=$(prod migration)"
   [[ -z "$problems" ]] || die "verify failed:$problems"
   VERIFY="/health 200 · app/version min $vmin latest $vlat · unauthenticated /transactions 401 · app log errors 0 · migration $(prod migration)"
@@ -413,88 +385,57 @@ else
   ok "$(tail -1 "$LOGS/offsite.log")"
 fi
 
-# ── docs entry + commit ─────────────────────────────────────────────────
-say "docs"
-REL_ENTRY="$DOCS_DIR/ai/releases/$VERSION.md"   # one file per release; CURRENT-WORK.md is frozen
+# ── release entry (main docs tree, NOT committed: Lead commits it) ──────
+say "release entry"
+REL_ENTRY="$DOCS_DIR/ai/releases/$VERSION.md"   # one file per release
 make_entry() {
-  local be_s app_s
-  be_s="$( [[ -n "$BE_REL" ]] && short "$BE_DIR" "$BE_REL" || echo '<be>')"
-  app_s="$( [[ -n "$APP_REL" ]] && short "$APP_DIR" "$APP_REL" || echo '<app>')"
-  echo "# $VERSION — released $(date +%F) (DevOps, release.sh)"
+  echo "# $VERSION — released $(date +%F) (DevOps, release.sh from tag $TAG)"
   echo
   echo "> QA pass: $([[ "$QA" == y ]] && echo yes || echo no) · new migrations: $new_migs · \`MIN_APP_BUILD\` $MIN_APP_BUILD"
   echo "> Pre-checks: BE $(state_get checks_be) · app $(state_get checks_app)"
   echo
   if $HAS_BE; then
-    echo "- **be** \`$be_s\` $BE_SUBJ"
+    echo "- **be** \`$BE_SHORT\` $BE_SUBJ"
     echo "  - live · backup \`$(state_get backup)\`"
   fi
   if $HAS_APP; then
-    echo "- **app** \`$app_s\` $APP_SUBJ"
+    echo "- **app** \`$APP_SHORT\` $APP_SUBJ"
     echo "  - build **$BUILD** (Firebase $(state_get firebase)) sent to \`firsttester\`"
   fi
   echo "- **prod \`.env\`:** \`LATEST_APP_BUILD=$WANT_LATEST\` · \`MIN_APP_BUILD=$WANT_MIN\` · backup copy \`.env.bak-$VERSION\`"
   echo "- **verify:** ${VERIFY}"
-  printf -- '- tag `v%s`:' "$VERSION"
-  $HAS_APP && printf ' app `%s` ·' "$app_s"
-  $HAS_BE && printf ' be `%s` ·' "$be_s"
-  echo ' docs (this commit)'
+  echo "- tag \`$TAG\`: be \`$BE_SHORT\` · app \`$APP_SHORT\` · docs \`$(short "$DOCS_DIR" "$DOCS_COMMIT")\`"
   echo
   tr -d '\r' < "$BRIEF/entry.md"
 }
-if [[ -n "$DOCS_REL" ]]; then
-  skip "docs: $(short "$DOCS_DIR" "$DOCS_REL") $DOCS_SUBJ"
+if [[ -f "$REL_ENTRY" ]]; then
+  skip "ai/releases/$VERSION.md already exists (delete it to regenerate)"
+elif $DRY; then
+  plan "write ai/releases/$VERSION.md in the main docs tree (uncommitted):"
+  make_entry | sed 's/^/      │ /'
 else
-  if [[ -f "$REL_ENTRY" ]]; then
-    skip "ai/releases/$VERSION.md already exists"
-  elif $DRY; then
-    plan "write ai/releases/$VERSION.md:"
-    make_entry | sed 's/^/      │ /'
-  else
-    mkdir -p "$(dirname "$REL_ENTRY")"
-    make_entry > "$REL_ENTRY"
-    ok "entry written to ai/releases/$VERSION.md"
-  fi
-  if $DRY; then
-    plan "commit docs ($(dirty_count "$DOCS_DIR") paths + the entry): $DOCS_SUBJ"
-  else
-    g "$DOCS_DIR" add -A
-    g "$DOCS_DIR" commit -q -F "$(msg_file docs.msg)"
-    DOCS_REL="$(g "$DOCS_DIR" rev-parse HEAD)"
-    ok "docs: $(short "$DOCS_DIR" "$DOCS_REL")"
-  fi
+  mkdir -p "$(dirname "$REL_ENTRY")"
+  make_entry > "$REL_ENTRY"
+  ok "entry written to ai/releases/$VERSION.md (uncommitted: Lead commits it)"
 fi
-push_repo "$DOCS_DIR" "$DOCS_REL"
 
-# ── tags ────────────────────────────────────────────────────────────────
-say "tags v$VERSION"
-tag_repo() { # dir release-commit
-  local name t; name="$(basename "$1")"; t="v$VERSION"
-  if [[ -z "$2" ]]; then $DRY && plan "tag $name (after its commit)"; return; fi
-  if g "$1" rev-parse -q --verify "refs/tags/$t" >/dev/null; then
-    [[ "$(g "$1" rev-parse "$t^{}")" == "$2" ]] \
-      || die "$name: tag $t exists but points at $(short "$1" "$t^{}"), not the release commit $(short "$1" "$2")"
-    skip "$name: $t → $(short "$1" "$2")"
-  elif $DRY; then plan "tag $name $t → $(short "$1" "$2")"; return
-  else g "$1" tag -a "$t" -m "$VERSION" "$2"; ok "$name: $t → $(short "$1" "$2")"; fi
-  if [[ -n "$(g "$1" ls-remote --tags origin "refs/tags/$t")" ]]; then skip "$name: $t on origin"
-  elif $DRY; then plan "push tag $t ($name)"
-  else g "$1" push -q origin "$t"; ok "$name: pushed $t"; fi
-}
-$HAS_APP && tag_repo "$APP_DIR" "$APP_REL"
-$HAS_BE  && tag_repo "$BE_DIR" "$BE_REL"
-tag_repo "$DOCS_DIR" "$DOCS_REL"
-
-# ── summary ─────────────────────────────────────────────────────────────
+# ── cleanup + summary ───────────────────────────────────────────────────
 if $DRY; then
   say "dry-run done — nothing was changed"
   exit 0
 fi
+if ! $KEEP; then
+  say "cleanup"
+  if $HAS_BE;  then g "$BE_DIR"  worktree remove --force "$BE_WT"  >/dev/null 2>&1 || true; fi
+  if $HAS_APP; then g "$APP_DIR" worktree remove --force "$APP_WT" >/dev/null 2>&1 || true; fi
+  rmdir "$WT" 2>/dev/null || true
+  ok "worktrees removed"
+fi
 {
-  echo "$VERSION DONE"
-  $HAS_BE  && echo "be   $(short "$BE_DIR" "$BE_REL")  $BE_SUBJ"
-  $HAS_APP && echo "app  $(short "$APP_DIR" "$APP_REL")  build $BUILD · Firebase $(state_get firebase)"
-  echo "docs $(short "$DOCS_DIR" "$DOCS_REL")  tags v$VERSION pushed"
+  echo "$VERSION DONE (from tag $TAG)"
+  $HAS_BE  && echo "be   $BE_SHORT  $BE_SUBJ"
+  $HAS_APP && echo "app  $APP_SHORT  build $BUILD · Firebase $(state_get firebase)"
+  echo "docs $(short "$DOCS_DIR" "$DOCS_COMMIT")  entry ai/releases/$VERSION.md (uncommitted)"
   echo "checks: BE $(state_get checks_be) · app $(state_get checks_app)"
   echo "backup: $(state_get backup) · migrations new: $new_migs"
   echo "env: LATEST_APP_BUILD=$WANT_LATEST · MIN_APP_BUILD=$WANT_MIN (.env.bak-$VERSION)"

@@ -5,9 +5,12 @@
 #   ./scripts/deploy.sh --skip-apk      # BE only
 #   ./scripts/deploy.sh --skip-be       # APK only
 #   ./scripts/deploy.sh -m "notes"      # release notes for the APK
+#   ./scripts/deploy.sh --dir <path>    # ship that checkout's HEAD (a worktree of
+#                                       # a release tag) instead of this repo
 #
 # Run from Git Bash on the dev machine (any cwd). Deploys what is COMMITTED
-# (git archive HEAD) — uncommitted changes are not shipped; the script warns.
+# (git archive HEAD of the repo, or of --dir) — uncommitted changes are not
+# shipped; the script warns.
 #
 # BE steps (all on the VPS, see chubi-pocket-docs/engineering/ops-runbook.md):
 #   1. upload the source, build image chubi-be:prod-new on the server
@@ -28,13 +31,15 @@ APP_DIR="$(cd "$BE_DIR/../chubi-pocket-app" 2>/dev/null && pwd || true)"
 
 skip_be=false
 skip_apk=false
+src_dir=""
 notes=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-be) skip_be=true ;;
     --skip-apk) skip_apk=true ;;
     -m|--notes) notes="${2:-}"; shift ;;
-    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    --dir) src_dir="${2:-}"; shift ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -48,7 +53,7 @@ SSH_OPTS=(-i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 -o ConnectionAttempts=
 ssh_vps() { ssh "${SSH_OPTS[@]}" "$VPS" "$@"; }
 
 deploy_be() {
-  cd "$BE_DIR"
+  cd "${src_dir:-$BE_DIR}"
   local commit
   commit="$(git rev-parse --short HEAD)"
   if [[ -n "$(git status --porcelain)" ]]; then
