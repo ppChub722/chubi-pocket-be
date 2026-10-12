@@ -204,7 +204,8 @@ WANT_MIN="$(prod MIN_APP_BUILD)"; [[ "$MIN_APP_BUILD" == unchanged ]] || WANT_MI
 # ── worktrees ───────────────────────────────────────────────────────────
 say "worktrees (clean checkouts of the tags)"
 WT="$WORK_ROOT/$VERSION"
-BE_WT="$WT/be"; APP_WT="$WT/app"
+# Named like the repos: app tests read ../chubi-pocket-be/... (the BE tag's spec).
+BE_WT="$WT/chubi-pocket-be"; APP_WT="$WT/chubi-pocket-app"
 add_worktree() { # repo-dir worktree-dir commit
   local d="$2"
   if [[ -d "$d" ]]; then
