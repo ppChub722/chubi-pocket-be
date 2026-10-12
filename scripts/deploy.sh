@@ -22,7 +22,7 @@
 #      back; restore from the backup taken in step 2 if ever needed).
 set -euo pipefail
 
-VPS="Admin@160.238.13.137"
+VPS="${VPS_HOST:-Admin@160.238.13.137}"   # new box: export VPS_HOST=Admin@<ip>
 KEY="$HOME/.ssh/ppforge_vps"
 HEALTH_URL="https://chubipocket-api.ppforge.dev/health"
 

@@ -26,7 +26,7 @@
 # Run from Git Bash on the dev machine (any cwd).
 set -euo pipefail
 
-VPS="Admin@160.238.13.137"
+VPS="${VPS_HOST:-Admin@160.238.13.137}"   # new box: export VPS_HOST=Admin@<ip>
 KEY="$HOME/.ssh/ppforge_vps"
 API="https://chubipocket-api.ppforge.dev"
 SSH_OPTS=(-i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 -o ConnectionAttempts=3
