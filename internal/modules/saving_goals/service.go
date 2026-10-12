@@ -2,9 +2,9 @@ package saving_goals
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,372 +12,543 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
+const (
+	defaultTimezone = "Asia/Bangkok"
+	daysPerMonth    = 30.44
+	paceMonths      = 3
+	entriesPerPage  = 20
+)
+
+// AutoSaveLister — the active recurring ออม rules into a goal (nil = the
+// spare bucket); wired from the recurring module.
+type AutoSaveLister func(ctx context.Context, userID uuid.UUID, goalID *uuid.UUID) ([]AutoSave, error)
+
 type Service struct {
-	store *Store
+	store    *Store
+	autoSave AutoSaveLister
 }
 
-func NewService(store *Store) *Service {
-	return &Service{store: store}
+func NewService(store *Store) *Service { return &Service{store: store} }
+
+func (s *Service) WithAutoSave(fn AutoSaveLister) { s.autoSave = fn }
+
+func round2(f float64) float64 { return math.Round(f*100) / 100 }
+
+func fptr(f float64) *float64 { return &f }
+
+func dstr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	v := t.Format(dateLayout)
+	return &v
 }
 
-// Create — validates ownership, computes default allocation if omitted
-// (Phase 1c rule: fill remaining capacity, never mutate existing
-// goals), enforces sum ≤ 100, and inserts atomically.
-func (s *Service) Create(
-	ctx context.Context, userID uuid.UUID, req CreateRequest,
-) (*SavingGoalView, error) {
-	tx, err := s.store.Pool().Begin(ctx)
+func days(a, b time.Time) int { return int(math.Round(b.Sub(a).Hours() / 24)) }
+
+func (s *Service) today(ctx context.Context, userID uuid.UUID) (time.Time, error) {
+	stored, err := s.store.userTimezone(ctx, userID)
 	if err != nil {
-		return nil, fmt.Errorf("begin: %w", err)
+		return time.Time{}, err
 	}
-	defer tx.Rollback(ctx)
-
-	// 1. Verify the linked account belongs to caller and is active.
-	acc, err := s.store.VerifyAccountOwnership(ctx, tx, userID, req.LinkedAccountID)
-	if err != nil {
-		return nil, err
-	}
-
-	// 2. Lock active sibling rows + sum existing allocation on the account.
-	existingSum, err := s.store.SumActiveAllocationOnAccountForUpdate(
-		ctx, tx, req.LinkedAccountID, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	// 3. Resolve allocation_pct.
-	//    - User-supplied: must satisfy existingSum + value ≤ 100.
-	//    - Default: fill remaining capacity (never silently mutate
-	//      existing goals). If capacity is 0, reject — user must
-	//      explicitly free up room first.
-	var allocation float64
-	if req.AllocationPct != nil {
-		allocation = *req.AllocationPct
-	} else {
-		allocation = round2(100 - existingSum)
-		if allocation <= 0 {
-			return nil, ErrAllocationExceeded
-		}
-	}
-	if existingSum+allocation > 100+1e-6 {
-		return nil, ErrAllocationExceeded
-	}
-
-	// 4. Insert.
-	row, err := s.store.CreateInTx(ctx, tx, userID, req, allocation)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-
-	v := buildView(*row, AccountSnapshot{
-		ID: acc.ID, Name: acc.Name, Balance: acc.Balance, Currency: acc.Currency,
-	})
-	return s.withRef(ctx, v)
-}
-
-func (s *Service) Get(
-	ctx context.Context, userID, id uuid.UUID,
-) (*SavingGoalView, error) {
-	g, err := s.store.GetByID(ctx, userID, id)
-	if err != nil {
-		return nil, err
-	}
-	acc, err := s.store.VerifyAccountOwnership(ctx, s.store.Pool(), userID, g.LinkedAccountID)
-	if err != nil {
-		// The linked account was archived but the goal lives on. Fall
-		// back to a zero-balance snapshot so the response shape stays
-		// consistent — this case is rare since accounts ON DELETE
-		// RESTRICT prevents deleting an account with goals.
-		if errors.Is(err, ErrAccountNotOwned) {
-			acc = &AccountSnapshot{ID: g.LinkedAccountID, Name: "(archived)", Balance: 0, Currency: "THB"}
-		} else {
-			return nil, err
-		}
-	}
-	v := buildView(*g, *acc)
-	return s.withRef(ctx, v)
-}
-
-func (s *Service) List(
-	ctx context.Context, userID uuid.UUID, f ListFilter,
-) (*ListResponse, error) {
-	rows, err := s.store.List(ctx, userID, f)
-	if err != nil {
-		return nil, err
-	}
-
-	snapshots, err := s.store.ListAccountSnapshotsForGoals(ctx, userID, rows)
-	if err != nil {
-		return nil, err
-	}
-
-	out := make([]SavingGoalView, 0, len(rows))
-	for _, g := range rows {
-		acc, ok := snapshots[g.LinkedAccountID]
-		if !ok {
-			// Linked account went missing (e.g. archived). Fallback
-			// snapshot keeps response shape stable.
-			acc = AccountSnapshot{ID: g.LinkedAccountID, Name: "(archived)", Balance: 0, Currency: "THB"}
-		}
-		v := buildView(g, acc)
-
-		// is_completed filter applied post-compute since it's derived.
-		if f.IsCompleted != nil && v.IsCompleted != *f.IsCompleted {
+	loc := time.UTC
+	for _, n := range []string{stored, defaultTimezone} {
+		if n == "" {
 			continue
 		}
-		out = append(out, v)
+		if l, err := time.LoadLocation(n); err == nil {
+			loc = l
+			break
+		}
 	}
-	if err := s.attachRefs(ctx, out); err != nil {
-		return nil, err
-	}
-	return &ListResponse{Data: out}, nil
+	now := time.Now().In(loc)
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC), nil
 }
 
-// Update — partial patch. Allocation changes re-check the sum.
-func (s *Service) Update(
-	ctx context.Context, userID, id uuid.UUID, req UpdateRequest,
-) (*SavingGoalView, error) {
-	tx, err := s.store.Pool().Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback(ctx)
+// --- figures ---
 
-	current, err := s.store.GetByIDInTx(ctx, tx, userID, id)
-	if err != nil {
-		return nil, err
+// monthlyNets — the net saved per month (YYYY-MM) into each goal (key) and
+// the spare bucket (key uuid.Nil when spare).
+func (s *Service) monthlyNets(ctx context.Context, q shared.Querier, userID uuid.UUID, goalIDs []uuid.UUID, spare bool) (map[uuid.UUID]map[string]float64, error) {
+	if goalIDs == nil {
+		goalIDs = []uuid.UUID{}
 	}
-
-	if req.AllocationPct != nil && current.Status == StatusActive {
-		// Lock siblings excluding this goal, then verify the new
-		// allocation fits. Archived goals are excluded from the sum
-		// regardless via status='active' filter, but excluding by
-		// id keeps the comparison correct when the row IS active.
-		excl := id
-		sumExcl, err := s.store.SumActiveAllocationOnAccountForUpdate(
-			ctx, tx, current.LinkedAccountID, &excl)
-		if err != nil {
+	rows, err := q.Query(ctx, `SELECT COALESCE(x.k, '00000000-0000-0000-0000-000000000000'::uuid), to_char(x.date, 'YYYY-MM'),
+			SUM(x.v)::float8
+		FROM (
+			SELECT CASE WHEN to_bucket = 'spare' THEN NULL ELSE to_goal_id END AS k, to_bucket AS b, date, amount AS v
+			FROM saving_entries WHERE user_id = $1 AND to_bucket <> 'available'
+			UNION ALL
+			SELECT CASE WHEN from_bucket = 'spare' THEN NULL ELSE from_goal_id END, from_bucket, date, -amount
+			FROM saving_entries WHERE user_id = $1 AND from_bucket <> 'available'
+		) x
+		WHERE (x.b = 'spare' AND $3) OR (x.b = 'goal' AND x.k = ANY($2))
+		GROUP BY 1, 2`, userID, goalIDs, spare)
+	if err != nil {
+		return nil, fmt.Errorf("monthly nets: %w", err)
+	}
+	defer rows.Close()
+	out := map[uuid.UUID]map[string]float64{}
+	for rows.Next() {
+		var (
+			k uuid.UUID
+			m string
+			v float64
+		)
+		if err := rows.Scan(&k, &m, &v); err != nil {
 			return nil, err
 		}
-		if sumExcl+*req.AllocationPct > 100+1e-6 {
-			return nil, ErrAllocationExceeded
+		if out[k] == nil {
+			out[k] = map[string]float64{}
 		}
+		out[k][m] = v
 	}
-
-	updated, err := s.store.UpdateInTx(ctx, tx, userID, id, req)
-	if err != nil {
-		return nil, err
-	}
-
-	acc, err := s.store.VerifyAccountOwnership(ctx, tx, userID, updated.LinkedAccountID)
-	if err != nil {
-		if errors.Is(err, ErrAccountNotOwned) {
-			acc = &AccountSnapshot{ID: updated.LinkedAccountID, Name: "(archived)", Balance: 0, Currency: "THB"}
-		} else {
-			return nil, err
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-	v := buildView(*updated, *acc)
-	return s.withRef(ctx, v)
+	return out, rows.Err()
 }
 
-func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
-	return s.store.Delete(ctx, userID, id)
-}
+func monthKey(t time.Time) string { return t.Format("2006-01") }
 
-// Archive — sets status='archived'. Frees allocation capacity on
-// the linked account; idempotent.
-func (s *Service) Archive(
-	ctx context.Context, userID, id uuid.UUID,
-) (*SavingGoalView, error) {
-	return s.transitionStatus(ctx, userID, id, StatusArchived)
-}
-
-// Restore — sets status='active'. Re-checks that the goal's stored
-// allocation_pct still fits the current account capacity. If another
-// goal has already absorbed the slot, restore is rejected and the
-// user must lower the allocation first via PUT.
-func (s *Service) Restore(
-	ctx context.Context, userID, id uuid.UUID,
-) (*SavingGoalView, error) {
-	return s.transitionStatus(ctx, userID, id, StatusActive)
-}
-
-func (s *Service) transitionStatus(
-	ctx context.Context, userID, id uuid.UUID, target string,
-) (*SavingGoalView, error) {
-	tx, err := s.store.Pool().Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	current, err := s.store.GetByIDInTx(ctx, tx, userID, id)
-	if err != nil {
-		return nil, err
-	}
-
-	if current.Status == target {
-		// Idempotent: just return the current view.
-		acc, accErr := s.store.VerifyAccountOwnership(ctx, tx, userID, current.LinkedAccountID)
-		if accErr != nil {
-			if errors.Is(accErr, ErrAccountNotOwned) {
-				acc = &AccountSnapshot{ID: current.LinkedAccountID, Name: "(archived)", Balance: 0, Currency: "THB"}
-			} else {
-				return nil, accErr
-			}
-		}
-		_ = tx.Commit(ctx)
-		v := buildView(*current, *acc)
-		return s.withRef(ctx, v)
-	}
-
-	// Restore guard — re-check capacity using the current goal's
-	// stored allocation. Other goals (excluding this one) must
-	// leave room.
-	if target == StatusActive {
-		excl := id
-		sumExcl, err := s.store.SumActiveAllocationOnAccountForUpdate(
-			ctx, tx, current.LinkedAccountID, &excl)
-		if err != nil {
-			return nil, err
-		}
-		if sumExcl+current.AllocationPct > 100+1e-6 {
-			return nil, ErrAllocationExceeded
+// firstMonth — the earliest month with an entry, else `fallback`.
+func firstMonth(nets map[string]float64, fallback time.Time) time.Time {
+	first := time.Date(fallback.Year(), fallback.Month(), 1, 0, 0, 0, 0, time.UTC)
+	for m := range nets {
+		if t, err := time.Parse("2006-01", m); err == nil && t.Before(first) {
+			first = t
 		}
 	}
+	return first
+}
 
-	updated, err := s.store.SetStatusInTx(ctx, tx, userID, id, target)
-	if err != nil {
-		return nil, err
+// history — month by month from the first entry (or `since`) to today's
+// month: the balance at each month's end.
+func history(nets map[string]float64, since, today time.Time) []HistoryPoint {
+	out := []HistoryPoint{}
+	cur := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
+	var cum float64
+	for m := firstMonth(nets, since); !m.After(cur) && len(out) < 600; m = m.AddDate(0, 1, 0) {
+		cum += nets[monthKey(m)]
+		out = append(out, HistoryPoint{Month: monthKey(m), Cumulative: round2(cum)})
 	}
+	return out
+}
 
-	acc, err := s.store.VerifyAccountOwnership(ctx, tx, userID, updated.LinkedAccountID)
-	if err != nil {
-		if errors.Is(err, ErrAccountNotOwned) {
-			acc = &AccountSnapshot{ID: updated.LinkedAccountID, Name: "(archived)", Balance: 0, Currency: "THB"}
-		} else {
-			return nil, err
+// paceOf — the net saved per month over the last 3 months, this month
+// included (fewer when younger); nil when nothing was saved.
+func paceOf(nets map[string]float64, since, today time.Time) *float64 {
+	first := firstMonth(nets, since)
+	cur := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
+	var (
+		sum float64
+		n   int
+	)
+	for i := 0; i < paceMonths; i++ {
+		m := cur.AddDate(0, -i, 0)
+		if m.Before(first) {
+			break
 		}
+		sum += nets[monthKey(m)]
+		n++
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
+	if n == 0 || sum <= 0 {
+		return nil
 	}
-	v := buildView(*updated, *acc)
-	return s.withRef(ctx, v)
+	return fptr(round2(sum / float64(n)))
 }
 
-// AccountAllocations — backs `GET /accounts/:id/saving-allocations`.
-// Verifies ownership, lists all active goals on the account, computes
-// allocated / unallocated split for the FE pie.
-func (s *Service) AccountAllocations(
-	ctx context.Context, userID, accountID uuid.UUID,
-) (*AccountAllocationsResponse, error) {
-	acc, err := s.store.VerifyAccountOwnership(ctx, s.store.Pool(), userID, accountID)
-	if err != nil {
-		return nil, err
-	}
-
-	rows, err := s.store.List(ctx, userID, ListFilter{
-		Status:    StatusActive,
-		AccountID: &accountID,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	out := AccountAllocationsResponse{
-		AccountID:      acc.ID,
-		AccountBalance: acc.Balance,
-		Currency:       acc.Currency,
-		ActiveGoals:    make([]AccountAllocationGoal, 0, len(rows)),
-	}
-
-	var sumPct float64
-	for _, g := range rows {
-		current := round2(acc.Balance * g.AllocationPct / 100)
-		out.ActiveGoals = append(out.ActiveGoals, AccountAllocationGoal{
-			ID:            g.ID,
-			Name:          g.Name,
-			AllocationPct: g.AllocationPct,
-			CurrentAmount: current,
-		})
-		sumPct += g.AllocationPct
-	}
-	out.AllocatedPct = round2(sumPct)
-	out.UnallocatedPct = round2(100 - sumPct)
-	out.UnallocatedAmount = round2(acc.Balance * out.UnallocatedPct / 100)
-	return &out, nil
+func monthsBetween(a, b time.Time) int {
+	return (b.Year()-a.Year())*12 + int(b.Month()) - int(a.Month())
 }
 
-// --- helpers ---
-
-func buildView(g SavingGoal, acc AccountSnapshot) SavingGoalView {
-	current := round2(acc.Balance * g.AllocationPct / 100)
-	progressPct := 0.0
+// goalView — the page-ready goal.
+func goalView(g *Goal, saved float64, nets map[string]float64, today time.Time, currency string) GoalView {
+	v := GoalView{
+		ID: g.ID, Name: g.Name, Description: g.Description, Note: g.Note, IconCode: g.IconCode,
+		TargetAmount: g.TargetAmount, Deadline: dstr(g.Deadline), State: g.Status, SavedAmount: round2(saved),
+		RemainingAmount: round2(math.Max(0, g.TargetAmount-saved)), Milestones: []Milestone{}, Currency: currency,
+		ClosedAt: g.ClosedAt, CreatedAt: g.CreatedAt, UpdatedAt: g.UpdatedAt, Pace: "none",
+	}
 	if g.TargetAmount > 0 {
-		progressPct = round2(current / g.TargetAmount * 100)
+		v.ProgressPct = int(math.Round(saved / g.TargetAmount * 100))
 	}
-	remaining := g.TargetAmount - current
-	if remaining < 0 {
-		remaining = 0
+	for _, p := range g.Milestones {
+		amt := round2(g.TargetAmount * float64(p) / 100)
+		v.Milestones = append(v.Milestones, Milestone{Pct: p, Amount: amt, Reached: saved >= amt-0.004})
 	}
-
-	v := SavingGoalView{
-		SavingGoal: g,
-		// LinkedAccount is completed by attachRefs (shared AccountRef, batch).
-		LinkedAccount:        shared.AccountRef{ID: acc.ID, Name: acc.Name, Currency: acc.Currency, Group: "asset"},
-		LinkedAccountBalance: acc.Balance,
-		Currency:             acc.Currency,
-		CurrentAmount:        current,
-		ProgressPct:          progressPct,
-		IsCompleted:          current >= g.TargetAmount,
-		RemainingAmount:      round2(remaining),
+	if g.Deadline != nil {
+		d := days(today, *g.Deadline)
+		v.DaysRemaining = &d
 	}
-	if g.Deadline != nil && *g.Deadline != "" {
-		if d, err := time.Parse("2006-01-02", *g.Deadline); err == nil {
-			days := int(time.Until(d).Hours() / 24)
-			v.DaysRemaining = &days
+	active := g.Status == StateActive
+	reached := saved >= g.TargetAmount-0.004
+	if active && !reached {
+		v.PaceMonthly = paceOf(nets, g.CreatedAt, today)
+		if g.Deadline != nil && !g.Deadline.Before(today) {
+			months := math.Max(1, float64(days(today, *g.Deadline))/daysPerMonth)
+			v.NeededMonthly = fptr(math.Ceil(v.RemainingAmount / months))
 		}
+		if v.PaceMonthly != nil {
+			eta := today.AddDate(0, int(math.Ceil(v.RemainingAmount / *v.PaceMonthly)), 0)
+			v.EtaDate = dstr(&eta)
+		}
+	}
+	switch {
+	case !active:
+	case reached:
+		v.Pace = "reached"
+	case g.Deadline == nil:
+	case v.EtaDate == nil:
+		v.Pace = "late"
+	default:
+		eta, _ := time.Parse(dateLayout, *v.EtaDate)
+		if eta.After(*g.Deadline) {
+			v.Pace = "late"
+			lm := monthsBetween(*g.Deadline, eta)
+			if lm < 1 {
+				lm = 1
+			}
+			v.LateMonths = &lm
+		} else {
+			v.Pace = "on_track"
+		}
+	}
+	empty := saved < 0.005
+	v.Actions = Actions{
+		Save: active, Withdraw: active && !empty, Move: active && !empty, Close: active,
+		Archive: g.Status != StateArchived && empty, Restore: g.Status != StateActive, Delete: empty,
 	}
 	return v
 }
 
-func round2(f float64) float64 {
-	return math.Round(f*100) / 100
-}
-
-// attachRefs replaces each view's linked_account with the shared AccountRef
-// (one query for the whole page).
-func (s *Service) attachRefs(ctx context.Context, views []SavingGoalView) error {
-	ids := make([]uuid.UUID, 0, len(views))
-	for _, v := range views {
-		ids = append(ids, v.LinkedAccountID)
+// shares — a bucket's balance per wallet, largest first.
+func (s *Service) shares(ctx context.Context, per map[uuid.UUID]float64) ([]WalletShare, float64, error) {
+	var total float64
+	ids := make([]uuid.UUID, 0, len(per))
+	for id, a := range per {
+		total += a
+		ids = append(ids, id)
 	}
-	refs, err := shared.LoadAccountRefs(ctx, s.store.Pool(), ids)
+	refs, err := shared.LoadAccountRefs(ctx, s.store.db, ids)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
-	for i := range views {
-		if r, ok := refs[views[i].LinkedAccountID]; ok {
-			views[i].LinkedAccount = r
+	out := []WalletShare{}
+	for id, a := range per {
+		if a < 0.005 {
+			continue
 		}
+		ws := WalletShare{Amount: round2(a)}
+		if r, ok := refs[id]; ok {
+			ws.Wallet = r
+		} else {
+			ws.Wallet = shared.AccountRef{ID: id}
+		}
+		if total > 0 {
+			ws.SharePct = int(math.Round(a / total * 100))
+		}
+		out = append(out, ws)
 	}
-	return nil
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Amount != out[j].Amount {
+			return out[i].Amount > out[j].Amount
+		}
+		return out[i].Wallet.ID.String() < out[j].Wallet.ID.String()
+	})
+	return out, round2(total), nil
 }
 
-func (s *Service) withRef(ctx context.Context, v SavingGoalView) (*SavingGoalView, error) {
-	one := []SavingGoalView{v}
-	if err := s.attachRefs(ctx, one); err != nil {
+func (s *Service) spare(ctx context.Context, q shared.Querier, userID uuid.UUID) (Spare, error) {
+	per, err := bucketBalances(ctx, q, userID, nil)
+	if err != nil {
+		return Spare{}, err
+	}
+	by, total, err := s.shares(ctx, per)
+	if err != nil {
+		return Spare{}, err
+	}
+	return Spare{Amount: total, ByWallet: by}, nil
+}
+
+// goalViews — page-ready goals (one balances + one nets query).
+func (s *Service) goalViews(ctx context.Context, userID uuid.UUID, goals []*Goal, today time.Time) ([]GoalView, error) {
+	out := make([]GoalView, 0, len(goals))
+	if len(goals) == 0 {
+		return out, nil
+	}
+	currency, err := s.store.userCurrency(ctx, userID)
+	if err != nil {
 		return nil, err
 	}
-	return &one[0], nil
+	ids := make([]uuid.UUID, len(goals))
+	for i, g := range goals {
+		ids[i] = g.ID
+	}
+	bals, err := shared.LoadSavingBalances(ctx, s.store.db, userID, `m.bucket = 'goal' AND m.goal_id = ANY($2)`, ids)
+	if err != nil {
+		return nil, err
+	}
+	saved := map[uuid.UUID]float64{}
+	for _, b := range bals {
+		saved[*b.GoalID] += b.Amount
+	}
+	nets, err := s.monthlyNets(ctx, s.store.db, userID, ids, false)
+	if err != nil {
+		return nil, err
+	}
+	for _, g := range goals {
+		out = append(out, goalView(g, saved[g.ID], nets[g.ID], today, currency))
+	}
+	return out, nil
+}
+
+// --- entries ---
+
+func (s *Service) entryViews(ctx context.Context, rows []*entryRow) ([]Entry, error) {
+	out := make([]Entry, 0, len(rows))
+	if len(rows) == 0 {
+		return out, nil
+	}
+	var accIDs, goalIDs, ids []uuid.UUID
+	for _, e := range rows {
+		accIDs = append(accIDs, e.AccountID)
+		ids = append(ids, e.ID)
+		for _, g := range []*uuid.UUID{e.FromGoalID, e.ToGoalID} {
+			if g != nil {
+				goalIDs = append(goalIDs, *g)
+			}
+		}
+	}
+	accs, err := shared.LoadAccountRefs(ctx, s.store.db, accIDs)
+	if err != nil {
+		return nil, err
+	}
+	goals, err := shared.LoadSavingGoalRefs(ctx, s.store.db, goalIDs)
+	if err != nil {
+		return nil, err
+	}
+	links := map[uuid.UUID]shared.RecurringItemLink{}
+	q, err := s.store.db.Query(ctx, `SELECT ri.saving_entry_id, ri.id, ri.seq, r.id, r.name, r.icon_code, r.total_count
+		FROM recurring_items ri LEFT JOIN recurring_rules r ON r.id = ri.rule_id WHERE ri.saving_entry_id = ANY($1)`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("entry links: %w", err)
+	}
+	for q.Next() {
+		var (
+			eid, iid uuid.UUID
+			seq, tot *int32
+			rid      *uuid.UUID
+			name     *string
+			icon     []byte
+			l        shared.RecurringItemLink
+			intOrNil = func(p *int32) *int {
+				if p == nil {
+					return nil
+				}
+				v := int(*p)
+				return &v
+			}
+		)
+		if err := q.Scan(&eid, &iid, &seq, &rid, &name, &icon, &tot); err != nil {
+			q.Close()
+			return nil, err
+		}
+		l.ItemID, l.Seq, l.Total = iid, intOrNil(seq), intOrNil(tot)
+		if rid != nil && name != nil {
+			l.Recurring = &shared.RecurringRef{ID: *rid, Name: *name, IconCode: shared.IconFromJSON(icon)}
+		}
+		links[eid] = l
+	}
+	q.Close()
+	bucket := func(b string, goal *uuid.UUID, acc shared.AccountRef) BucketRef {
+		switch b {
+		case BucketAvailable:
+			name := acc.Name
+			id := acc.ID
+			return BucketRef{Type: "wallet", ID: &id, Name: &name, IconCode: acc.IconCode}
+		case BucketSpare:
+			return BucketRef{Type: BucketSpare}
+		}
+		r := BucketRef{Type: BucketGoal}
+		if goal != nil {
+			if g, ok := goals[*goal]; ok {
+				id, name := g.ID, g.Name
+				r.ID, r.Name, r.IconCode = &id, &name, g.IconCode
+			}
+		}
+		return r
+	}
+	for _, e := range rows {
+		acc, ok := accs[e.AccountID]
+		if !ok {
+			acc = shared.AccountRef{ID: e.AccountID}
+		}
+		v := Entry{
+			ID: e.ID, GroupID: e.GroupID, Kind: e.Kind, Date: e.Date.Format(dateLayout), Note: e.Note, Wallet: acc,
+			Amount: round2(e.Amount), From: bucket(e.FromBucket, e.FromGoalID, acc), To: bucket(e.ToBucket, e.ToGoalID, acc),
+			Source: e.Source, GoalIDs: []uuid.UUID{}, CreatedAt: e.CreatedAt,
+		}
+		for _, g := range []*uuid.UUID{e.FromGoalID, e.ToGoalID} {
+			if g != nil {
+				v.GoalIDs = append(v.GoalIDs, *g)
+			}
+		}
+		if l, ok := links[e.ID]; ok {
+			v.Recurring = &l
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// entryPage — entries matching where (newest first), one page.
+func (s *Service) entryPage(ctx context.Context, userID uuid.UUID, where string, page, perPage int, args ...any) (EntryList, error) {
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 || perPage > 100 {
+		perPage = entriesPerPage
+	}
+	var total int
+	if err := s.store.db.QueryRow(ctx, `SELECT COUNT(*) FROM saving_entries WHERE user_id = $1 `+where,
+		append([]any{userID}, args...)...).Scan(&total); err != nil {
+		return EntryList{}, err
+	}
+	n := len(args)
+	rows, err := s.store.listEntries(ctx, s.store.db, userID, where+fmt.Sprintf(
+		` ORDER BY date DESC, created_at DESC, id LIMIT $%d OFFSET $%d`, n+2, n+3),
+		append(args, perPage, (page-1)*perPage)...)
+	if err != nil {
+		return EntryList{}, err
+	}
+	data, err := s.entryViews(ctx, rows)
+	if err != nil {
+		return EntryList{}, err
+	}
+	return EntryList{Data: data, Pagination: shared.NewPage(page, perPage, total)}, nil
+}
+
+const (
+	whereGoal  = `AND (from_goal_id = $2 OR to_goal_id = $2)`
+	whereSpare = `AND (from_bucket = 'spare' OR to_bucket = 'spare')`
+)
+
+// Entries — GET /saving-entries.
+func (s *Service) Entries(ctx context.Context, userID uuid.UUID, goalID *uuid.UUID, spare bool, accountID *uuid.UUID, page, perPage int) (*EntryList, error) {
+	var (
+		where string
+		args  []any
+	)
+	switch {
+	case goalID != nil:
+		where, args = whereGoal, []any{*goalID}
+	case spare:
+		where = whereSpare
+	case accountID != nil:
+		where, args = `AND account_id = $2`, []any{*accountID}
+	}
+	out, err := s.entryPage(ctx, userID, where, page, perPage, args...)
+	return &out, err
+}
+
+// --- reads ---
+
+func (s *Service) List(ctx context.Context, userID uuid.UUID, status string) (*GoalList, error) {
+	today, err := s.today(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if status == "" {
+		status = StateActive
+	}
+	order := `ORDER BY created_at, id`
+	if status != StateActive {
+		order = `ORDER BY COALESCE(closed_at, updated_at) DESC, id`
+	}
+	goals, err := s.store.listGoals(ctx, s.store.db, userID, `AND status = $2 `+order, status)
+	if err != nil {
+		return nil, err
+	}
+	out := &GoalList{Data: []GoalView{}}
+	if out.Data, err = s.goalViews(ctx, userID, goals, today); err != nil {
+		return nil, err
+	}
+	if out.Spare, err = s.spare(ctx, s.store.db, userID); err != nil {
+		return nil, err
+	}
+	t, err := shared.LoadSavingTotals(ctx, s.store.db, userID)
+	if err != nil {
+		return nil, err
+	}
+	if out.Summary.Currency, err = s.store.userCurrency(ctx, userID); err != nil {
+		return nil, err
+	}
+	out.Summary.Saved, out.Summary.InGoals, out.Summary.Spare = t.Saved, t.InGoals, t.Spare
+	return out, nil
+}
+
+func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int) (*GoalDetail, error) {
+	today, err := s.today(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	g, err := s.store.getGoal(ctx, s.store.db, userID, id, false)
+	if err != nil {
+		return nil, err
+	}
+	views, err := s.goalViews(ctx, userID, []*Goal{g}, today)
+	if err != nil {
+		return nil, err
+	}
+	out := &GoalDetail{Goal: views[0], AutoSave: []AutoSave{}}
+	per, err := bucketBalances(ctx, s.store.db, userID, &g.ID)
+	if err != nil {
+		return nil, err
+	}
+	if out.ByWallet, _, err = s.shares(ctx, per); err != nil {
+		return nil, err
+	}
+	nets, err := s.monthlyNets(ctx, s.store.db, userID, []uuid.UUID{g.ID}, false)
+	if err != nil {
+		return nil, err
+	}
+	out.History = history(nets[g.ID], g.CreatedAt, today)
+	if s.autoSave != nil {
+		if out.AutoSave, err = s.autoSave(ctx, userID, &g.ID); err != nil {
+			return nil, err
+		}
+	}
+	if out.Entries, err = s.entryPage(ctx, userID, whereGoal, 1, perPage, g.ID); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Spare — GET /saving-goals/spare.
+func (s *Service) Spare(ctx context.Context, userID uuid.UUID, perPage int) (*SpareDetail, error) {
+	today, err := s.today(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := &SpareDetail{AutoSave: []AutoSave{}}
+	if out.Spare, err = s.spare(ctx, s.store.db, userID); err != nil {
+		return nil, err
+	}
+	nets, err := s.monthlyNets(ctx, s.store.db, userID, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	out.History = history(nets[uuid.Nil], today, today)
+	if s.autoSave != nil {
+		if out.AutoSave, err = s.autoSave(ctx, userID, nil); err != nil {
+			return nil, err
+		}
+	}
+	if out.Entries, err = s.entryPage(ctx, userID, whereSpare, 1, perPage); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Totals — Home / More (shared).
+func (s *Service) Totals(ctx context.Context, userID uuid.UUID) (*shared.SavingTotals, error) {
+	return shared.LoadSavingTotals(ctx, s.store.db, userID)
 }

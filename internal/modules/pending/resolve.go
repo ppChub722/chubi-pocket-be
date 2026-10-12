@@ -16,6 +16,7 @@ const (
 	missingTags       = "tag_ids"
 	missingProject    = "project_id"
 	missingContact    = "contact_id"
+	missingGoal       = "goal_id"
 )
 
 // ResolveDrafts resolves the ids of every draft with ONE query per kind
@@ -23,8 +24,11 @@ const (
 // drafts. out[i] belongs to drafts[i]. A dangling id is null in the result
 // and its draft key is listed in Missing.
 func ResolveDrafts(ctx context.Context, q shared.Querier, userID uuid.UUID, drafts []Draft) ([]DraftResolved, error) {
-	var accIDs, catIDs, eventIDs, tagIDs, contactIDs []uuid.UUID
+	var accIDs, catIDs, eventIDs, tagIDs, contactIDs, goalIDs []uuid.UUID
 	for _, d := range drafts {
+		if d.GoalID != nil {
+			goalIDs = append(goalIDs, *d.GoalID)
+		}
 		if d.AccountID != nil {
 			accIDs = append(accIDs, *d.AccountID)
 		}
@@ -61,6 +65,10 @@ func ResolveDrafts(ctx context.Context, q shared.Querier, userID uuid.UUID, draf
 		return nil, err
 	}
 	persons, err := shared.LoadPersons(ctx, q, userID, contactIDs)
+	if err != nil {
+		return nil, err
+	}
+	goals, err := shared.LoadSavingGoalRefs(ctx, q, goalIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +129,13 @@ func ResolveDrafts(ctx context.Context, q shared.Querier, userID uuid.UUID, draf
 		}
 		if contactGone {
 			r.Missing = append(r.Missing, missingContact)
+		}
+		if d.GoalID != nil {
+			if g, ok := goals[*d.GoalID]; ok {
+				r.Goal = &g
+			} else {
+				r.Missing = append(r.Missing, missingGoal)
+			}
 		}
 		out[i] = r
 	}

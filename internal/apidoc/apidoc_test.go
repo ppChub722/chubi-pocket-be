@@ -73,8 +73,11 @@ func TestSpecIsValidEnough(t *testing.T) {
 		if params, ok := ops["parameters"].([]any); ok {
 			for _, p := range params {
 				if m, ok := p.(map[string]any); ok {
-					if ref, ok := m["$ref"].(string); ok && ref == "#/components/parameters/IdPath" {
-						shared["id"] = true
+					if ref, ok := m["$ref"].(string); ok && strings.HasPrefix(ref, "#/components/parameters/") {
+						name := strings.TrimPrefix(ref, "#/components/parameters/")
+						if p, ok := doc["components"].(map[string]any)["parameters"].(map[string]any)[name].(map[string]any); ok && p["in"] == "path" {
+							m = p
+						}
 					}
 					if m["in"] == "path" {
 						shared[m["name"].(string)] = true

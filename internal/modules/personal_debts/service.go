@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -24,209 +25,470 @@ func NewService(store *Store, txs *transactions.Service) *Service {
 	return &Service{store: store, txs: txs}
 }
 
-func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateRequest) (*PersonalDebt, error) {
-	d, err := s.store.Create(ctx, userID, req)
+func clampPage(page, perPage, dflt int) (int, int) {
+	if page <= 0 {
+		page = 1
+	}
+	if perPage <= 0 {
+		perPage = dflt
+	}
+	if perPage > 100 {
+		perPage = 100
+	}
+	return page, perPage
+}
+
+// --- reads ---
+
+// People — GET /personal-debts/people: one page of people + the totals.
+func (s *Service) People(ctx context.Context, userID uuid.UUID, f PeopleFilter) (*PeopleList, error) {
+	f.Page, f.PerPage = clampPage(f.Page, f.PerPage, 30)
+	rows, total, err := s.store.listPeople(ctx, userID, f)
 	if err != nil {
 		return nil, err
 	}
-	return d, s.fillPersons(ctx, userID, d)
-}
-
-func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*PersonalDebt, error) {
-	d, err := s.store.GetByID(ctx, userID, id)
+	totals, err := s.store.totals(ctx, s.store.db, userID)
 	if err != nil {
 		return nil, err
 	}
-	return d, s.fillPersons(ctx, userID, d)
+	return &PeopleList{Data: rows, Totals: totals, Pagination: shared.NewPage(f.Page, f.PerPage, total)}, nil
 }
 
-func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*ListResponse, error) {
-	if f.Page <= 0 {
-		f.Page = 1
-	}
-	if f.PerPage <= 0 {
-		f.PerPage = 20
-	}
-	if f.PerPage > 100 {
-		f.PerPage = 100
-	}
-	rows, total, err := s.store.List(ctx, userID, f)
+// Totals — the debts tile numbers (dashboard, /me/counts).
+func (s *Service) Totals(ctx context.Context, userID uuid.UUID) (DebtTotals, error) {
+	return s.store.totals(ctx, s.store.db, userID)
+}
+
+// Person — GET /personal-debts/people/:key.
+func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey string, page, perPage int) (*PersonPage, error) {
+	k, err := shared.ParseDebtKey(rawKey)
 	if err != nil {
 		return nil, err
 	}
-	ptrs := make([]*PersonalDebt, len(rows))
-	for i := range rows {
-		ptrs[i] = &rows[i].PersonalDebt
-	}
-	if err := s.fillPersons(ctx, userID, ptrs...); err != nil {
-		return nil, err
-	}
-	totalPages := (total + f.PerPage - 1) / f.PerPage
-	if totalPages == 0 {
-		totalPages = 1
-	}
-	return &ListResponse{
-		Data: rows,
-		Pagination: Pagination{
-			Page: f.Page, PerPage: f.PerPage, Total: total, TotalPages: totalPages,
-		},
-	}, nil
-}
-
-func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (*PersonalDebt, error) {
-	d, err := s.store.Update(ctx, userID, id, req)
+	bal, found, err := s.store.personBalance(ctx, s.store.db, userID, k)
 	if err != nil {
 		return nil, err
 	}
-	return d, s.fillPersons(ctx, userID, d)
-}
-
-func (s *Service) Cancel(ctx context.Context, userID, id uuid.UUID) (*PersonalDebt, error) {
-	d, err := s.store.Cancel(ctx, userID, id)
+	if !found {
+		if k.ContactID == nil || bal.Person.ContactID == nil {
+			return nil, ErrPersonNotFound
+		}
+	}
+	page, perPage = clampPage(page, perPage, 30)
+	items, total, err := s.store.listEntries(ctx, userID, k.Key(), EntryFilter{Page: page, PerPage: perPage})
 	if err != nil {
 		return nil, err
 	}
-	return d, s.fillPersons(ctx, userID, d)
+	counts, err := s.store.entryCounts(ctx, userID, k.Key())
+	if err != nil {
+		return nil, err
+	}
+	return &PersonPage{DebtPerson: bal, Counts: counts, Items: items, Pagination: shared.NewPage(page, perPage, total)}, nil
 }
 
-func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
-	return s.store.Delete(ctx, userID, id)
+// Entries — GET /personal-debts/people/:key/entries.
+func (s *Service) Entries(ctx context.Context, userID uuid.UUID, rawKey string, f EntryFilter) (*EntryList, error) {
+	k, err := shared.ParseDebtKey(rawKey)
+	if err != nil {
+		return nil, err
+	}
+	f.Page, f.PerPage = clampPage(f.Page, f.PerPage, 30)
+	items, total, err := s.store.listEntries(ctx, userID, k.Key(), f)
+	if err != nil {
+		return nil, err
+	}
+	return &EntryList{Data: items, Pagination: shared.NewPage(f.Page, f.PerPage, total)}, nil
 }
 
-// SettleResult bundles the resulting transaction (if any) and the
-// updated debt row.
-type SettleResult struct {
-	Transaction any           `json:"transaction,omitempty"` // *transactions.TransactionDetail or nil
-	Debt        *PersonalDebt `json:"debt"`
-	// Post-commit balances of the wallets the payment moved (none: []).
-	AccountBalances []shared.WalletBalance `json:"account_balances"`
+// GetEntry — GET /personal-debts/:id (the tx-detail page in debt mode).
+func (s *Service) GetEntry(ctx context.Context, userID, id uuid.UUID) (*EntryDetail, error) {
+	v, err := entryView(ctx, s.store.db, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	bal, err := s.balanceOfKey(ctx, s.store.db, userID, v.Key)
+	if err != nil {
+		return nil, err
+	}
+	out := &EntryDetail{Entry: *v, PersonBalance: bal}
+	if v.Transaction != nil {
+		if out.Transaction, err = s.txs.Get(ctx, userID, v.Transaction.ID); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
-// Settle records a settlement event: always a transaction (income for
-// owed_to_me, expense for i_owe) — into req.AccountID, or a floating row
-// when it's nil — and the debt's settled_amount is bumped by the auto-bump
-// hook. Forgiveness / write-offs use Cancel instead.
-func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID, req SettleRequest) (*SettleResult, error) {
+func (s *Service) balanceOfKey(ctx context.Context, q shared.Querier, userID uuid.UUID, key string) (DebtPerson, error) {
+	k, err := shared.ParseDebtKey(key)
+	if err != nil {
+		return DebtPerson{}, err
+	}
+	bal, _, err := s.store.personBalance(ctx, q, userID, k)
+	return bal, err
+}
+
+// --- writes ---
+
+func today(ctx context.Context, tx pgx.Tx) (string, error) {
+	var d string
+	err := tx.QueryRow(ctx, `SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD')`).Scan(&d)
+	return d, err
+}
+
+// resolvePerson — the (contact, typed name) a key stands for. A contact must
+// be the caller's; a typed name takes personName when given (the shown
+// spelling), else the key's text.
+func resolvePerson(ctx context.Context, q querier, userID uuid.UUID, rawKey string, personName *string) (*uuid.UUID, string, error) {
+	k, err := shared.ParseDebtKey(rawKey)
+	if err != nil {
+		return nil, "", err
+	}
+	if k.ContactID != nil {
+		var name string
+		err := q.QueryRow(ctx, `SELECT display_name FROM contacts WHERE id = $1 AND user_id = $2`,
+			*k.ContactID, userID).Scan(&name)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, "", ErrContactNotFound
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("contact: %w", err)
+		}
+		return k.ContactID, name, nil
+	}
+	name := k.Name
+	if personName != nil && strings.EqualFold(strings.TrimSpace(*personName), k.Name) {
+		name = strings.TrimSpace(*personName)
+	}
+	return nil, name, nil
+}
+
+// CreateEntry — POST /personal-debts/people/:key/entries.
+func (s *Service) CreateEntry(ctx context.Context, userID uuid.UUID, rawKey string, req CreateEntryRequest) (*WriteResult, error) {
+	if len(req.TagIDs) > 0 && req.AccountID == nil {
+		return nil, ErrTagsNeedWallet
+	}
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	current, err := s.store.GetByID(ctx, userID, id)
+	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
 	if err != nil {
 		return nil, err
 	}
-	if current.Status == StatusSettled {
-		return nil, ErrAlreadySettled
+	date := ""
+	if req.Date != nil {
+		date = *req.Date
+	} else if date, err = today(ctx, tx); err != nil {
+		return nil, err
 	}
-	if current.Status == StatusCancelled {
-		return nil, ErrAlreadyCancelled
-	}
-
-	outstanding := current.Amount - current.SettledAmount
-	if outstanding <= 0.005 {
-		return nil, ErrDebtOverpaid
-	}
-	amount := outstanding
-	if req.Amount != nil {
-		amount = *req.Amount
-	}
-	if amount <= 0 {
-		return nil, errors.New("amount must be > 0")
-	}
-	if amount > outstanding {
-		return nil, ErrOverpayment
-	}
-
-	date := req.Date
-	if date == nil {
-		var today string
-		if err := tx.QueryRow(ctx, `SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD')`).Scan(&today); err != nil {
-			return nil, fmt.Errorf("today: %w", err)
-		}
-		date = &today
-	}
-
-	// Always a real transaction (owner decision 2026-10-08): into the
-	// chosen wallet, or a floating row when none — the debt is settled by
-	// the auto-bump hook either way. i_owe → expense, owed_to_me → income.
-	var txType transactions.TxType
-	switch current.Direction {
-	case DirectionIOwe:
-		txType = transactions.TypeExpense
-	case DirectionOwedToMe:
-		txType = transactions.TypeIncome
-	default:
-		return nil, fmt.Errorf("unknown direction: %s", current.Direction)
-	}
-	description := req.Description
-	if description == nil {
-		description = current.Description
-	}
-	created, err := s.txs.CreateInTxWithSourceDebt(ctx, tx, userID, id, transactions.CreateRequest{
-		Type:        txType,
-		AccountID:   req.AccountID,
-		Amount:      amount,
-		Date:        *date,
-		Description: description,
-		Note:        req.Note,
+	e, err := insertEntryTx(ctx, tx, &Entry{
+		UserID: userID, Direction: req.Direction, ContactID: contactID, PersonName: name,
+		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note,
 	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Linked split → tell the other side (split_flow.go).
-	if err := s.afterSettleTx(ctx, tx, current, amount, *date); err != nil {
+	var touched []uuid.UUID
+	if req.AccountID != nil {
+		if _, err := s.txs.CreateDebtTxInTx(ctx, tx, userID, e.ID, transactions.DebtTxInput{
+			Direction: e.Direction, AccountID: *req.AccountID, Amount: e.Amount, Date: e.Date,
+			Description: e.Description, Note: e.Note, TagIDs: req.TagIDs,
+		}); err != nil {
+			return nil, err
+		}
+		touched = append(touched, *req.AccountID)
+	}
+	if err := markPaidTx(ctx, tx, userID, e.Key(), req.MarkPaidIDs); err != nil {
 		return nil, err
 	}
-
-	updated, err := getAnyDebtTx(ctx, tx, id) // in-tx: sees the settle
-	if err != nil {
-		return nil, err
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	if err := s.fillPersons(ctx, userID, updated); err != nil {
+	return s.writeResult(ctx, userID, e.ID, touched, nil)
+}
+
+// markPaidTx labels ids (entries of the person key) paid.
+func markPaidTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, key string, ids []uuid.UUID) error {
+	ids = uniqueIDs(ids)
+	if len(ids) == 0 {
+		return nil
+	}
+	tag, err := tx.Exec(ctx, `UPDATE personal_debts SET paid = TRUE, updated_by_user_id = $1
+		WHERE user_id = $1 AND id = ANY($2) AND `+shared.DebtKeySQL("personal_debts")+` = $3`, userID, ids, key)
+	if err != nil {
+		return fmt.Errorf("mark paid: %w", err)
+	}
+	if int(tag.RowsAffected()) != len(ids) {
+		return ErrMarkPaidNotFound
+	}
+	return nil
+}
+
+func uniqueIDs(ids []uuid.UUID) []uuid.UUID {
+	seen := map[uuid.UUID]bool{}
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// writeResult — the final state after a committed write.
+func (s *Service) writeResult(ctx context.Context, userID, entryID uuid.UUID, touched []uuid.UUID, previousKey *string) (*WriteResult, error) {
+	v, err := entryView(ctx, s.store.db, userID, entryID)
+	if err != nil {
+		return nil, err
+	}
+	out := &WriteResult{Entry: *v}
+	if out.PersonBalance, err = s.balanceOfKey(ctx, s.store.db, userID, v.Key); err != nil {
+		return nil, err
+	}
+	if previousKey != nil && *previousKey != v.Key {
+		prev, err := s.balanceOfKey(ctx, s.store.db, userID, *previousKey)
+		if err != nil {
+			return nil, err
+		}
+		out.PreviousPersonBalance = &prev
+	}
+	if v.Transaction != nil {
+		if out.Transaction, err = s.txs.Get(ctx, userID, v.Transaction.ID); err != nil {
+			return nil, err
+		}
+	}
+	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.store.db, touched); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// UpdateEntry — PUT /personal-debts/:id. The entry and its wallet
+// transaction are one record: every money / text change is written to both.
+func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req UpdateEntryRequest) (*WriteResult, error) {
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	e, err := getEntry(ctx, tx, userID, id, true)
+	if err != nil {
+		return nil, err
+	}
+	if e.SourceKind != nil && req.moneyChange() {
+		return nil, ErrManagedBySource
+	}
+	prevKey := e.Key()
+	next := *e
+	if req.Direction != nil {
+		next.Direction = *req.Direction
+	}
+	if req.Amount != nil {
+		next.Amount = *req.Amount
+	}
+	if req.Date != nil {
+		next.Date = *req.Date
+	}
+	if req.has("description") {
+		next.Description = shared.CleanText(req.Description)
+	}
+	if req.has("note") {
+		next.Note = shared.CleanText(req.Note)
+	}
+	if req.Paid != nil {
+		next.Paid = *req.Paid
+	}
+	if req.Key != nil {
+		if next.ContactID, next.PersonName, err = resolvePerson(ctx, tx, userID, *req.Key, req.PersonName); err != nil {
+			return nil, err
+		}
+	} else if req.PersonName != nil && e.ContactID == nil && strings.EqualFold(strings.TrimSpace(*req.PersonName), strings.TrimSpace(e.PersonName)) {
+		next.PersonName = strings.TrimSpace(*req.PersonName) // a respelling of the same typed name
+	}
+
+	// The wallet: present null = ledger-only; a value = create / move.
+	txID, err := entryTxID(ctx, tx, e.ID)
+	if err != nil {
+		return nil, err
+	}
+	var wallet *uuid.UUID
+	if txID != nil {
+		if err := tx.QueryRow(ctx, `SELECT account_id FROM transactions WHERE id = $1`, *txID).Scan(&wallet); err != nil {
+			return nil, fmt.Errorf("entry wallet: %w", err)
+		}
+	}
+	walletChange := req.has("account_id")
+	if walletChange {
+		wallet = req.AccountID
+	}
+	if req.has("tag_ids") && len(req.TagIDs) > 0 && wallet == nil {
+		return nil, ErrTagsNeedWallet
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE personal_debts
+		SET direction = $2, amount = $3, date = $4::date, description = $5, note = $6, paid = $7,
+		    counterparty_contact_id = $8, counterparty_person_name = $9, updated_by_user_id = $10
+		WHERE id = $1`, e.ID, next.Direction, next.Amount, next.Date, next.Description, next.Note,
+		next.Paid, next.ContactID, next.PersonName, userID); err != nil {
+		return nil, fmt.Errorf("update entry: %w", err)
+	}
+
+	var touched []uuid.UUID
+	in := transactions.DebtTxInput{
+		Direction: next.Direction, Amount: next.Amount, Date: next.Date,
+		Description: next.Description, Note: next.Note, TagIDs: req.TagIDs, TagsSet: req.has("tag_ids"),
+	}
+	switch {
+	case txID != nil && wallet == nil:
+		acc, err := s.txs.DeleteDebtTxInTx(ctx, tx, userID, *txID)
+		if err != nil {
+			return nil, err
+		}
+		touched = nonNil(acc)
+	case txID != nil && e.SourceKind == nil:
+		in.AccountID = *wallet
+		if touched, err = s.txs.SyncDebtTxInTx(ctx, tx, userID, *txID, in); err != nil {
+			return nil, err
+		}
+	case txID == nil && wallet != nil:
+		in.AccountID = *wallet
+		if _, err := s.txs.CreateDebtTxInTx(ctx, tx, userID, e.ID, in); err != nil {
+			return nil, err
+		}
+		touched = []uuid.UUID{*wallet}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.writeResult(ctx, userID, e.ID, touched, &prevKey)
+}
+
+func nonNil(id *uuid.UUID) []uuid.UUID {
+	if id == nil {
+		return nil
+	}
+	return []uuid.UUID{*id}
+}
+
+// DeleteEntry — DELETE /personal-debts/:id: the entry and its wallet
+// transaction (the money comes back). A split on my bill is taken off the
+// bill (the linked partner hears "removed", like a split edit).
+func (s *Service) DeleteEntry(ctx context.Context, userID, id uuid.UUID) (*DeleteResult, error) {
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	e, err := getEntry(ctx, tx, userID, id, true)
+	if err != nil {
+		return nil, err
+	}
+	txID, err := entryTxID(ctx, tx, e.ID)
+	if err != nil {
 		return nil, err
 	}
 	var touched []uuid.UUID
-	if req.AccountID != nil {
-		touched = append(touched, *req.AccountID)
+	if txID != nil {
+		acc, err := s.txs.DeleteDebtTxInTx(ctx, tx, userID, *txID)
+		if err != nil {
+			return nil, err
+		}
+		touched = nonNil(acc)
 	}
-	balances, err := shared.LoadWalletBalances(ctx, s.store.Pool(), touched)
+	if e.SourceKind != nil && *e.SourceKind == SourceTransaction {
+		if err := s.notifySplitChangeTx(ctx, tx, e, 0, notifications.SplitChangeRemoved); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM personal_debts WHERE id = $1`, e.ID); err != nil {
+		return nil, fmt.Errorf("delete entry: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	out := &DeleteResult{ID: e.ID, TransactionID: txID}
+	if out.PersonBalance, err = s.balanceOfKey(ctx, s.store.db, userID, e.Key()); err != nil {
+		return nil, err
+	}
+	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.store.db, touched); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RepayEntry — a new entry with targetID's person in the opposite direction
+// (paying it back), into accountID (nil = ledger-only). The pending
+// settle_debt draft submits through it.
+func (s *Service) RepayEntry(ctx context.Context, userID, targetID uuid.UUID, amount float64, accountID *uuid.UUID,
+	date, description, note *string) (*WriteResult, error) {
+	e, err := getEntry(ctx, s.store.db, userID, targetID, false)
 	if err != nil {
 		return nil, err
 	}
-	return &SettleResult{Transaction: created, Debt: updated, AccountBalances: balances}, nil
+	name := e.PersonName
+	return s.CreateEntry(ctx, userID, e.Key(), CreateEntryRequest{
+		Direction: opposite(e.Direction), Amount: amount, Date: date, AccountID: accountID,
+		Description: description, Note: note, PersonName: &name,
+	})
 }
 
-func (s *Service) People(ctx context.Context, userID uuid.UUID) (*PeopleResponse, error) {
-	rows, totalOwed, totalIOwe, err := s.store.People(ctx, userID)
+// --- transactions.DebtLinks (the wallet side was edited / deleted) ---
+
+// TxEditedTx copies an edited wallet transaction onto its entry.
+func (s *Service) TxEditedTx(ctx context.Context, tx pgx.Tx, userID, entryID uuid.UUID, row *transactions.Transaction) error {
+	_, err := tx.Exec(ctx, `UPDATE personal_debts
+		SET amount = $3, date = $4::date, description = $5, note = $6, updated_by_user_id = $2
+		WHERE id = $1 AND user_id = $2`, entryID, userID, row.Amount, row.Date, row.Description, row.Note)
+	if err != nil {
+		return fmt.Errorf("sync entry: %w", err)
+	}
+	return nil
+}
+
+// TxDeletedTx deletes the entry of a deleted wallet transaction.
+func (s *Service) TxDeletedTx(ctx context.Context, tx pgx.Tx, userID, entryID uuid.UUID) (string, error) {
+	e, err := getEntry(ctx, tx, userID, entryID, true)
+	if errors.Is(err, ErrEntryNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM personal_debts WHERE id = $1`, entryID); err != nil {
+		return "", fmt.Errorf("delete entry: %w", err)
+	}
+	return e.Key(), nil
+}
+
+func (s *Service) PersonBalanceByEntry(ctx context.Context, userID, entryID uuid.UUID) (any, error) {
+	e, err := getEntry(ctx, s.store.db, userID, entryID, false)
 	if err != nil {
 		return nil, err
 	}
-	return &PeopleResponse{
-		Data:          rows,
-		TotalOwedToMe: totalOwed,
-		TotalIOwe:     totalIOwe,
-		NetPosition:   totalOwed - totalIOwe,
-		Currency:      "THB", // 1c+ multi-currency
-	}, nil
+	return s.balanceOfKey(ctx, s.store.db, userID, e.Key())
 }
 
-// --- Hooks for transactions module ---
+func (s *Service) PersonBalanceByKey(ctx context.Context, userID uuid.UUID, key string) (any, error) {
+	if key == "" {
+		return nil, nil
+	}
+	return s.balanceOfKey(ctx, s.store.db, userID, key)
+}
 
-// CreateForTransactionTx is called by transactions.Service when a
-// transaction is created with a `splits` array. Inserts one debt row
-// per split entry on the splitter's side, plus a mirror row for linked
-// contacts. Direction follows the parent type:
-//   - expense — splitter fronted money: counterparties owe them
-//     (splitter 'owed_to_me', mirror 'i_owe')
-//   - income  — splitter received money that partly belongs to others
-//     (splitter 'i_owe', mirror 'owed_to_me')
+var _ transactions.DebtLinks = (*Service)(nil)
+
+// --- splits (hooks for the transactions module) ---
+
+// CreateForTransactionTx is called by transactions.Service when a bill is
+// created with `splits`: one split entry per person on the splitter's side
+// (expense → paid: they owe me; income → received: I owe them), plus the
+// linked partner's side per their notification flags (split_flow.go).
 func (s *Service) CreateForTransactionTx(
 	ctx context.Context, tx pgx.Tx,
 	parentTxID, userID uuid.UUID,
@@ -236,13 +498,13 @@ func (s *Service) CreateForTransactionTx(
 	if len(inputs) == 0 {
 		return nil
 	}
-	splitterDir := DirectionOwedToMe
+	direction := DirectionPaid
 	if parentType == "income" {
-		splitterDir = DirectionIOwe
+		direction = DirectionReceived
 	}
 	// Every split contact must be one of the splitter's own contacts —
 	// otherwise a foreign contact id would mirror a debt into a stranger's
-	// account (step 2 below). Reject the whole transaction.
+	// account. Reject the whole transaction.
 	for i := range inputs {
 		if err := assertContactOwned(ctx, tx, userID, inputs[i].ContactID); err != nil {
 			if errors.Is(err, ErrContactNotFound) {
@@ -251,31 +513,23 @@ func (s *Service) CreateForTransactionTx(
 			return err
 		}
 	}
+	var date string
+	if err := tx.QueryRow(ctx, `SELECT to_char(date, 'YYYY-MM-DD') FROM transactions WHERE id = $1`, parentTxID).Scan(&date); err != nil {
+		return fmt.Errorf("bill date: %w", err)
+	}
+	kind := SourceTransaction
 	for i := range inputs {
 		in := inputs[i]
-		// 1. Splitter's side — always created.
-		splitterDebt, err := s.store.CreateAttachedTx(ctx, tx, userID, splitterDir,
-			in.ContactID, in.PersonName,
-			&parentTxID, nil, nil,
-			in.OwedAmount, parentCurrency, parentDescription, nil,
-		)
+		splitter, err := insertEntryTx(ctx, tx, &Entry{
+			UserID: userID, Direction: direction, ContactID: in.ContactID, PersonName: in.PersonName,
+			SourceTransactionID: &parentTxID, Amount: in.OwedAmount, Currency: parentCurrency,
+			Date: date, SourceKind: &kind, Description: parentDescription,
+		})
 		if err != nil {
 			return err
 		}
-
-		// 2. Partner's side — only if contact is linked.
-		if in.ContactID != nil {
-			var linkedUserID *uuid.UUID
-			if err := tx.QueryRow(ctx,
-				`SELECT linked_user_id FROM contacts WHERE id = $1 AND user_id = $2`,
-				*in.ContactID, userID).Scan(&linkedUserID); err != nil {
-				continue // contact missing or not linked
-			}
-			if linkedUserID == nil || *linkedUserID == userID {
-				continue
-			}
-			// Mirror + split_created per both users' flags (split_flow.go).
-			if err := s.splitToPartnerTx(ctx, tx, splitterDebt, *linkedUserID, parentTxID); err != nil {
+		if partner := linkedPartnerTx(ctx, tx, splitter); partner != nil {
+			if err := s.splitToPartnerTx(ctx, tx, splitter, *partner, parentTxID); err != nil {
 				return err
 			}
 		}
@@ -283,76 +537,10 @@ func (s *Service) CreateForTransactionTx(
 	return nil
 }
 
-// AutoBumpInTx is the hook the transactions module calls when a transaction
-// with `source_personal_debt_id` lands. Bumps that debt's settled_amount.
-func (s *Service) AutoBumpInTx(
-	ctx context.Context, tx pgx.Tx, userID, debtID uuid.UUID, delta float64,
-) error {
-	return s.store.AutoBumpInTx(ctx, tx, userID, debtID, delta)
-}
-
-// AdjustSettledInTx — the transactions.DebtSettledAdjuster hook: a
-// repayment row was edited (delta = new − old), deleted or unlinked
-// (delta = −amount). Repaid is floored at 0; status follows.
-func (s *Service) AdjustSettledInTx(ctx context.Context, tx pgx.Tx, userID, debtID uuid.UUID, delta float64) error {
-	if _, err := tx.Exec(ctx, `UPDATE personal_debts SET settled_amount = GREATEST(settled_amount + $3, 0)
-		WHERE id = $1 AND user_id = $2`, debtID, userID, delta); err != nil {
-		return fmt.Errorf("adjust settled: %w", err)
-	}
-	_, err := tx.Exec(ctx, `UPDATE personal_debts SET status = `+debtStatusAfterAmount+`,
-		updated_by_user_id = $2 WHERE id = $1 AND user_id = $2`, debtID, userID)
-	return err
-}
-
-// ValidateOwnership checks the caller actually owns the debt. Used by
-// transactions module before allowing source_personal_debt_id to be set.
-// Returns the debt's amount/settled_amount so the transaction service
-// can validate sane settle amount.
-func (s *Service) ValidateOwnership(
-	ctx context.Context, tx pgx.Tx, userID, debtID uuid.UUID,
-) (direction string, outstanding float64, err error) {
-	q := `SELECT direction, (amount - settled_amount) AS outstanding
-		FROM personal_debts WHERE id = $1 AND user_id = $2 AND status = 'open'`
-	err = tx.QueryRow(ctx, q, debtID, userID).Scan(&direction, &outstanding)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", 0, ErrDebtNotFound
-	}
-	return direction, outstanding, err
-}
-
-// SumOwedToMeForTransaction is a public hook used by the transactions
-// summary endpoint to compute "my share" — for transactions that
-// originated split debts on the caller's side, the report-time amount
-// should subtract the open lent amount.
-func (s *Service) SumOwedToMeForTransaction(
-	ctx context.Context, userID, txID uuid.UUID,
-) (float64, error) {
-	return s.store.SumDebtsForTransaction(ctx, userID, txID)
-}
-
-// DebtsForTransaction is exposed so the FE transaction-detail view can
-// pull the split breakdown.
-func (s *Service) DebtsForTransaction(
-	ctx context.Context, userID, txID uuid.UUID,
-) ([]PersonalDebt, error) {
-	return s.store.DebtsForTransaction(ctx, userID, txID)
-}
-
 // --- contacts hooks (wired in main.go) ---
-//
-// The contacts module declares three function-typed hooks:
-// SplitsAbsorber, SplitsRestorer, UnlinkedNamesProvider. The original
-// "splits" module that implemented them was retired in 1b.2 when
-// shared_expense_splits was rebuilt as personal_debts. These methods
-// re-point the same hooks at the new schema — same intent, new table.
 
-// UnlinkedNames implements contacts.UnlinkedNamesProvider against
-// personal_debts. Lists every (counterparty_person_name, count) pair the
-// caller has typed without wiring to a contact yet — the wire-up surface
-// on contact detail consumes this.
-func (s *Service) UnlinkedNames(
-	ctx context.Context, userID uuid.UUID,
-) ([]contacts.UnlinkedName, error) {
+// UnlinkedNames implements contacts.UnlinkedNamesProvider.
+func (s *Service) UnlinkedNames(ctx context.Context, userID uuid.UUID) ([]contacts.UnlinkedName, error) {
 	rows, err := s.store.UnlinkedNames(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -364,48 +552,12 @@ func (s *Service) UnlinkedNames(
 	return out, nil
 }
 
-// AbsorbForContact implements contacts.SplitsAbsorber. Wires every
-// counterparty_person_name in `names` (case-insensitive exact) to
-// `contactID` on the caller's personal_debts. Snapshots contact.display_name
-// onto the rewritten rows. Bumps contacts.last_used_at.
-func (s *Service) AbsorbForContact(
-	ctx context.Context, userID, contactID uuid.UUID, names []string,
-) (int, error) {
+// AbsorbForContact implements contacts.SplitsAbsorber.
+func (s *Service) AbsorbForContact(ctx context.Context, userID, contactID uuid.UUID, names []string) (int, error) {
 	return s.store.AbsorbForContact(ctx, userID, contactID, names)
 }
 
-// RestoreOnContactDeleteTx implements contacts.SplitsRestorer. Called inside
-// the contact-delete tx — snapshots display_name into counterparty_person_name
-// for every personal_debts row referencing this contact, BEFORE the FK
-// ON DELETE SET NULL fires.
-func (s *Service) RestoreOnContactDeleteTx(
-	ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID,
-) (int, error) {
+// RestoreOnContactDeleteTx implements contacts.SplitsRestorer.
+func (s *Service) RestoreOnContactDeleteTx(ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID) (int, error) {
 	return s.store.RestoreOnContactDeleteTx(ctx, tx, userID, contactID)
-}
-
-// fillPersons resolves each debt's counterparty into the shared PersonRef
-// (one query for the whole set): the contact's live name by the one name
-// rule; the stored snapshot only when there is no contact. userID owns the
-// contacts (the debts' owner).
-func (s *Service) fillPersons(ctx context.Context, userID uuid.UUID, debts ...*PersonalDebt) error {
-	var ids []uuid.UUID
-	for _, d := range debts {
-		if d != nil && d.CounterpartyContactID != nil {
-			ids = append(ids, *d.CounterpartyContactID)
-		}
-	}
-	persons, err := shared.LoadPersons(ctx, s.store.Pool(), userID, ids)
-	if err != nil {
-		return err
-	}
-	for _, d := range debts {
-		if d == nil {
-			continue
-		}
-		d.Person = shared.ResolvePerson(persons, shared.PersonKey{
-			ContactID: d.CounterpartyContactID, Snapshot: d.CounterpartyPersonName,
-		})
-	}
-	return nil
 }

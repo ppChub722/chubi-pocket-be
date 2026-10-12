@@ -1,5 +1,14 @@
 package saving_goals
 
+// Saving goals v2 (0.3.1-10, owner mockup goals-v2.html). Savings are a
+// NOTEBOOK: a saving entry moves an amount of ONE wallet between buckets —
+// the wallet's available money, the spare bucket ("ยังไม่จัดสรร") or a
+// goal — and never touches transactions or wallet balances. Kinds: save
+// (available → spare / goal), withdraw (spare / goal → its wallet), move
+// (spare / goal → spare / goal; the wallet travels with it). A (bucket,
+// wallet) never goes below 0; saved above a wallet's balance is a red
+// warning only.
+
 import (
 	"time"
 
@@ -8,117 +17,262 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// Status values.
+const dateLayout = "2006-01-02"
+
+// Goal states.
 const (
-	StatusActive   = "active"
-	StatusArchived = "archived"
+	StateActive    = "active"
+	StateCompleted = "completed"
+	StateArchived  = "archived"
 )
 
-// SavingGoal — stored row, no computed fields.
-type SavingGoal struct {
+// Entry kinds / buckets / sources.
+const (
+	KindSave     = "save"
+	KindWithdraw = "withdraw"
+	KindMove     = "move"
+
+	BucketAvailable = "available"
+	BucketSpare     = "spare"
+	BucketGoal      = "goal"
+
+	SourceManual    = "manual"
+	SourceRecurring = "recurring"
+	SourcePending   = "pending"
+)
+
+var defaultMilestones = []int{25, 50, 75, 100}
+
+// Goal — the saving_goals row.
+type Goal struct {
+	ID           uuid.UUID
+	UserID       uuid.UUID
+	Name         string
+	Description  *string
+	Note         *string
+	IconCode     *shared.IconCode
+	TargetAmount float64
+	Deadline     *time.Time
+	Milestones   []int
+	Status       string
+	ClosedAt     *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// entryRow — the saving_entries row.
+type entryRow struct {
+	ID         uuid.UUID
+	UserID     uuid.UUID
+	GroupID    uuid.UUID
+	Kind       string
+	AccountID  uuid.UUID
+	FromBucket string
+	FromGoalID *uuid.UUID
+	ToBucket   string
+	ToGoalID   *uuid.UUID
+	Amount     float64
+	Date       time.Time
+	Note       *string
+	Source     string
+	CreatedAt  time.Time
+}
+
+// --- API shapes (spec schemas Saving*) ---
+
+type Milestone struct {
+	Pct     int     `json:"pct"`
+	Amount  float64 `json:"amount"`
+	Reached bool    `json:"reached"`
+}
+
+type Actions struct {
+	Save     bool `json:"save"`
+	Withdraw bool `json:"withdraw"`
+	Move     bool `json:"move"`
+	Close    bool `json:"close"`
+	Archive  bool `json:"archive"`
+	Restore  bool `json:"restore"`
+	Delete   bool `json:"delete"`
+}
+
+// GoalView — spec SavingGoal.
+type GoalView struct {
 	ID              uuid.UUID        `json:"id"`
-	UserID          uuid.UUID        `json:"user_id"`
 	Name            string           `json:"name"`
-	TargetAmount    float64          `json:"target_amount"`
-	LinkedAccountID uuid.UUID        `json:"linked_account_id"`
-	AllocationPct   float64          `json:"allocation_pct"`
-	Deadline        *string          `json:"deadline"` // YYYY-MM-DD
-	IconCode        *shared.IconCode `json:"icon_code"`
-	Status          string           `json:"status"`
 	Description     *string          `json:"description"`
 	Note            *string          `json:"note"`
+	IconCode        *shared.IconCode `json:"icon_code"`
+	TargetAmount    float64          `json:"target_amount"`
+	Deadline        *string          `json:"deadline"`
+	State           string           `json:"state"`
+	SavedAmount     float64          `json:"saved_amount"`
+	ProgressPct     int              `json:"progress_pct"`
+	RemainingAmount float64          `json:"remaining_amount"`
+	DaysRemaining   *int             `json:"days_remaining"`
+	NeededMonthly   *float64         `json:"needed_monthly"`
+	PaceMonthly     *float64         `json:"pace_monthly"`
+	EtaDate         *string          `json:"eta_date"`
+	Pace            string           `json:"pace"`
+	LateMonths      *int             `json:"late_months"`
+	Milestones      []Milestone      `json:"milestones"`
+	Currency        string           `json:"currency"`
+	ClosedAt        *time.Time       `json:"closed_at"`
+	Actions         Actions          `json:"actions"`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
-// SavingGoalView extends SavingGoal with computed progress fields.
-// Currency inherits from the linked account; current_amount derives
-// from balance × allocation; is_completed is non-sticky (re-flips
-// false if balance drops below target).
-type SavingGoalView struct {
-	SavingGoal
-	LinkedAccount        shared.AccountRef `json:"linked_account"`
-	LinkedAccountBalance float64           `json:"linked_account_balance"`
-	Currency             string            `json:"currency"`
-	CurrentAmount        float64           `json:"current_amount"`
-	ProgressPct          float64           `json:"progress_pct"`
-	IsCompleted          bool              `json:"is_completed"`
-	RemainingAmount      float64           `json:"remaining_amount"`
-	DaysRemaining        *int              `json:"days_remaining"`
+// WalletShare — spec SavingWalletShare.
+type WalletShare struct {
+	Wallet   shared.AccountRef `json:"wallet"`
+	Amount   float64           `json:"amount"`
+	SharePct int               `json:"share_pct"`
 }
 
-// CreateRequest — `allocation_pct` is optional. When omitted, the
-// service fills it with the linked account's remaining capacity
-// (Phase 1c default — never silently mutates existing goals).
-type CreateRequest struct {
-	Name            string           `json:"name"             binding:"required,min=1,max=100"`
-	TargetAmount    float64          `json:"target_amount"    binding:"required,gt=0"`
-	LinkedAccountID uuid.UUID        `json:"linked_account_id" binding:"required"`
-	AllocationPct   *float64         `json:"allocation_pct"   binding:"omitempty,gt=0,lte=100"`
-	Deadline        *string          `json:"deadline"         binding:"omitempty,datetime=2006-01-02"`
-	IconCode        *shared.IconCode `json:"icon_code"`
-	Description     *string          `json:"description" binding:"omitempty,max=200"`
-	Note            *string          `json:"note"        binding:"omitempty,max=500"`
+// Spare — spec SavingSpare.
+type Spare struct {
+	Amount   float64       `json:"amount"`
+	ByWallet []WalletShare `json:"by_wallet"`
 }
 
-// UpdateRequest — partial. linked_account_id is intentionally not
-// editable (delete + recreate if wrong). status changes flow through
-// the dedicated archive/restore endpoints.
-type UpdateRequest struct {
-	Name          *string          `json:"name"          binding:"omitempty,min=1,max=100"`
-	TargetAmount  *float64         `json:"target_amount" binding:"omitempty,gt=0"`
-	AllocationPct *float64         `json:"allocation_pct" binding:"omitempty,gt=0,lte=100"`
-	Deadline      *string          `json:"deadline"      binding:"omitempty,datetime=2006-01-02"`
-	IconCode      *shared.IconCode `json:"icon_code"`
-	Description   *string          `json:"description" binding:"omitempty,max=200"`
-	Note          *string          `json:"note"        binding:"omitempty,max=500"`
-
-	descriptionPresent bool
-	notePresent        bool
+// BucketRef — spec SavingBucketRef.
+type BucketRef struct {
+	Type     string           `json:"type"`
+	ID       *uuid.UUID       `json:"id"`
+	Name     *string          `json:"name"`
+	IconCode *shared.IconCode `json:"icon_code"`
 }
 
-// UnmarshalJSON records which keys the body carried: an absent description /
-// note stays as is; null or "" clears it.
-func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
-	type alias UpdateRequest
-	present, err := shared.DecodeTracked(data, (*alias)(r))
-	r.descriptionPresent, r.notePresent = present["description"], present["note"]
-	return err
+// Entry — spec SavingEntry.
+type Entry struct {
+	ID        uuid.UUID                 `json:"id"`
+	GroupID   uuid.UUID                 `json:"group_id"`
+	Kind      string                    `json:"kind"`
+	Date      string                    `json:"date"`
+	Note      *string                   `json:"note"`
+	Wallet    shared.AccountRef         `json:"wallet"`
+	Amount    float64                   `json:"amount"`
+	From      BucketRef                 `json:"from"`
+	To        BucketRef                 `json:"to"`
+	Source    string                    `json:"source"`
+	GoalIDs   []uuid.UUID               `json:"goal_ids"`
+	Recurring *shared.RecurringItemLink `json:"recurring"`
+	CreatedAt time.Time                 `json:"created_at"`
 }
 
-func (r *UpdateRequest) DescriptionChange() (*string, bool) {
-	return shared.TextChange(r.Description, r.descriptionPresent)
+type EntryList struct {
+	Data       []Entry     `json:"data"`
+	Pagination shared.Page `json:"pagination"`
 }
 
-func (r *UpdateRequest) NoteChange() (*string, bool) {
-	return shared.TextChange(r.Note, r.notePresent)
+type HistoryPoint struct {
+	Month      string  `json:"month"`
+	Cumulative float64 `json:"cumulative"`
 }
 
-type ListFilter struct {
-	Status      string // 'active' (default), 'archived', 'all'
-	AccountID   *uuid.UUID
-	IsCompleted *bool
+// AutoSave — spec SavingAutoSave (filled by the recurring module).
+type AutoSave struct {
+	Recurring shared.RecurringRef `json:"recurring"`
+	Amount    float64             `json:"amount"`
+	Rule      any                 `json:"rule"`
+	NextDate  *string             `json:"next_date"`
 }
 
-type ListResponse struct {
-	Data []SavingGoalView `json:"data"`
+type ListSummary struct {
+	Saved    float64 `json:"saved"`
+	InGoals  float64 `json:"in_goals"`
+	Spare    float64 `json:"spare"`
+	Currency string  `json:"currency"`
 }
 
-// AccountAllocationsResponse — backs `GET /accounts/:id/saving-allocations`.
-// Used by the FE to render the per-account allocation pie.
-type AccountAllocationGoal struct {
-	ID            uuid.UUID `json:"id"`
-	Name          string    `json:"name"`
-	AllocationPct float64   `json:"allocation_pct"`
-	CurrentAmount float64   `json:"current_amount"`
+// GoalList — spec SavingGoalList.
+type GoalList struct {
+	Summary ListSummary `json:"summary"`
+	Spare   Spare       `json:"spare"`
+	Data    []GoalView  `json:"data"`
 }
 
-type AccountAllocationsResponse struct {
-	AccountID         uuid.UUID               `json:"account_id"`
-	AccountBalance    float64                 `json:"account_balance"`
-	Currency          string                  `json:"currency"`
-	ActiveGoals       []AccountAllocationGoal `json:"active_goals"`
-	AllocatedPct      float64                 `json:"allocated_pct"`
-	UnallocatedPct    float64                 `json:"unallocated_pct"`
-	UnallocatedAmount float64                 `json:"unallocated_amount"`
+// GoalDetail — spec SavingGoalDetail.
+type GoalDetail struct {
+	Goal     GoalView       `json:"goal"`
+	ByWallet []WalletShare  `json:"by_wallet"`
+	History  []HistoryPoint `json:"history"`
+	AutoSave []AutoSave     `json:"auto_save"`
+	Entries  EntryList      `json:"entries"`
+}
+
+// SpareDetail — spec SavingSpareDetail.
+type SpareDetail struct {
+	Spare    Spare          `json:"spare"`
+	History  []HistoryPoint `json:"history"`
+	AutoSave []AutoSave     `json:"auto_save"`
+	Entries  EntryList      `json:"entries"`
+}
+
+type WalletOut struct {
+	Wallet  shared.AccountRef    `json:"wallet"`
+	Savings shared.WalletSavings `json:"savings"`
+}
+
+// WriteResult — spec SavingWriteResult.
+type WriteResult struct {
+	Entries []Entry     `json:"entries"`
+	Goals   []GoalView  `json:"goals"`
+	Spare   Spare       `json:"spare"`
+	Wallets []WalletOut `json:"wallets"`
+	// The page the action was made from (one button = one call).
+	GoalPage  *GoalDetail  `json:"goal_page"`
+	SparePage *SpareDetail `json:"spare_page"`
+}
+
+// pageRef — which page a write answers with: a goal's, or spare's.
+type pageRef struct {
+	goal  *uuid.UUID
+	spare bool
+}
+
+// --- requests ---
+
+// GoalRequest — create / update (presence filled by the handler).
+type GoalRequest struct {
+	Name         *string          `json:"name"`
+	Description  *string          `json:"description"`
+	Note         *string          `json:"note"`
+	IconCode     *shared.IconCode `json:"icon_code"`
+	TargetAmount *float64         `json:"target_amount"`
+	Deadline     *string          `json:"deadline"`
+	Milestones   []int            `json:"milestones"`
+
+	present map[string]bool
+}
+
+type Split struct {
+	WalletID uuid.UUID `json:"wallet_id"`
+	Amount   float64   `json:"amount"`
+}
+
+// EntryRequest — spec SavingEntryRequest.
+type EntryRequest struct {
+	Kind     string     `json:"kind"`
+	Amount   float64    `json:"amount"`
+	Date     *string    `json:"date"`
+	Note     *string    `json:"note"`
+	GoalID   *uuid.UUID `json:"goal_id"`
+	WalletID *uuid.UUID `json:"wallet_id"`
+	ToGoalID *uuid.UUID `json:"to_goal_id"`
+	Splits   []Split    `json:"splits"`
+}
+
+// EntryUpdateRequest — spec SavingEntryUpdateRequest.
+type EntryUpdateRequest struct {
+	Amount *float64 `json:"amount"`
+	Date   *string  `json:"date"`
+	Note   *string  `json:"note"`
+
+	present map[string]bool
+}
+
+type CloseRequest struct {
+	To string `json:"to"`
 }

@@ -277,6 +277,10 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "BALANCE_NOT_EDITABLE", err.Error(), nil)
 	case errors.Is(err, ErrAdjustNoOp):
 		response.BadRequest(c, "NO_OP", err.Error(), nil)
+	case errors.Is(err, ErrBalanceNotTracked):
+		response.Fail(c, http.StatusConflict, "BALANCE_NOT_TRACKED", err.Error(), nil)
+	case errors.Is(err, ErrCurrentBalanceAlone):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	default:
 		response.InternalError(c, "Account operation failed", err.Error())
 	}

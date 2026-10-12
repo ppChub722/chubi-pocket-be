@@ -156,8 +156,8 @@ func TestUnreadCount(t *testing.T) {
 
 func TestMarkReadActionedDismiss(t *testing.T) {
 	f := newFix(t)
-	a := f.add(t, TypeSplitPaid, nil, `{}`, time.Hour)
-	b := f.add(t, TypeSplitPaid, nil, `{}`, 2*time.Hour)
+	a := f.add(t, TypeProjectTxRecordedForYou, nil, `{}`, time.Hour)
+	b := f.add(t, TypeProjectTxRecordedForYou, nil, `{}`, 2*time.Hour)
 	c := f.add(t, TypeAccountInvite, nil, `{}`, 3*time.Hour)
 
 	out := f.do(t, "POST", "/api/v1/notifications/"+a.String()+"/read", nil, "markNotificationRead", http.StatusOK)
@@ -246,7 +246,7 @@ func TestNotificationSettings(t *testing.T) {
 
 	body := map[string]any{
 		"muted_types":                  []string{TypeProjectAdded},
-		"auto_types":                   []string{TypeSplitPaid},
+		"auto_types":                   []string{TypeProjectTxRecordedForYou},
 		"default_account_id":           acc.String(),
 		"auto_resolve_own_in_projects": true,
 	}

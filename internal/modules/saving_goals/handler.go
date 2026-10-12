@@ -1,6 +1,7 @@
 package saving_goals
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -16,202 +17,280 @@ type Handler struct {
 	service *Service
 }
 
-func NewHandler(s *Service) *Handler {
-	return &Handler{service: s}
+func NewHandler(s *Service) *Handler { return &Handler{service: s} }
+
+func atoiOr(s string, def int) int {
+	if n, err := strconv.Atoi(s); err == nil {
+		return n
+	}
+	return def
 }
 
-// POST /v1/saving-goals
-func (h *Handler) Create(c *gin.Context) {
-	userID, ok := requireUser(c)
+func user(c *gin.Context) (uuid.UUID, bool) {
+	id, ok := auth.UserIDFromContext(c)
 	if !ok {
-		return
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
 	}
-	var req CreateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-		return
+	return id, ok
+}
+
+func userAndID(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
+	uid, ok := user(c)
+	if !ok {
+		return uuid.Nil, uuid.Nil, false
 	}
-	out, err := h.service.Create(c.Request.Context(), userID, req)
+	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		mapServiceError(c, err)
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid id", nil)
+		return uuid.Nil, uuid.Nil, false
+	}
+	return uid, id, true
+}
+
+func optionalID(c *gin.Context, name string) (*uuid.UUID, bool) {
+	v := c.Query(name)
+	if v == "" {
+		return nil, true
+	}
+	id, err := uuid.Parse(v)
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid "+name, nil)
+		return nil, false
+	}
+	return &id, true
+}
+
+// bind decodes the body into v and returns the keys it carried.
+func bind(c *gin.Context, v any) (map[string]bool, bool) {
+	raw, err := c.GetRawData()
+	if err == nil && len(raw) == 0 {
+		raw = []byte("{}")
+	}
+	keys := map[string]json.RawMessage{}
+	if err == nil {
+		err = json.Unmarshal(raw, v)
+	}
+	if err == nil {
+		err = json.Unmarshal(raw, &keys)
+	}
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return nil, false
+	}
+	present := map[string]bool{}
+	for k := range keys {
+		present[k] = true
+	}
+	return present, true
+}
+
+func reply(c *gin.Context, status int, out any, err error) {
+	if err != nil {
+		mapError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, out)
+	c.JSON(status, out)
+}
+
+func mapError(c *gin.Context, err error) {
+	var insufficient *InsufficientError
+	switch {
+	case errors.As(err, &insufficient):
+		response.Fail(c, http.StatusConflict, "INSUFFICIENT_SAVING", err.Error(), gin.H{"available": insufficient.Available})
+	case errors.Is(err, ErrGoalNotFound):
+		response.NotFound(c, "NOT_FOUND", "Saving goal not found")
+	case errors.Is(err, ErrEntryNotFound):
+		response.NotFound(c, "NOT_FOUND", "Saving entry not found")
+	case errors.Is(err, ErrValidation):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, ErrSplitMismatch):
+		response.BadRequest(c, "SPLIT_MISMATCH", err.Error(), nil)
+	case errors.Is(err, ErrAccountNotFound):
+		response.BadRequest(c, "ACCOUNT_NOT_FOUND", err.Error(), nil)
+	case errors.Is(err, ErrWalletNotTracked):
+		response.BadRequest(c, "WALLET_NOT_TRACKED", err.Error(), nil)
+	case errors.Is(err, ErrGoalNotActive):
+		response.Fail(c, http.StatusConflict, "GOAL_NOT_ACTIVE", err.Error(), nil)
+	case errors.Is(err, ErrGoalHasSavings):
+		response.Fail(c, http.StatusConflict, "GOAL_HAS_SAVINGS", err.Error(), nil)
+	case errors.Is(err, ErrInvalidTransition):
+		response.Fail(c, http.StatusConflict, "INVALID_TRANSITION", err.Error(), nil)
+	default:
+		response.InternalError(c, "Saving operation failed", err.Error())
+	}
 }
 
 // GET /v1/saving-goals
 func (h *Handler) List(c *gin.Context) {
-	userID, ok := requireUser(c)
+	uid, ok := user(c)
 	if !ok {
 		return
 	}
-	f := ListFilter{Status: c.Query("status")}
-	if v := c.Query("account_id"); v != "" {
-		id, err := uuid.Parse(v)
-		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid account_id", nil)
-			return
-		}
-		f.AccountID = &id
-	}
-	if v := c.Query("is_completed"); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid is_completed", nil)
-			return
-		}
-		f.IsCompleted = &b
-	}
-	out, err := h.service.List(c.Request.Context(), userID, f)
-	if err != nil {
-		response.InternalError(c, "List failed", err.Error())
+	status := c.DefaultQuery("status", StateActive)
+	if status != StateActive && status != StateCompleted && status != StateArchived {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
 		return
 	}
-	c.JSON(http.StatusOK, out)
+	out, err := h.service.List(c.Request.Context(), uid, status)
+	reply(c, http.StatusOK, out, err)
+}
+
+// POST /v1/saving-goals
+func (h *Handler) Create(c *gin.Context) {
+	uid, ok := user(c)
+	if !ok {
+		return
+	}
+	var req GoalRequest
+	present, ok := bind(c, &req)
+	if !ok {
+		return
+	}
+	req.present = present
+	out, err := h.service.Create(c.Request.Context(), uid, &req)
+	reply(c, http.StatusCreated, out, err)
+}
+
+// GET /v1/saving-goals/spare
+func (h *Handler) Spare(c *gin.Context) {
+	uid, ok := user(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.Spare(c.Request.Context(), uid, atoiOr(c.Query("per_page"), entriesPerPage))
+	reply(c, http.StatusOK, out, err)
 }
 
 // GET /v1/saving-goals/:id
 func (h *Handler) Get(c *gin.Context) {
-	userID, ok := requireUser(c)
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-	out, err := h.service.Get(c.Request.Context(), userID, id)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
+	out, err := h.service.Get(c.Request.Context(), uid, id, atoiOr(c.Query("per_page"), entriesPerPage))
+	reply(c, http.StatusOK, out, err)
 }
 
 // PUT /v1/saving-goals/:id
 func (h *Handler) Update(c *gin.Context) {
-	userID, ok := requireUser(c)
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	id, ok := parseIDParam(c)
+	var req GoalRequest
+	present, ok := bind(c, &req)
 	if !ok {
 		return
 	}
-	var req UpdateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-		return
-	}
-	out, err := h.service.Update(c.Request.Context(), userID, id, req)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
+	req.present = present
+	out, err := h.service.Update(c.Request.Context(), uid, id, &req)
+	reply(c, http.StatusOK, out, err)
 }
 
 // DELETE /v1/saving-goals/:id
 func (h *Handler) Delete(c *gin.Context) {
-	userID, ok := requireUser(c)
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	id, ok := parseIDParam(c)
+	err := h.service.Delete(c.Request.Context(), uid, id)
+	reply(c, http.StatusOK, gin.H{"id": id}, err)
+}
+
+// POST /v1/saving-goals/:id/close
+func (h *Handler) Close(c *gin.Context) {
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	if err := h.service.Delete(c.Request.Context(), userID, id); err != nil {
-		mapServiceError(c, err)
+	var req CloseRequest
+	if _, ok := bind(c, &req); !ok {
 		return
 	}
-	response.OK(c, "Saving goal deleted", nil)
+	out, err := h.service.Close(c.Request.Context(), uid, id, req)
+	reply(c, http.StatusOK, out, err)
 }
 
 // POST /v1/saving-goals/:id/archive
 func (h *Handler) Archive(c *gin.Context) {
-	userID, ok := requireUser(c)
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-	out, err := h.service.Archive(c.Request.Context(), userID, id)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
+	out, err := h.service.Archive(c.Request.Context(), uid, id)
+	reply(c, http.StatusOK, out, err)
 }
 
 // POST /v1/saving-goals/:id/restore
 func (h *Handler) Restore(c *gin.Context) {
-	userID, ok := requireUser(c)
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	id, ok := parseIDParam(c)
+	out, err := h.service.Restore(c.Request.Context(), uid, id)
+	reply(c, http.StatusOK, out, err)
+}
+
+// GET /v1/saving-entries
+func (h *Handler) Entries(c *gin.Context) {
+	uid, ok := user(c)
 	if !ok {
 		return
 	}
-	out, err := h.service.Restore(c.Request.Context(), userID, id)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}
-
-// GET /v1/accounts/:id/saving-allocations
-func (h *Handler) AccountAllocations(c *gin.Context) {
-	userID, ok := requireUser(c)
+	goalID, ok := optionalID(c, "goal_id")
 	if !ok {
 		return
 	}
-	accountID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid account id", nil)
-		return
-	}
-	out, err := h.service.AccountAllocations(c.Request.Context(), userID, accountID)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}
-
-// --- helpers ---
-
-func requireUser(c *gin.Context) (uuid.UUID, bool) {
-	userID, ok := auth.UserIDFromContext(c)
+	accountID, ok := optionalID(c, "account_id")
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return uuid.Nil, false
+		return
 	}
-	return userID, true
+	bucket := c.Query("bucket")
+	if bucket != "" && bucket != BucketSpare {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid bucket", nil)
+		return
+	}
+	out, err := h.service.Entries(c.Request.Context(), uid, goalID, bucket == BucketSpare, accountID,
+		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), entriesPerPage))
+	reply(c, http.StatusOK, out, err)
 }
 
-func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
-	id, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid saving goal id", nil)
-		return uuid.Nil, false
+// POST /v1/saving-entries
+func (h *Handler) CreateEntry(c *gin.Context) {
+	uid, ok := user(c)
+	if !ok {
+		return
 	}
-	return id, true
+	var req EntryRequest
+	if _, ok := bind(c, &req); !ok {
+		return
+	}
+	out, err := h.service.CreateEntry(c.Request.Context(), uid, req)
+	reply(c, http.StatusCreated, out, err)
 }
 
-func mapServiceError(c *gin.Context, err error) {
-	switch {
-	case errors.Is(err, ErrGoalNotFound):
-		response.NotFound(c, "NOT_FOUND", "Saving goal not found")
-	case errors.Is(err, ErrAccountNotOwned):
-		response.BadRequest(c, "ACCOUNT_NOT_OWNED", "Linked account does not belong to caller", nil)
-	case errors.Is(err, ErrAllocationExceeded):
-		response.BadRequest(c, "ALLOCATION_EXCEEDED", "Sum of allocations on account would exceed 100%", nil)
-	default:
-		response.InternalError(c, "Saving goal operation failed", err.Error())
+// PUT /v1/saving-entries/:id
+func (h *Handler) UpdateEntry(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
 	}
+	var req EntryUpdateRequest
+	present, ok := bind(c, &req)
+	if !ok {
+		return
+	}
+	req.present = present
+	out, err := h.service.UpdateEntry(c.Request.Context(), uid, id, req)
+	reply(c, http.StatusOK, out, err)
+}
+
+// DELETE /v1/saving-entries/:id
+func (h *Handler) DeleteEntry(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.DeleteEntry(c.Request.Context(), uid, id)
+	reply(c, http.StatusOK, out, err)
 }

@@ -1,8 +1,10 @@
 package budgets
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -11,216 +13,265 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
-const headerTimezone = "X-Timezone"
-
 type Handler struct {
 	service *Service
 }
 
-func NewHandler(s *Service) *Handler {
-	return &Handler{service: s}
+func NewHandler(s *Service) *Handler { return &Handler{service: s} }
+
+func atoiOr(s string, def int) int {
+	if n, err := strconv.Atoi(s); err == nil {
+		return n
+	}
+	return def
 }
 
-// POST /v1/budgets
-func (h *Handler) Create(c *gin.Context) {
-	userID, ok := requireUser(c)
+func tz(c *gin.Context) string { return c.GetHeader("X-Timezone") }
+
+func user(c *gin.Context) (uuid.UUID, bool) {
+	id, ok := auth.UserIDFromContext(c)
 	if !ok {
-		return
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
 	}
-	var req CreateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-		return
+	return id, ok
+}
+
+func userAndID(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
+	uid, ok := user(c)
+	if !ok {
+		return uuid.Nil, uuid.Nil, false
 	}
-	out, err := h.service.Create(c.Request.Context(), userID, req, c.GetHeader(headerTimezone))
+	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		mapServiceError(c, err)
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid budget id", nil)
+		return uuid.Nil, uuid.Nil, false
+	}
+	return uid, id, true
+}
+
+// optionalID — a uuid query param (nil when absent).
+func optionalID(c *gin.Context, name string) (*uuid.UUID, bool) {
+	v := c.Query(name)
+	if v == "" {
+		return nil, true
+	}
+	id, err := uuid.Parse(v)
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid "+name, nil)
+		return nil, false
+	}
+	return &id, true
+}
+
+// bind decodes the body into v and returns the keys it carried.
+func bind(c *gin.Context, v any) (map[string]bool, bool) {
+	raw, err := c.GetRawData()
+	if err == nil && len(raw) == 0 {
+		raw = []byte("{}")
+	}
+	keys := map[string]json.RawMessage{}
+	if err == nil {
+		err = json.Unmarshal(raw, v)
+	}
+	if err == nil {
+		err = json.Unmarshal(raw, &keys)
+	}
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return nil, false
+	}
+	present := map[string]bool{}
+	for k := range keys {
+		present[k] = true
+	}
+	return present, true
+}
+
+func reply(c *gin.Context, status int, out any, err error) {
+	if err != nil {
+		mapError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, out)
+	c.JSON(status, out)
+}
+
+func mapError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, ErrBudgetNotFound):
+		response.NotFound(c, "NOT_FOUND", "Budget not found")
+	case errors.Is(err, ErrPeriodNotFound):
+		response.NotFound(c, "NOT_FOUND", "Budget period not found")
+	case errors.Is(err, ErrValidation):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, ErrInvalidRule):
+		response.BadRequest(c, "INVALID_RULE", err.Error(), nil)
+	case errors.Is(err, ErrInvalidCategory):
+		response.BadRequest(c, "INVALID_CATEGORY", err.Error(), nil)
+	case errors.Is(err, ErrAccountNotFound):
+		response.BadRequest(c, "ACCOUNT_NOT_FOUND", err.Error(), nil)
+	case errors.Is(err, ErrInvalidTransition):
+		response.Fail(c, http.StatusConflict, "INVALID_TRANSITION", err.Error(), nil)
+	default:
+		response.InternalError(c, "Budget operation failed", err.Error())
+	}
 }
 
 // GET /v1/budgets
 func (h *Handler) List(c *gin.Context) {
-	userID, ok := requireUser(c)
+	uid, ok := user(c)
 	if !ok {
 		return
 	}
-	f := ListFilter{
-		Status: c.Query("status"),
-		Period: c.Query("period"),
-		Scope:  c.Query("scope"),
-	}
-	if v := c.Query("project_id"); v != "" {
-		id, err := uuid.Parse(v)
-		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid project_id", nil)
-			return
-		}
-		f.ProjectID = &id
-	}
-	out, err := h.service.List(c.Request.Context(), userID, f, c.GetHeader(headerTimezone))
-	if err != nil {
-		response.InternalError(c, "List failed", err.Error())
+	status := c.DefaultQuery("status", "active")
+	if status != "active" && status != "ended" && status != "archived" {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
 		return
 	}
-	c.JSON(http.StatusOK, out)
+	sortBy := c.DefaultQuery("sort", "risk")
+	if sortBy != "risk" && sortBy != "name" && sortBy != "newest" {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid sort", nil)
+		return
+	}
+	out, err := h.service.List(c.Request.Context(), uid, status, sortBy, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+// POST /v1/budgets
+func (h *Handler) Create(c *gin.Context) {
+	uid, ok := user(c)
+	if !ok {
+		return
+	}
+	var req Request
+	present, ok := bind(c, &req)
+	if !ok {
+		return
+	}
+	req.present = present
+	out, err := h.service.Create(c.Request.Context(), uid, &req, tz(c))
+	reply(c, http.StatusCreated, out, err)
 }
 
 // GET /v1/budgets/:id
 func (h *Handler) Get(c *gin.Context) {
-	userID, ok := requireUser(c)
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	id, ok := parseIDParam(c)
+	periodID, ok := optionalID(c, "period_id")
 	if !ok {
 		return
 	}
-	out, err := h.service.Get(c.Request.Context(), userID, id, c.GetHeader(headerTimezone))
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
+	out, err := h.service.Get(c.Request.Context(), uid, id, periodID, tz(c))
+	reply(c, http.StatusOK, out, err)
 }
 
 // PUT /v1/budgets/:id
 func (h *Handler) Update(c *gin.Context) {
-	userID, ok := requireUser(c)
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	id, ok := parseIDParam(c)
+	var req Request
+	present, ok := bind(c, &req)
 	if !ok {
 		return
 	}
-	var req UpdateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-		return
-	}
-	out, err := h.service.Update(c.Request.Context(), userID, id, req, c.GetHeader(headerTimezone))
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
+	req.present = present
+	out, err := h.service.Update(c.Request.Context(), uid, id, &req, tz(c))
+	reply(c, http.StatusOK, out, err)
 }
 
 // DELETE /v1/budgets/:id
 func (h *Handler) Delete(c *gin.Context) {
-	userID, ok := requireUser(c)
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	id, ok := parseIDParam(c)
+	err := h.service.Delete(c.Request.Context(), uid, id)
+	reply(c, http.StatusOK, gin.H{"id": id}, err)
+}
+
+// GET /v1/budgets/:id/periods
+func (h *Handler) Periods(c *gin.Context) {
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	if err := h.service.Delete(c.Request.Context(), userID, id); err != nil {
-		mapServiceError(c, err)
+	out, err := h.service.Periods(c.Request.Context(), uid, id,
+		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20), tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+// PUT /v1/budgets/:id/periods/:period_id
+func (h *Handler) UpdatePeriod(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
 		return
 	}
-	response.OK(c, "Budget deleted", nil)
+	periodID, err := uuid.Parse(c.Param("period_id"))
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid period id", nil)
+		return
+	}
+	var req PeriodRequest
+	present, ok := bind(c, &req)
+	if !ok {
+		return
+	}
+	req.present = present
+	out, err := h.service.UpdatePeriod(c.Request.Context(), uid, id, periodID, &req, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+// GET /v1/budgets/:id/items
+func (h *Handler) Items(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	periodID, ok := optionalID(c, "period_id")
+	if !ok {
+		return
+	}
+	source := c.Query("source")
+	switch source {
+	case "", SourceNormal, SourceRecurring, SourceEvent, SourceUpcoming, SourcePending:
+	default:
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid source", nil)
+		return
+	}
+	out, err := h.service.Items(c.Request.Context(), uid, id, periodID, source,
+		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), itemsPerPage), tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+// POST /v1/budgets/:id/close
+func (h *Handler) Close(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.Close(c.Request.Context(), uid, id, tz(c))
+	reply(c, http.StatusOK, out, err)
 }
 
 // POST /v1/budgets/:id/archive
 func (h *Handler) Archive(c *gin.Context) {
-	userID, ok := requireUser(c)
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-	out, err := h.service.Archive(c.Request.Context(), userID, id, c.GetHeader(headerTimezone))
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
+	out, err := h.service.Archive(c.Request.Context(), uid, id, tz(c))
+	reply(c, http.StatusOK, out, err)
 }
 
 // POST /v1/budgets/:id/restore
 func (h *Handler) Restore(c *gin.Context) {
-	userID, ok := requireUser(c)
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-	out, err := h.service.Restore(c.Request.Context(), userID, id, c.GetHeader(headerTimezone))
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}
-
-// GET /v1/budgets/overview
-func (h *Handler) Overview(c *gin.Context) {
-	userID, ok := requireUser(c)
-	if !ok {
-		return
-	}
-	period := c.DefaultQuery("period", PeriodMonthly)
-	scope := c.DefaultQuery("scope", ScopeUser)
-	var projectID *uuid.UUID
-	if v := c.Query("project_id"); v != "" {
-		id, err := uuid.Parse(v)
-		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid project_id", nil)
-			return
-		}
-		projectID = &id
-	}
-	if scope == ScopeProject && projectID == nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "project_id required when scope=project", nil)
-		return
-	}
-	out, err := h.service.Overview(c.Request.Context(), userID, period, scope, projectID, c.GetHeader(headerTimezone))
-	if err != nil {
-		response.InternalError(c, "Overview failed", err.Error())
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}
-
-// --- helpers ---
-
-func requireUser(c *gin.Context) (uuid.UUID, bool) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return uuid.Nil, false
-	}
-	return userID, true
-}
-
-func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
-	id, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid budget id", nil)
-		return uuid.Nil, false
-	}
-	return id, true
-}
-
-func mapServiceError(c *gin.Context, err error) {
-	switch {
-	case errors.Is(err, ErrBudgetNotFound):
-		response.NotFound(c, "NOT_FOUND", "Budget not found")
-	case errors.Is(err, ErrDuplicateBudget):
-		response.BadRequest(c, "DUPLICATE_BUDGET", "An active budget already exists for this category/period/scope", nil)
-	case errors.Is(err, ErrInvalidCategory):
-		response.BadRequest(c, "INVALID_CATEGORY", "Category must be expense-typed, owned, and not a system category", nil)
-	case errors.Is(err, ErrProjectNotOwner):
-		response.Fail(c, http.StatusForbidden, "FORBIDDEN", "Only the project owner can manage project-scope budgets", nil)
-	default:
-		response.InternalError(c, "Budget operation failed", err.Error())
-	}
+	out, err := h.service.Restore(c.Request.Context(), uid, id, tz(c))
+	reply(c, http.StatusOK, out, err)
 }

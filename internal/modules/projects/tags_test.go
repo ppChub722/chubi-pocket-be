@@ -1,23 +1,17 @@
 package projects
 
-import (
-	"reflect"
-	"testing"
-)
+import "testing"
 
-func TestNormalizeTags(t *testing.T) {
-	cases := []struct {
-		in   []string
-		want []string
-	}{
-		{nil, []string{}},
-		{[]string{"Food", " food ", "FOOD"}, []string{"Food"}},
-		{[]string{"  ", "", "Taxi"}, []string{"Taxi"}},
-		{[]string{"อาหาร", "เดินทาง", "อาหาร"}, []string{"อาหาร", "เดินทาง"}},
+func TestCleanTagName(t *testing.T) {
+	cases := map[string]string{
+		"  Food ": "Food",
+		"":        "",
+		"อาหาร":   "อาหาร",
+		"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzXYZ": "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwx",
 	}
-	for _, c := range cases {
-		if got := normalizeTags(c.in); !reflect.DeepEqual(got, c.want) {
-			t.Errorf("normalizeTags(%q) = %q, want %q", c.in, got, c.want)
+	for in, want := range cases {
+		if got := cleanTagName(in); got != want {
+			t.Errorf("cleanTagName(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

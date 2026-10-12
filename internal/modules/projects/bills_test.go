@@ -60,11 +60,11 @@ func TestAddExistingBillsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quick create from existing: %v", err)
 	}
-	if resp.TransactionID != nil || resp.LinkedCount != 1 {
-		t.Errorf("transaction_id=%v linked=%d, want nil and 1", resp.TransactionID, resp.LinkedCount)
+	if resp.NewTransactionID != nil || len(resp.Detail.Board.Data) != 1 {
+		t.Errorf("transaction_id=%v linked=%d, want nil and 1", resp.NewTransactionID, len(resp.Detail.Board.Data))
 	}
 	if n := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE id = $1 AND project_id = $2`,
-		f.bill1, resp.ID); n != 1 {
+		f.bill1, resp.Detail.Event.ID); n != 1 {
 		t.Errorf("bill1 not linked to the new event")
 	}
 	if b := f.accountBalance(t, f.acctPersonal); b != 1000 {
@@ -72,16 +72,16 @@ func TestAddExistingBillsOnly(t *testing.T) {
 	}
 
 	// Add an existing bill to that event.
-	added, err := f.svc.AddBills(ctx, f.owner, resp.ID, AddBillsRequest{TransactionIDs: []uuid.UUID{f.bill2}})
+	added, err := f.svc.AddBills(ctx, f.owner, resp.Detail.Event.ID, AddBillsRequest{TransactionIDs: []uuid.UUID{f.bill2}})
 	if err != nil {
 		t.Fatalf("add existing: %v", err)
 	}
-	if added.TransactionID != nil || added.LinkedCount != 1 {
-		t.Errorf("add: transaction_id=%v linked=%d", added.TransactionID, added.LinkedCount)
+	if added.NewTransactionID != nil || len(added.Rows) != 1 {
+		t.Errorf("add: transaction_id=%v linked=%d", added.NewTransactionID, len(added.Rows))
 	}
 
 	// Nothing to add.
-	if _, err := f.svc.AddBills(ctx, f.owner, resp.ID, AddBillsRequest{}); !errors.Is(err, ErrQuickNothingToAdd) {
+	if _, err := f.svc.AddBills(ctx, f.owner, resp.Detail.Event.ID, AddBillsRequest{}); !errors.Is(err, ErrQuickNothingToAdd) {
 		t.Errorf("empty add: want ErrQuickNothingToAdd, got %v", err)
 	}
 	if _, err := f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{Name: "Empty"}); !errors.Is(err, ErrQuickNothingToAdd) {
@@ -132,12 +132,12 @@ func TestPullWalletlessBill(t *testing.T) {
 		SELECT COUNT(*) FROM project_transactions pt
 		JOIN transactions t ON t.source_project_transaction_id = pt.id
 		WHERE t.id = $1 AND t.project_id = $2 AND pt.currency = 'THB' AND pt.amount = 70`,
-		floating, resp.ID); n != 1 {
+		floating, resp.Detail.Event.ID); n != 1 {
 		t.Errorf("wallet-less bill not on the board with the user's currency")
 	}
 
 	// A wallet-less new bill too.
-	added, err := f.svc.AddBills(ctx, f.owner, resp.ID, AddBillsRequest{
+	added, err := f.svc.AddBills(ctx, f.owner, resp.Detail.Event.ID, AddBillsRequest{
 		NewTransaction: &transactions.CreateRequest{
 			Type: transactions.TypeExpense, Amount: 30, Date: "2026-09-04",
 		},
@@ -145,8 +145,8 @@ func TestPullWalletlessBill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wallet-less new bill: %v", err)
 	}
-	if added.TransactionID == nil || added.LinkedCount != 1 {
-		t.Errorf("new wallet-less bill: transaction_id=%v linked=%d", added.TransactionID, added.LinkedCount)
+	if added.NewTransactionID == nil || len(added.Rows) != 1 {
+		t.Errorf("new wallet-less bill: transaction_id=%v linked=%d", added.NewTransactionID, len(added.Rows))
 	}
 }
 
@@ -161,18 +161,18 @@ func TestRemoveBill(t *testing.T) {
 		t.Fatalf("quick create: %v", err)
 	}
 	parent := f.boardParentOf(t, f.bill1)
-	beeCopy := f.insertCopy(t, f.friend, resp.ID, parent, 100)
+	beeCopy := f.insertCopy(t, f.friend, resp.Detail.Event.ID, parent, 100)
 
 	// Only the author: the owner can't remove Bee's copy, Bee can't remove bill1.
-	if err := f.svc.RemoveBill(ctx, f.owner, resp.ID, beeCopy); !errors.Is(err, ErrQuickTxNotFound) {
+	if _, err := f.svc.RemoveBill(ctx, f.owner, resp.Detail.Event.ID, beeCopy); !errors.Is(err, ErrQuickTxNotFound) {
 		t.Errorf("non-author: want ErrQuickTxNotFound, got %v", err)
 	}
-	if err := f.svc.RemoveBill(ctx, f.friend, resp.ID, f.bill1); !errors.Is(err, ErrQuickTxNotFound) {
+	if _, err := f.svc.RemoveBill(ctx, f.friend, resp.Detail.Event.ID, f.bill1); !errors.Is(err, ErrQuickTxNotFound) {
 		t.Errorf("non-author bill: want ErrQuickTxNotFound, got %v", err)
 	}
 
 	// Bee removes their copy: only the copy is unlinked; the board row stays.
-	if err := f.svc.RemoveBill(ctx, f.friend, resp.ID, beeCopy); err != nil {
+	if _, err := f.svc.RemoveBill(ctx, f.friend, resp.Detail.Event.ID, beeCopy); err != nil {
 		t.Fatalf("remove copy: %v", err)
 	}
 	f.assertLoose(t, beeCopy)
@@ -182,8 +182,8 @@ func TestRemoveBill(t *testing.T) {
 
 	// The origin leaves: board row + children go, every copy is unlinked,
 	// the bill's debts lose their project tag but stay as they were.
-	beeCopy2 := f.insertCopy(t, f.friend, resp.ID, parent, 100)
-	if err := f.svc.RemoveBill(ctx, f.owner, resp.ID, f.bill1); err != nil {
+	beeCopy2 := f.insertCopy(t, f.friend, resp.Detail.Event.ID, parent, 100)
+	if _, err := f.svc.RemoveBill(ctx, f.owner, resp.Detail.Event.ID, f.bill1); err != nil {
 		t.Fatalf("remove origin: %v", err)
 	}
 	f.assertLoose(t, f.bill1)
@@ -225,7 +225,7 @@ func TestRemoveBill(t *testing.T) {
 	}
 
 	// Already out.
-	if err := f.svc.RemoveBill(ctx, f.owner, resp.ID, f.bill1); !errors.Is(err, ErrBillNotInProject) {
+	if _, err := f.svc.RemoveBill(ctx, f.owner, resp.Detail.Event.ID, f.bill1); !errors.Is(err, ErrBillNotInProject) {
 		t.Errorf("second remove: want ErrBillNotInProject, got %v", err)
 	}
 }
@@ -248,7 +248,7 @@ func TestMoveBill(t *testing.T) {
 	}); !errors.Is(err, ErrQuickTxAlreadyInProject) {
 		t.Errorf("no move: want ErrQuickTxAlreadyInProject, got %v", err)
 	}
-	if _, err := f.svc.AddBills(ctx, f.owner, first.ID, AddBillsRequest{
+	if _, err := f.svc.AddBills(ctx, f.owner, first.Detail.Event.ID, AddBillsRequest{
 		TransactionIDs: []uuid.UUID{f.bill1}, Move: true,
 	}); !errors.Is(err, ErrQuickTxAlreadyInProject) {
 		t.Errorf("same event: want ErrQuickTxAlreadyInProject, got %v", err)
@@ -261,13 +261,13 @@ func TestMoveBill(t *testing.T) {
 		t.Fatalf("move: %v", err)
 	}
 	if n := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE id = $1 AND project_id = $2`,
-		f.bill1, second.ID); n != 1 {
+		f.bill1, second.Detail.Event.ID); n != 1 {
 		t.Errorf("bill1 not in the second event")
 	}
 	if n := f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE id = $1`, oldParent); n != 0 {
 		t.Errorf("old board row should be gone")
 	}
-	if n := f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE project_id = $1`, first.ID); n != 0 {
+	if n := f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE project_id = $1`, first.Detail.Event.ID); n != 0 {
 		t.Errorf("first event still has %d board rows", n)
 	}
 	// The board splits went straight to the new board row — never back
@@ -300,9 +300,9 @@ func TestDeleteBoardRowWithCopies(t *testing.T) {
 		t.Fatalf("quick create: %v", err)
 	}
 	parent := f.boardParentOf(t, f.bill1)
-	beeCopy := f.insertCopy(t, f.friend, resp.ID, parent, 100)
+	beeCopy := f.insertCopy(t, f.friend, resp.Detail.Event.ID, parent, 100)
 
-	if err := f.svc.DeleteProjectTransaction(ctx, f.owner, resp.ID, parent); err != nil {
+	if _, err := f.svc.DeleteProjectTransaction(ctx, f.owner, resp.Detail.Event.ID, parent); err != nil {
 		t.Fatalf("delete board row with copies: %v", err)
 	}
 	f.assertLoose(t, f.bill1)
@@ -334,27 +334,23 @@ func TestPullRejectsSystemRow(t *testing.T) {
 	}
 }
 
-// Splits move onto the board, so money that already moved in the personal
-// book (a repayment) or a forgiven split blocks the pull.
-func TestPullBlocksRepaidOrForgivenSplits(t *testing.T) {
+// Splits move onto the board, so a split labelled paid (its repayment sits
+// in the person's ledger) blocks the pull.
+func TestPullBlocksPaidSplits(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
 
-	if _, err := f.pool.Exec(ctx, `UPDATE personal_debts SET settled_amount = 50 WHERE id = $1`, f.debtGr1); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{
-		Name: "Repaid", TransactionIDs: []uuid.UUID{f.bill1},
-	}); !errors.Is(err, ErrQuickTxSplitRepaid) {
-		t.Errorf("repaid split: want ErrQuickTxSplitRepaid, got %v", err)
-	}
-	if _, err := f.pool.Exec(ctx, `UPDATE personal_debts SET status = 'cancelled' WHERE id = $1`, f.debtB2); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{
-		Name: "Forgiven", TransactionIDs: []uuid.UUID{f.bill2},
-	}); !errors.Is(err, ErrQuickTxSplitCancelled) {
-		t.Errorf("forgiven split: want ErrQuickTxSplitCancelled, got %v", err)
+	for _, c := range []struct {
+		debt, bill uuid.UUID
+	}{{f.debtGr1, f.bill1}, {f.debtB2, f.bill2}} {
+		if _, err := f.pool.Exec(ctx, `UPDATE personal_debts SET paid = TRUE WHERE id = $1`, c.debt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{
+			Name: "Paid", TransactionIDs: []uuid.UUID{c.bill},
+		}); !errors.Is(err, ErrQuickTxSplitPaid) {
+			t.Errorf("paid split: want ErrQuickTxSplitPaid, got %v", err)
+		}
 	}
 	if n := f.countRows(t, `SELECT COUNT(*) FROM projects WHERE owner_user_id = $1`, f.owner); n != 0 {
 		t.Errorf("blocked pulls left %d projects", n)
@@ -380,7 +376,7 @@ func TestPullMovesLinkedSplitOffPartnersBook(t *testing.T) {
 		t.Fatalf("create split bill: %v", err)
 	}
 	billID := created.(*transactions.TransactionDetail).ID
-	if n := f.countRows(t, `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1 AND direction = 'i_owe'`,
+	if n := f.countRows(t, `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1 AND direction = 'received'`,
 		f.friend); n != 1 {
 		t.Fatalf("Bee's copy of the split = %d, want 1 (split_created auto)", n)
 	}
@@ -417,7 +413,7 @@ func TestNewBillSplitsGoStraightToBoard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quick create: %v", err)
 	}
-	added, err := f.svc.AddBills(ctx, f.owner, resp.ID, AddBillsRequest{
+	added, err := f.svc.AddBills(ctx, f.owner, resp.Detail.Event.ID, AddBillsRequest{
 		NewTransaction: &transactions.CreateRequest{
 			Type: transactions.TypeExpense, AccountID: &f.acctPersonal, Amount: 120, CategoryID: &f.cat,
 			Date: "2026-09-07",
@@ -430,7 +426,7 @@ func TestNewBillSplitsGoStraightToBoard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add new bill: %v", err)
 	}
-	newID := *added.TransactionID
+	newID := *added.NewTransactionID
 	if n := f.countRows(t, `SELECT COUNT(*) FROM personal_debts WHERE source_transaction_id = $1`, newID); n != 0 {
 		t.Errorf("new bill made %d personal debts, want 0", n)
 	}
@@ -461,7 +457,7 @@ func TestDeleteBoardRowRestoresOnlyForAuthor(t *testing.T) {
 	}
 	p1, p2 := f.boardParentOf(t, f.bill1), f.boardParentOf(t, f.bill2)
 
-	if err := f.svc.DeleteProjectTransaction(ctx, f.owner, resp.ID, p1); err != nil {
+	if _, err := f.svc.DeleteProjectTransaction(ctx, f.owner, resp.Detail.Event.ID, p1); err != nil {
 		t.Fatalf("author deletes: %v", err)
 	}
 	f.assertLoose(t, f.bill1)
@@ -469,7 +465,7 @@ func TestDeleteBoardRowRestoresOnlyForAuthor(t *testing.T) {
 		t.Errorf("author delete: splits back = %d, want 2", n)
 	}
 
-	if err := f.svc.DeleteProjectTransaction(ctx, f.friend, resp.ID, p2); err != nil {
+	if _, err := f.svc.DeleteProjectTransaction(ctx, f.friend, resp.Detail.Event.ID, p2); err != nil {
 		t.Fatalf("member deletes: %v", err)
 	}
 	f.assertLoose(t, f.bill2)
@@ -494,7 +490,7 @@ func TestCopyIsMyShare(t *testing.T) {
 		t.Helper()
 		var id uuid.UUID
 		if err := f.pool.QueryRow(ctx, `SELECT id FROM project_members WHERE project_id = $1 AND `+where,
-			resp.ID, arg).Scan(&id); err != nil {
+			resp.Detail.Event.ID, arg).Scan(&id); err != nil {
 			t.Fatalf("member: %v", err)
 		}
 		return id
@@ -507,7 +503,7 @@ func TestCopyIsMyShare(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pt, err := f.svc.CreateProjectTransaction(ctx, f.owner, resp.ID, CreateProjectTransactionRequest{
+	pt, err := f.svc.CreateProjectTransaction(ctx, f.owner, resp.Detail.Event.ID, CreateProjectTransactionRequest{
 		TransactionMemberID: me, Type: "expense", Amount: 600, Currency: "THB", Date: "2026-09-10",
 		Splits: []ProjectSplitInput{{MemberID: bee, Amount: 200}, {MemberID: gran, Amount: 200}},
 	})
@@ -516,26 +512,26 @@ func TestCopyIsMyShare(t *testing.T) {
 	}
 	if n := f.countRows(t, `
 		SELECT COUNT(*) FROM transactions WHERE user_id = $1 AND source_project_transaction_id = $2 AND amount = 200`,
-		f.owner, pt.ID); n != 1 {
+		f.owner, pt.Row.ID); n != 1 {
 		t.Errorf("my auto copy should be my share (200)")
 	}
-	beeCopy, err := f.svc.CopyToPersonal(ctx, f.friend, resp.ID, pt.ID)
+	beeCopy, err := f.svc.CopyToPersonal(ctx, f.friend, resp.Detail.Event.ID, pt.Row.ID)
 	if err != nil {
 		t.Fatalf("Bee copies: %v", err)
 	}
-	if n := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE id = $1 AND amount = 200`, beeCopy); n != 1 {
+	if n := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE id = $1 AND amount = 200`, beeCopy.Transaction.ID); n != 1 {
 		t.Errorf("Bee's copy should be her split (200)")
 	}
 
 	// Fully split to others: no share, no auto copy, no error.
-	full, err := f.svc.CreateProjectTransaction(ctx, f.owner, resp.ID, CreateProjectTransactionRequest{
+	full, err := f.svc.CreateProjectTransaction(ctx, f.owner, resp.Detail.Event.ID, CreateProjectTransactionRequest{
 		TransactionMemberID: me, Type: "expense", Amount: 600, Currency: "THB", Date: "2026-09-11",
 		Splits: []ProjectSplitInput{{MemberID: bee, Amount: 300}, {MemberID: gran, Amount: 300}},
 	})
 	if err != nil {
 		t.Fatalf("record fully split: %v", err)
 	}
-	if n := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE source_project_transaction_id = $1`, full.ID); n != 0 {
+	if n := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE source_project_transaction_id = $1`, full.Row.ID); n != 0 {
 		t.Errorf("fully split row got %d copies, want 0", n)
 	}
 }
@@ -562,8 +558,8 @@ func TestSplitFlags(t *testing.T) {
 		t.Errorf("mate's view = %v, want can_split only", got)
 	}
 
-	// A repaid split blocks joining an event, not editing.
-	if _, err := f.pool.Exec(ctx, `UPDATE personal_debts SET settled_amount = 50 WHERE id = $1`, f.debtGr1); err != nil {
+	// A split labelled paid blocks joining an event, not editing.
+	if _, err := f.pool.Exec(ctx, `UPDATE personal_debts SET paid = TRUE WHERE id = $1`, f.debtGr1); err != nil {
 		t.Fatal(err)
 	}
 	if got := flags(f.owner, f.bill1); got != [3]bool{true, true, false} {
@@ -633,7 +629,7 @@ func TestEventBillPersonalSplits(t *testing.T) {
 	}
 
 	// Leaving the event: Bee's board split comes back next to Outsider.
-	if err := f.svc.RemoveBill(ctx, f.owner, resp.ID, f.bill2); err != nil {
+	if _, err := f.svc.RemoveBill(ctx, f.owner, resp.Detail.Event.ID, f.bill2); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if n := f.countRows(t, `SELECT COUNT(*) FROM personal_debts WHERE source_transaction_id = $1`, f.bill2); n != 2 {
@@ -676,10 +672,10 @@ func TestMyShare(t *testing.T) {
 	if v := share(f.bill2); v != 150 {
 		t.Errorf("split bill my_share = %v, want 150 (200 − 50)", v)
 	}
-	if _, err := f.pool.Exec(ctx, `UPDATE personal_debts SET status = 'cancelled' WHERE id = $1`, f.debtB2); err != nil {
+	if _, err := f.pool.Exec(ctx, `DELETE FROM personal_debts WHERE id = $1`, f.debtB2); err != nil {
 		t.Fatal(err)
 	}
 	if v := share(f.bill2); v != 200 {
-		t.Errorf("forgiven split: my_share = %v, want 200", v)
+		t.Errorf("split deleted: my_share = %v, want 200", v)
 	}
 }

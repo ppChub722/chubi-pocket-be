@@ -24,28 +24,30 @@ func NewStore(db *pgxpool.Pool) *Store {
 func (s *Store) Pool() *pgxpool.Pool { return s.db }
 
 var (
-	ErrDebtNotFound     = errors.New("personal debt not found")
-	ErrAlreadySettled   = errors.New("debt is already settled")
-	ErrAlreadyCancelled = errors.New("debt is already cancelled")
-	ErrOverpayment      = errors.New("settle amount exceeds outstanding")
-	// Repaid more than owed (amount edited below repaid) — nothing to settle.
-	ErrDebtOverpaid = errors.New("this debt is already repaid in full or overpaid")
-	// ErrInvalidSettled — an update would leave settled_amount > amount
-	// (the DB CHECK would otherwise surface as a 500).
-	ErrInvalidSettled = errors.New("settled_amount exceeds amount")
-	// ErrContactNotFound — counterparty_contact_id doesn't exist or belongs
-	// to another user. Never link a debt to someone else's contact row.
+	// ErrEntryNotFound — not the caller's entry (404 NOT_FOUND).
+	ErrEntryNotFound = errors.New("debt entry not found")
+	// ErrPersonNotFound — a typed-name key with no entries (404 NOT_FOUND).
+	ErrPersonNotFound = errors.New("no entries with this person")
+	// ErrContactNotFound — the contact doesn't exist or belongs to another
+	// user. Never link an entry to someone else's contact row.
 	ErrContactNotFound = errors.New("contact not found")
+	// ErrTagsNeedWallet — tags belong to the wallet transaction.
+	ErrTagsNeedWallet = errors.New("tags go on the wallet transaction: pick a wallet first")
+	// ErrMarkPaidNotFound — a mark_paid_ids entry isn't this person's.
+	ErrMarkPaidNotFound = errors.New("an entry to mark paid is not one of this person's")
+	// ErrManagedBySource — a split-sourced entry edits only description /
+	// note / paid (409 ENTRY_MANAGED_BY_SOURCE).
+	ErrManagedBySource = errors.New("this entry comes from a split: only its description, note and paid label can change here")
 )
 
-// contactQuerier is satisfied by both *pgxpool.Pool and pgx.Tx.
-type contactQuerier interface {
+// querier is satisfied by both *pgxpool.Pool and pgx.Tx.
+type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 // assertContactOwned returns ErrContactNotFound unless contactID is one of
 // userID's own contacts. nil contactID is always fine (free-text name).
-func assertContactOwned(ctx context.Context, q contactQuerier, userID uuid.UUID, contactID *uuid.UUID) error {
+func assertContactOwned(ctx context.Context, q querier, userID uuid.UUID, contactID *uuid.UUID) error {
 	if contactID == nil {
 		return nil
 	}
@@ -61,105 +63,417 @@ func assertContactOwned(ctx context.Context, q contactQuerier, userID uuid.UUID,
 	return nil
 }
 
-const debtColumns = `id, user_id, direction,
+const entryColumns = `id, user_id, direction,
 	counterparty_contact_id, counterparty_person_name,
 	source_transaction_id, source_project_transaction_id, project_id,
-	amount, settled_amount, currency, status, description, note,
+	amount, currency, to_char(date, 'YYYY-MM-DD'), paid, source_kind, description, note,
 	created_at, updated_at, counterpart_debt_id`
 
-func scanDebt(row pgx.Row) (*PersonalDebt, error) {
-	var d PersonalDebt
+func scanEntry(row pgx.Row) (*Entry, error) {
+	var e Entry
 	err := row.Scan(
-		&d.ID, &d.UserID, &d.Direction,
-		&d.CounterpartyContactID, &d.CounterpartyPersonName,
-		&d.SourceTransactionID, &d.SourceProjectTransactionID, &d.ProjectID,
-		&d.Amount, &d.SettledAmount, &d.Currency, &d.Status, &d.Description, &d.Note,
-		&d.CreatedAt, &d.UpdatedAt, &d.CounterpartDebtID,
+		&e.ID, &e.UserID, &e.Direction,
+		&e.ContactID, &e.PersonName,
+		&e.SourceTransactionID, &e.SourceProjectTransactionID, &e.ProjectID,
+		&e.Amount, &e.Currency, &e.Date, &e.Paid, &e.SourceKind, &e.Description, &e.Note,
+		&e.CreatedAt, &e.UpdatedAt, &e.CounterpartDebtID,
 	)
-	return &d, err
+	return &e, err
 }
 
-// --- Manual create / list / get / update / cancel / delete ---
-
-func (s *Store) Create(ctx context.Context, userID uuid.UUID, req CreateRequest) (*PersonalDebt, error) {
-	if err := assertContactOwned(ctx, s.db, userID, req.CounterpartyContactID); err != nil {
-		return nil, err
+// getEntry — the caller's entry (FOR UPDATE inside a write).
+func getEntry(ctx context.Context, q querier, userID, id uuid.UUID, forUpdate bool) (*Entry, error) {
+	sql := `SELECT ` + entryColumns + ` FROM personal_debts WHERE id = $1 AND user_id = $2`
+	if forUpdate {
+		sql += ` FOR UPDATE`
 	}
+	e, err := scanEntry(q.QueryRow(ctx, sql, id, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrEntryNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("entry: %w", err)
+	}
+	return e, nil
+}
+
+// getAnyEntryTx — any user's entry, locked (the split flows touch both books).
+func getAnyEntryTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*Entry, error) {
+	e, err := scanEntry(tx.QueryRow(ctx,
+		`SELECT `+entryColumns+` FROM personal_debts WHERE id = $1 FOR UPDATE`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrEntryNotFound
+	}
+	return e, err
+}
+
+// insertEntryTx writes a new entry (e.ID is assigned) and bumps the
+// contact's last_used_at (the "recent first" typeahead).
+func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
-	q := `INSERT INTO personal_debts
-		(id, user_id, direction, counterparty_contact_id, counterparty_person_name,
-		 amount, currency, description, note, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $2, $2)
-		RETURNING ` + debtColumns
-	return scanDebt(s.db.QueryRow(ctx, q,
-		id, userID, req.Direction, req.CounterpartyContactID,
-		strings.TrimSpace(req.CounterpartyPersonName),
-		req.Amount, strings.ToUpper(req.Currency), shared.CleanText(req.Description), shared.CleanText(req.Note),
-	))
-}
-
-// CreateAttachedTx is used by transactions module when an expense/income
-// is created with splits — inserts one debt row per debtor in the same
-// caller's tx. Direction is derived from the caller's role:
-//   - splitter (creditor) → 'owed_to_me'
-//   - linked debtor (auto-created on partner's side) → 'i_owe'
-func (s *Store) CreateAttachedTx(
-	ctx context.Context, tx pgx.Tx,
-	userID uuid.UUID, direction string,
-	contactID *uuid.UUID, personName string,
-	sourceTxID, sourceProjectTxID, projectID *uuid.UUID,
-	amount float64, currency string, description, note *string,
-) (*PersonalDebt, error) {
-	id, err := uuid.NewV7()
-	if err != nil {
-		return nil, fmt.Errorf("uuid: %w", err)
+	if e.Currency == "" {
+		if err := tx.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, e.UserID).Scan(&e.Currency); err != nil {
+			return nil, fmt.Errorf("user currency: %w", err)
+		}
 	}
-	q := `INSERT INTO personal_debts
+	row, err := scanEntry(tx.QueryRow(ctx, `INSERT INTO personal_debts
 		(id, user_id, direction, counterparty_contact_id, counterparty_person_name,
 		 source_transaction_id, source_project_transaction_id, project_id,
-		 amount, currency, description, note, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $2, $2)
-		RETURNING ` + debtColumns
-	row, err := scanDebt(tx.QueryRow(ctx, q,
-		id, userID, direction, contactID, strings.TrimSpace(personName),
-		sourceTxID, sourceProjectTxID, projectID,
-		amount, strings.ToUpper(currency), shared.CleanText(description), shared.CleanText(note),
-	))
+		 amount, currency, date, paid, source_kind, description, note,
+		 created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::date, $12, $13, $14, $15, $2, $2)
+		RETURNING `+entryColumns,
+		id, e.UserID, e.Direction, e.ContactID, strings.TrimSpace(e.PersonName),
+		e.SourceTransactionID, e.SourceProjectTransactionID, e.ProjectID,
+		e.Amount, strings.ToUpper(e.Currency), e.Date, e.Paid, e.SourceKind,
+		shared.CleanText(e.Description), shared.CleanText(e.Note)))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("insert entry: %w", err)
 	}
-	// Recency bump: bump contacts.last_used_at so the FE typeahead can
-	// surface this contact first next time. Best-effort — failure here
-	// is logged via the err shadow but doesn't roll back the debt.
-	if contactID != nil {
-		_, _ = tx.Exec(ctx,
-			`UPDATE contacts SET last_used_at = NOW()
-			WHERE id = $1 AND user_id = $2`,
-			*contactID, userID)
+	if e.ContactID != nil {
+		_, _ = tx.Exec(ctx, `UPDATE contacts SET last_used_at = NOW() WHERE id = $1 AND user_id = $2`,
+			*e.ContactID, e.UserID)
 	}
 	return row, nil
 }
 
+// --- people (balances) ---
+
+// peopleSQL aggregates the caller's entries per person key ($1 = user id).
+// keyFilter (may be "") narrows the entries, e.g. `AND <key> = ANY($2)`.
+func peopleSQL(keyFilter string) string {
+	return `
+		WITH e AS (
+			SELECT ` + shared.DebtKeySQL("pd") + ` AS key,
+			       pd.counterparty_contact_id AS cid, pd.counterparty_person_name AS snap,
+			       ` + shared.DebtSignedSQL("pd") + ` AS signed, pd.paid, pd.date, pd.created_at
+			FROM personal_debts pd
+			WHERE pd.user_id = $1 ` + keyFilter + `
+		), g AS (
+			SELECT key, (ARRAY_AGG(cid))[1] AS cid,
+			       (ARRAY_AGG(snap ORDER BY created_at DESC))[1] AS snap,
+			       SUM(signed) AS net,
+			       COUNT(*) FILTER (WHERE NOT paid) AS open_count,
+			       COUNT(*) AS entry_count, MAX(date) AS last
+			FROM e GROUP BY key
+		)
+		SELECT g.key, g.cid, COALESCE(` + shared.PersonNameSQL("c", "lu") + `, g.snap) AS name,
+		       CASE WHEN c.id IS NOT NULL THEN ` + shared.PersonIconSQL("c", "lu") + ` END AS icon,
+		       lu.id AS linked, g.net, g.open_count, g.entry_count, g.last
+		FROM g
+		LEFT JOIN contacts c ON c.id = g.cid AND c.user_id = $1
+		LEFT JOIN users lu ON lu.id = c.linked_user_id`
+}
+
+// openSQL — the person has something open: net ≠ 0 or an entry not labelled paid.
+const openSQL = `(ABS(p.net) > 0.005 OR p.open_count > 0)`
+
+func scanPerson(rows pgx.Rows) (DebtPerson, error) {
+	var (
+		p      DebtPerson
+		cid    *uuid.UUID
+		name   string
+		icon   []byte
+		linked *uuid.UUID
+		last   *string
+	)
+	if err := rows.Scan(&p.Key, &cid, &name, &icon, &linked, &p.Net, &p.OpenCount, &p.EntryCount, &last); err != nil {
+		return p, err
+	}
+	p.Net = round2(p.Net)
+	p.Person = shared.PersonRef{Name: name, ContactID: cid, Linked: linked != nil, LinkedUserID: linked}
+	if cid != nil {
+		p.Person.IconCode = shared.IconFromJSON(icon)
+	}
+	p.LastActivityAt = last
+	return p, nil
+}
+
+// listPeople — one page of people (PeopleFilter) and the filtered count.
+func (s *Store) listPeople(ctx context.Context, userID uuid.UUID, f PeopleFilter) ([]DebtPerson, int, error) {
+	where := []string{"TRUE"}
+	args := []any{userID}
+	if !f.All {
+		where = append(where, openSQL)
+	}
+	switch f.Side {
+	case "owed_to_me":
+		where = append(where, "p.net > 0.005")
+	case "i_owe":
+		where = append(where, "p.net < -0.005")
+	}
+	if q := strings.TrimSpace(f.Q); q != "" {
+		args = append(args, "%"+shared.EscapeLike(q)+"%")
+		where = append(where, fmt.Sprintf("p.name ILIKE $%d", len(args)))
+	}
+	base := `SELECT key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD')
+		FROM (` + peopleSQL("") + `) p WHERE ` + strings.Join(where, " AND ")
+	var total int
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM (`+base+`) x`, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("people count: %w", err)
+	}
+	args = append(args, f.PerPage, (f.Page-1)*f.PerPage)
+	rows, err := s.db.Query(ctx, base+fmt.Sprintf(` ORDER BY ABS(p.net) DESC, p.last DESC NULLS LAST, p.key
+		LIMIT $%d OFFSET $%d`, len(args)-1, len(args)), args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("people: %w", err)
+	}
+	defer rows.Close()
+	out := make([]DebtPerson, 0)
+	for rows.Next() {
+		p, err := scanPerson(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, p)
+	}
+	return out, total, rows.Err()
+}
+
+// totals — the header / tile numbers over every person.
+func (s *Store) totals(ctx context.Context, q shared.Querier, userID uuid.UUID) (DebtTotals, error) {
+	var t DebtTotals
+	rows, err := q.Query(ctx, `
+		SELECT COALESCE(SUM(p.net) FILTER (WHERE p.net > 0.005), 0),
+		       COALESCE(SUM(-p.net) FILTER (WHERE p.net < -0.005), 0),
+		       COUNT(*) FILTER (WHERE `+openSQL+`)
+		FROM (`+peopleSQL("")+`) p`, userID)
+	if err != nil {
+		return t, fmt.Errorf("debt totals: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&t.OwedToMe, &t.IOwe, &t.OpenCount); err != nil {
+			return t, err
+		}
+	}
+	t.OwedToMe, t.IOwe = round2(t.OwedToMe), round2(t.IOwe)
+	t.Net = round2(t.OwedToMe - t.IOwe)
+	return t, rows.Err()
+}
+
+// personBalance — one person's balance. found = they have entries; a
+// contact key without entries still resolves (zeros) when the contact is
+// the caller's.
+func (s *Store) personBalance(ctx context.Context, q shared.Querier, userID uuid.UUID, k shared.DebtPersonKey) (DebtPerson, bool, error) {
+	key := k.Key()
+	rows, err := q.Query(ctx, `SELECT key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD')
+		FROM (`+peopleSQL("AND "+shared.DebtKeySQL("pd")+" = $2")+`) p`, userID, key)
+	if err != nil {
+		return DebtPerson{}, false, fmt.Errorf("person balance: %w", err)
+	}
+	var (
+		p     DebtPerson
+		found bool
+	)
+	if rows.Next() {
+		if p, err = scanPerson(rows); err != nil {
+			rows.Close()
+			return DebtPerson{}, false, err
+		}
+		found = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return DebtPerson{}, false, err
+	}
+	if found {
+		return p, true, nil
+	}
+	p = DebtPerson{Key: key, Person: shared.PersonRef{Name: k.Name}}
+	if k.ContactID != nil {
+		persons, err := shared.LoadPersons(ctx, q, userID, []uuid.UUID{*k.ContactID})
+		if err != nil {
+			return DebtPerson{}, false, err
+		}
+		if ref, ok := persons[*k.ContactID]; ok {
+			p.Person = ref
+		}
+	}
+	return p, false, nil
+}
+
+// --- entries (views) ---
+
+// entryViewSQL — an entry with its wallet transaction and source title.
+const entryViewSQL = `SELECT pd.id, ` + `pd.direction, pd.counterparty_contact_id, pd.counterparty_person_name,
+		pd.amount, to_char(pd.date, 'YYYY-MM-DD'), pd.description, pd.note, pd.paid, pd.source_kind,
+		CASE pd.source_kind WHEN 'transaction' THEN pd.source_transaction_id
+		                    WHEN 'event' THEN pd.project_id END,
+		CASE pd.source_kind WHEN 'transaction' THEN COALESCE(st.description, sc.name)
+		                    WHEN 'event' THEN sp.name
+		                    WHEN 'partner' THEN ou.display_name END,
+		t.id, t.account_id, pd.created_at, pd.updated_at
+	FROM personal_debts pd
+	LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id
+	LEFT JOIN transactions st ON st.id = pd.source_transaction_id
+	LEFT JOIN categories sc ON sc.id = st.category_id
+	LEFT JOIN projects sp ON sp.id = pd.project_id
+	LEFT JOIN personal_debts op ON op.id = pd.counterpart_debt_id
+	LEFT JOIN users ou ON ou.id = op.user_id`
+
+// loadViews runs entryViewSQL + tail (WHERE / ORDER / LIMIT) and resolves
+// the wallets in one batch.
+func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) ([]DebtEntry, error) {
+	rows, err := q.Query(ctx, entryViewSQL+" "+tail, args...)
+	if err != nil {
+		return nil, fmt.Errorf("entries: %w", err)
+	}
+	type acc struct {
+		i  int
+		id uuid.UUID
+	}
+	var (
+		out  = make([]DebtEntry, 0)
+		accs []acc
+		ids  []uuid.UUID
+	)
+	for rows.Next() {
+		var (
+			v        DebtEntry
+			cid      *uuid.UUID
+			name     string
+			kind     *string
+			sourceID *uuid.UUID
+			title    *string
+			txID     *uuid.UUID
+			accID    *uuid.UUID
+		)
+		if err := rows.Scan(&v.ID, &v.Direction, &cid, &name, &v.Amount, &v.Date, &v.Description, &v.Note,
+			&v.Paid, &kind, &sourceID, &title, &txID, &accID, &v.CreatedAt, &v.UpdatedAt); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("entries scan: %w", err)
+		}
+		v.Key = shared.DebtKey(cid, name)
+		if kind != nil {
+			v.Source = &DebtSource{Kind: *kind, ID: sourceID, Title: title}
+		}
+		if txID != nil {
+			v.Transaction = &EntryTx{ID: *txID}
+			if accID != nil {
+				accs = append(accs, acc{len(out), *accID})
+				ids = append(ids, *accID)
+			}
+		}
+		out = append(out, v)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	refs, err := shared.LoadAccountRefs(ctx, q, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range accs {
+		if r, ok := refs[a.id]; ok {
+			out[a.i].Transaction.Account = &r
+		}
+	}
+	return out, nil
+}
+
+// entryView — one entry, page-ready.
+func entryView(ctx context.Context, q shared.Querier, userID, id uuid.UUID) (*DebtEntry, error) {
+	vs, err := loadViews(ctx, q, `WHERE pd.id = $1 AND pd.user_id = $2`, id, userID)
+	if err != nil {
+		return nil, err
+	}
+	if len(vs) == 0 {
+		return nil, ErrEntryNotFound
+	}
+	return &vs[0], nil
+}
+
+// listEntries — one page of a person's entries and the filtered count.
+func (s *Store) listEntries(ctx context.Context, userID uuid.UUID, key string, f EntryFilter) ([]DebtEntry, int, error) {
+	where := []string{"pd.user_id = $1", shared.DebtKeySQL("pd") + " = $2"}
+	args := []any{userID, key}
+	add := func(cond string, v any) {
+		args = append(args, v)
+		where = append(where, fmt.Sprintf(cond, len(args)))
+	}
+	if q := strings.TrimSpace(f.Q); q != "" {
+		add("(pd.description ILIKE $%[1]d OR pd.note ILIKE $%[1]d)", "%"+shared.EscapeLike(q)+"%")
+	}
+	if f.Direction != "" {
+		add("pd.direction = $%d", f.Direction)
+	}
+	if f.Paid != nil {
+		add("pd.paid = $%d", *f.Paid)
+	}
+	if f.Money {
+		where = append(where, "t.id IS NOT NULL")
+	}
+	if f.AccountID != nil {
+		add("t.account_id = $%d", *f.AccountID)
+	}
+	if f.From != nil {
+		add("pd.date >= $%d::date", *f.From)
+	}
+	if f.To != nil {
+		add("pd.date <= $%d::date", *f.To)
+	}
+	w := strings.Join(where, " AND ")
+	var total int
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM personal_debts pd
+		LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id WHERE `+w, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("entries count: %w", err)
+	}
+	order := "pd.date DESC, pd.created_at DESC"
+	switch f.Sort {
+	case "date_asc":
+		order = "pd.date ASC, pd.created_at DESC"
+	case "amount_desc":
+		order = "pd.amount DESC, pd.created_at DESC"
+	case "amount_asc":
+		order = "pd.amount ASC, pd.created_at DESC"
+	}
+	args = append(args, f.PerPage, (f.Page-1)*f.PerPage)
+	out, err := loadViews(ctx, s.db, fmt.Sprintf(`WHERE %s ORDER BY %s, pd.id LIMIT $%d OFFSET $%d`,
+		w, order, len(args)-1, len(args)), args...)
+	return out, total, err
+}
+
+// entryCounts — the person page tab counts.
+func (s *Store) entryCounts(ctx context.Context, userID uuid.UUID, key string) (EntryCounts, error) {
+	var c EntryCounts
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(t.id) FROM personal_debts pd
+		LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id
+		WHERE pd.user_id = $1 AND `+shared.DebtKeySQL("pd")+` = $2`, userID, key).Scan(&c.Entries, &c.Money)
+	return c, err
+}
+
+// entryTxID — the entry's wallet transaction, if any.
+func entryTxID(ctx context.Context, q querier, entryID uuid.UUID) (*uuid.UUID, error) {
+	var id uuid.UUID
+	err := q.QueryRow(ctx, `SELECT id FROM transactions WHERE source_personal_debt_id = $1`, entryID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("entry tx: %w", err)
+	}
+	return &id, nil
+}
+
+// --- contacts hooks ---
+
 // UnlinkedNames returns (counterparty_person_name, count) pairs for every
-// personal_debts row owned by `userID` whose counterparty_contact_id is
-// NULL. Powers the contacts.UnlinkedNamesProvider hook (the wire-up surface
-// on contact detail). Sorted by count DESC so the highest-impact name shows
-// first.
+// entry owned by userID whose counterparty_contact_id is NULL — the wire-up
+// surface on contact detail. Highest count first.
 func (s *Store) UnlinkedNames(ctx context.Context, userID uuid.UUID) ([]struct {
 	Name  string
 	Count int
 }, error) {
-	q := `SELECT counterparty_person_name, COUNT(*)
+	rows, err := s.db.Query(ctx, `SELECT counterparty_person_name, COUNT(*)
 		FROM personal_debts
-		WHERE user_id = $1
-		  AND counterparty_contact_id IS NULL
-		  AND counterparty_person_name <> ''
+		WHERE user_id = $1 AND counterparty_contact_id IS NULL AND counterparty_person_name <> ''
 		GROUP BY counterparty_person_name
-		ORDER BY COUNT(*) DESC, LOWER(counterparty_person_name)`
-	rows, err := s.db.Query(ctx, q, userID)
+		ORDER BY COUNT(*) DESC, LOWER(counterparty_person_name)`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("unlinked names: %w", err)
 	}
@@ -182,32 +496,23 @@ func (s *Store) UnlinkedNames(ctx context.Context, userID uuid.UUID) ([]struct {
 	return out, rows.Err()
 }
 
-// AbsorbForContact wires every personal_debts row whose counterparty_person_name
-// matches one of `names` (case-insensitive exact) and whose
-// counterparty_contact_id is currently NULL to `contactID`. Also snapshots
-// the contact's display_name into counterparty_person_name so the wired
-// rows display consistently. Returns the count of rows rewritten + bumps
-// contacts.last_used_at.
-func (s *Store) AbsorbForContact(
-	ctx context.Context, userID, contactID uuid.UUID, names []string,
-) (int, error) {
+// AbsorbForContact wires every entry whose typed name matches one of names
+// (case-insensitive) to contactID, snapshotting the contact's display_name.
+// Returns the rows rewritten; bumps contacts.last_used_at.
+func (s *Store) AbsorbForContact(ctx context.Context, userID, contactID uuid.UUID, names []string) (int, error) {
 	if len(names) == 0 {
 		return 0, nil
 	}
-	// Lowercase normalize the input set for comparison; LOWER(person_name)
-	// in WHERE matches each row case-insensitively against the same set.
 	lowered := make([]string, len(names))
 	for i, n := range names {
 		lowered[i] = strings.ToLower(strings.TrimSpace(n))
 	}
-
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// Resolve the contact's display name + verify ownership in one shot.
 	var displayName string
 	if err := tx.QueryRow(ctx,
 		`SELECT display_name FROM contacts WHERE id = $1 AND user_id = $2`,
@@ -217,56 +522,38 @@ func (s *Store) AbsorbForContact(
 		}
 		return 0, fmt.Errorf("contact lookup: %w", err)
 	}
-
-	tag, err := tx.Exec(ctx,
-		`UPDATE personal_debts
-		SET counterparty_contact_id = $1,
-		    counterparty_person_name = $2,
-		    updated_by_user_id = $3
-		WHERE user_id = $3
-		  AND counterparty_contact_id IS NULL
-		  AND LOWER(counterparty_person_name) = ANY($4::text[])`,
+	tag, err := tx.Exec(ctx, `UPDATE personal_debts
+		SET counterparty_contact_id = $1, counterparty_person_name = $2, updated_by_user_id = $3
+		WHERE user_id = $3 AND counterparty_contact_id IS NULL
+		  AND LOWER(TRIM(counterparty_person_name)) = ANY($4::text[])`,
 		contactID, displayName, userID, lowered)
 	if err != nil {
 		return 0, fmt.Errorf("absorb: %w", err)
 	}
-
-	// Recency bump — same rationale as CreateAttachedTx.
 	if tag.RowsAffected() > 0 {
-		_, _ = tx.Exec(ctx,
-			`UPDATE contacts SET last_used_at = NOW()
-			WHERE id = $1 AND user_id = $2`,
+		_, _ = tx.Exec(ctx, `UPDATE contacts SET last_used_at = NOW() WHERE id = $1 AND user_id = $2`,
 			contactID, userID)
 	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
 }
 
-// RestoreOnContactDeleteTx snapshots the contact's display_name into
-// counterparty_person_name on every personal_debts row that references this
-// contact, BEFORE the FK ON DELETE SET NULL fires. Without this, deleting a
-// contact would leave behind rows with NULL contact_id AND a possibly stale
-// person_name (or worse — empty string). Called inside the contact-delete tx.
-func (s *Store) RestoreOnContactDeleteTx(
-	ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID,
-) (int, error) {
-	// Snapshot the display name once.
+// RestoreOnContactDeleteTx snapshots the contact's display_name onto every
+// entry referencing it, BEFORE the FK ON DELETE SET NULL fires (the entries
+// become a typed-name person). Called inside the contact-delete tx.
+func (s *Store) RestoreOnContactDeleteTx(ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID) (int, error) {
 	var displayName string
 	if err := tx.QueryRow(ctx,
 		`SELECT display_name FROM contacts WHERE id = $1 AND user_id = $2`,
 		contactID, userID).Scan(&displayName); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			// Contact already gone — nothing to snapshot. Caller may proceed.
 			return 0, nil
 		}
 		return 0, fmt.Errorf("contact lookup: %w", err)
 	}
-
-	tag, err := tx.Exec(ctx,
-		`UPDATE personal_debts
+	tag, err := tx.Exec(ctx, `UPDATE personal_debts
 		SET counterparty_person_name = $1, updated_by_user_id = $2
 		WHERE user_id = $2 AND counterparty_contact_id = $3`,
 		displayName, userID, contactID)
@@ -276,364 +563,9 @@ func (s *Store) RestoreOnContactDeleteTx(
 	return int(tag.RowsAffected()), nil
 }
 
-func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*PersonalDebt, error) {
-	q := `SELECT ` + debtColumns + ` FROM personal_debts WHERE id = $1 AND user_id = $2`
-	d, err := scanDebt(s.db.QueryRow(ctx, q, id, userID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrDebtNotFound
+func round2(f float64) float64 {
+	if f < 0 {
+		return -float64(int64(-f*100+0.5)) / 100
 	}
-	if err != nil {
-		return nil, fmt.Errorf("db error: %w", err)
-	}
-	return d, nil
-}
-
-func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]PersonalDebtView, int, error) {
-	whereClauses := []string{"user_id = $1"}
-	args := []any{userID}
-
-	switch strings.ToLower(strings.TrimSpace(f.Direction)) {
-	case "i_owe":
-		whereClauses = append(whereClauses, "direction = 'i_owe'")
-	case "owed_to_me":
-		whereClauses = append(whereClauses, "direction = 'owed_to_me'")
-	}
-
-	switch strings.ToLower(strings.TrimSpace(f.Status)) {
-	case "", "open":
-		whereClauses = append(whereClauses, "status = 'open'")
-	case "settled":
-		whereClauses = append(whereClauses, "status = 'settled'")
-	case "cancelled":
-		whereClauses = append(whereClauses, "status = 'cancelled'")
-	case "all":
-		// no filter
-	}
-
-	if f.CounterpartyContactID != nil {
-		args = append(args, *f.CounterpartyContactID)
-		whereClauses = append(whereClauses, fmt.Sprintf("counterparty_contact_id = $%d", len(args)))
-	}
-	if f.From != nil {
-		args = append(args, *f.From)
-		whereClauses = append(whereClauses, fmt.Sprintf("created_at >= $%d::timestamptz", len(args)))
-	}
-	if f.To != nil {
-		args = append(args, *f.To)
-		whereClauses = append(whereClauses, fmt.Sprintf("created_at <= $%d::timestamptz", len(args)))
-	}
-
-	where := strings.Join(whereClauses, " AND ")
-
-	var total int
-	if err := s.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM personal_debts WHERE `+where, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("count: %w", err)
-	}
-
-	args = append(args, f.PerPage)
-	limitIdx := len(args)
-	args = append(args, (f.Page-1)*f.PerPage)
-	offsetIdx := len(args)
-
-	q := fmt.Sprintf(`
-		SELECT %s, (amount - settled_amount) AS outstanding
-		FROM personal_debts
-		WHERE %s
-		ORDER BY created_at DESC
-		LIMIT $%d OFFSET $%d`, debtColumns, where, limitIdx, offsetIdx)
-
-	rows, err := s.db.Query(ctx, q, args...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("list: %w", err)
-	}
-	defer rows.Close()
-
-	out := make([]PersonalDebtView, 0, f.PerPage)
-	for rows.Next() {
-		var v PersonalDebtView
-		if err := rows.Scan(
-			&v.ID, &v.UserID, &v.Direction,
-			&v.CounterpartyContactID, &v.CounterpartyPersonName,
-			&v.SourceTransactionID, &v.SourceProjectTransactionID, &v.ProjectID,
-			&v.Amount, &v.SettledAmount, &v.Currency, &v.Status, &v.Description, &v.Note,
-			&v.CreatedAt, &v.UpdatedAt, &v.CounterpartDebtID, &v.Outstanding,
-		); err != nil {
-			return nil, 0, fmt.Errorf("scan: %w", err)
-		}
-		out = append(out, v)
-	}
-	return out, total, rows.Err()
-}
-
-// Update applies a partial patch. Direct-edit path for non-cash adjustments
-// (forgiveness, barter, math errors).
-func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (*PersonalDebt, error) {
-	current, err := s.GetByID(ctx, userID, id)
-	if err != nil {
-		return nil, err
-	}
-	if err := assertContactOwned(ctx, s.db, userID, req.CounterpartyContactID); err != nil {
-		return nil, err
-	}
-
-	q := `UPDATE personal_debts SET updated_by_user_id = $1`
-	args := []any{userID}
-
-	// Resulting settled_amount must stay within amount (DB CHECK → 500).
-	nextAmount, nextSettled := current.Amount, current.SettledAmount
-	if req.Amount != nil {
-		nextAmount = *req.Amount
-	}
-	if req.SettledAmount != nil {
-		nextSettled = *req.SettledAmount
-	}
-	if nextSettled > nextAmount {
-		return nil, ErrInvalidSettled
-	}
-
-	if req.ClearContact {
-		q += ", counterparty_contact_id = NULL"
-	} else if req.CounterpartyContactID != nil {
-		args = append(args, *req.CounterpartyContactID)
-		q += fmt.Sprintf(", counterparty_contact_id = $%d", len(args))
-	}
-	if req.CounterpartyPersonName != nil {
-		args = append(args, strings.TrimSpace(*req.CounterpartyPersonName))
-		q += fmt.Sprintf(", counterparty_person_name = $%d", len(args))
-	}
-	if req.Amount != nil {
-		args = append(args, *req.Amount)
-		q += fmt.Sprintf(", amount = $%d", len(args))
-	}
-	if req.SettledAmount != nil {
-		args = append(args, *req.SettledAmount)
-		q += fmt.Sprintf(", settled_amount = $%d", len(args))
-	}
-	if req.Currency != nil {
-		args = append(args, strings.ToUpper(*req.Currency))
-		q += fmt.Sprintf(", currency = $%d", len(args))
-	}
-	if req.Status != nil {
-		// status='settled' requires settled_amount >= amount.
-		if *req.Status == StatusSettled && nextSettled < nextAmount {
-			return nil, fmt.Errorf("cannot mark settled when settled_amount < amount")
-		}
-		args = append(args, *req.Status)
-		q += fmt.Sprintf(", status = $%d", len(args))
-	}
-	if v, ok := shared.TextChange(req.Description, req.ClearDescription); ok {
-		args = append(args, v)
-		q += fmt.Sprintf(", description = $%d", len(args))
-	}
-	if req.ClearNote {
-		q += ", note = NULL"
-	} else if req.Note != nil {
-		args = append(args, shared.CleanText(req.Note))
-		q += fmt.Sprintf(", note = $%d", len(args))
-	}
-
-	args = append(args, id)
-	q += fmt.Sprintf(" WHERE id = $%d AND user_id = $1 RETURNING ", len(args)) + debtColumns
-
-	d, err := scanDebt(s.db.QueryRow(ctx, q, args...))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrDebtNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("update: %w", err)
-	}
-	return d, nil
-}
-
-func (s *Store) Cancel(ctx context.Context, userID, id uuid.UUID) (*PersonalDebt, error) {
-	current, err := s.GetByID(ctx, userID, id)
-	if err != nil {
-		return nil, err
-	}
-	if current.Status == StatusCancelled {
-		return nil, ErrAlreadyCancelled
-	}
-	q := `UPDATE personal_debts SET status = 'cancelled', updated_by_user_id = $1
-		WHERE id = $2 AND user_id = $1 RETURNING ` + debtColumns
-	return scanDebt(s.db.QueryRow(ctx, q, userID, id))
-}
-
-func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
-	tag, err := s.db.Exec(ctx,
-		`DELETE FROM personal_debts WHERE id = $1 AND user_id = $2`, id, userID)
-	if err != nil {
-		return fmt.Errorf("delete: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrDebtNotFound
-	}
-	return nil
-}
-
-// SettleInTx bumps settled_amount within the provided tx. Caller is
-// responsible for the corresponding income/expense row in transactions.
-// Auto-flips status to 'settled' when fully covered.
-func (s *Store) SettleInTx(
-	ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, amount float64,
-) (*PersonalDebt, error) {
-	q := `UPDATE personal_debts SET
-		settled_amount = settled_amount + $1,
-		status = CASE WHEN settled_amount + $1 >= amount THEN 'settled' ELSE status END,
-		updated_by_user_id = $2
-		WHERE id = $3 AND user_id = $2
-		RETURNING ` + debtColumns
-	d, err := scanDebt(tx.QueryRow(ctx, q, amount, userID, id))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrDebtNotFound
-	}
-	return d, err
-}
-
-// AutoBumpInTx — called by transactions module's hook when a transaction
-// with source_personal_debt_id lands. The transaction creator (debt owner)
-// has already been validated to own the debt; just bump.
-func (s *Store) AutoBumpInTx(
-	ctx context.Context, tx pgx.Tx, userID, debtID uuid.UUID, delta float64,
-) error {
-	if delta <= 0 {
-		return nil
-	}
-	_, err := tx.Exec(ctx, `
-		UPDATE personal_debts SET
-			settled_amount = LEAST(amount, settled_amount + $1),
-			status = CASE WHEN settled_amount + $1 >= amount THEN 'settled' ELSE status END,
-			updated_by_user_id = $2
-		WHERE id = $3 AND user_id = $2 AND status = 'open' AND settled_amount < amount`,
-		delta, userID, debtID)
-	if err != nil {
-		return fmt.Errorf("auto-bump: %w", err)
-	}
-	return nil
-}
-
-// People aggregates open debts grouped by counterparty (contact_id when
-// present, else lower(person_name)) and computes net position per person.
-func (s *Store) People(ctx context.Context, userID uuid.UUID) ([]PersonRow, float64, float64, error) {
-	// The display name is the one name rule (shared.PersonNameSQL): live
-	// nickname / linked profile / contact name; the snapshot only when the
-	// debt has no contact. Grouping stays: contact id, else lower(snapshot).
-	q := `
-		WITH grouped AS (
-			SELECT
-				pd.counterparty_contact_id,
-				LOWER(COALESCE(` + shared.PersonNameSQL("c", "lu") + `, pd.counterparty_person_name)) AS group_key,
-				COALESCE(` + shared.PersonNameSQL("c", "lu") + `, pd.counterparty_person_name) AS display_name,
-				` + shared.PersonIconSQL("c", "lu") + ` AS icon_code,
-				lu.id AS linked_user_id,
-				pd.direction,
-				(pd.amount - pd.settled_amount) AS outstanding
-			FROM personal_debts pd
-			LEFT JOIN contacts c ON c.id = pd.counterparty_contact_id AND c.user_id = pd.user_id
-			LEFT JOIN users lu ON lu.id = c.linked_user_id
-			WHERE pd.user_id = $1 AND pd.status = 'open'
-		)
-		SELECT
-			counterparty_contact_id,
-			MAX(display_name) AS display_name,
-			-- Overpaid rows (outstanding < 0) count the other way round.
-			COALESCE(SUM(GREATEST(outstanding, 0)) FILTER (WHERE direction = 'owed_to_me'), 0) +
-			COALESCE(SUM(GREATEST(-outstanding, 0)) FILTER (WHERE direction = 'i_owe'), 0) AS owed_to_me,
-			COALESCE(SUM(GREATEST(outstanding, 0)) FILTER (WHERE direction = 'i_owe'), 0) +
-			COALESCE(SUM(GREATEST(-outstanding, 0)) FILTER (WHERE direction = 'owed_to_me'), 0) AS i_owe,
-			COUNT(*) AS open_count,
-			(ARRAY_AGG(icon_code))[1] AS icon_code,
-			(ARRAY_AGG(linked_user_id))[1] AS linked_user_id
-		FROM grouped
-		GROUP BY counterparty_contact_id, group_key
-		ORDER BY ABS(
-			COALESCE(SUM(outstanding) FILTER (WHERE direction = 'owed_to_me'), 0) -
-			COALESCE(SUM(outstanding) FILTER (WHERE direction = 'i_owe'), 0)
-		) DESC`
-
-	rows, err := s.db.Query(ctx, q, userID)
-	if err != nil {
-		return nil, 0, 0, fmt.Errorf("people: %w", err)
-	}
-	defer rows.Close()
-
-	out := make([]PersonRow, 0)
-	var totalOwed, totalIOwe float64
-	for rows.Next() {
-		var r PersonRow
-		var icon []byte
-		var linked *uuid.UUID
-		var name string
-		if err := rows.Scan(
-			&r.ContactID, &name,
-			&r.OwedToMeOpen, &r.IOweOpen, &r.OpenCount, &icon, &linked,
-		); err != nil {
-			return nil, 0, 0, err
-		}
-		r.Person = shared.PersonRef{
-			Name: name, ContactID: r.ContactID, Linked: linked != nil, LinkedUserID: linked,
-		}
-		if r.ContactID != nil {
-			r.Person.IconCode = shared.IconFromJSON(icon)
-		}
-		r.NetPosition = r.OwedToMeOpen - r.IOweOpen
-		out = append(out, r)
-		totalOwed += r.OwedToMeOpen
-		totalIOwe += r.IOweOpen
-	}
-	return out, totalOwed, totalIOwe, rows.Err()
-}
-
-// FindMatchingForCounterparty looks up the partner-side debt (created
-// when a linked split fires both sides) by source transaction. Used to
-// keep both books in sync — bumping caller's settled_amount also bumps
-// the matching counterparty row when the relationship is symmetric.
-func (s *Store) FindMatchingForCounterparty(
-	ctx context.Context, tx pgx.Tx, sourceTxID uuid.UUID, counterpartyUserID uuid.UUID,
-) (*PersonalDebt, error) {
-	q := `SELECT ` + debtColumns + ` FROM personal_debts
-		WHERE source_transaction_id = $1
-		  AND user_id = $2
-		LIMIT 1`
-	d, err := scanDebt(tx.QueryRow(ctx, q, sourceTxID, counterpartyUserID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil // no matching row, fine
-	}
-	return d, err
-}
-
-// DebtsForTransaction returns all debts originating from a transaction
-// (one per debtor for the splitter side) — used by the FE to show
-// split breakdown on a transaction detail page.
-func (s *Store) DebtsForTransaction(ctx context.Context, userID, txID uuid.UUID) ([]PersonalDebt, error) {
-	q := `SELECT ` + debtColumns + ` FROM personal_debts
-		WHERE user_id = $1 AND source_transaction_id = $2
-		ORDER BY created_at`
-	rows, err := s.db.Query(ctx, q, userID, txID)
-	if err != nil {
-		return nil, fmt.Errorf("debts for tx: %w", err)
-	}
-	defer rows.Close()
-	out := make([]PersonalDebt, 0)
-	for rows.Next() {
-		d, err := scanDebt(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *d)
-	}
-	return out, rows.Err()
-}
-
-// SumDebtsForTransaction returns the total amount of open lent debts
-// originating from a transaction. Used by reports for "my share"
-// calculation.
-func (s *Store) SumDebtsForTransaction(ctx context.Context, userID, txID uuid.UUID) (float64, error) {
-	var total float64
-	err := s.db.QueryRow(ctx, `
-		SELECT COALESCE(SUM(amount), 0) FROM personal_debts
-		WHERE user_id = $1 AND source_transaction_id = $2
-		  AND direction = 'owed_to_me' AND status != 'cancelled'`,
-		userID, txID).Scan(&total)
-	return total, err
+	return float64(int64(f*100+0.5)) / 100
 }

@@ -62,7 +62,9 @@ func User(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 		for _, q := range []string{
 			`DELETE FROM transactions WHERE user_id = $1`,
 			`DELETE FROM personal_debts WHERE user_id = $1`,
-			`DELETE FROM scheduled_transactions WHERE user_id = $1`,
+			`DELETE FROM recurring_rules WHERE user_id = $1`,
+			`DELETE FROM recurring_items WHERE user_id = $1`,
+			`DELETE FROM saving_entries WHERE user_id = $1`,
 			`DELETE FROM saving_goals WHERE user_id = $1`,
 			`DELETE FROM budgets WHERE user_id = $1`,
 			`DELETE FROM projects WHERE owner_user_id = $1`,

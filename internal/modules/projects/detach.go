@@ -31,35 +31,46 @@ import (
 var ErrBillNotInProject = errors.New("transaction is not in this project")
 
 // RemoveBill implements DELETE /v1/projects/:id/bills/:transaction_id.
-func (s *Service) RemoveBill(ctx context.Context, callerUserID, projectID, txID uuid.UUID) error {
+func (s *Service) RemoveBill(ctx context.Context, callerUserID, projectID, txID uuid.UUID) (*EventPatch, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin: %w", err)
+		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
 	var (
-		ownerID uuid.UUID
-		inProj  *uuid.UUID
+		ownerID  uuid.UUID
+		inProj   *uuid.UUID
+		sourcePT *uuid.UUID
 	)
-	err = tx.QueryRow(ctx, `SELECT user_id, project_id FROM transactions WHERE id = $1 FOR UPDATE`,
-		txID).Scan(&ownerID, &inProj)
+	err = tx.QueryRow(ctx, `SELECT user_id, project_id, source_project_transaction_id FROM transactions WHERE id = $1 FOR UPDATE`,
+		txID).Scan(&ownerID, &inProj, &sourcePT)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && ownerID != callerUserID) {
-		return ErrQuickTxNotFound // not-owned = not-found (no info leak)
+		return nil, ErrQuickTxNotFound // not-owned = not-found (no info leak)
 	}
 	if err != nil {
-		return fmt.Errorf("load bill %s: %w", txID, err)
+		return nil, fmt.Errorf("load bill %s: %w", txID, err)
 	}
 	if inProj == nil || *inProj != projectID {
-		return ErrBillNotInProject
+		return nil, ErrBillNotInProject
+	}
+	var removed *uuid.UUID
+	if sourcePT != nil {
+		origin, err := isBoardOriginTx(ctx, tx, callerUserID, *sourcePT)
+		if err != nil {
+			return nil, err
+		}
+		if origin {
+			removed = sourcePT
+		}
 	}
 	if _, err := s.detachBillTx(ctx, tx, callerUserID, txID, true); err != nil {
-		return err
+		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	return s.patch(ctx, callerUserID, projectID, nil, removed, nil)
 }
 
 // detachBillTx takes the caller's transaction txID out of its project (see

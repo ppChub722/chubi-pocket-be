@@ -1,5 +1,17 @@
 package budgets
 
+// Budgets v2 (0.3.1-10, owner mockup 2026-10-13). A budget is a NAMED
+// personal tracker:
+//   - SCOPE (free; budgets may overlap): everything, or any mix of
+//     categories (± sub-categories), tag NAMES and wallets — a row counts
+//     when it matches ANY of them;
+//   - TIME: recurring ("งบระยะยาว", periods from a rule; each period is an
+//     instance with its own amount / note) or one range (fixed, or open
+//     until ปิดงบ);
+//   - WHAT COUNTS (expense side, my share): USED = my transactions (normal /
+//     recurring-linked) + my share of event bills (once); EXPECTED (current
+//     period only) = upcoming recurring items + pending drafts.
+
 import (
 	"time"
 
@@ -8,161 +20,307 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// Scope values.
-const (
-	ScopeUser    = "user"
-	ScopeProject = "project"
-)
+const dateLayout = "2006-01-02"
 
-// Period values.
-const (
-	PeriodWeekly  = "weekly"
-	PeriodMonthly = "monthly"
-	PeriodYearly  = "yearly"
-)
-
-// Status values.
+// Status values (stored).
 const (
 	StatusActive   = "active"
 	StatusArchived = "archived"
 )
 
-// Budget — stored row, no computed progress fields.
-//
-// The icon comes from the linked category (migration 000037). Like every
-// "thing": `name` (the title — defaults to the category's name, migration
-// 000051), `description`, `note`.
+// States (derived).
+const (
+	StateUpcoming = "upcoming"
+	StateActive   = "active"
+	StateEnded    = "ended"
+	StateArchived = "archived"
+)
+
+// Period statuses.
+const (
+	PeriodOK   = "ok"
+	PeriodPace = "pace"
+	PeriodWarn = "warn"
+	PeriodOver = "over"
+)
+
+// Sources of what a budget counts.
+const (
+	SourceNormal    = "normal"
+	SourceRecurring = "recurring"
+	SourceEvent     = "event"
+	SourceUpcoming  = "upcoming"
+	SourcePending   = "pending"
+)
+
+const defaultWarnPct = 80
+
+// scopeCat — one category of the scope.
+type scopeCat struct {
+	ID              uuid.UUID
+	IncludeChildren bool
+}
+
+// Budget — the budgets row + its scope lists.
 type Budget struct {
-	ID          uuid.UUID  `json:"id"`
-	UserID      uuid.UUID  `json:"user_id"`
-	CategoryID  uuid.UUID  `json:"category_id"`
-	Scope       string     `json:"scope"`
-	ProjectID   *uuid.UUID `json:"project_id"`
-	Amount      float64    `json:"amount"`
-	Period      string     `json:"period"`
-	Currency    string     `json:"currency"`
-	Status      string     `json:"status"`
-	Name        string     `json:"name"`
-	Description *string    `json:"description"`
-	Note        *string    `json:"note"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID          uuid.UUID
+	UserID      uuid.UUID
+	Name        string
+	Description *string
+	Note        *string
+	IconCode    *shared.IconCode
+	Amount      float64
+	WarnPct     *int
+	ScopeAll    bool
+	TagNames    []string
+	Recurring   bool
+	Freq        *string
+	Interval    int
+	StartDate   time.Time
+	AnchorDate  time.Time
+	EndKind     string
+	EndDate     *time.Time
+	EndCount    *int
+	ClosedOn    *time.Time
+	Status      string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	Categories  []scopeCat
+	Wallets     []uuid.UUID
 }
 
-// CurrentPeriod — period-boundary snapshot + spend computed at read.
-type CurrentPeriod struct {
-	Start          string  `json:"start"` // YYYY-MM-DD
-	End            string  `json:"end"`
-	Spent          float64 `json:"spent"`
-	Remaining      float64 `json:"remaining"`
-	UtilizationPct float64 `json:"utilization_pct"`
-	OverLimit      bool    `json:"over_limit"`
+// periodRow — a budget_periods row.
+type periodRow struct {
+	ID         uuid.UUID
+	Seq        int
+	Start      time.Time
+	End        *time.Time
+	Amount     float64
+	Overridden bool
+	Note       *string
 }
 
-// ChildBreakdownRow — descendant-by-descendant spend roll-up.
-type ChildBreakdownRow struct {
-	CategoryID uuid.UUID `json:"category_id"`
-	Name       string    `json:"name"`
-	Spent      float64   `json:"spent"`
+// --- API shapes (spec schemas Budget*) ---
+
+type ScopeCategory struct {
+	Category        shared.CategoryRef `json:"category"`
+	IncludeChildren bool               `json:"include_children"`
 }
 
-// BudgetView — read-shape with computed fields.
-type BudgetView struct {
-	Budget
-	Category       shared.CategoryRef  `json:"category"`
-	CurrentPeriod  CurrentPeriod       `json:"current_period"`
-	ChildBreakdown []ChildBreakdownRow `json:"child_breakdown"`
+// Scope — spec BudgetScope.
+type Scope struct {
+	All        bool                `json:"all"`
+	Categories []ScopeCategory     `json:"categories"`
+	Tags       []string            `json:"tags"`
+	Wallets    []shared.AccountRef `json:"wallets"`
 }
 
-// CreateRequest — `currency` is optional; defaults to user's currency
-// (THB in 1c). `project_id` required iff `scope='project'`.
-// `name` is optional: absent / null / "" → the category's name.
-type CreateRequest struct {
-	CategoryID  uuid.UUID  `json:"category_id" binding:"required"`
-	Amount      float64    `json:"amount"      binding:"required,gt=0"`
-	Period      string     `json:"period"      binding:"required,oneof=weekly monthly yearly"`
-	Scope       string     `json:"scope"       binding:"required,oneof=user project"`
-	ProjectID   *uuid.UUID `json:"project_id"  binding:"omitempty"`
-	Currency    *string    `json:"currency"    binding:"omitempty,len=3"`
-	Name        *string    `json:"name"        binding:"omitempty,max=100"`
-	Description *string    `json:"description" binding:"omitempty,max=200"`
-	Note        *string    `json:"note"        binding:"omitempty,max=500"`
+// Rule — spec BudgetRule.
+type Rule struct {
+	Freq     string `json:"freq"`
+	Interval int    `json:"interval"`
 }
 
-// UpdateRequest — partial. scope / project_id NOT editable (delete +
-// recreate). status changes flow via archive / restore endpoints.
-//
-// CategoryID re-anchors the budget on another expense category. Spent is
-// computed live from transactions, so nothing needs migrating; the
-// one-active-budget-per-(category, period, scope) rule still applies.
-type UpdateRequest struct {
-	CategoryID  *uuid.UUID `json:"category_id"`
-	Amount      *float64   `json:"amount"      binding:"omitempty,gt=0"`
-	Period      *string    `json:"period"      binding:"omitempty,oneof=weekly monthly yearly"`
-	Currency    *string    `json:"currency"    binding:"omitempty,len=3"`
-	Name        *string    `json:"name"        binding:"omitempty,max=100"`
-	Description *string    `json:"description" binding:"omitempty,max=200"`
-	Note        *string    `json:"note"        binding:"omitempty,max=500"`
-
-	namePresent        bool
-	descriptionPresent bool
-	notePresent        bool
+// End — spec RecurrenceEnd.
+type End struct {
+	Kind  string  `json:"kind"`
+	Date  *string `json:"date"`
+	Count *int    `json:"count"`
 }
 
-// UnmarshalJSON records which keys the body carried: an absent name /
-// description / note stays as is; null or "" clears it (name: back to the
-// category's name).
-func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
-	type alias UpdateRequest
-	present, err := shared.DecodeTracked(data, (*alias)(r))
-	r.namePresent = present["name"]
-	r.descriptionPresent, r.notePresent = present["description"], present["note"]
-	return err
+// Period — spec BudgetPeriod.
+type Period struct {
+	ID         uuid.UUID `json:"id"`
+	Seq        int       `json:"seq"`
+	Start      string    `json:"start"`
+	End        *string   `json:"end"`
+	Amount     float64   `json:"amount"`
+	BaseAmount float64   `json:"base_amount"`
+	Overridden bool      `json:"overridden"`
+	Note       *string   `json:"note"`
+	IsCurrent  bool      `json:"is_current"`
+	Used       float64   `json:"used"`
+	Expected   float64   `json:"expected"`
+	Remaining  float64   `json:"remaining"`
+	OverBy     float64   `json:"over_by"`
+	Pct        int       `json:"pct"`
+	Status     string    `json:"status"`
+	Tone       string    `json:"tone"`
+	DaysLeft   *int      `json:"days_left"`
 }
 
-func (r *UpdateRequest) NameChange() (*string, bool) {
-	return shared.TextChange(r.Name, r.namePresent)
+type Actions struct {
+	Edit    bool `json:"edit"`
+	Close   bool `json:"close"`
+	Archive bool `json:"archive"`
+	Restore bool `json:"restore"`
 }
 
-func (r *UpdateRequest) DescriptionChange() (*string, bool) {
-	return shared.TextChange(r.Description, r.descriptionPresent)
+// View — spec Budget.
+type View struct {
+	ID          uuid.UUID        `json:"id"`
+	Name        string           `json:"name"`
+	Description *string          `json:"description"`
+	Note        *string          `json:"note"`
+	IconCode    *shared.IconCode `json:"icon_code"`
+	Amount      float64          `json:"amount"`
+	WarnPct     *int             `json:"warn_pct"`
+	Scope       Scope            `json:"scope"`
+	Recurring   bool             `json:"recurring"`
+	Rule        *Rule            `json:"rule"`
+	StartDate   string           `json:"start_date"`
+	End         End              `json:"end"`
+	State       string           `json:"state"`
+	ClosedOn    *string          `json:"closed_on"`
+	Period      Period           `json:"period"`
+	Actions     Actions          `json:"actions"`
+	CreatedAt   time.Time        `json:"created_at"`
+	UpdatedAt   time.Time        `json:"updated_at"`
 }
 
-func (r *UpdateRequest) NoteChange() (*string, bool) {
-	return shared.TextChange(r.Note, r.notePresent)
+// ListSummary — spec BudgetListSummary.
+type ListSummary struct {
+	ActiveCount   int `json:"active_count"`
+	OverCount     int `json:"over_count"`
+	WarnCount     int `json:"warn_count"`
+	PaceCount     int `json:"pace_count"`
+	EndedCount    int `json:"ended_count"`
+	ArchivedCount int `json:"archived_count"`
 }
 
-type ListFilter struct {
-	Status    string // 'active' (default), 'archived', 'all'
-	Period    string // optional period filter
-	Scope     string // 'user', 'project', 'all'
-	ProjectID *uuid.UUID
+// List — spec BudgetList.
+type List struct {
+	Summary ListSummary `json:"summary"`
+	Data    []View      `json:"data"`
 }
 
-type ListResponse struct {
-	Data []BudgetView `json:"data"`
+// Forecast — spec BudgetForecast.
+type Forecast struct {
+	ElapsedDays            *int     `json:"elapsed_days"`
+	TotalDays              *int     `json:"total_days"`
+	DailyAllowance         *float64 `json:"daily_allowance"`
+	AvgDaily               *float64 `json:"avg_daily"`
+	AvgMonthly             *float64 `json:"avg_monthly"`
+	ForecastEnd            *float64 `json:"forecast_end"`
+	ForecastOverBy         *float64 `json:"forecast_over_by"`
+	ForecastOverDate       *string  `json:"forecast_over_date"`
+	RemainingAfterExpected float64  `json:"remaining_after_expected"`
+	ThisMonth              *float64 `json:"this_month"`
+	HistoryAvg             *float64 `json:"history_avg"`
+	HistoryCount           int      `json:"history_count"`
 }
 
-// OverviewItem — compact per-budget summary used in /overview.
-type OverviewItem struct {
-	ID             uuid.UUID `json:"id"`
-	CategoryName   string    `json:"category_name"`
-	Amount         float64   `json:"amount"`
-	Spent          float64   `json:"spent"`
-	OverLimit      bool      `json:"over_limit"`
-	UtilizationPct float64   `json:"utilization_pct"`
+// SourceRow — spec BudgetSourceRow.
+type SourceRow struct {
+	Source   string  `json:"source"`
+	CountsAs string  `json:"counts_as"`
+	Count    int     `json:"count"`
+	Amount   float64 `json:"amount"`
 }
 
-type OverviewResponse struct {
-	Period                string         `json:"period"`
-	PeriodStart           string         `json:"period_start"`
-	PeriodEnd             string         `json:"period_end"`
-	Scope                 string         `json:"scope"`
-	ProjectID             *uuid.UUID     `json:"project_id"`
-	TotalBudget           float64        `json:"total_budget"`
-	TotalSpent            float64        `json:"total_spent"`
-	TotalRemaining        float64        `json:"total_remaining"`
-	OverallUtilizationPct float64        `json:"overall_utilization_pct"`
-	BudgetsOverLimit      int            `json:"budgets_over_limit"`
-	Budgets               []OverviewItem `json:"budgets"`
+// CategoryRow — spec BudgetCategoryRow.
+type CategoryRow struct {
+	Category *shared.CategoryRef `json:"category"`
+	Amount   float64             `json:"amount"`
+	Pct      int                 `json:"pct"`
+}
+
+// Item — spec BudgetItem.
+type Item struct {
+	Kind        string                    `json:"kind"`
+	ID          uuid.UUID                 `json:"id"`
+	Source      string                    `json:"source"`
+	CountsAs    string                    `json:"counts_as"`
+	Date        *string                   `json:"date"`
+	Amount      float64                   `json:"amount"`
+	Description *string                   `json:"description"`
+	Category    *shared.CategoryRef       `json:"category"`
+	Account     *shared.AccountRef        `json:"account"`
+	Tags        []string                  `json:"tags"`
+	Event       *shared.EventRef          `json:"event"`
+	Recurring   *shared.RecurringItemLink `json:"recurring"`
+}
+
+type ItemList struct {
+	Data       []Item      `json:"data"`
+	Pagination shared.Page `json:"pagination"`
+}
+
+type PeriodList struct {
+	Data       []Period    `json:"data"`
+	Pagination shared.Page `json:"pagination"`
+}
+
+type RecentPeriods struct {
+	Data    []Period `json:"data"`
+	HasMore bool     `json:"has_more"`
+}
+
+// Detail — spec BudgetDetail.
+type Detail struct {
+	Budget     View          `json:"budget"`
+	Forecast   Forecast      `json:"forecast"`
+	BySource   []SourceRow   `json:"by_source"`
+	ByCategory []CategoryRow `json:"by_category"`
+	Periods    RecentPeriods `json:"periods"`
+	Items      ItemList      `json:"items"`
+}
+
+// Totals — the Home budgets tile / More budgets_summary: every active,
+// started budget at its current period.
+type Totals struct {
+	Count          int
+	TotalBudget    float64
+	TotalSpent     float64
+	UtilizationPct float64
+	OverLimitCount int
+}
+
+// --- requests ---
+
+type ScopeCategoryInput struct {
+	ID              uuid.UUID `json:"id"`
+	IncludeChildren *bool     `json:"include_children"`
+}
+
+// ScopeInput — spec BudgetScopeInput.
+type ScopeInput struct {
+	All        bool                 `json:"all"`
+	Categories []ScopeCategoryInput `json:"categories"`
+	Tags       []string             `json:"tags"`
+	WalletIDs  []uuid.UUID          `json:"wallet_ids"`
+}
+
+type RuleInput struct {
+	Freq     string `json:"freq"`
+	Interval int    `json:"interval"`
+}
+
+// Request — create / update body (spec BudgetCreateRequest /
+// BudgetUpdateRequest); presence filled by the handler.
+type Request struct {
+	Name        *string          `json:"name"`
+	Description *string          `json:"description"`
+	Note        *string          `json:"note"`
+	IconCode    *shared.IconCode `json:"icon_code"`
+	Amount      *float64         `json:"amount"`
+	WarnPct     *int             `json:"warn_pct"`
+	Scope       *ScopeInput      `json:"scope"`
+	Recurring   *bool            `json:"recurring"`
+	Rule        *RuleInput       `json:"rule"`
+	StartDate   *string          `json:"start_date"`
+	End         *End             `json:"end"`
+	Apply       string           `json:"apply"`
+
+	present map[string]bool
+}
+
+func (r *Request) has(k string) bool { return r.present[k] }
+
+// PeriodRequest — spec BudgetPeriodUpdateRequest.
+type PeriodRequest struct {
+	Amount *float64 `json:"amount"`
+	Note   *string  `json:"note"`
+
+	present map[string]bool
 }

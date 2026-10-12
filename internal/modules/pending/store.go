@@ -187,3 +187,38 @@ func (s *Store) DeleteMany(ctx context.Context, userID uuid.UUID, ids []uuid.UUI
 	}
 	return out, rows.Err()
 }
+
+// InsertTx — Insert inside the caller's DB transaction (the recurring due
+// check writes its drafts with the items' links in one go).
+func (s *Store) InsertTx(
+	ctx context.Context, tx pgx.Tx, userID uuid.UUID, source, kind string, d Draft, sourceRef json.RawMessage,
+) (*PendingTransaction, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return nil, fmt.Errorf("uuid: %w", err)
+	}
+	draft, err := json.Marshal(d)
+	if err != nil {
+		return nil, err
+	}
+	var ref []byte
+	if len(sourceRef) > 0 {
+		ref = sourceRef
+	}
+	return scanPending(tx.QueryRow(ctx, `
+		INSERT INTO pending_transactions (id, user_id, source, kind, draft, source_ref)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING `+pendingColumns,
+		id, userID, source, kind, draft, ref))
+}
+
+// UpdateDraftTx — UpdateDraft inside the caller's DB transaction.
+func (s *Store) UpdateDraftTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, d Draft) error {
+	draft, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE pending_transactions SET draft = $3, last_error = NULL
+		WHERE id = $1 AND user_id = $2`, id, userID, draft)
+	return err
+}

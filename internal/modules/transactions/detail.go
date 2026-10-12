@@ -22,7 +22,7 @@ type rowFacts struct {
 	splitCount    int
 	billable      bool // expense / income, not a repayment or a system row
 	eventBill     bool // shared.EventBillPredicate
-	closed        bool // a split of it was repaid or forgiven
+	closed        bool // a split of it is labelled paid
 	activeMembers int  // on the row's wallet
 	callerActive  bool // the caller is an active member of the row's wallet
 	authorName    string
@@ -31,6 +31,21 @@ type rowFacts struct {
 	peerAccountID *uuid.UUID
 	kind          *string // this row's category system_kind
 	peerKind      *string
+	// The debt entry the row is the wallet side of (author's book).
+	debtContactID *uuid.UUID
+	debtName      *string
+	debtDirection *string
+	debtPaid      *bool
+	// The board bill (parent) the row belongs to.
+	billID *uuid.UUID
+	// The recurring item linked to the row.
+	recItemID   *uuid.UUID
+	recItemUser *uuid.UUID
+	recItemSeq  *int
+	recID       *uuid.UUID
+	recName     *string
+	recIcon     []byte
+	recTotal    *int
 }
 
 // buildDetails turns rows into page-ready TransactionDetails for callerID.
@@ -53,9 +68,12 @@ func buildDetails(
 		return nil, err
 	}
 
-	var accIDs, catIDs, eventIDs []uuid.UUID
+	var accIDs, catIDs, eventIDs, debtContacts []uuid.UUID
 	for i := range rows {
 		r := &rows[i]
+		if f, ok := facts[r.ID]; ok && f.debtContactID != nil && r.UserID == callerID {
+			debtContacts = append(debtContacts, *f.debtContactID)
+		}
 		if r.AccountID != nil {
 			accIDs = append(accIDs, *r.AccountID)
 		}
@@ -81,6 +99,10 @@ func buildDetails(
 	if err != nil {
 		return nil, err
 	}
+	debtPersons, err := shared.LoadPersons(ctx, q, callerID, debtContacts)
+	if err != nil {
+		return nil, err
+	}
 	tags, err := loadRowTags(ctx, q, callerID, ids)
 	if err != nil {
 		return nil, err
@@ -94,7 +116,7 @@ func buildDetails(
 
 	for i := range rows {
 		r := rows[i]
-		d := TransactionDetail{Transaction: r, Tags: []shared.TagRef{}, IsRepayment: r.SourcePersonalDebtID != nil}
+		d := TransactionDetail{Transaction: r, Tags: []shared.TagRef{}}
 		if r.AccountID != nil {
 			if a, ok := accounts[*r.AccountID]; ok {
 				d.Account = &a
@@ -121,6 +143,33 @@ func buildDetails(
 			d.Splits = &s
 		}
 		f := facts[r.ID]
+		// The debt entry lives in the author's book: only they see it.
+		if r.SourcePersonalDebtID != nil && f.debtDirection != nil && r.UserID == callerID {
+			name := ""
+			if f.debtName != nil {
+				name = *f.debtName
+			}
+			d.Counterparty = &shared.DebtLink{
+				EntryID:   *r.SourcePersonalDebtID,
+				Key:       shared.DebtKey(f.debtContactID, name),
+				Person:    shared.ResolvePerson(debtPersons, shared.PersonKey{ContactID: f.debtContactID, Snapshot: name}),
+				Direction: *f.debtDirection,
+				Paid:      f.debtPaid != nil && *f.debtPaid,
+			}
+		}
+		if f.recItemID != nil && f.recItemUser != nil && *f.recItemUser == callerID {
+			link := &shared.RecurringItemLink{ItemID: *f.recItemID, Seq: f.recItemSeq, Total: f.recTotal}
+			if f.recID != nil {
+				link.Recurring = &shared.RecurringRef{ID: *f.recID, IconCode: shared.IconFromJSON(f.recIcon)}
+				if f.recName != nil {
+					link.Recurring.Name = *f.recName
+				}
+			}
+			d.RecurringItem = link
+		}
+		if d.Project != nil && f.billID != nil {
+			d.EventBill = &EventBillLink{Event: *d.Project, BillID: *f.billID, Linked: f.eventBill}
+		}
 		d.Currency = f.currency
 		d.MyShare = f.myShare
 		d.SplitCount, d.HasSplits = f.splitCount, f.splitCount > 0
@@ -171,15 +220,21 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		         AND NOT COALESCE(c.is_system, FALSE),
 		       `+shared.EventBillPredicate("t")+`,
 		       EXISTS (SELECT 1 FROM personal_debts d
-		               WHERE d.source_transaction_id = t.id AND d.user_id = t.user_id
-		                 AND (d.settled_amount > 0.005 OR d.status = 'cancelled')),
+		               WHERE d.source_transaction_id = t.id AND d.user_id = t.user_id AND d.paid),
 		       (SELECT COUNT(*) FROM account_members am
 		         WHERE am.account_id = t.account_id
 		           AND am.joined_at IS NOT NULL AND am.left_at IS NULL),
 		       `+shared.ActiveMembershipPredicate("t.account_id", "$2")+`,
 		       u.display_name, u.icon_code,
-		       peer.id, peer.account_id, c.system_kind, pc.system_kind
+		       peer.id, peer.account_id, c.system_kind, pc.system_kind,
+		       de.counterparty_contact_id, de.counterparty_person_name, de.direction, de.paid,
+		       COALESCE(bp.parent_project_transaction_id, bp.id),
+		       ri.id, ri.user_id, ri.seq, rr.id, rr.name, rr.icon_code, rr.total_count
 		FROM transactions t
+		LEFT JOIN recurring_items ri ON ri.transaction_id = t.id
+		LEFT JOIN recurring_rules rr ON rr.id = ri.rule_id
+		LEFT JOIN personal_debts de ON de.id = t.source_personal_debt_id
+		LEFT JOIN project_transactions bp ON bp.id = t.source_project_transaction_id
 		JOIN users u ON u.id = t.user_id
 		LEFT JOIN accounts a ON a.id = t.account_id
 		LEFT JOIN categories c ON c.id = t.category_id
@@ -202,7 +257,9 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		)
 		if err := rows.Scan(&id, &f.currency, &f.myShare, &f.splitCount, &f.billable, &f.eventBill,
 			&f.closed, &f.activeMembers, &f.callerActive, &f.authorName, &f.authorIcon,
-			&f.peerID, &f.peerAccountID, &f.kind, &f.peerKind); err != nil {
+			&f.peerID, &f.peerAccountID, &f.kind, &f.peerKind,
+			&f.debtContactID, &f.debtName, &f.debtDirection, &f.debtPaid, &f.billID,
+			&f.recItemID, &f.recItemUser, &f.recItemSeq, &f.recID, &f.recName, &f.recIcon, &f.recTotal); err != nil {
 			return nil, fmt.Errorf("row facts scan: %w", err)
 		}
 		out[id] = f
@@ -238,13 +295,13 @@ func loadRowTags(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids 
 	return out, rows.Err()
 }
 
-// loadSplits — the debts each row made in the caller's book (a shared-wallet
+// loadSplits — the split entries each row made in the caller's book (a shared-wallet
 // member who isn't the author gets none: the debts are the author's), with
 // the person resolved by the name rule (live contact name).
 func loadSplits(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID][]SplitRef, error) {
 	rows, err := q.Query(ctx, `
 		SELECT source_transaction_id, id, counterparty_person_name, counterparty_contact_id,
-		       direction, amount, settled_amount, status
+		       direction, amount, paid
 		FROM personal_debts
 		WHERE source_transaction_id = ANY($1) AND user_id = $2
 		ORDER BY created_at, id`, ids, callerID)
@@ -262,7 +319,7 @@ func loadSplits(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids [
 	for rows.Next() {
 		var r row
 		if err := rows.Scan(&r.txID, &r.ref.DebtID, &r.ref.PersonName, &r.ref.ContactID,
-			&r.ref.Direction, &r.ref.Amount, &r.ref.SettledAmount, &r.ref.Status); err != nil {
+			&r.ref.Direction, &r.ref.Amount, &r.ref.Paid); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("splits scan: %w", err)
 		}
@@ -283,6 +340,7 @@ func loadSplits(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids [
 	for _, r := range list {
 		r.ref.Person = shared.ResolvePerson(persons, shared.PersonKey{ContactID: r.ref.ContactID, Snapshot: r.ref.PersonName})
 		r.ref.DisplayName = r.ref.Person.Name
+		r.ref.Key = shared.DebtKey(r.ref.ContactID, r.ref.PersonName)
 		out[r.txID] = append(out[r.txID], r.ref)
 	}
 	return out, nil

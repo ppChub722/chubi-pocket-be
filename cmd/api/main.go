@@ -33,8 +33,8 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/providers"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/recurring"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/scheduled_transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/user_pack_permissions"
@@ -121,16 +121,16 @@ func main() {
 	budgetsHandler := budgets.NewHandler(budgetsService)
 	meHandler := me.NewHandler(meService.WithBudgets(budgetsService).WithDebts(personalDebtsService))
 
-	// Scheduled transactions (Phase 1c). generate-now is the dev/dogfood
-	// trigger; Phase 3 wires the same logic into an hourly cron.
-	scheduledStore := scheduled_transactions.NewStore(dbPool)
-	scheduledService := scheduled_transactions.NewService(scheduledStore)
-	scheduledService.WithTimezoneResolver(budgetsService.ResolveTimezone)
-	scheduledHandler := scheduled_transactions.NewHandler(scheduledService)
-
 	// Pending transactions — drafts waiting to be confirmed.
-	pendingHandler := pending.NewHandler(pending.NewService(pending.NewStore(dbPool),
-		transactionsService, tagsService, personalDebtsService, projectsService))
+	pendingService := pending.NewService(pending.NewStore(dbPool),
+		transactionsService, tagsService, personalDebtsService, projectsService)
+	pendingHandler := pending.NewHandler(pendingService)
+
+	// Recurring (0.3.1-10, replaces scheduled): settings + their items,
+	// linked to pending drafts / transactions. No job runner: the due check
+	// runs inside the boot reads (me counts, dashboard, notifications).
+	recurringService := recurring.NewService(dbPool, transactionsService, pendingService, notificationsService)
+	recurringHandler := recurring.NewHandler(recurringService)
 
 	// Imports — slips / text into pending drafts. 0.3.1: scan-slip runs OCR
 	// (tesseract CLI, shipped in the Docker image); the rest is still a stub.
@@ -170,9 +170,8 @@ func main() {
 	// transactions ↔ personal_debts.
 	transactionsService.WithDebtsCreator(personalDebtsService.CreateForTransactionTx)
 	transactionsService.WithSplitsEditor(personalDebtsService.EditForTransactionTx)
-	transactionsService.WithDebtValidator(personalDebtsService.ValidateOwnership)
-	transactionsService.WithDebtAutoBumper(personalDebtsService.AutoBumpInTx)
-	transactionsService.WithDebtSettledAdjuster(personalDebtsService.AdjustSettledInTx)
+	// A debt entry and its wallet transaction are one record (0.3.1-10).
+	transactionsService.WithDebtLinks(personalDebtsService)
 	// personal_debts ↔ notifications (linked splits, contract §5).
 	personalDebtsService.WithNotifications(notificationsService)
 
@@ -198,6 +197,21 @@ func main() {
 	// path inside the quick-create tx, so balances and split debts behave
 	// exactly like POST /v1/transactions).
 	projectsService.WithTransactionsService(transactionsService)
+	// A bill made from a transaction shares its money (0.3.1-10).
+	transactionsService.WithEventBillSyncer(projectsService.SyncBillFromTxTx)
+	transactionsService.WithEventBillDeleter(projectsService.DeleteBillOfTxTx)
+
+	// recurring ↔ transactions / pending / boot reads.
+	transactionsService.WithRecurringLinks(recurringService)
+	pendingService.WithSubmitHook(recurringService.OnDraftSubmitted)
+	// Savings v2: saving drafts (🐷) submit into the notebook; recurring
+	// ออม settings; a goal's page lists its auto-saves.
+	pendingService.WithSavings(savingGoalsService)
+	recurringService.WithSavings(savingGoalsService)
+	savingGoalsService.WithAutoSave(recurringService.AutoSaves)
+	meService.WithDueCheck(recurringService.DueCheck)
+	dashboardService.WithDueCheck(recurringService.DueCheck)
+	notificationsService.WithDueCheck(recurringService.DueCheck)
 
 	// accounts ↔ notifications (account_invite — shared-wallet member
 	// invites ride the same notification pattern as project invites).
@@ -373,7 +387,6 @@ func main() {
 			protected.PUT("/accounts/:id/report-scope", accountsHandler.UpdateReportScope)
 			// Saving-goals helper lives under /accounts so the FE can fetch
 			// the per-account allocation pie without an extra round-trip.
-			protected.GET("/accounts/:id/saving-allocations", savingGoalsHandler.AccountAllocations)
 
 			// Transactions (Phase 1a.3). /summary registered before /:id so the
 			// literal path doesn't get swallowed by the param.
@@ -410,18 +423,17 @@ func main() {
 			protected.POST("/contacts/:id/absorb", contactsHandler.Absorb)
 			protected.DELETE("/contacts/:id", contactsHandler.Delete)
 
-			// Personal debts (bidirectional, replaces splits + old debts).
-			// /people view aggregates by counterparty with net positions.
+			// Debts = a person ledger (0.3.1-10): people with net balances,
+			// entries paid / received; an entry with a wallet owns its transaction.
 			protected.GET("/personal-debts/people", personalDebtsHandler.People)
+			protected.GET("/personal-debts/people/:key", personalDebtsHandler.Person)
+			protected.GET("/personal-debts/people/:key/entries", personalDebtsHandler.Entries)
+			protected.POST("/personal-debts/people/:key/entries", personalDebtsHandler.CreateEntry)
 			protected.POST("/personal-debts/split-requests/:notification_id/accept", personalDebtsHandler.AcceptSplitRequest)
 			protected.POST("/personal-debts/split-changes/:notification_id/apply", personalDebtsHandler.ApplySplitChange)
-			protected.GET("/personal-debts", personalDebtsHandler.List)
-			protected.POST("/personal-debts", personalDebtsHandler.Create)
 			protected.GET("/personal-debts/:id", personalDebtsHandler.Get)
 			protected.PUT("/personal-debts/:id", personalDebtsHandler.Update)
 			protected.DELETE("/personal-debts/:id", personalDebtsHandler.Delete)
-			protected.POST("/personal-debts/:id/cancel", personalDebtsHandler.Cancel)
-			protected.POST("/personal-debts/:id/settle", personalDebtsHandler.Settle)
 
 			// Notifications (Phase 1b.2). Static paths first.
 			protected.GET("/notifications", notificationsHandler.List)
@@ -442,6 +454,7 @@ func main() {
 			protected.POST("/projects/link-requests/:notification_id/accept", projectsHandler.AcceptLinkRequest)
 			protected.POST("/projects/link-requests/:notification_id/reject", projectsHandler.RejectLinkRequest)
 			protected.GET("/projects/:id", projectsHandler.Get)
+			protected.GET("/projects/:id/detail", projectsHandler.Detail)
 			protected.PUT("/projects/:id", projectsHandler.Update)
 			protected.DELETE("/projects/:id", projectsHandler.Delete)
 			protected.GET("/projects/:id/members", projectsHandler.ListMembers)
@@ -461,22 +474,34 @@ func main() {
 			protected.POST("/projects/:id/project-transactions/:pt_id/copy", projectsHandler.CopyToPersonal)
 			protected.GET("/projects/:id/summary", projectsHandler.Summary)
 			protected.GET("/projects/:id/tags", projectsHandler.ListTags)
+			protected.POST("/projects/:id/tags", projectsHandler.CreateTag)
+			protected.POST("/projects/:id/tags/import", projectsHandler.ImportTags)
+			protected.PUT("/projects/:id/tags/:tag_id", projectsHandler.UpdateTag)
+			protected.DELETE("/projects/:id/tags/:tag_id", projectsHandler.DeleteTag)
 
 			// Saving goals (Phase 1c). All paths under /saving-goals are
 			// param-only — no static-vs-param ordering hazard.
 			protected.POST("/saving-goals", savingGoalsHandler.Create)
 			protected.GET("/saving-goals", savingGoalsHandler.List)
+			protected.GET("/saving-goals/spare", savingGoalsHandler.Spare)
 			protected.GET("/saving-goals/:id", savingGoalsHandler.Get)
+			protected.POST("/saving-goals/:id/close", savingGoalsHandler.Close)
+			protected.GET("/saving-entries", savingGoalsHandler.Entries)
+			protected.POST("/saving-entries", savingGoalsHandler.CreateEntry)
+			protected.PUT("/saving-entries/:id", savingGoalsHandler.UpdateEntry)
+			protected.DELETE("/saving-entries/:id", savingGoalsHandler.DeleteEntry)
 			protected.PUT("/saving-goals/:id", savingGoalsHandler.Update)
 			protected.DELETE("/saving-goals/:id", savingGoalsHandler.Delete)
 			protected.POST("/saving-goals/:id/archive", savingGoalsHandler.Archive)
 			protected.POST("/saving-goals/:id/restore", savingGoalsHandler.Restore)
 
-			// Budgets (Phase 1c). Static path /overview registered before
-			// /:id so Gin's tree doesn't match it as a UUID param.
+			// Budgets v2 (0.3.1-10): named trackers, periods, sources.
 			protected.POST("/budgets", budgetsHandler.Create)
 			protected.GET("/budgets", budgetsHandler.List)
-			protected.GET("/budgets/overview", budgetsHandler.Overview)
+			protected.GET("/budgets/:id/periods", budgetsHandler.Periods)
+			protected.PUT("/budgets/:id/periods/:period_id", budgetsHandler.UpdatePeriod)
+			protected.GET("/budgets/:id/items", budgetsHandler.Items)
+			protected.POST("/budgets/:id/close", budgetsHandler.Close)
 			protected.GET("/budgets/:id", budgetsHandler.Get)
 			protected.PUT("/budgets/:id", budgetsHandler.Update)
 			protected.DELETE("/budgets/:id", budgetsHandler.Delete)
@@ -485,17 +510,26 @@ func main() {
 
 			// Scheduled transactions (Phase 1c). /upcoming registered
 			// before /:id so Gin doesn't match it as a UUID param.
-			protected.POST("/scheduled-transactions", scheduledHandler.Create)
-			protected.GET("/scheduled-transactions", scheduledHandler.List)
-			protected.GET("/scheduled-transactions/upcoming", scheduledHandler.Upcoming)
-			protected.GET("/scheduled-transactions/:id", scheduledHandler.Get)
-			protected.PUT("/scheduled-transactions/:id", scheduledHandler.Update)
-			protected.DELETE("/scheduled-transactions/:id", scheduledHandler.Delete)
-			protected.POST("/scheduled-transactions/:id/pause", scheduledHandler.Pause)
-			protected.POST("/scheduled-transactions/:id/resume", scheduledHandler.Resume)
-			protected.POST("/scheduled-transactions/:id/cancel", scheduledHandler.Cancel)
-			protected.POST("/scheduled-transactions/:id/generate-now", scheduledHandler.GenerateNow)
-			protected.GET("/scheduled-transactions/:id/history", scheduledHandler.History)
+			protected.GET("/recurring", recurringHandler.List)
+			protected.POST("/recurring", recurringHandler.Create)
+			protected.GET("/recurring/:id", recurringHandler.Get)
+			protected.PUT("/recurring/:id", recurringHandler.Update)
+			protected.DELETE("/recurring/:id", recurringHandler.Delete)
+			protected.GET("/recurring/:id/items", recurringHandler.RuleItems)
+			protected.POST("/recurring/:id/pause", recurringHandler.Pause)
+			protected.POST("/recurring/:id/resume", recurringHandler.Resume)
+			protected.POST("/recurring/:id/archive", recurringHandler.Archive)
+			protected.POST("/recurring/:id/restore", recurringHandler.Restore)
+			protected.POST("/recurring/:id/extend", recurringHandler.Extend)
+			protected.GET("/recurring-items", recurringHandler.Items)
+			protected.POST("/recurring-items", recurringHandler.CreateItem)
+			protected.POST("/recurring-items/batch", recurringHandler.Batch)
+			protected.GET("/recurring-items/:id", recurringHandler.GetItem)
+			protected.PUT("/recurring-items/:id", recurringHandler.UpdateItem)
+			protected.DELETE("/recurring-items/:id", recurringHandler.DeleteItem)
+			protected.POST("/recurring-items/:id/create", recurringHandler.CreateNow)
+			protected.POST("/recurring-items/:id/archive", recurringHandler.ArchiveItem)
+			protected.POST("/recurring-items/:id/restore", recurringHandler.RestoreItem)
 
 			// Dashboard (Phase 2, contract §4) — one aggregated read for the home screen.
 			protected.GET("/dashboard", dashboardHandler.Get)

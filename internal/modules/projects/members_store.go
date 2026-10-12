@@ -261,3 +261,16 @@ func (s *Store) AssertCanWrite(ctx context.Context, projectID, userID uuid.UUID)
 	}
 	return m, nil
 }
+
+// MemberByUserIDTx — MemberByUserID inside tx (rows not committed yet).
+func (s *Store) MemberByUserIDTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UUID) (*ProjectMember, error) {
+	m, err := scanMember(tx.QueryRow(ctx, `SELECT `+memberColumns+` FROM project_members
+		WHERE project_id = $1 AND user_id = $2`, projectID, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotMember
+	}
+	if err != nil {
+		return nil, fmt.Errorf("member lookup: %w", err)
+	}
+	return m, nil
+}

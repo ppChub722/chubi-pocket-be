@@ -42,7 +42,7 @@ func TestDetailSplitsAndProject(t *testing.T) {
 		t.Fatalf("create response splits = %v, want 2", split.Splits)
 	}
 	if s := (*split.Splits)[1]; s.PersonName != "Beam" || s.DisplayName != "Beam" || s.Person.Name != "Beam" ||
-		s.Amount != 100 || s.Direction != "owed_to_me" {
+		s.Amount != 100 || s.Direction != "paid" {
 		t.Errorf("create response second split = %+v", s)
 	}
 	if split.Account == nil {
@@ -76,7 +76,7 @@ func TestDetailSplitsAndProject(t *testing.T) {
 	if d.SplitCount != 2 || !d.HasSplits || d.Splits == nil || len(*d.Splits) != 2 {
 		t.Fatalf("detail: split_count=%d has_splits=%v splits=%v", d.SplitCount, d.HasSplits, d.Splits)
 	}
-	if s := (*d.Splits)[0]; s.PersonName != "Aom" || s.Amount != 100 || s.Status != "open" || s.Direction != "owed_to_me" {
+	if s := (*d.Splits)[0]; s.PersonName != "Aom" || s.Amount != 100 || s.Paid || s.Key != "n:aom" || s.Direction != "paid" {
 		t.Errorf("first split = %+v", s)
 	}
 	if d.Project != nil {

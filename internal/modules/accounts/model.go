@@ -74,6 +74,13 @@ type Account struct {
 	// (edits fields, invites, transfers ownership, archives).
 	MyRole  string `json:"my_role"`
 	CanEdit bool   `json:"can_edit"`
+	// TrackBalance — "ติดตามยอดเงิน" (owner 2026-10-12). false: no balance
+	// shown, left out of every total / net worth, no adjust; transfers and
+	// income / expense reports as usual. Balance is still the running sum.
+	TrackBalance bool `json:"track_balance"`
+	// Savings — the caller's saving buckets in this wallet: saved, spare,
+	// available (= balance − saved), the over-balance warning.
+	Savings shared.WalletSavings `json:"savings"`
 }
 
 // AccountMember is the account_members DB row. A pending invite has
@@ -147,6 +154,8 @@ type CreateRequest struct {
 	PaymentDueDate *int             `json:"payment_due_date" binding:"omitempty,min=1,max=31"`
 	MinimumPayment *float64         `json:"minimum_payment"  binding:"omitempty,gte=0"`
 	Identifiers    []Identifier     `json:"identifiers"`
+	// TrackBalance — default true; false = no opening balance.
+	TrackBalance *bool `json:"track_balance"`
 }
 
 // UpdateRequest — partial. `balance` is intentionally absent (use the
@@ -168,6 +177,11 @@ type UpdateRequest struct {
 	SortOrder      *int             `json:"sort_order"       binding:"omitempty"`
 	// Present → replaces the whole list ([] clears it); absent → unchanged.
 	Identifiers *[]Identifier `json:"identifiers"`
+	// TrackBalance turns "ติดตามยอดเงิน" off / on; CurrentBalance (only with
+	// track_balance: true) = the balance it has now (an adjustment row when
+	// it differs), so turning it back on is one call.
+	TrackBalance   *bool    `json:"track_balance"`
+	CurrentBalance *float64 `json:"current_balance"`
 
 	iconCodePresent    bool
 	logoURLPresent     bool
@@ -262,6 +276,8 @@ type AccountTotals struct {
 	SharedCount        int         `json:"shared_count"`
 	SharedBalance      float64     `json:"shared_balance"`
 	OtherCurrencyCount int         `json:"other_currency_count"`
+	// UntrackedCount — wallets with track_balance false (never summed).
+	UntrackedCount int `json:"untracked_count"`
 }
 
 // AccountList - spec AccountList.

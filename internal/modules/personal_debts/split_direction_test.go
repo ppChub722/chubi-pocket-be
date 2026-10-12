@@ -1,7 +1,7 @@
 package personal_debts
 
 // Split debt-direction tests: expense splits put the splitter on
-// 'owed_to_me' (counterparties owe them), income splits flip to 'i_owe'
+// 'paid' (counterparties owe them), income splits flip to 'received'
 // (the splitter received money that partly belongs to others); linked
 // partner mirrors invert. Live-DB tests, same conventions as
 // transactions/sharedwallets_test.go — self-skip when the dev Postgres
@@ -52,12 +52,12 @@ func sdV7(t *testing.T) uuid.UUID {
 }
 
 type sdFixture struct {
-	pool                 *pgxpool.Pool
-	svc                  *Service
-	splitter, partner    uuid.UUID
-	splitterContact      uuid.UUID // splitter's contact for partner (linked)
-	partnerContact       uuid.UUID // partner's contact back to splitter
-	account              uuid.UUID
+	pool              *pgxpool.Pool
+	svc               *Service
+	splitter, partner uuid.UUID
+	splitterContact   uuid.UUID // splitter's contact for partner (linked)
+	partnerContact    uuid.UUID // partner's contact back to splitter
+	account           uuid.UUID
 }
 
 func newSDFixture(t *testing.T) *sdFixture {
@@ -181,33 +181,33 @@ func (f *sdFixture) directions(t *testing.T, userID uuid.UUID, source *uuid.UUID
 func TestSplitDirectionsByParentType(t *testing.T) {
 	f := newSDFixture(t)
 
-	// Expense: splitter fronted money → owed_to_me; linked mirror i_owe.
+	// Expense: splitter fronted money → paid; linked mirror received.
 	expense := f.newBill(t, "expense", 900)
 	f.runCreator(t, expense, "expense")
 	for _, d := range f.directions(t, f.splitter, &expense) {
-		if d != DirectionOwedToMe {
-			t.Fatalf("expense splitter debt direction = %s, want owed_to_me", d)
+		if d != DirectionPaid {
+			t.Fatalf("expense splitter debt direction = %s, want paid", d)
 		}
 	}
 	mirrors := f.directions(t, f.partner, nil)
-	if len(mirrors) != 1 || mirrors[0] != DirectionIOwe {
-		t.Fatalf("expense partner mirror = %v, want [i_owe]", mirrors)
+	if len(mirrors) != 1 || mirrors[0] != DirectionReceived {
+		t.Fatalf("expense partner mirror = %v, want [received]", mirrors)
 	}
 
 	// Income: splitter received money that partly belongs to others →
-	// i_owe; linked mirror owed_to_me.
+	// received; linked mirror paid.
 	income := f.newBill(t, "income", 1000)
 	f.runCreator(t, income, "income")
 	for _, d := range f.directions(t, f.splitter, &income) {
-		if d != DirectionIOwe {
-			t.Fatalf("income splitter debt direction = %s, want i_owe", d)
+		if d != DirectionReceived {
+			t.Fatalf("income splitter debt direction = %s, want received", d)
 		}
 	}
 	mirrors = f.directions(t, f.partner, nil)
 	if len(mirrors) != 2 {
 		t.Fatalf("partner mirrors = %v, want 2 rows", mirrors)
 	}
-	if mirrors[1] != DirectionOwedToMe {
-		t.Fatalf("income partner mirror = %s, want owed_to_me", mirrors[1])
+	if mirrors[1] != DirectionPaid {
+		t.Fatalf("income partner mirror = %s, want paid", mirrors[1])
 	}
 }

@@ -12,7 +12,6 @@ package personal_debts
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -32,12 +31,6 @@ var (
 	ErrNotificationActioned = errors.New("this notification's action was already used")
 )
 
-// SplitChangeResult — what "อัปเดตตาม" did to the caller's debt.
-type SplitChangeResult struct {
-	Result string        `json:"result"` // updated | deleted | zeroed
-	Debt   *PersonalDebt `json:"debt"`
-}
-
 const amountEps = 0.005
 
 // EditForTransactionTx is the transactions.SplitsEditor hook: make
@@ -48,16 +41,16 @@ func (s *Service) EditForTransactionTx(
 	parentType, parentCurrency string, parentDescription *string,
 	edits []transactions.SplitEdit,
 ) error {
-	rows, err := tx.Query(ctx, `SELECT `+debtColumns+` FROM personal_debts
+	rows, err := tx.Query(ctx, `SELECT `+entryColumns+` FROM personal_debts
 		WHERE source_transaction_id = $1 AND user_id = $2
 		ORDER BY created_at, id FOR UPDATE`, parentTxID, userID)
 	if err != nil {
 		return fmt.Errorf("load splits: %w", err)
 	}
-	existing := map[uuid.UUID]*PersonalDebt{}
+	existing := map[uuid.UUID]*Entry{}
 	var order []uuid.UUID
 	for rows.Next() {
-		d, err := scanDebt(rows)
+		d, err := scanEntry(rows)
 		if err != nil {
 			rows.Close()
 			return fmt.Errorf("scan split: %w", err)
@@ -175,18 +168,18 @@ type identityEdit struct {
 // contact is linked to another app user (they may hold a mirror) and the
 // contact changes, the edit is a replace — see identityEdit.replace.
 func checkIdentityEditTx(
-	ctx context.Context, tx pgx.Tx, userID uuid.UUID, d *PersonalDebt, e transactions.SplitEdit,
+	ctx context.Context, tx pgx.Tx, userID uuid.UUID, d *Entry, e transactions.SplitEdit,
 ) (identityEdit, bool, error) {
 	name := strings.TrimSpace(e.PersonName)
-	out := identityEdit{name: d.CounterpartyPersonName, contactID: d.CounterpartyContactID}
+	out := identityEdit{name: d.PersonName, contactID: d.ContactID}
 	if e.ContactIDSet || e.ContactID != nil {
 		out.contactID = e.ContactID
 	}
-	contactChanged := !sameUUID(out.contactID, d.CounterpartyContactID)
+	contactChanged := !sameUUID(out.contactID, d.ContactID)
 	if !contactChanged && out.contactID != nil {
 		return identityEdit{}, false, nil // same contact: the name is not editable
 	}
-	nameChanged := name != "" && name != d.CounterpartyPersonName
+	nameChanged := name != "" && name != d.PersonName
 	if !nameChanged && !contactChanged {
 		return identityEdit{}, false, nil
 	}
@@ -233,7 +226,7 @@ func (s *Service) applyIdentityEditTx(
 	if !e.newLink {
 		return nil
 	}
-	d, err := getAnyDebtTx(ctx, tx, debtID)
+	d, err := getAnyEntryTx(ctx, tx, debtID)
 	if err != nil {
 		return err
 	}
@@ -264,13 +257,13 @@ func assertSplitContactTx(ctx context.Context, tx pgx.Tx, userID, contactID uuid
 
 // linkedPartnerTx — the app user behind a splitter debt's contact (nil when
 // the contact isn't linked, or is the splitter).
-func linkedPartnerTx(ctx context.Context, tx pgx.Tx, d *PersonalDebt) *uuid.UUID {
-	if d.CounterpartyContactID == nil {
+func linkedPartnerTx(ctx context.Context, tx pgx.Tx, d *Entry) *uuid.UUID {
+	if d.ContactID == nil {
 		return nil
 	}
 	var linked *uuid.UUID
 	_ = tx.QueryRow(ctx, `SELECT linked_user_id FROM contacts WHERE id = $1 AND user_id = $2`,
-		*d.CounterpartyContactID, d.UserID).Scan(&linked)
+		*d.ContactID, d.UserID).Scan(&linked)
 	if linked == nil || *linked == d.UserID {
 		return nil
 	}
@@ -280,7 +273,7 @@ func linkedPartnerTx(ctx context.Context, tx pgx.Tx, d *PersonalDebt) *uuid.UUID
 // notifySplitChangeTx tells the linked partner that splitter debt `d` (as it
 // was before) is now `newAmount` (change=amount) or gone (change=removed).
 func (s *Service) notifySplitChangeTx(
-	ctx context.Context, tx pgx.Tx, d *PersonalDebt, newAmount float64, change string,
+	ctx context.Context, tx pgx.Tx, d *Entry, newAmount float64, change string,
 ) error {
 	if s.notifs == nil {
 		return nil
@@ -289,10 +282,10 @@ func (s *Service) notifySplitChangeTx(
 	if partner == nil {
 		return nil
 	}
-	var mirror *PersonalDebt
+	var mirror *Entry
 	if d.CounterpartDebtID != nil {
-		m, err := getAnyDebtTx(ctx, tx, *d.CounterpartDebtID)
-		if err != nil && !errors.Is(err, ErrDebtNotFound) {
+		m, err := getAnyEntryTx(ctx, tx, *d.CounterpartDebtID)
+		if err != nil && !errors.Is(err, ErrEntryNotFound) {
 			return err
 		}
 		if m != nil && m.UserID == *partner {
@@ -335,128 +328,4 @@ func (s *Service) notifySplitChangeTx(
 		actioned = true
 	}
 	return s.notifs.DispatchSplitChanged(ctx, tx, *partner, d.UserID, p, actioned)
-}
-
-// applySplitChangeTx makes the recipient's mirror match the change.
-func applySplitChangeTx(ctx context.Context, tx pgx.Tx, mirror *PersonalDebt, p notifications.SplitChangedPayload) (*SplitChangeResult, error) {
-	if p.Change == notifications.SplitChangeRemoved {
-		if err := removeDebtTx(ctx, tx, mirror); err != nil {
-			return nil, fmt.Errorf("remove mirror: %w", err)
-		}
-		if mirror.SettledAmount <= amountEps {
-			return &SplitChangeResult{Result: "deleted"}, nil
-		}
-		out, err := getAnyDebtTx(ctx, tx, mirror.ID)
-		if err != nil {
-			return nil, err
-		}
-		return &SplitChangeResult{Result: "zeroed", Debt: out}, nil
-	}
-	if err := setDebtAmountTx(ctx, tx, mirror.ID, p.NewAmount); err != nil {
-		return nil, fmt.Errorf("update mirror: %w", err)
-	}
-	out, err := getAnyDebtTx(ctx, tx, mirror.ID)
-	if err != nil {
-		return nil, err
-	}
-	return &SplitChangeResult{Result: "updated", Debt: out}, nil
-}
-
-// ApplySplitChange — "อัปเดตตาม" on a split_changed notification
-// (POST /v1/personal-debts/split-changes/:notification_id/apply). One shot:
-// a used, superseded or out-of-date change is refused.
-func (s *Service) ApplySplitChange(ctx context.Context, userID, notificationID uuid.UUID) (*SplitChangeResult, error) {
-	if s.notifs == nil {
-		return nil, errors.New("notifications module not wired")
-	}
-	tx, err := s.store.Pool().Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	n, err := s.notifs.GetByIDForCallerTx(ctx, tx, userID, notificationID)
-	if err != nil {
-		return nil, err
-	}
-	if n.Type != notifications.TypeSplitChanged {
-		return nil, ErrNotSplitChange
-	}
-	if n.ActionedAt != nil {
-		return nil, ErrNotificationActioned
-	}
-	var p notifications.SplitChangedPayload
-	if err := json.Unmarshal(n.Payload, &p); err != nil {
-		return nil, fmt.Errorf("payload: %w", err)
-	}
-	if p.Superseded {
-		return nil, ErrSplitChangeStale
-	}
-	// The change must still be the splitter's current state.
-	var splitterAmount float64
-	err = tx.QueryRow(ctx, `SELECT amount FROM personal_debts WHERE id = $1`, p.SplitID).Scan(&splitterAmount)
-	switch {
-	case p.Change == notifications.SplitChangeRemoved:
-		// Gone, or kept at 0 because it had repayments.
-		if err == nil && splitterAmount > amountEps {
-			return nil, ErrSplitChangeStale
-		}
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return nil, err
-		}
-	case errors.Is(err, pgx.ErrNoRows):
-		return nil, ErrSplitChangeStale
-	case err != nil:
-		return nil, err
-	case math.Abs(splitterAmount-p.NewAmount) > amountEps:
-		return nil, ErrSplitChangeStale
-	}
-
-	mirror, err := getAnyDebtTx(ctx, tx, p.RecipientDebtID)
-	if err != nil {
-		return nil, err
-	}
-	if mirror.UserID != userID {
-		return nil, ErrNotSplitChange
-	}
-	out, err := applySplitChangeTx(ctx, tx, mirror, p)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := s.notifs.MarkActionedTx(ctx, tx, userID, notificationID); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-	if err := s.fillPersons(ctx, userID, out.Debt); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// Repayments don't constrain edits (owner 2026-10-10): the amount just
-// changes; outstanding = amount − settled may go negative (overpaid, shown
-// as owed the other way). Settled only when repaid exactly matches.
-const debtStatusAfterAmount = `CASE WHEN status = 'cancelled' THEN status
-	WHEN ABS(settled_amount - amount) < 0.005 THEN 'settled' ELSE 'open' END`
-
-func setDebtAmountTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, amount float64) error {
-	if _, err := tx.Exec(ctx, `UPDATE personal_debts SET amount = $2 WHERE id = $1`, id, amount); err != nil {
-		return err
-	}
-	_, err := tx.Exec(ctx, `UPDATE personal_debts SET status = `+debtStatusAfterAmount+`,
-		updated_by_user_id = user_id WHERE id = $1`, id)
-	return err
-}
-
-// removeDebtTx — a person taken off a split. Unpaid → the row is deleted.
-// Already repaid → the row stays at amount 0, so what they paid shows as
-// overpaid (owner 2026-10-10); the repayment transaction is untouched.
-func removeDebtTx(ctx context.Context, tx pgx.Tx, d *PersonalDebt) error {
-	if d.SettledAmount > amountEps {
-		return setDebtAmountTx(ctx, tx, d.ID, 0)
-	}
-	_, err := tx.Exec(ctx, `DELETE FROM personal_debts WHERE id = $1`, d.ID)
-	return err
 }

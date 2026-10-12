@@ -411,6 +411,14 @@ func (s *Store) fillMembers(ctx context.Context, callerID uuid.UUID, accs []Acco
 	for i := range accs {
 		accs[i].IsShared = len(accs[i].Members) > 1
 	}
+	// The caller's saving buckets in each wallet (goals v2).
+	savings, err := shared.LoadWalletSavings(ctx, s.db, callerID, ids)
+	if err != nil {
+		return err
+	}
+	for i := range accs {
+		accs[i].Savings = savings[accs[i].ID]
+	}
 	return nil
 }
 

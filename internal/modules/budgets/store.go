@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -14,428 +14,370 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
+var (
+	ErrBudgetNotFound    = errors.New("budget not found")
+	ErrPeriodNotFound    = errors.New("budget period not found")
+	ErrInvalidCategory   = errors.New("categories must be your own expense categories (not system ones)")
+	ErrAccountNotFound   = errors.New("wallet not found")
+	ErrInvalidRule       = errors.New("invalid budget period rule")
+	ErrValidation        = errors.New("invalid request")
+	ErrInvalidTransition = errors.New("this action doesn't apply in the budget's current state")
+)
+
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 type Store struct {
 	db *pgxpool.Pool
 }
 
-func NewStore(db *pgxpool.Pool) *Store {
-	return &Store{db: db}
-}
+func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 
 func (s *Store) Pool() *pgxpool.Pool { return s.db }
 
-var (
-	ErrBudgetNotFound  = errors.New("budget not found")
-	ErrDuplicateBudget = errors.New("active budget already exists for this category/period/scope")
-	ErrInvalidCategory = errors.New("category is income-type, system, or not owned by caller")
-	ErrProjectNotOwner = errors.New("only the project owner can manage project-scope budgets")
-)
-
-const budgetColumns = `id, user_id, category_id, scope, project_id,
-	amount, period, currency, status, name, description, note,
-	created_at, updated_at`
+const budgetColumns = `id, user_id, name, description, note, icon_code, amount::float8, warn_pct, scope_all,
+	tag_names, recurring, freq, interval_n, start_date, anchor_date, end_kind, end_date, end_count,
+	closed_on, status, created_at, updated_at`
 
 func scanBudget(row pgx.Row) (*Budget, error) {
-	var b Budget
-	if err := row.Scan(
-		&b.ID, &b.UserID, &b.CategoryID, &b.Scope, &b.ProjectID,
-		&b.Amount, &b.Period, &b.Currency, &b.Status, &b.Name, &b.Description, &b.Note,
-		&b.CreatedAt, &b.UpdatedAt,
-	); err != nil {
+	var (
+		b        Budget
+		icon     []byte
+		warn     *int16
+		interval int32
+		count    *int32
+	)
+	if err := row.Scan(&b.ID, &b.UserID, &b.Name, &b.Description, &b.Note, &icon, &b.Amount, &warn, &b.ScopeAll,
+		&b.TagNames, &b.Recurring, &b.Freq, &interval, &b.StartDate, &b.AnchorDate, &b.EndKind, &b.EndDate, &count,
+		&b.ClosedOn, &b.Status, &b.CreatedAt, &b.UpdatedAt); err != nil {
 		return nil, err
+	}
+	b.IconCode = shared.IconFromJSON(icon)
+	b.Interval = int(interval)
+	if warn != nil {
+		v := int(*warn)
+		b.WarnPct = &v
+	}
+	if count != nil {
+		v := int(*count)
+		b.EndCount = &v
+	}
+	if b.TagNames == nil {
+		b.TagNames = []string{}
 	}
 	return &b, nil
 }
 
-// CategoryRef — minimal category snapshot for budget read responses.
-type CategoryRef struct {
-	ID       uuid.UUID
-	Name     string
-	IconCode *shared.IconCode
-	ParentID *uuid.UUID
-	Type     string
-	IsSystem bool
-}
-
-// VerifyExpenseCategory checks the category belongs to the caller, is
-// expense-typed, and is not a system category. Returns the snapshot for
-// embedding in the read response.
-func (s *Store) VerifyExpenseCategory(
-	ctx context.Context, userID, categoryID uuid.UUID,
-) (*CategoryRef, error) {
-	var c CategoryRef
-	var iconBytes []byte
-	err := s.db.QueryRow(ctx,
-		`SELECT id, name, icon_code, parent_id, type, is_system
-		   FROM categories
-		  WHERE id = $1 AND user_id = $2`,
-		categoryID, userID).
-		Scan(&c.ID, &c.Name, &iconBytes, &c.ParentID, &c.Type, &c.IsSystem)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrInvalidCategory
+// loadScopes fills the categories / wallets of bs (one query each).
+func (s *Store) loadScopes(ctx context.Context, q shared.Querier, bs []*Budget) error {
+	if len(bs) == 0 {
+		return nil
 	}
+	ids := make([]uuid.UUID, len(bs))
+	byID := map[uuid.UUID]*Budget{}
+	for i, b := range bs {
+		ids[i], byID[b.ID] = b.ID, b
+		b.Categories, b.Wallets = []scopeCat{}, []uuid.UUID{}
+	}
+	rows, err := q.Query(ctx, `SELECT bc.budget_id, bc.category_id, bc.include_children FROM budget_categories bc
+		JOIN categories c ON c.id = bc.category_id WHERE bc.budget_id = ANY($1) ORDER BY c.sort_order, c.name`, ids)
 	if err != nil {
-		return nil, fmt.Errorf("category lookup: %w", err)
+		return fmt.Errorf("budget categories: %w", err)
 	}
-	if c.Type != "expense" || c.IsSystem {
-		return nil, ErrInvalidCategory
-	}
-	if iconBytes != nil {
-		c.IconCode = new(shared.IconCode)
-		if err := json.Unmarshal(iconBytes, c.IconCode); err != nil {
-			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
+	for rows.Next() {
+		var (
+			bid uuid.UUID
+			c   scopeCat
+		)
+		if err := rows.Scan(&bid, &c.ID, &c.IncludeChildren); err != nil {
+			rows.Close()
+			return err
 		}
+		byID[bid].Categories = append(byID[bid].Categories, c)
 	}
-	return &c, nil
-}
-
-// VerifyProjectOwner ensures the caller owns the project — only owners
-// can manage project-scope budgets.
-func (s *Store) VerifyProjectOwner(
-	ctx context.Context, userID, projectID uuid.UUID,
-) error {
-	var ownerID uuid.UUID
-	err := s.db.QueryRow(ctx,
-		`SELECT owner_user_id FROM projects WHERE id = $1`, projectID).
-		Scan(&ownerID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrProjectNotOwner
-	}
+	rows.Close()
+	rows, err = q.Query(ctx, `SELECT budget_id, account_id FROM budget_wallets WHERE budget_id = ANY($1)`, ids)
 	if err != nil {
-		return fmt.Errorf("project lookup: %w", err)
+		return fmt.Errorf("budget wallets: %w", err)
 	}
-	if ownerID != userID {
-		return ErrProjectNotOwner
-	}
-	return nil
-}
-
-func (s *Store) Create(
-	ctx context.Context, userID uuid.UUID, req CreateRequest, currency string,
-) (*Budget, error) {
-	id, err := uuid.NewV7()
-	if err != nil {
-		return nil, fmt.Errorf("uuid: %w", err)
-	}
-
-	q := `INSERT INTO budgets
-		(id, user_id, category_id, scope, project_id, amount, period,
-		 currency, name, description, note, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-		        COALESCE($11, (SELECT name FROM categories WHERE id = $3)),
-		        $9, $10, $2, $2)
-		RETURNING ` + budgetColumns
-	b, err := scanBudget(s.db.QueryRow(ctx, q,
-		id, userID, req.CategoryID, req.Scope, req.ProjectID,
-		req.Amount, req.Period, currency, shared.CleanText(req.Description), shared.CleanText(req.Note),
-		shared.CleanText(req.Name),
-	))
-	if err != nil {
-		// Best-effort detection of the partial unique-index hit.
-		if strings.Contains(err.Error(), "idx_budgets_user_category_period") {
-			return nil, ErrDuplicateBudget
+	defer rows.Close()
+	for rows.Next() {
+		var bid, aid uuid.UUID
+		if err := rows.Scan(&bid, &aid); err != nil {
+			return err
 		}
-		return nil, fmt.Errorf("insert: %w", err)
+		byID[bid].Wallets = append(byID[bid].Wallets, aid)
 	}
-	return b, nil
+	return rows.Err()
 }
 
-// GetByID — visibility rule:
-//   - user-scope budget: only owner (user_id) can see
-//   - project-scope budget: any active member of the project can see
-//
-// Mutation authorization is enforced at the service layer; this read
-// gate just controls visibility (incl. callers who are project members
-// but not the budget's user_id).
-func (s *Store) GetByID(
-	ctx context.Context, callerID, id uuid.UUID,
-) (*Budget, error) {
-	q := `SELECT ` + budgetColumns + ` FROM budgets b
-	       WHERE b.id = $1
-	         AND (b.user_id = $2
-	              OR (b.scope = 'project'
-	                  AND b.project_id IN (
-	                      SELECT pm.project_id FROM project_members pm
-	                       WHERE pm.user_id = $2 AND pm.status = 'active')))`
-	b, err := scanBudget(s.db.QueryRow(ctx, q, id, callerID))
+func (s *Store) get(ctx context.Context, q pgx.Tx, userID, id uuid.UUID, lock bool) (*Budget, error) {
+	sql := `SELECT ` + budgetColumns + ` FROM budgets WHERE id = $1 AND user_id = $2`
+	if lock {
+		sql += ` FOR UPDATE`
+	}
+	var row pgx.Row
+	if q != nil {
+		row = q.QueryRow(ctx, sql, id, userID)
+	} else {
+		row = s.db.QueryRow(ctx, sql, id, userID)
+	}
+	b, err := scanBudget(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrBudgetNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("db error: %w", err)
+		return nil, fmt.Errorf("budget: %w", err)
+	}
+	var qq shared.Querier = s.db
+	if q != nil {
+		qq = q
+	}
+	if err := s.loadScopes(ctx, qq, []*Budget{b}); err != nil {
+		return nil, err
 	}
 	return b, nil
 }
 
-func (s *Store) List(
-	ctx context.Context, callerID uuid.UUID, f ListFilter,
-) ([]Budget, error) {
-	// Visibility: own user-scope budgets + project-scope budgets on
-	// projects where the caller is an active member. Same gate as
-	// GetByID — kept inline so the planner can reorder freely.
-	whereClauses := []string{
-		`(user_id = $1
-		  OR (scope = 'project'
-		      AND project_id IN (
-		          SELECT pm.project_id FROM project_members pm
-		           WHERE pm.user_id = $1 AND pm.status = 'active')))`,
-	}
-	args := []any{callerID}
-
-	switch strings.ToLower(strings.TrimSpace(f.Status)) {
-	case "", "active":
-		whereClauses = append(whereClauses, "status = 'active'")
-	case "archived":
-		whereClauses = append(whereClauses, "status = 'archived'")
-	case "all":
-		// no filter
-	}
-	if f.Period != "" && f.Period != "all" {
-		args = append(args, f.Period)
-		whereClauses = append(whereClauses, fmt.Sprintf("period = $%d", len(args)))
-	}
-	switch strings.ToLower(strings.TrimSpace(f.Scope)) {
-	case "user":
-		whereClauses = append(whereClauses, "scope = 'user'")
-	case "project":
-		whereClauses = append(whereClauses, "scope = 'project'")
-	}
-	if f.ProjectID != nil {
-		args = append(args, *f.ProjectID)
-		whereClauses = append(whereClauses, fmt.Sprintf("project_id = $%d", len(args)))
-	}
-
-	q := `SELECT ` + budgetColumns + ` FROM budgets
-	       WHERE ` + strings.Join(whereClauses, " AND ") + `
-	       ORDER BY created_at DESC`
-
-	rows, err := s.db.Query(ctx, q, args...)
+// listAll — every budget of the user (the list filters by state in Go).
+func (s *Store) listAll(ctx context.Context, userID uuid.UUID) ([]*Budget, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+budgetColumns+` FROM budgets WHERE user_id = $1 ORDER BY created_at, id`, userID)
 	if err != nil {
-		return nil, fmt.Errorf("list: %w", err)
+		return nil, fmt.Errorf("budgets: %w", err)
 	}
-	defer rows.Close()
-	out := make([]Budget, 0)
+	var out []*Budget
 	for rows.Next() {
 		b, err := scanBudget(rows)
 		if err != nil {
-			return nil, fmt.Errorf("scan: %w", err)
+			rows.Close()
+			return nil, err
 		}
-		out = append(out, *b)
+		out = append(out, b)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, s.loadScopes(ctx, s.db, out)
+}
+
+// save inserts (ID Nil) or updates the row and replaces its scope lists.
+func (s *Store) save(ctx context.Context, tx pgx.Tx, b *Budget) error {
+	var icon []byte
+	if b.IconCode != nil {
+		var err error
+		if icon, err = json.Marshal(b.IconCode); err != nil {
+			return err
+		}
+	}
+	tags := b.TagNames
+	if tags == nil {
+		tags = []string{}
+	}
+	args := []any{b.ID, b.UserID, b.Name, shared.CleanText(b.Description), shared.CleanText(b.Note), icon, b.Amount,
+		b.WarnPct, b.ScopeAll, tags, b.Recurring, b.Freq, b.Interval, b.StartDate, b.AnchorDate, b.EndKind,
+		b.EndDate, b.EndCount, b.ClosedOn, b.Status}
+	var err error
+	if b.ID == uuid.Nil {
+		b.ID, _ = uuid.NewV7()
+		args[0] = b.ID
+		_, err = tx.Exec(ctx, `INSERT INTO budgets (id, user_id, name, description, note, icon_code, amount, warn_pct,
+			scope_all, tag_names, recurring, freq, interval_n, start_date, anchor_date, end_kind, end_date, end_count,
+			closed_on, status)
+			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`, args...)
+	} else {
+		_, err = tx.Exec(ctx, `UPDATE budgets SET name = $3, description = $4, note = $5, icon_code = $6::jsonb,
+			amount = $7, warn_pct = $8, scope_all = $9, tag_names = $10, recurring = $11, freq = $12, interval_n = $13,
+			start_date = $14, anchor_date = $15, end_kind = $16, end_date = $17, end_count = $18, closed_on = $19,
+			status = $20 WHERE id = $1 AND user_id = $2`, args...)
+	}
+	if err != nil {
+		return fmt.Errorf("save budget: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM budget_categories WHERE budget_id = $1`, b.ID); err != nil {
+		return err
+	}
+	for _, c := range b.Categories {
+		if _, err := tx.Exec(ctx, `INSERT INTO budget_categories (budget_id, category_id, include_children)
+			VALUES ($1, $2, $3)`, b.ID, c.ID, c.IncludeChildren); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM budget_wallets WHERE budget_id = $1`, b.ID); err != nil {
+		return err
+	}
+	for _, w := range b.Wallets {
+		if _, err := tx.Exec(ctx, `INSERT INTO budget_wallets (budget_id, account_id) VALUES ($1, $2)`, b.ID, w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// --- periods ---
+
+const periodColumns = `id, seq, start_date, end_date, amount::float8, overridden, note`
+
+func scanPeriod(row pgx.Row) (*periodRow, error) {
+	var (
+		p   periodRow
+		seq int32
+	)
+	if err := row.Scan(&p.ID, &seq, &p.Start, &p.End, &p.Amount, &p.Overridden, &p.Note); err != nil {
+		return nil, err
+	}
+	p.Seq = int(seq)
+	return &p, nil
+}
+
+func (s *Store) periods(ctx context.Context, q shared.Querier, budgetID uuid.UUID, where string, args ...any) ([]*periodRow, error) {
+	rows, err := q.Query(ctx, `SELECT `+periodColumns+` FROM budget_periods WHERE budget_id = $1 `+where,
+		append([]any{budgetID}, args...)...)
+	if err != nil {
+		return nil, fmt.Errorf("periods: %w", err)
+	}
+	defer rows.Close()
+	var out []*periodRow
+	for rows.Next() {
+		p, err := scanPeriod(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }
 
-// Update — authorization is enforced upstream by the service. The SQL
-// itself only matches by id; `actorUserID` is the caller stamped into
-// `updated_by_user_id` (NOT the row's user_id, which may be a different
-// project-creator when caller is the current project owner).
-func (s *Store) Update(
-	ctx context.Context, actorUserID, id uuid.UUID, req UpdateRequest,
-) (*Budget, error) {
-	q := `UPDATE budgets SET updated_by_user_id = $1`
-	args := []any{actorUserID}
-
-	if req.CategoryID != nil {
-		args = append(args, *req.CategoryID)
-		q += fmt.Sprintf(", category_id = $%d", len(args))
-	}
-	if req.Amount != nil {
-		args = append(args, *req.Amount)
-		q += fmt.Sprintf(", amount = $%d", len(args))
-	}
-	if req.Period != nil {
-		args = append(args, *req.Period)
-		q += fmt.Sprintf(", period = $%d", len(args))
-	}
-	if req.Currency != nil {
-		args = append(args, strings.ToUpper(*req.Currency))
-		q += fmt.Sprintf(", currency = $%d", len(args))
-	}
-	if v, ok := req.NameChange(); ok {
-		// Cleared → the (new, if changing) category's name.
-		args = append(args, v, req.CategoryID)
-		q += fmt.Sprintf(", name = COALESCE($%d, (SELECT name FROM categories WHERE id = COALESCE($%d::uuid, budgets.category_id)))", len(args)-1, len(args))
-	}
-	if v, ok := req.DescriptionChange(); ok {
-		args = append(args, v)
-		q += fmt.Sprintf(", description = $%d", len(args))
-	}
-	if v, ok := req.NoteChange(); ok {
-		args = append(args, v)
-		q += fmt.Sprintf(", note = $%d", len(args))
-	}
-
-	args = append(args, id)
-	q += fmt.Sprintf(" WHERE id = $%d RETURNING ", len(args)) + budgetColumns
-
-	b, err := scanBudget(s.db.QueryRow(ctx, q, args...))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrBudgetNotFound
-	}
-	if err != nil {
-		// Category / period change can collide with the unique index.
-		if strings.Contains(err.Error(), "idx_budgets_user_category_period") {
-			return nil, ErrDuplicateBudget
-		}
-		return nil, fmt.Errorf("update: %w", err)
-	}
-	return b, nil
+func (s *Store) baseSeq(ctx context.Context, q rowQuerier, b *Budget) (int, error) {
+	var n int
+	err := q.QueryRow(ctx, `SELECT COUNT(*) FROM budget_periods WHERE budget_id = $1 AND start_date < $2`,
+		b.ID, b.AnchorDate).Scan(&n)
+	return n, err
 }
 
-// SetStatus flips between active and archived. Authorization enforced
-// upstream; SQL matches by id only and stamps `actorUserID` as the
-// updater (which may differ from the row's user_id when the actor is a
-// project owner editing a project-scope budget created by someone else).
-func (s *Store) SetStatus(
-	ctx context.Context, actorUserID, id uuid.UUID, status string,
-) (*Budget, error) {
-	q := `UPDATE budgets SET status = $1, updated_by_user_id = $2
-	       WHERE id = $3
-	   RETURNING ` + budgetColumns
-	b, err := scanBudget(s.db.QueryRow(ctx, q, status, actorUserID, id))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrBudgetNotFound
-	}
+// syncPeriods writes the periods that have started (from the anchor; the
+// rows before it stay as they are): new ones take the base amount, kept
+// ones keep their amount / note, ones that no longer exist go.
+func (s *Store) syncPeriods(ctx context.Context, tx pgx.Tx, b *Budget, today time.Time) error {
+	base, err := s.baseSeq(ctx, tx, b)
 	if err != nil {
-		// Restore can collide with the unique index if a sibling has
-		// claimed the same (category, period, project_id) slot while
-		// this row was archived.
-		if strings.Contains(err.Error(), "idx_budgets_user_category_period") {
-			return nil, ErrDuplicateBudget
+		return err
+	}
+	have, err := s.periods(ctx, tx, b.ID, `AND start_date >= $2`, b.AnchorDate)
+	if err != nil {
+		return err
+	}
+	byStart := map[time.Time]*periodRow{}
+	for _, p := range have {
+		byStart[p.Start] = p
+	}
+	seen := map[uuid.UUID]bool{}
+	for i, sp := range b.spans(base, today) {
+		seq := base + i + 1
+		if p, ok := byStart[sp.Start]; ok {
+			seen[p.ID] = true
+			if p.Seq != seq || !sameDate(p.End, sp.End) {
+				if _, err := tx.Exec(ctx, `UPDATE budget_periods SET seq = $2, end_date = $3 WHERE id = $1`,
+					p.ID, seq, sp.End); err != nil {
+					return err
+				}
+			}
+			continue
 		}
-		return nil, fmt.Errorf("set status: %w", err)
+		id, _ := uuid.NewV7()
+		if _, err := tx.Exec(ctx, `INSERT INTO budget_periods (id, budget_id, seq, start_date, end_date, amount)
+			VALUES ($1, $2, $3, $4, $5, $6)`, id, b.ID, seq, sp.Start, sp.End, b.Amount); err != nil {
+			return fmt.Errorf("insert period: %w", err)
+		}
 	}
-	return b, nil
-}
-
-// Delete — authorization upstream; SQL matches by id only.
-func (s *Store) Delete(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.db.Exec(ctx, `DELETE FROM budgets WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("delete: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrBudgetNotFound
+	for _, p := range have {
+		if !seen[p.ID] {
+			if _, err := tx.Exec(ctx, `DELETE FROM budget_periods WHERE id = $1`, p.ID); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
-// ComputeSpentResult — aggregated spend + per-descendant breakdown.
-// Recursive CTE walks the category tree from the budget's anchor.
-type ComputeSpentResult struct {
-	Total          float64
-	ChildBreakdown []ChildBreakdownRow
+func sameDate(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
 }
 
-// ComputeSpent runs the recursive descendants CTE + aggregate. For
-// project-scope budgets, restricts to that project_id; for user-scope,
-// restricts project_id IS NULL (personal book only).
-//
-// Period bounds are inclusive on both sides (DATE comparison; DB stores
-// transactions.date as DATE — no tz coercion at this layer).
-func (s *Store) ComputeSpent(
-	ctx context.Context, userID uuid.UUID, b *Budget, periodStart, periodEnd string,
-) (*ComputeSpentResult, error) {
-	args := []any{userID, b.CategoryID, periodStart, periodEnd}
-	projectClause := "AND t.project_id IS NULL"
-	if b.Scope == ScopeProject && b.ProjectID != nil {
-		args = append(args, *b.ProjectID)
-		projectClause = "AND t.project_id = $5"
+// --- validation ---
+
+func (s *Store) checkScope(ctx context.Context, q pgx.Tx, userID uuid.UUID, b *Budget) error {
+	if len(b.Categories) > 0 {
+		ids := make([]uuid.UUID, len(b.Categories))
+		for i, c := range b.Categories {
+			ids[i] = c.ID
+		}
+		var n int
+		if err := q.QueryRow(ctx, `SELECT COUNT(*) FROM categories WHERE id = ANY($1) AND user_id = $2
+			AND type = 'expense' AND NOT is_system`, ids, userID).Scan(&n); err != nil {
+			return err
+		}
+		if n != len(ids) {
+			return ErrInvalidCategory
+		}
 	}
+	for _, w := range b.Wallets {
+		var ok bool
+		if err := q.QueryRow(ctx, `SELECT `+shared.ActiveMembershipPredicate("$1", "$2"), w, userID).Scan(&ok); err != nil {
+			return err
+		}
+		if !ok {
+			return ErrAccountNotFound
+		}
+	}
+	return nil
+}
 
-	// Shared wallets: the central report-scope predicate (spec §14/5
-	// guardrail) replaces the old bare `t.user_id = $1` — a wallet row
-	// only rolls into the viewer's budgets when their membership scope
-	// says so ('own'/'all'; 'none' hides the wallet from budgets). The
-	// category-descendants filter already restricts sums to the viewer's
-	// own taxonomy, so other members' rows can never match anyway.
-	q := `
-		WITH RECURSIVE descendants AS (
-			SELECT id, name FROM categories WHERE id = $2
-			UNION ALL
-			SELECT c.id, c.name FROM categories c
-			JOIN descendants d ON c.parent_id = d.id
-		),
-		sums AS (
-			SELECT t.category_id, COALESCE(SUM(` + shared.ShareAmountExpr("t") + `), 0) AS spent
-			FROM transactions t
-			WHERE ` + shared.ReportScopePredicate("t", "$1") + `
-			  AND t.type = 'expense'
-			  AND t.category_id IN (SELECT id FROM descendants)
-			  AND t.date BETWEEN $3::date AND $4::date
-			  ` + projectClause + `
-			GROUP BY t.category_id
-		)
-		SELECT d.id, d.name, COALESCE(s.spent, 0) AS spent
-		FROM descendants d
-		LEFT JOIN sums s ON s.category_id = d.id
-		ORDER BY d.id`
-
-	rows, err := s.db.Query(ctx, q, args...)
+// expandCategories — the scope's category ids, sub-categories included
+// where asked.
+func (s *Store) expandCategories(ctx context.Context, cats []scopeCat) ([]uuid.UUID, error) {
+	var direct, deep []uuid.UUID
+	for _, c := range cats {
+		if c.IncludeChildren {
+			deep = append(deep, c.ID)
+		} else {
+			direct = append(direct, c.ID)
+		}
+	}
+	out := append([]uuid.UUID{}, direct...)
+	if len(deep) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.Query(ctx, `WITH RECURSIVE d AS (
+			SELECT id FROM categories WHERE id = ANY($1)
+			UNION SELECT c.id FROM categories c JOIN d ON c.parent_id = d.id)
+		SELECT id FROM d`, deep)
 	if err != nil {
-		return nil, fmt.Errorf("compute spent: %w", err)
+		return nil, fmt.Errorf("expand categories: %w", err)
 	}
 	defer rows.Close()
-
-	out := ComputeSpentResult{ChildBreakdown: make([]ChildBreakdownRow, 0)}
 	for rows.Next() {
-		var r ChildBreakdownRow
-		if err := rows.Scan(&r.CategoryID, &r.Name, &r.Spent); err != nil {
-			return nil, fmt.Errorf("scan breakdown: %w", err)
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
 		}
-		out.Total += r.Spent
-		// Drop the anchor category from the breakdown — it's the budget
-		// itself; the FE shows it as the heading row.
-		if r.CategoryID == b.CategoryID {
-			continue
-		}
-		// Skip zero-spent descendants to keep the response light.
-		if r.Spent == 0 {
-			continue
-		}
-		out.ChildBreakdown = append(out.ChildBreakdown, r)
+		out = append(out, id)
 	}
-	return &out, rows.Err()
+	return out, rows.Err()
 }
 
-// GetUserTimezone reads `preferences->>'timezone'` from user_preferences.
-// Returns "" if the row is missing or the key is absent — caller falls
-// back to the default tz.
-func (s *Store) GetUserTimezone(
-	ctx context.Context, userID uuid.UUID,
-) (string, error) {
+func (s *Store) userTimezone(ctx context.Context, userID uuid.UUID) (string, error) {
 	var tz *string
-	err := s.db.QueryRow(ctx,
-		`SELECT preferences->>'timezone' FROM user_preferences WHERE user_id = $1`,
-		userID).Scan(&tz)
-	if errors.Is(err, pgx.ErrNoRows) {
+	err := s.db.QueryRow(ctx, `SELECT preferences->>'timezone' FROM user_preferences WHERE user_id = $1`, userID).Scan(&tz)
+	if errors.Is(err, pgx.ErrNoRows) || tz == nil {
 		return "", nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("user prefs: %w", err)
-	}
-	if tz == nil {
-		return "", nil
 	}
 	return *tz, nil
-}
-
-// GetUserCurrency reads `preferences->>'currency'`. Empty string if missing.
-func (s *Store) GetUserCurrency(
-	ctx context.Context, userID uuid.UUID,
-) (string, error) {
-	var cur *string
-	err := s.db.QueryRow(ctx,
-		`SELECT preferences->>'currency' FROM user_preferences WHERE user_id = $1`,
-		userID).Scan(&cur)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("user prefs: %w", err)
-	}
-	if cur == nil {
-		return "", nil
-	}
-	return *cur, nil
 }

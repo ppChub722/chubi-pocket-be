@@ -168,9 +168,9 @@ func (f *qcFixture) insertDebt(
 	if _, err := f.pool.Exec(context.Background(), `
 		INSERT INTO personal_debts
 			(id, user_id, direction, counterparty_contact_id, counterparty_person_name,
-			 source_transaction_id, amount, settled_amount, currency, status)
-		VALUES ($1, $2, 'owed_to_me', $3, $4, $5, $6, $7, 'THB', $8)`,
-		id, userID, contactID, personName, sourceTxID, amount, settled, status); err != nil {
+			 source_transaction_id, amount, currency, date, paid, source_kind)
+		VALUES ($1, $2, 'paid', $3, $4, $5, $6, 'THB', CURRENT_DATE, $7, 'transaction')`,
+		id, userID, contactID, personName, sourceTxID, amount, settled > 0 || status == "settled"); err != nil {
 		t.Fatalf("insert debt: %v", err)
 	}
 	return id
@@ -184,6 +184,7 @@ func (f *qcFixture) cleanup(t *testing.T) {
 	// Deleting projects cascades project_members + project_transactions.
 	for _, q := range []string{
 		`DELETE FROM personal_debts WHERE user_id = ANY($1)`,
+		`DELETE FROM project_my_tags WHERE user_id = ANY($1)`,
 		`DELETE FROM transactions WHERE user_id = ANY($1)`,
 		`DELETE FROM projects WHERE owner_user_id = ANY($1)`,
 		`DELETE FROM notifications WHERE recipient_user_id = ANY($1) OR actor_user_id = ANY($1)`,
@@ -191,6 +192,7 @@ func (f *qcFixture) cleanup(t *testing.T) {
 		`DELETE FROM accounts WHERE user_id = ANY($1)`,
 		`DELETE FROM categories WHERE user_id = ANY($1)`,
 		`DELETE FROM contacts WHERE user_id = ANY($1)`,
+		`DELETE FROM tags WHERE user_id = ANY($1)`,
 		`DELETE FROM user_notification_settings WHERE user_id = ANY($1)`,
 		`DELETE FROM users WHERE id = ANY($1)`,
 	} {
@@ -218,6 +220,9 @@ func newQCFixture(t *testing.T) *qcFixture {
 	f.svc = NewService(NewStore(pool))
 	f.svc.WithNotificationService(notifSvc)
 	f.svc.WithTransactionsService(txSvc)
+	txSvc.WithDebtLinks(pdSvc)
+	txSvc.WithEventBillSyncer(f.svc.SyncBillFromTxTx)
+	txSvc.WithEventBillDeleter(f.svc.DeleteBillOfTxTx)
 
 	t.Cleanup(func() { f.cleanup(t) })
 
@@ -290,22 +295,19 @@ func TestQuickCreateHappyPath(t *testing.T) {
 	}
 
 	// --- Project shell ---
-	if resp.LinkedCount != 3 {
-		t.Errorf("linked_count = %d, want 3", resp.LinkedCount)
+	if len(resp.Detail.Board.Data) != 3 {
+		t.Errorf("linked_count = %d, want 3", len(resp.Detail.Board.Data))
 	}
-	if resp.Name != "แฟน, บี · 15 ก.ย. 2026" || resp.Status != StatusActive {
-		t.Errorf("project shape: name=%q status=%q", resp.Name, resp.Status)
+	if resp.Detail.Event.Name != "แฟน, บี · 15 ก.ย. 2026" || resp.Detail.Event.Status != StatusActive {
+		t.Errorf("project shape: name=%q status=%q", resp.Detail.Event.Name, resp.Detail.Event.Status)
 	}
-	if resp.Type == nil || *resp.Type != "other" {
-		t.Errorf("project type = %v, want 'other'", resp.Type)
-	}
-	if resp.OwnerUserID != f.owner {
-		t.Errorf("owner_user_id = %s, want caller", resp.OwnerUserID)
+	if resp.Detail.Event.OwnerUserID != f.owner {
+		t.Errorf("owner_user_id = %s, want caller", resp.Detail.Event.OwnerUserID)
 	}
 
 	// --- Members: owner + Bee(linked) + Grandma(ad-hoc) + Chai(wallet) ---
-	if resp.MembersCount != 4 {
-		t.Errorf("members_count = %d, want 4 (deduped)", resp.MembersCount)
+	if resp.Detail.Event.MembersCount != 4 {
+		t.Errorf("members_count = %d, want 4 (deduped)", resp.Detail.Event.MembersCount)
 	}
 	type memberRow struct {
 		id     uuid.UUID
@@ -316,7 +318,7 @@ func TestQuickCreateHappyPath(t *testing.T) {
 	}
 	memberRows, err := f.pool.Query(ctx, `
 		SELECT id, user_id, display_name, role, status
-		FROM project_members WHERE project_id = $1`, resp.ID)
+		FROM project_members WHERE project_id = $1`, resp.Detail.Event.ID)
 	if err != nil {
 		t.Fatalf("members query: %v", err)
 	}
@@ -357,12 +359,12 @@ func TestQuickCreateHappyPath(t *testing.T) {
 	// --- Board: 3 parents, 4 children, personal rows linked back ---
 	if n := f.countRows(t, `
 		SELECT COUNT(*) FROM project_transactions
-		WHERE project_id = $1 AND parent_project_transaction_id IS NULL`, resp.ID); n != 3 {
+		WHERE project_id = $1 AND parent_project_transaction_id IS NULL`, resp.Detail.Event.ID); n != 3 {
 		t.Errorf("board parents = %d, want 3", n)
 	}
 	if n := f.countRows(t, `
 		SELECT COUNT(*) FROM project_transactions
-		WHERE project_id = $1 AND parent_project_transaction_id IS NOT NULL`, resp.ID); n != 4 {
+		WHERE project_id = $1 AND parent_project_transaction_id IS NOT NULL`, resp.Detail.Event.ID); n != 4 {
 		t.Errorf("board children = %d, want 4", n)
 	}
 
@@ -370,7 +372,7 @@ func TestQuickCreateHappyPath(t *testing.T) {
 	if err := f.pool.QueryRow(ctx, `
 		SELECT id FROM transactions
 		WHERE user_id = $1 AND amount = 150 AND project_id = $2`,
-		f.owner, resp.ID).Scan(&newTxID); err != nil {
+		f.owner, resp.Detail.Event.ID).Scan(&newTxID); err != nil {
 		t.Fatalf("new bill should be linked to the project: %v", err)
 	}
 
@@ -385,14 +387,14 @@ func TestQuickCreateHappyPath(t *testing.T) {
 			t.Errorf("bill %s not auto-claimed: %v", txID, err)
 			return
 		}
-		if projectID != resp.ID {
-			t.Errorf("bill %s project_id = %s, want %s", txID, projectID, resp.ID)
+		if projectID != resp.Detail.Event.ID {
+			t.Errorf("bill %s project_id = %s, want %s", txID, projectID, resp.Detail.Event.ID)
 		}
 		var amount float64
 		var isChild *uuid.UUID
 		if err := f.pool.QueryRow(ctx, `
 			SELECT amount, parent_project_transaction_id FROM project_transactions
-			WHERE id = $1 AND project_id = $2`, parentID, resp.ID).Scan(&amount, &isChild); err != nil {
+			WHERE id = $1 AND project_id = $2`, parentID, resp.Detail.Event.ID).Scan(&amount, &isChild); err != nil {
 			t.Errorf("board parent for bill %s: %v", txID, err)
 			return
 		}
@@ -474,8 +476,8 @@ func TestQuickCreateAtomicRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first quick create: %v", err)
 	}
-	if first.LinkedCount != 2 {
-		t.Errorf("first linked_count = %d, want 2", first.LinkedCount)
+	if len(first.Detail.Board.Data) != 2 {
+		t.Errorf("first linked_count = %d, want 2", len(first.Detail.Board.Data))
 	}
 
 	snapshot := func() (projects, txs, notifs int, balance float64) {

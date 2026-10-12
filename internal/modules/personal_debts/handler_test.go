@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/apidoc/apitest"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
@@ -17,10 +19,15 @@ import (
 
 type debtHFix struct {
 	t       *testing.T
+	ctx     context.Context
+	pool    *pgxpool.Pool
 	me      uuid.UUID
 	partner uuid.UUID
 	contact uuid.UUID // my contact for partner (linked)
 	wallet  uuid.UUID
+	tag     uuid.UUID
+	txs     *transactions.Service
+	svc     *Service
 	r       http.Handler
 	exec    func(q string, args ...any)
 }
@@ -29,7 +36,7 @@ func newDebtHFix(t *testing.T) *debtHFix {
 	t.Helper()
 	pool := testdb.Pool(t)
 	ctx := context.Background()
-	f := &debtHFix{t: t}
+	f := &debtHFix{t: t, ctx: ctx, pool: pool}
 	f.me = testdb.User(t, pool)
 	f.partner = testdb.User(t, pool)
 	f.exec = func(q string, args ...any) {
@@ -49,22 +56,20 @@ func newDebtHFix(t *testing.T) *debtHFix {
 	if err := seed.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	txs := transactions.NewService(transactions.NewStore(pool), cats)
-	svc := NewService(NewStore(pool), txs)
-	txs.WithDebtsCreator(svc.CreateForTransactionTx)
-	txs.WithSplitsEditor(svc.EditForTransactionTx)
-	txs.WithDebtValidator(svc.ValidateOwnership)
-	txs.WithDebtAutoBumper(svc.AutoBumpInTx)
-	txs.WithDebtSettledAdjuster(svc.AdjustSettledInTx)
-	h := NewHandler(svc)
+	f.txs = transactions.NewService(transactions.NewStore(pool), cats)
+	f.svc = NewService(NewStore(pool), f.txs)
+	f.txs.WithDebtsCreator(f.svc.CreateForTransactionTx)
+	f.txs.WithSplitsEditor(f.svc.EditForTransactionTx)
+	f.txs.WithDebtLinks(f.svc)
+	h := NewHandler(f.svc)
 	f.r = apitest.Engine(f.me, func(g *gin.RouterGroup) {
 		g.GET("/personal-debts/people", h.People)
-		g.GET("/personal-debts", h.List)
-		g.POST("/personal-debts", h.Create)
+		g.GET("/personal-debts/people/:key", h.Person)
+		g.GET("/personal-debts/people/:key/entries", h.Entries)
+		g.POST("/personal-debts/people/:key/entries", h.CreateEntry)
 		g.GET("/personal-debts/:id", h.Get)
 		g.PUT("/personal-debts/:id", h.Update)
-		g.POST("/personal-debts/:id/cancel", h.Cancel)
-		g.POST("/personal-debts/:id/settle", h.Settle)
+		g.DELETE("/personal-debts/:id", h.Delete)
 	})
 	f.exec(`UPDATE users SET display_name = 'Bee Live' WHERE id = $1`, f.partner)
 	f.wallet = testdb.Account(t, pool, f.me)
@@ -72,6 +77,9 @@ func newDebtHFix(t *testing.T) *debtHFix {
 	f.contact = uuid.New()
 	f.exec(`INSERT INTO contacts (id, user_id, display_name, linked_user_id, status)
 		VALUES ($1, $2, 'Bee old', $3, 'active')`, f.contact, f.me, f.partner)
+	f.tag = uuid.New()
+	f.exec(`INSERT INTO tags (id, user_id, name) VALUES ($1, $2, 'family')`, f.tag, f.me)
+	// Runs before the users' own cleanups (my contact links the partner).
 	t.Cleanup(func() {
 		_, _ = pool.Exec(ctx, `DELETE FROM personal_debts WHERE user_id = ANY($1)`, []uuid.UUID{f.me, f.partner})
 		_, _ = pool.Exec(ctx, `DELETE FROM contacts WHERE user_id = ANY($1)`, []uuid.UUID{f.me, f.partner})
@@ -79,176 +87,274 @@ func newDebtHFix(t *testing.T) *debtHFix {
 	return f
 }
 
-func (f *debtHFix) call(method, path string, body any) (int, []byte) {
+// call sends a request as me, checks the status and (with op) the spec.
+func (f *debtHFix) call(method, path string, body any, op string, want int) map[string]any {
 	f.t.Helper()
-	return apitest.Do(f.t, f.r, method, path, body)
+	status, raw := apitest.Do(f.t, f.r, method, path, body)
+	if status != want {
+		f.t.Fatalf("%s %s: status %d, want %d; body %s", method, path, status, want, raw)
+	}
+	if op != "" {
+		apitest.Conform(f.t, op, status, raw)
+	}
+	var out map[string]any
+	_ = json.Unmarshal(raw, &out)
+	return out
 }
 
-func personOf(t *testing.T, raw []byte) map[string]any {
-	t.Helper()
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
+func (f *debtHFix) code(method, path string, body any, want int, code string) {
+	f.t.Helper()
+	status, raw := apitest.Do(f.t, f.r, method, path, body)
+	var e struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
-	if _, old := m["counterparty_person_name"]; old {
-		t.Errorf("counterparty_person_name must not be returned: %s", raw)
+	_ = json.Unmarshal(raw, &e)
+	if status != want || e.Error.Code != code {
+		f.t.Errorf("%s %s: %d %s, want %d %s (%s)", method, path, status, e.Error.Code, want, code, raw)
 	}
-	p, _ := m["person"].(map[string]any)
-	if p == nil {
-		t.Fatalf("no person in %s", raw)
-	}
-	return p
 }
 
-func TestDebtsPersonRefAndPeople(t *testing.T) {
+func (f *debtHFix) balance() float64 {
+	f.t.Helper()
+	var b float64
+	if err := f.pool.QueryRow(f.ctx, `SELECT balance FROM accounts WHERE id = $1`, f.wallet).Scan(&b); err != nil {
+		f.t.Fatal(err)
+	}
+	return b
+}
+
+func obj(m map[string]any, keys ...string) map[string]any {
+	for _, k := range keys {
+		m, _ = m[k].(map[string]any)
+	}
+	return m
+}
+
+func num(m map[string]any, keys ...string) float64 {
+	v, _ := obj(m, keys[:len(keys)-1]...)[keys[len(keys)-1]].(float64)
+	return v
+}
+
+func entriesPath(key string) string {
+	return "/api/v1/personal-debts/people/" + url.PathEscape(key) + "/entries"
+}
+
+// TestDebtLedgerFlow — the person ledger end to end: entries with and
+// without a wallet, the people list, the person page, edits and deletes
+// keeping the entry and its wallet transaction one record.
+func TestDebtLedgerFlow(t *testing.T) {
 	f := newDebtHFix(t)
 
-	status, body := f.call("POST", "/api/v1/personal-debts", map[string]any{
-		"direction": "owed_to_me", "counterparty_contact_id": f.contact, "counterparty_person_name": "typed",
-		"amount": 100, "currency": "THB",
-	})
-	if status != http.StatusCreated {
-		t.Fatalf("create: %d %s", status, body)
+	// I paid Mom 200 from the wallet, tagged: the wallet tx is written.
+	lend := f.call("POST", entriesPath("n:Mom"), map[string]any{
+		"direction": "paid", "amount": 200, "account_id": f.wallet, "date": "2026-10-01",
+		"description": "Lunch money", "tag_ids": []uuid.UUID{f.tag},
+	}, "createDebtEntry", http.StatusCreated)
+	lendID := obj(lend, "entry")["id"].(string)
+	if k := obj(lend, "entry")["key"]; k != "n:mom" {
+		t.Errorf("key = %v, want n:mom", k)
 	}
-	p := personOf(t, body)
-	if p["name"] != "Bee Live" || p["contact_id"] != f.contact.String() || p["linked"] != true || p["linked_user_id"] != f.partner.String() {
-		t.Errorf("create: person = %v, want the contact resolved to the linked user's live name", p)
+	if num(lend, "person_balance", "net") != 200 || obj(lend, "person_balance", "person")["name"] != "Mom" {
+		t.Errorf("person_balance = %v", lend["person_balance"])
 	}
-	var created map[string]any
-	_ = json.Unmarshal(body, &created)
-	id := created["id"].(string)
-
-	// A free-name debt: the snapshot is the name.
-	status, body = f.call("POST", "/api/v1/personal-debts", map[string]any{
-		"direction": "i_owe", "counterparty_person_name": "Grandma", "amount": 30, "currency": "THB",
-	})
-	if status != http.StatusCreated {
-		t.Fatalf("create free: %d %s", status, body)
+	tx := obj(lend, "transaction")
+	if tx == nil || tx["type"] != "expense" || obj(tx, "counterparty")["key"] != "n:mom" ||
+		obj(tx, "counterparty")["entry_id"] != lendID || obj(tx, "category")["system_kind"] != "DEBT_PAID" {
+		t.Fatalf("linked tx = %v", tx)
 	}
-	if p := personOf(t, body); p["name"] != "Grandma" || p["contact_id"] != nil || p["linked"] != false {
-		t.Errorf("free person = %v", p)
+	if tags, _ := tx["tags"].([]any); len(tags) != 1 {
+		t.Errorf("tx tags = %v, want family", tx["tags"])
+	}
+	if f.balance() != 800 {
+		t.Errorf("wallet = %v, want 800", f.balance())
 	}
 
-	// Live name: the partner renames themself, then a nickname wins.
-	f.exec(`UPDATE users SET display_name = 'Bee Renamed' WHERE id = $1`, f.partner)
-	status, body = f.call("GET", "/api/v1/personal-debts/"+id, nil)
-	apitest.Conform(t, "getDebt", status, body)
-	if p := personOf(t, body); p["name"] != "Bee Renamed" {
-		t.Errorf("get: name = %v, want the live profile name", p["name"])
-	}
-	f.exec(`UPDATE contacts SET nickname = 'Beebee', show_nickname = TRUE WHERE id = $1`, f.contact)
+	// Tags need a wallet.
+	f.code("POST", entriesPath("n:mom"), map[string]any{
+		"direction": "received", "amount": 50, "tag_ids": []uuid.UUID{f.tag},
+	}, http.StatusBadRequest, "TAGS_NEED_WALLET")
 
-	status, body = f.call("GET", "/api/v1/personal-debts", nil)
-	apitest.Conform(t, "listDebts", status, body)
-	var list struct {
-		Data []json.RawMessage `json:"data"`
+	// Mom paid me 50 back, ledger only, and the loan is labelled paid.
+	back := f.call("POST", entriesPath("n:mom"), map[string]any{
+		"direction": "received", "amount": 50, "date": "2026-10-02", "mark_paid_ids": []string{lendID},
+	}, "createDebtEntry", http.StatusCreated)
+	backID := obj(back, "entry")["id"].(string)
+	if back["transaction"] != nil || num(back, "person_balance", "net") != 150 || num(back, "person_balance", "open_count") != 1 {
+		t.Errorf("ledger-only entry = %v", back)
 	}
-	_ = json.Unmarshal(body, &list)
-	if len(list.Data) != 2 {
-		t.Fatalf("list = %d, want 2", len(list.Data))
+	f.code("POST", entriesPath("n:mom"), map[string]any{
+		"direction": "received", "amount": 1, "mark_paid_ids": []uuid.UUID{uuid.New()},
+	}, http.StatusBadRequest, "ENTRY_NOT_FOUND")
+
+	// A contact person: the linked user's live name.
+	bee := f.call("POST", entriesPath("c:"+f.contact.String()), map[string]any{
+		"direction": "paid", "amount": 100, "date": "2026-10-03",
+	}, "createDebtEntry", http.StatusCreated)
+	if p := obj(bee, "person_balance", "person"); p["name"] != "Bee Live" || p["linked"] != true {
+		t.Errorf("contact person = %v", p)
 	}
-	names := map[string]bool{}
-	for _, d := range list.Data {
-		names[personOf(t, d)["name"].(string)] = true
+	f.code("POST", entriesPath("c:"+uuid.NewString()), map[string]any{"direction": "paid", "amount": 1},
+		http.StatusBadRequest, "CONTACT_NOT_FOUND")
+	f.code("POST", entriesPath("x:nope"), map[string]any{"direction": "paid", "amount": 1},
+		http.StatusBadRequest, "INVALID_PERSON_KEY")
+
+	// People: one list, |net| first; the totals ignore the filters.
+	people := f.call("GET", "/api/v1/personal-debts/people", nil, "listDebtPeople", http.StatusOK)
+	rows, _ := people["data"].([]any)
+	if len(rows) != 2 || rows[0].(map[string]any)["key"] != "n:mom" {
+		t.Fatalf("people = %v", rows)
 	}
-	if !names["Beebee"] || !names["Grandma"] {
-		t.Errorf("list names = %v, want nickname + snapshot", names)
+	if num(people, "totals", "owed_to_me") != 250 || num(people, "totals", "i_owe") != 0 ||
+		num(people, "totals", "net") != 250 || num(people, "totals", "open_count") != 2 {
+		t.Errorf("totals = %v", people["totals"])
+	}
+	if got := f.call("GET", "/api/v1/personal-debts/people?q=bee", nil, "listDebtPeople", http.StatusOK); len(got["data"].([]any)) != 1 {
+		t.Errorf("q=bee = %v", got["data"])
+	}
+	if got := f.call("GET", "/api/v1/personal-debts/people?side=i_owe", nil, "listDebtPeople", http.StatusOK); len(got["data"].([]any)) != 0 ||
+		num(got, "totals", "owed_to_me") != 250 {
+		t.Errorf("side=i_owe = %v", got)
 	}
 
-	status, body = f.call("GET", "/api/v1/personal-debts/people", nil)
-	apitest.Conform(t, "listDebtPeople", status, body)
-	var people struct {
-		Data []map[string]any `json:"data"`
+	// The person page.
+	mom := f.call("GET", "/api/v1/personal-debts/people/n:mom", nil, "getDebtPerson", http.StatusOK)
+	if num(mom, "net") != 150 || num(mom, "counts", "entries") != 2 || num(mom, "counts", "money") != 1 || len(mom["items"].([]any)) != 2 {
+		t.Errorf("person page = %v", mom)
 	}
-	_ = json.Unmarshal(body, &people)
-	if len(people.Data) != 2 {
-		t.Fatalf("people = %d, want 2: %s", len(people.Data), body)
+	f.code("GET", "/api/v1/personal-debts/people/n:nobody", nil, http.StatusNotFound, "NOT_FOUND")
+	f.code("GET", "/api/v1/personal-debts/people/bad", nil, http.StatusBadRequest, "INVALID_PERSON_KEY")
+	empty := uuid.New()
+	f.exec(`INSERT INTO contacts (id, user_id, display_name, status) VALUES ($1, $2, 'Fresh', 'active')`, empty, f.me)
+	if p := f.call("GET", "/api/v1/personal-debts/people/c:"+empty.String(), nil, "getDebtPerson", http.StatusOK); num(p, "net") != 0 ||
+		obj(p, "person")["name"] != "Fresh" {
+		t.Errorf("contact without entries = %v", p)
 	}
-	for _, row := range people.Data {
-		pp := row["person"].(map[string]any)
-		if _, old := row["display_name"]; old {
-			t.Errorf("display_name must be gone: %v", row)
+
+	// Entries: filters and sort.
+	for q, want := range map[string]int{"money=true": 1, "direction=received": 1, "paid=false": 1, "q=lunch": 1} {
+		got := f.call("GET", entriesPath("n:mom")+"?"+q, nil, "listDebtEntries", http.StatusOK)
+		if n := len(got["data"].([]any)); n != want {
+			t.Errorf("entries?%s = %d, want %d", q, n, want)
 		}
-		if _, old := row["icon_code"]; old {
-			t.Errorf("icon_code must be gone: %v", row)
-		}
-		switch pp["name"] {
-		case "Beebee":
-			if row["contact_id"] != f.contact.String() || row["owed_to_me_open"] != float64(100) {
-				t.Errorf("Bee row = %v", row)
-			}
-		case "Grandma":
-			if row["contact_id"] != nil || row["i_owe_open"] != float64(30) {
-				t.Errorf("Grandma row = %v", row)
-			}
-		default:
-			t.Errorf("unexpected person %v", pp)
-		}
+	}
+	asc := f.call("GET", entriesPath("n:mom")+"?sort=amount_asc", nil, "listDebtEntries", http.StatusOK)
+	if first := asc["data"].([]any)[0].(map[string]any); first["id"] != backID {
+		t.Errorf("amount_asc first = %v", first)
 	}
 
-	// update / cancel carry person too.
-	status, body = f.call("PUT", "/api/v1/personal-debts/"+id, map[string]any{"note": "n"})
-	if status != http.StatusOK {
-		t.Fatalf("update: %d %s", status, body)
+	// Entry detail = the tx-detail page in debt mode.
+	d := f.call("GET", "/api/v1/personal-debts/"+lendID, nil, "getDebtEntry", http.StatusOK)
+	if obj(d, "entry")["paid"] != true || obj(d, "transaction")["id"] == nil || num(d, "person_balance", "net") != 150 {
+		t.Errorf("entry detail = %v", d)
 	}
-	if p := personOf(t, body); p["name"] != "Beebee" {
-		t.Errorf("update: person = %v", p)
+	txID := uuid.MustParse(obj(d, "transaction")["id"].(string))
+	f.code("GET", "/api/v1/personal-debts/"+uuid.NewString(), nil, http.StatusNotFound, "NOT_FOUND")
+
+	// Edit the entry: the wallet tx follows (one record).
+	up := f.call("PUT", "/api/v1/personal-debts/"+lendID, map[string]any{
+		"amount": 300, "description": "Rent help",
+	}, "updateDebtEntry", http.StatusOK)
+	if num(up, "transaction", "amount") != 300 || obj(up, "transaction")["description"] != "Rent help" ||
+		num(up, "person_balance", "net") != 250 || f.balance() != 700 {
+		t.Errorf("edit entry: %v (wallet %v)", up, f.balance())
 	}
-	status, body = f.call("POST", "/api/v1/personal-debts/"+id+"/cancel", nil)
-	if status != http.StatusOK {
-		t.Fatalf("cancel: %d %s", status, body)
+	if bs, _ := up["account_balances"].([]any); len(bs) != 1 {
+		t.Errorf("account_balances = %v", up["account_balances"])
 	}
-	personOf(t, body)
+
+	// Edit the tx: the entry follows, and the write carries the person's balance.
+	amt := 250.0
+	w, err := f.txs.UpdateWrite(f.ctx, f.me, txID, transactions.UpdateRequest{Amount: &amt})
+	if err != nil {
+		t.Fatalf("edit the wallet side: %v", err)
+	}
+	if pb, ok := w.PersonBalance.(DebtPerson); !ok || pb.Net != 200 {
+		t.Errorf("tx write person_balance = %+v", w.PersonBalance)
+	}
+	if e, _ := f.svc.GetEntry(f.ctx, f.me, uuid.MustParse(lendID)); e.Entry.Amount != 250 {
+		t.Errorf("entry after a tx edit = %v, want 250", e.Entry.Amount)
+	}
+	cat := testdb.Category(t, f.pool, f.me, "Food")
+	if _, err := f.txs.UpdateWrite(f.ctx, f.me, txID, transactions.UpdateRequest{CategoryID: &cat}); err == nil {
+		t.Errorf("a debt tx's category must stay")
+	}
+
+	// Ledger-only: the tx goes, the money comes back.
+	lo := f.call("PUT", "/api/v1/personal-debts/"+lendID, map[string]any{"account_id": nil}, "updateDebtEntry", http.StatusOK)
+	if lo["transaction"] != nil || f.balance() != 1000 {
+		t.Errorf("ledger-only: %v (wallet %v)", lo["transaction"], f.balance())
+	}
+	// ... and back onto the wallet.
+	re := f.call("PUT", "/api/v1/personal-debts/"+lendID, map[string]any{"account_id": f.wallet}, "updateDebtEntry", http.StatusOK)
+	if re["transaction"] == nil || f.balance() != 750 {
+		t.Errorf("wallet again: %v (wallet %v)", re["transaction"], f.balance())
+	}
+
+	// Move the entry to another person: both balances come back.
+	mv := f.call("PUT", "/api/v1/personal-debts/"+backID, map[string]any{"key": "c:" + f.contact.String()}, "updateDebtEntry", http.StatusOK)
+	if num(mv, "person_balance", "net") != 50 || num(mv, "previous_person_balance", "net") != 250 {
+		t.Errorf("moved: now %v, before %v", mv["person_balance"], mv["previous_person_balance"])
+	}
+
+	// Delete: the entry and its tx.
+	del := f.call("DELETE", "/api/v1/personal-debts/"+lendID, nil, "deleteDebtEntry", http.StatusOK)
+	if del["transaction_id"] == nil || f.balance() != 1000 || num(del, "person_balance", "net") != 0 {
+		t.Errorf("delete: %v (wallet %v)", del, f.balance())
+	}
+	var txLeft int
+	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM transactions WHERE source_personal_debt_id IS NOT NULL AND user_id = $1`, f.me).Scan(&txLeft)
+	if txLeft != 0 {
+		t.Errorf("%d debt txs left after the delete", txLeft)
+	}
+
+	// Deleting the tx side deletes the entry too.
+	again := f.call("POST", entriesPath("n:mom"), map[string]any{
+		"direction": "paid", "amount": 40, "account_id": f.wallet,
+	}, "createDebtEntry", http.StatusCreated)
+	againTx := uuid.MustParse(obj(again, "transaction")["id"].(string))
+	dr, err := f.txs.DeleteWrite(f.ctx, f.me, againTx, false)
+	if err != nil || dr.DebtEntryID == nil || dr.DebtEntryID.String() != obj(again, "entry")["id"] {
+		t.Fatalf("delete the wallet side: %+v, %v", dr, err)
+	}
+	f.code("GET", "/api/v1/personal-debts/"+dr.DebtEntryID.String(), nil, http.StatusNotFound, "NOT_FOUND")
 }
 
-func TestSettleDebtAccountBalances(t *testing.T) {
+// TestSplitSourcedEntries — a split on my bill is an entry the bill owns:
+// only description / note / paid change here.
+func TestSplitSourcedEntries(t *testing.T) {
 	f := newDebtHFix(t)
-	status, body := f.call("POST", "/api/v1/personal-debts", map[string]any{
-		"direction": "owed_to_me", "counterparty_contact_id": f.contact, "counterparty_person_name": "x",
-		"amount": 100, "currency": "THB",
+	created, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
+		Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: 300, Date: "2026-10-05",
+		Description: testdb.Str("Dinner"),
+		Splits:      []transactions.SplitInput{{PersonName: "Grandma", OwedAmount: 100}},
 	})
-	if status != http.StatusCreated {
-		t.Fatalf("create: %d %s", status, body)
+	if err != nil {
+		t.Fatalf("split bill: %v", err)
 	}
-	var d map[string]any
-	_ = json.Unmarshal(body, &d)
-	id := d["id"].(string)
-
-	type balances struct {
-		AccountBalances []struct {
-			AccountID string  `json:"account_id"`
-			Balance   float64 `json:"balance"`
-		} `json:"account_balances"`
-		Debt map[string]any `json:"debt"`
+	bill := created.(*transactions.TransactionDetail)
+	split := (*bill.Splits)[0]
+	if split.Key != "n:grandma" || split.Direction != DirectionPaid {
+		t.Fatalf("split = %+v", split)
 	}
-	// With a wallet: owed_to_me -> income lands in it.
-	status, body = f.call("POST", "/api/v1/personal-debts/"+id+"/settle", map[string]any{"account_id": f.wallet, "amount": 40})
-	if status != http.StatusOK {
-		t.Fatalf("settle: %d %s", status, body)
+	id := split.DebtID.String()
+	d := f.call("GET", "/api/v1/personal-debts/"+id, nil, "getDebtEntry", http.StatusOK)
+	src := obj(d, "entry", "source")
+	if src["kind"] != "transaction" || src["id"] != bill.ID.String() || src["title"] != "Dinner" || d["transaction"] != nil {
+		t.Errorf("split entry = %v", d)
 	}
-	apitest.Conform(t, "settleDebt", status, body)
-	var b balances
-	_ = json.Unmarshal(body, &b)
-	if len(b.AccountBalances) != 1 || b.AccountBalances[0].AccountID != f.wallet.String() || b.AccountBalances[0].Balance != 1040 {
-		t.Errorf("account_balances = %+v, want the wallet at 1040", b.AccountBalances)
+	f.code("PUT", "/api/v1/personal-debts/"+id, map[string]any{"amount": 50}, http.StatusConflict, "ENTRY_MANAGED_BY_SOURCE")
+	f.code("PUT", "/api/v1/personal-debts/"+id, map[string]any{"account_id": f.wallet}, http.StatusConflict, "ENTRY_MANAGED_BY_SOURCE")
+	ok := f.call("PUT", "/api/v1/personal-debts/"+id, map[string]any{"paid": true, "note": "cash at home"}, "updateDebtEntry", http.StatusOK)
+	if obj(ok, "entry")["paid"] != true || obj(ok, "entry")["note"] != "cash at home" || num(ok, "entry", "amount") != 100 {
+		t.Errorf("label + note = %v", ok["entry"])
 	}
-	if p, _ := b.Debt["person"].(map[string]any); p == nil || p["name"] != "Bee Live" {
-		t.Errorf("settle result debt person = %v", b.Debt["person"])
-	}
-	if _, old := b.Debt["counterparty_person_name"]; old {
-		t.Errorf("counterparty_person_name still in the settle result")
-	}
-
-	// Without a wallet: nothing touched.
-	status, body = f.call("POST", "/api/v1/personal-debts/"+id+"/settle", map[string]any{"amount": 10})
-	if status != http.StatusOK {
-		t.Fatalf("settle floating: %d %s", status, body)
-	}
-	apitest.Conform(t, "settleDebt", status, body)
-	b = balances{}
-	_ = json.Unmarshal(body, &b)
-	if b.AccountBalances == nil || len(b.AccountBalances) != 0 {
-		t.Errorf("floating settle account_balances = %v, want []", b.AccountBalances)
+	// Deleting it takes the split off the bill.
+	f.call("DELETE", "/api/v1/personal-debts/"+id, nil, "deleteDebtEntry", http.StatusOK)
+	after, _ := f.txs.Get(f.ctx, f.me, bill.ID)
+	if after.SplitCount != 0 || after.MyShare == nil || *after.MyShare != 300 {
+		t.Errorf("bill after deleting its split: count %d share %v", after.SplitCount, after.MyShare)
 	}
 }
 
@@ -308,5 +414,56 @@ func TestSplitIdentityRuleInHook(t *testing.T) {
 	}
 	if n := storedName(beam); n != "Beamy" {
 		t.Errorf("free-name rename = %q, want Beamy", n)
+	}
+}
+
+// TestTransactionFilters — GET /transactions?counterparty_key (a person's
+// wallet sides) and ?can_join_event (the event bill picker).
+func TestTransactionFilters(t *testing.T) {
+	f := newDebtHFix(t)
+	entry, err := f.svc.CreateEntry(f.ctx, f.me, "n:mom", CreateEntryRequest{
+		Direction: DirectionPaid, Amount: 40, AccountID: &f.wallet,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
+		Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: 10, Date: "2026-10-05",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	split, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
+		Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: 90, Date: "2026-10-05",
+		Splits: []transactions.SplitInput{{PersonName: "Aom", OwedAmount: 30}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := func(fl transactions.ListFilter) map[uuid.UUID]bool {
+		t.Helper()
+		fl.Page, fl.PerPage = 1, 50
+		res, err := f.txs.List(f.ctx, f.me, fl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[uuid.UUID]bool{}
+		for _, r := range res.Data {
+			out[r.ID] = true
+		}
+		return out
+	}
+	if got := ids(transactions.ListFilter{CounterpartyKey: "n:mom"}); len(got) != 1 || !got[entry.Transaction.ID] {
+		t.Errorf("counterparty_key=n:mom = %v, want only the entry's tx", got)
+	}
+	plainID := plain.(*transactions.TransactionDetail).ID
+	splitBill := split.(*transactions.TransactionDetail)
+	got := ids(transactions.ListFilter{CanJoinEvent: true})
+	if !got[plainID] || !got[splitBill.ID] || got[entry.Transaction.ID] {
+		t.Errorf("can_join_event = %v, want the plain + split bills, not the debt tx", got)
+	}
+	f.exec(`UPDATE personal_debts SET paid = TRUE WHERE id = $1`, (*splitBill.Splits)[0].DebtID)
+	if got := ids(transactions.ListFilter{CanJoinEvent: true}); got[splitBill.ID] {
+		t.Errorf("a bill with a split labelled paid can't join an event")
 	}
 }

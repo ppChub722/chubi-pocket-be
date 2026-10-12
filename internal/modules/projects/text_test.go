@@ -23,7 +23,7 @@ func TestUpdateTextFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	testdb.CheckText(t, "create project", p.Description, p.Note, "D1", "N1")
+	testdb.CheckText(t, "create project", p.Event.Description, p.Event.Note, "D1", "N1")
 	for i, st := range testdb.Steps {
 		body := st.Body
 		if i == 0 {
@@ -33,14 +33,14 @@ func TestUpdateTextFields(t *testing.T) {
 		if err := json.Unmarshal([]byte(body), &req); err != nil {
 			t.Fatalf("%s: %v", body, err)
 		}
-		got, err := store.Update(ctx, uid, p.ID, req)
+		got, err := svc.Update(ctx, uid, p.Event.ID, req)
 		if err != nil {
 			t.Fatalf("%s: %v", body, err)
 		}
-		testdb.CheckText(t, "project "+body, got.Description, got.Note, st.WantD, st.WantN)
+		testdb.CheckText(t, "project "+body, got.Event.Description, got.Event.Note, st.WantD, st.WantN)
 	}
 
-	m, err := store.MemberByUserID(ctx, p.ID, uid)
+	m, err := store.MemberByUserID(ctx, p.Event.ID, uid)
 	if err != nil {
 		t.Fatalf("owner member: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestUpdateTextFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	pt, err := store.InsertPTTx(ctx, tx, p.ID, uid, CreateProjectTransactionRequest{
+	pt, err := store.InsertPTTx(ctx, tx, p.Event.ID, uid, CreateProjectTransactionRequest{
 		TransactionMemberID: m.ID, Type: "expense", Amount: 100, Currency: "THB", Date: "2026-10-10",
 		Description: testdb.Str("D1"), Note: testdb.Str("N1"),
 	})
@@ -61,7 +61,7 @@ func TestUpdateTextFields(t *testing.T) {
 	for i, st := range testdb.Steps {
 		body := st.Body
 		if i == 0 {
-			body = `{"amount":120,"tags":["food"]}`
+			body = `{"amount":120}`
 		}
 		var req UpdateProjectTransactionRequest
 		if err := json.Unmarshal([]byte(body), &req); err != nil {
@@ -71,7 +71,7 @@ func TestUpdateTextFields(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		got, err := store.UpdatePTTx(ctx, tx, p.ID, pt.ID, uid, req)
+		got, err := store.UpdatePTTx(ctx, tx, p.Event.ID, pt.ID, uid, req)
 		if err != nil {
 			t.Fatalf("%s: %v", body, err)
 		}

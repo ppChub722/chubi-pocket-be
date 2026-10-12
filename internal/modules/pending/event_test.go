@@ -136,7 +136,7 @@ func (f *evFixture) newEvent(t *testing.T, owner uuid.UUID, name string) uuid.UU
 	if err != nil {
 		t.Fatalf("create event: %v", err)
 	}
-	return p.ID
+	return p.Event.ID
 }
 
 // draft — a complete expense draft; mutate the result per case.

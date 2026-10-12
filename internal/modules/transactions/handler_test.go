@@ -83,9 +83,7 @@ func newHFix(t *testing.T, seed bool) *hfix {
 	debts := personal_debts.NewService(personal_debts.NewStore(pool), f.svc)
 	f.svc.WithDebtsCreator(debts.CreateForTransactionTx)
 	f.svc.WithSplitsEditor(debts.EditForTransactionTx)
-	f.svc.WithDebtValidator(debts.ValidateOwnership)
-	f.svc.WithDebtAutoBumper(debts.AutoBumpInTx)
-	f.svc.WithDebtSettledAdjuster(debts.AdjustSettledInTx)
+	f.svc.WithDebtLinks(debts)
 	f.h = transactions.NewHandler(f.svc)
 	f.r = apitest.Engine(f.me, routes(f.h))
 
@@ -231,8 +229,8 @@ func TestCreateGetListHandlers(t *testing.T) {
 	if got := tagNames(bill); len(got) != 1 || got[0] != "alpha" {
 		t.Errorf("tags = %v, want [alpha]", got)
 	}
-	if bill.MyShare == nil || *bill.MyShare != 150 || bill.SplitCount != 2 || bill.IsRepayment {
-		t.Errorf("my_share=%v split_count=%d is_repayment=%v", bill.MyShare, bill.SplitCount, bill.IsRepayment)
+	if bill.MyShare == nil || *bill.MyShare != 150 || bill.SplitCount != 2 || bill.Counterparty != nil || bill.EventBill != nil {
+		t.Errorf("my_share=%v split_count=%d counterparty=%v", bill.MyShare, bill.SplitCount, bill.Counterparty)
 	}
 	if !bill.CanSplit || !bill.CanEditSplits || !bill.CanJoinEvent || !bill.CanEditCategory || bill.IsLocked ||
 		bill.CreatedBy != nil || bill.TransferPeer != nil {

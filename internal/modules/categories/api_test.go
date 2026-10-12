@@ -145,8 +145,9 @@ func TestCategoryAPI(t *testing.T) {
 		t.Fatalf("set fee category: %v", err)
 	}
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM user_preferences WHERE user_id = $1`, uid) })
-	if _, err := pool.Exec(ctx, `INSERT INTO budgets (id, user_id, name, category_id, scope, amount, period, currency, status)
-		VALUES (gen_random_uuid(), $1, 'bud', $2, 'user', 100, 'monthly', 'THB', 'active')`, uid, b.ID); err != nil {
+	if _, err := pool.Exec(ctx, `WITH n AS (INSERT INTO budgets (id, user_id, name, amount, start_date, anchor_date)
+			VALUES (gen_random_uuid(), $1, 'bud', 100, CURRENT_DATE, CURRENT_DATE) RETURNING id)
+		INSERT INTO budget_categories (budget_id, category_id) SELECT id, $2 FROM n`, uid, b.ID); err != nil {
 		t.Fatalf("insert budget: %v", err)
 	}
 	status, raw := apitest.Do(t, r, "GET", "/api/v1/categories/"+b.ID.String(), nil)

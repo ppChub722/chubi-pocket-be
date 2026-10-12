@@ -23,7 +23,7 @@ func NewStore(db *pgxpool.Pool) *Store {
 	return &Store{db: db}
 }
 
-type scheduledRow struct {
+type upcomingRow struct {
 	ID       uuid.UUID
 	Name     string
 	Type     string
@@ -33,24 +33,25 @@ type scheduledRow struct {
 	LogoURL  *string
 }
 
-// DueScheduled — the caller's active scheduled transactions due on or
-// before `until`, overdue ones included (nothing auto-generates them
-// yet, so a past next_billing_date means "not recorded"). `until` is a
-// date in the caller's timezone, computed by the service — never the
-// DB's CURRENT_DATE.
-func (s *Store) DueScheduled(ctx context.Context, userID uuid.UUID, until string) ([]scheduledRow, error) {
+// UpcomingItems — the caller's upcoming recurring items (one-off + active
+// settings, not produced yet) dated after today and up to `until` (dates in
+// the caller's timezone, computed by the service — never CURRENT_DATE).
+func (s *Store) UpcomingItems(ctx context.Context, userID uuid.UUID, today, until string) ([]upcomingRow, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id, name, type, amount, to_char(next_billing_date, 'YYYY-MM-DD'), icon_code, logo_url
-		FROM scheduled_transactions
-		WHERE user_id = $1 AND status = 'active' AND next_billing_date <= $2::date
-		ORDER BY next_billing_date ASC, name ASC`, userID, until)
+		SELECT i.id, COALESCE(r.name, i.draft->>'description', ''), COALESCE(i.draft->>'type', 'expense'),
+		       COALESCE((i.draft->>'amount')::numeric, 0), to_char(i.date, 'YYYY-MM-DD'), r.icon_code, NULL::text
+		FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.rule_id
+		WHERE i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
+		  AND NOT i.archived AND i.date > $2::date AND i.date <= $3::date
+		  AND (i.rule_id IS NULL OR r.status = 'active')
+		ORDER BY i.date ASC, 2 ASC`, userID, today, until)
 	if err != nil {
-		return nil, fmt.Errorf("due scheduled: %w", err)
+		return nil, fmt.Errorf("upcoming items: %w", err)
 	}
 	defer rows.Close()
-	out := make([]scheduledRow, 0)
+	out := make([]upcomingRow, 0)
 	for rows.Next() {
-		var r scheduledRow
+		var r upcomingRow
 		var icon []byte
 		if err := rows.Scan(&r.ID, &r.Name, &r.Type, &r.Amount, &r.DueDate, &icon, &r.LogoURL); err != nil {
 			return nil, err
@@ -67,7 +68,7 @@ func (s *Store) DueScheduled(ctx context.Context, userID uuid.UUID, until string
 // (shared.AwaitsAnswer); a READ row of any other type has left the block.
 var attentionTypes = []string{
 	"contact_link_request", "account_invite", "split_created", "split_changed",
-	"split_paid", "project_tx_recorded_for_you", "project_tx_changed",
+	"project_tx_recorded_for_you", "project_tx_changed",
 }
 
 // AttentionIDs — the ids of the caller's notifications that belong in the

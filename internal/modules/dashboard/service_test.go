@@ -36,9 +36,10 @@ func TestNextDayOfMonth(t *testing.T) {
 
 func TestNetWorth(t *testing.T) {
 	got := netWorth([]accounts.Account{
-		{Balance: 1000, MyReportScope: accounts.ReportScopeAll},
-		{Balance: -300, MyReportScope: accounts.ReportScopeAll, Type: accounts.TypeCreditCard},
-		{Balance: 5000, MyReportScope: accounts.ReportScopeNone}, // hidden wallet
+		{Balance: 1000, MyReportScope: accounts.ReportScopeAll, TrackBalance: true},
+		{Balance: -300, MyReportScope: accounts.ReportScopeAll, Type: accounts.TypeCreditCard, TrackBalance: true},
+		{Balance: 5000, MyReportScope: accounts.ReportScopeNone, TrackBalance: true}, // hidden wallet
+		{Balance: 800, MyReportScope: accounts.ReportScopeAll},                       // no balance tracked
 	})
 	want := NetWorth{Total: 700, Assets: 1000, Liabilities: 300, AccountsCount: 2}
 	if got != want {
@@ -49,13 +50,13 @@ func TestNetWorth(t *testing.T) {
 func TestBuildUpcoming(t *testing.T) {
 	today := day(2026, 10, 7)
 	due := 9
-	scheduled := []scheduledRow{
+	scheduled := []upcomingRow{
 		{ID: uuid.New(), Name: "Internet", Type: "expense", Amount: 599, DueDate: "2026-10-05"},
 		{ID: uuid.New(), Name: "Salary", Type: "income", Amount: 30000, DueDate: "2026-10-20"},
 	}
 	accts := []accounts.Account{
-		{ID: uuid.New(), Name: "KTC", Type: accounts.TypeCreditCard, Balance: -3200, PaymentDueDate: &due},
-		{ID: uuid.New(), Name: "Paid off", Type: accounts.TypeCreditCard, Balance: 0, PaymentDueDate: &due},
+		{ID: uuid.New(), Name: "KTC", Type: accounts.TypeCreditCard, Balance: -3200, PaymentDueDate: &due, TrackBalance: true},
+		{ID: uuid.New(), Name: "Paid off", Type: accounts.TypeCreditCard, Balance: 0, PaymentDueDate: &due, TrackBalance: true},
 	}
 	up := buildUpcoming(today, scheduled, accts)
 

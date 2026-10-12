@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
@@ -32,7 +34,15 @@ type Service struct {
 	tags     *tags.Service
 	debts    *personal_debts.Service
 	projects *projects.Service
+	onSubmit SubmitHook
+	savings  *saving_goals.Service
 }
+
+// typeSaving — draft.type of a saving draft (kind saving).
+const typeSaving = transactions.TxType("saving")
+
+// WithSavings — saving drafts (goals v2) submit into the savings notebook.
+func (s *Service) WithSavings(sv *saving_goals.Service) { s.savings = sv }
 
 func NewService(store *Store, txs *transactions.Service, tg *tags.Service, debts *personal_debts.Service, prj *projects.Service) *Service {
 	return &Service{store: store, txs: txs, tags: tg, debts: debts, projects: prj}
@@ -53,7 +63,7 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID) (*ListResponse, er
 func checkDraft(d Draft) error {
 	if d.Type != nil {
 		switch transactions.TxType(*d.Type) {
-		case transactions.TypeExpense, transactions.TypeIncome, transactions.TypeTransfer:
+		case transactions.TypeExpense, transactions.TypeIncome, transactions.TypeTransfer, typeSaving:
 		default:
 			return fmt.Errorf("%w: type must be expense, income or transfer", ErrInvalidDraft)
 		}
@@ -171,6 +181,10 @@ func (s *Service) Submit(ctx context.Context, userID uuid.UUID, req SubmitReques
 		}
 		before := s.accountsOfTarget(ctx, userID, p)
 		txID, err := s.submitOne(ctx, userID, p)
+		if err == nil && p.Kind == KindSaving {
+			out.Submitted = append(out.Submitted, Submitted{ID: id, Rows: []transactions.TransactionDetail{}, SavingEntryID: txID})
+			continue
+		}
 		if err != nil {
 			e := toSubmitError(err)
 			_ = s.store.SetError(ctx, userID, id, e)
@@ -260,6 +274,8 @@ func (s *Service) submitOne(ctx context.Context, userID uuid.UUID, p *PendingTra
 		return s.submitSettle(ctx, userID, p)
 	case KindUpdateTx:
 		return s.submitUpdate(ctx, userID, p)
+	case KindSaving:
+		return s.submitSaving(ctx, userID, p)
 	}
 	return nil, fmt.Errorf("unknown pending kind %q", p.Kind)
 }
@@ -343,6 +359,11 @@ func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *Pending
 			return nil, err
 		}
 	}
+	if txID != uuid.Nil && s.onSubmit != nil {
+		if err := s.onSubmit(ctx, tx, userID, p.ID, txID, KindCreate); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.store.DeleteTx(ctx, tx, userID, p.ID); err != nil {
 		return nil, err
 	}
@@ -350,6 +371,53 @@ func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *Pending
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return &txID, nil
+}
+
+// submitSaving — a saving entry from the draft (wallet → goal / spare),
+// removing the draft, one DB tx. Returns the entry id.
+func (s *Service) submitSaving(ctx context.Context, userID uuid.UUID, p *PendingTransaction) (*uuid.UUID, error) {
+	if s.savings == nil {
+		return nil, errors.New("savings not available")
+	}
+	d := p.Draft
+	if d.Amount == nil || *d.Amount <= 0 {
+		return nil, &submitErr{"MISSING_AMOUNT", "amount must be more than 0"}
+	}
+	if d.Date == nil {
+		return nil, &submitErr{"MISSING_DATE", "date is required"}
+	}
+	if d.AccountID == nil {
+		return nil, &submitErr{"MISSING_ACCOUNT", "a wallet is required"}
+	}
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	source := saving_goals.SourcePending
+	if p.Source == "recurring" || p.Source == "upcoming" {
+		source = saving_goals.SourceRecurring
+	}
+	note := d.Note
+	if note == nil {
+		note = d.Description
+	}
+	id, err := s.savings.SaveFromDraftTx(ctx, tx, userID, *d.AccountID, d.GoalID, *d.Amount, *d.Date, note, source)
+	if err != nil {
+		return nil, err
+	}
+	if s.onSubmit != nil {
+		if err := s.onSubmit(ctx, tx, userID, p.ID, id, KindSaving); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.store.DeleteTx(ctx, tx, userID, p.ID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return &id, nil
 }
 
 // submitSettle — a payment against TargetDebtID (wallet optional).
@@ -360,19 +428,15 @@ func (s *Service) submitSettle(ctx context.Context, userID uuid.UUID, p *Pending
 	if p.Draft.Amount == nil || *p.Draft.Amount <= 0 {
 		return nil, &submitErr{"MISSING_AMOUNT", "amount must be more than 0"}
 	}
-	res, err := s.debts.Settle(ctx, userID, *p.TargetDebtID, personal_debts.SettleRequest{
-		AccountID:   p.Draft.AccountID,
-		Amount:      p.Draft.Amount,
-		Date:        p.Draft.Date,
-		Description: p.Draft.Description,
-		Note:        p.Draft.Note,
-	})
+	// A new entry with the target's person, the other way round (repaying it).
+	res, err := s.debts.RepayEntry(ctx, userID, *p.TargetDebtID, *p.Draft.Amount, p.Draft.AccountID,
+		p.Draft.Date, p.Draft.Description, p.Draft.Note)
 	if err != nil {
 		return nil, err
 	}
 	_ = s.store.Delete(ctx, userID, p.ID)
-	if d, ok := res.Transaction.(*transactions.TransactionDetail); ok && d != nil {
-		return &d.ID, nil
+	if res.Transaction != nil {
+		return &res.Transaction.ID, nil
 	}
 	return nil, nil
 }
@@ -437,10 +501,12 @@ func toSubmitError(err error) SubmitError {
 		{projects.ErrViewerReadOnly, "PROJECT_READ_ONLY"},
 		{projects.ErrQuickTxNotBillable, "TX_NOT_BILLABLE"},
 		{tags.ErrTagNotFound, "TAG_NOT_FOUND"},
-		{personal_debts.ErrDebtNotFound, "DEBT_NOT_FOUND"},
-		{personal_debts.ErrAlreadySettled, "DEBT_ALREADY_SETTLED"},
-		{personal_debts.ErrOverpayment, "OVERPAYMENT"},
+		{personal_debts.ErrEntryNotFound, "DEBT_NOT_FOUND"},
 		{transactions.ErrTxNotFound, "TRANSACTION_NOT_FOUND"},
+		{saving_goals.ErrAccountNotFound, "ACCOUNT_NOT_FOUND"},
+		{saving_goals.ErrWalletNotTracked, "WALLET_NOT_TRACKED"},
+		{saving_goals.ErrGoalNotActive, "GOAL_NOT_ACTIVE"},
+		{saving_goals.ErrGoalNotFound, "NOT_FOUND"},
 	}
 	for _, c := range codes {
 		if errors.Is(err, c.target) {
@@ -449,3 +515,14 @@ func toSubmitError(err error) SubmitError {
 	}
 	return SubmitError{Code: "SUBMIT_FAILED", Message: err.Error()}
 }
+
+// SubmitHook — called inside a submit's DB transaction once draft draftID
+// became record id (a transaction; a saving entry for kind saving), before
+// the draft is removed (a recurring item linked to the draft takes it).
+type SubmitHook func(ctx context.Context, tx pgx.Tx, userID, draftID, id uuid.UUID, kind string) error
+
+func (s *Service) WithSubmitHook(fn SubmitHook) { s.onSubmit = fn }
+
+// Store — the drafts store (the recurring module writes drafts in its own
+// DB transactions).
+func (s *Service) Store() *Store { return s.store }

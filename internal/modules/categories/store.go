@@ -568,11 +568,12 @@ func mapInsertError(err error) error {
 	return fmt.Errorf("db error: %w", err)
 }
 
-// CountBudgets — budgets (any scope/status) that a delete would cascade.
+// CountBudgets — budgets that track this category (a delete takes it out
+// of their scope).
 func (s *Store) CountBudgets(ctx context.Context, id uuid.UUID) (int, error) {
 	var n int
 	err := s.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM budgets WHERE category_id = $1`, id).Scan(&n)
+		`SELECT COUNT(DISTINCT budget_id) FROM budget_categories WHERE category_id = $1`, id).Scan(&n)
 	return n, err
 }
 

@@ -10,150 +10,480 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/apidoc/apitest"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
-type walletBalances struct {
-	AccountBalances []struct {
-		AccountID string  `json:"account_id"`
-		Balance   float64 `json:"balance"`
-	} `json:"account_balances"`
-	ID string `json:"id"`
-}
-
-func touchEngine(f *qcFixture) http.Handler {
+// eventsEngine registers every event route as `as`.
+func eventsEngine(f *qcFixture, as uuid.UUID) http.Handler {
 	h := NewHandler(f.svc)
-	return apitest.Engine(f.owner, func(g *gin.RouterGroup) {
+	return apitest.Engine(as, func(g *gin.RouterGroup) {
+		g.POST("/projects", h.Create)
+		g.GET("/projects", h.List)
 		g.POST("/projects/quick", h.QuickCreate)
-		g.POST("/projects/:id/bills", h.AddBills)
+		g.POST("/projects/link-requests/:notification_id/accept", h.AcceptLinkRequest)
+		g.POST("/projects/link-requests/:notification_id/reject", h.RejectLinkRequest)
+		g.GET("/projects/:id", h.Get)
+		g.GET("/projects/:id/detail", h.Detail)
+		g.PUT("/projects/:id", h.Update)
+		g.DELETE("/projects/:id", h.Delete)
+		g.GET("/projects/:id/members", h.ListMembers)
+		g.POST("/projects/:id/members", h.AddMember)
+		g.PUT("/projects/:id/members/:member_id", h.UpdateMember)
+		g.DELETE("/projects/:id/members/:member_id", h.RemoveMember)
+		g.POST("/projects/:id/members/:member_id/request-link", h.RequestLink)
+		g.POST("/projects/:id/transfer-ownership", h.TransferOwnership)
+		g.POST("/projects/:id/leave", h.Leave)
 		g.GET("/projects/:id/transactions", h.ListPT)
+		g.POST("/projects/:id/project-transactions", h.CreatePT)
+		g.POST("/projects/:id/bills", h.AddBills)
+		g.DELETE("/projects/:id/bills/:transaction_id", h.RemoveBill)
+		g.PUT("/projects/:id/project-transactions/:pt_id", h.UpdatePT)
+		g.DELETE("/projects/:id/project-transactions/:pt_id", h.DeletePT)
+		g.PUT("/projects/:id/project-transactions/:pt_id/mark", h.ToggleMark)
+		g.POST("/projects/:id/project-transactions/:pt_id/copy", h.CopyToPersonal)
+		g.GET("/projects/:id/summary", h.Summary)
+		g.GET("/projects/:id/tags", h.ListTags)
+		g.POST("/projects/:id/tags", h.CreateTag)
+		g.POST("/projects/:id/tags/import", h.ImportTags)
+		g.PUT("/projects/:id/tags/:tag_id", h.UpdateTag)
+		g.DELETE("/projects/:id/tags/:tag_id", h.DeleteTag)
 	})
 }
 
+type evClient struct {
+	t *testing.T
+	r http.Handler
+}
+
+// do sends a request, checks the status and (with op) the spec.
+func (c evClient) do(method, path string, body any, op string, want int) map[string]any {
+	c.t.Helper()
+	status, raw := apitest.Do(c.t, c.r, method, "/api/v1"+path, body)
+	if status != want {
+		c.t.Fatalf("%s %s: status %d, want %d; %s", method, path, status, want, raw)
+	}
+	if op != "" {
+		apitest.Conform(c.t, op, status, raw)
+	}
+	var out map[string]any
+	_ = json.Unmarshal(raw, &out)
+	return out
+}
+
+func (c evClient) code(method, path string, body any, want int, code string) {
+	c.t.Helper()
+	status, raw := apitest.Do(c.t, c.r, method, "/api/v1"+path, body)
+	var e struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(raw, &e)
+	if status != want || e.Error.Code != code {
+		c.t.Errorf("%s %s: %d %s, want %d %s (%s)", method, path, status, e.Error.Code, want, code, raw)
+	}
+}
+
+func m(v any, keys ...string) map[string]any {
+	cur, _ := v.(map[string]any)
+	for _, k := range keys {
+		cur, _ = cur[k].(map[string]any)
+	}
+	return cur
+}
+
+func n(v map[string]any, key string) float64 {
+	f, _ := v[key].(float64)
+	return f
+}
+
+func list(v map[string]any, key string) []any {
+	l, _ := v[key].([]any)
+	return l
+}
+
+func (f *qcFixture) personalTag(t *testing.T, userID uuid.UUID, name string) uuid.UUID {
+	t.Helper()
+	id := qcMustV7(t)
+	if _, err := f.pool.Exec(context.Background(), `INSERT INTO tags (id, user_id, name) VALUES ($1, $2, $3)`, id, userID, name); err != nil {
+		t.Fatalf("tag: %v", err)
+	}
+	return id
+}
+
+// TestEventsAPI — every event route against the spec, and the 0.3.1-10
+// rules: one-call create with my tags, event tags, the linked money of a
+// pulled bill, my tags private to me, patches on every write.
+func TestEventsAPI(t *testing.T) {
+	f := newQCFixture(t)
+	ctx := context.Background()
+	me := evClient{t, eventsEngine(f, f.owner)}
+	bee := evClient{t, eventsEngine(f, f.friend)}
+	trip := f.personalTag(t, f.owner, "Trip")
+	taxi := f.personalTag(t, f.owner, "Taxi")
+
+	// Create in one call.
+	me.code("POST", "/projects", map[string]any{"name": "Bad", "start_date": "2026-10-10", "end_date": "2026-10-01"},
+		http.StatusBadRequest, "INVALID_DATE_RANGE")
+	created := me.do("POST", "/projects", map[string]any{
+		"name": "Japan", "planned_amount": 1000, "start_date": "2026-10-01", "end_date": "2026-10-10",
+		"tag_ids": []uuid.UUID{trip},
+	}, "createProject", http.StatusCreated)
+	ev := m(created, "event")
+	id := ev["id"].(string)
+	if tags := list(ev, "tags"); len(tags) != 1 || n(ev, "planned_amount") != 1000 || ev["is_owner"] != true || ev["can_add_bill"] != true {
+		t.Fatalf("created event = %v", ev)
+	}
+	if got := me.do("GET", "/projects?tag_id="+trip.String(), nil, "listProjects", http.StatusOK); len(list(got, "data")) != 1 {
+		t.Errorf("list by my tag = %v", got["data"])
+	}
+	if got := me.do("GET", "/projects?q=nomatch&sort=name_asc", nil, "listProjects", http.StatusOK); len(list(got, "data")) != 0 {
+		t.Errorf("q=nomatch = %v", got["data"])
+	}
+	me.do("GET", "/projects/"+id, nil, "getProject", http.StatusOK)
+
+	// Members: a typed person; bad input is 400.
+	me.code("POST", "/projects/"+id+"/members", map[string]any{"role": "viewer"}, http.StatusBadRequest, "VALIDATION_ERROR")
+	added := me.do("POST", "/projects/"+id+"/members", map[string]any{"ad_hoc": true, "display_name": "Grandma"},
+		"addProjectMember", http.StatusCreated)
+	var gran string
+	for _, x := range list(added, "members") {
+		if x.(map[string]any)["name"] == "Grandma" {
+			gran = x.(map[string]any)["id"].(string)
+		}
+	}
+	myMember := ev["my_member_id"].(string)
+
+	// Event tags.
+	food := m(me.do("POST", "/projects/"+id+"/tags", map[string]any{"name": "Food"}, "createProjectTag", http.StatusCreated), "tag")
+	me.code("POST", "/projects/"+id+"/tags", map[string]any{"name": " food "}, http.StatusConflict, "TAG_NAME_TAKEN")
+	me.do("PUT", "/projects/"+id+"/tags/"+food["id"].(string), map[string]any{"icon_code": map[string]any{"icon": "ramen", "iconColors": []string{"#FFFFFF"}, "background": "solid", "bgColors": []string{"#138F2D"}, "border": "none", "borderColors": []string{}, "shape": "circle"}},
+		"updateProjectTag", http.StatusOK)
+
+	// A board bill with a split and a tag.
+	bill := me.do("POST", "/projects/"+id+"/project-transactions", map[string]any{
+		"transaction_member_id": myMember, "type": "expense", "amount": 300, "date": "2026-10-02",
+		"tag_ids": []string{food["id"].(string)}, "splits": []map[string]any{{"member_id": gran, "amount": 100}},
+	}, "createProjectTransaction", http.StatusCreated)
+	row := m(bill, "row")
+	ptID := row["id"].(string)
+	if n(row, "my_share") != 200 || len(list(row, "tags")) != 1 || len(list(row, "children")) != 1 || row["linked"] != false {
+		t.Errorf("bill row = %v", row)
+	}
+	if pos := m(bill, "summary", "my_position"); n(pos, "net") != 100 || n(pos, "share") != 200 {
+		t.Errorf("my position = %v (paid 300, share 200, net 100)", pos)
+	}
+	byTag := list(m(bill, "summary"), "by_tag")
+	if len(byTag) != 1 || n(byTag[0].(map[string]any), "share") != 200 || m(byTag[0], "tag")["name"] != "Food" {
+		t.Errorf("by_tag = %v", byTag)
+	}
+	me.code("POST", "/projects/"+id+"/project-transactions", map[string]any{
+		"transaction_member_id": myMember, "type": "expense", "amount": 10, "date": "2026-10-02", "tag_ids": []uuid.UUID{uuid.New()},
+	}, http.StatusBadRequest, "TAG_NOT_FOUND")
+	me.do("PUT", "/projects/"+id+"/project-transactions/"+ptID, map[string]any{"amount": 360, "tag_ids": []string{}},
+		"updateProjectTransaction", http.StatusOK)
+	marked := me.do("PUT", "/projects/"+id+"/project-transactions/"+ptID+"/mark", map[string]any{"marked": true},
+		"markProjectTransaction", http.StatusOK)
+	if m(marked, "row")["my_mark"] != true {
+		t.Errorf("mark = %v", m(marked, "row"))
+	}
+
+	// Pull a personal transaction in: its tags become event tags (copied),
+	// the money stays linked, Bee joins from its split.
+	billTx, err := f.txs.Create(ctx, f.owner, transactions.CreateRequest{
+		Type: transactions.TypeExpense, AccountID: &f.acctPersonal, Amount: 200, CategoryID: &f.cat, Date: "2026-10-03",
+		TagIDs: []uuid.UUID{taxi},
+		Splits: []transactions.SplitInput{{PersonName: "Bee", ContactID: &f.contactB, OwedAmount: 50}},
+	})
+	if err != nil {
+		t.Fatalf("personal bill: %v", err)
+	}
+	billTxID := billTx.(*transactions.TransactionDetail).ID
+	pulled := me.do("POST", "/projects/"+id+"/bills", map[string]any{"transaction_ids": []uuid.UUID{billTxID}},
+		"addBillsToEvent", http.StatusOK)
+	prow := list(pulled, "rows")[0].(map[string]any)
+	pulledID := prow["id"].(string)
+	if prow["linked"] != true || m(prow, "source_tx")["id"] != billTxID.String() ||
+		len(list(prow, "tags")) != 1 || m(list(prow, "tags")[0])["name"] != "Taxi" {
+		t.Errorf("pulled row = %v", prow)
+	}
+	if d, _ := f.txs.Get(ctx, f.owner, billTxID); d.EventBill == nil || !d.EventBill.Linked || d.EventBill.BillID.String() != pulledID {
+		t.Errorf("tx event_bill = %+v", d.EventBill)
+	}
+
+	// Bee (now a member) sees the bill linked, without my transaction. She
+	// may change its money (a shared book): my transaction stays, I get
+	// "อัปเดตตาม" (project_tx_changed with a suggestion for my tx).
+	beeBoard := bee.do("GET", "/projects/"+id+"/transactions?mine=true", nil, "listBoardRows", http.StatusOK)
+	if rows := list(beeBoard, "data"); len(rows) != 1 || rows[0].(map[string]any)["source_tx"] != nil || rows[0].(map[string]any)["linked"] != true {
+		t.Errorf("Bee's board = %v", rows)
+	}
+	bee.do("PUT", "/projects/"+id+"/project-transactions/"+pulledID, map[string]any{"amount": 210, "description": "Taxi home", "also_update_link": true},
+		"updateProjectTransaction", http.StatusOK)
+	if got := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE id = $1 AND amount = 200`, billTxID); got != 1 {
+		t.Errorf("another member's edit must not change my transaction")
+	}
+	if got := f.countRows(t, `SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1 AND type = 'project_tx_changed'
+		AND payload->>'personal_transaction_id' = $2`, f.owner, billTxID.String()); got != 1 {
+		t.Errorf("the tx owner should get project_tx_changed with the suggestion (got %d)", got)
+	}
+	if d, _ := f.txs.Get(ctx, f.owner, billTxID); d.EventBill == nil || !d.EventBill.Linked {
+		t.Errorf("the link must survive different amounts: %+v", d.EventBill)
+	}
+
+	// My own edit of the bill: only this side unless I ask for both.
+	before := f.accountBalance(t, f.acctPersonal)
+	me.do("PUT", "/projects/"+id+"/project-transactions/"+pulledID, map[string]any{"amount": 240},
+		"updateProjectTransaction", http.StatusOK)
+	if f.accountBalance(t, f.acctPersonal) != before {
+		t.Errorf("an edit without also_update_link moved my wallet")
+	}
+	up := me.do("PUT", "/projects/"+id+"/project-transactions/"+pulledID, map[string]any{"amount": 250, "also_update_link": true},
+		"updateProjectTransaction", http.StatusOK)
+	if len(list(up, "account_balances")) != 1 || f.accountBalance(t, f.acctPersonal) != before-50 {
+		t.Errorf("linked edit: balances %v, wallet %v → %v", up["account_balances"], before, f.accountBalance(t, f.acctPersonal))
+	}
+	// My transaction: the bill follows only when asked.
+	amt := 230.0
+	if _, err := f.txs.UpdateWrite(ctx, f.owner, billTxID, transactions.UpdateRequest{Amount: &amt}); err != nil {
+		t.Fatalf("edit the source tx: %v", err)
+	}
+	if got := f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE id = $1 AND amount = 250`, uuid.MustParse(pulledID)); got != 1 {
+		t.Errorf("the bill changed without also_update_link")
+	}
+	amt = 220.0
+	if _, err := f.txs.UpdateWrite(ctx, f.owner, billTxID, transactions.UpdateRequest{Amount: &amt, AlsoUpdateLink: true}); err != nil {
+		t.Fatalf("edit the source tx: %v", err)
+	}
+	if got := f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE id = $1 AND amount = 220`, uuid.MustParse(pulledID)); got != 1 {
+		t.Errorf("the bill didn't follow its transaction")
+	}
+
+	// Tags: import into my personal tags (Taxi is mine already).
+	imp := me.do("POST", "/projects/"+id+"/tags/import", map[string]any{}, "importProjectTags", http.StatusOK)
+	if c := list(imp, "created"); len(c) != 1 || c[0].(map[string]any)["name"] != "Food" {
+		t.Errorf("imported = %v", imp["created"])
+	}
+	me.do("GET", "/projects/"+id+"/tags", nil, "listProjectTags", http.StatusOK)
+
+	// My tags are mine: Bee sets her own, can't edit the event.
+	bee.do("PUT", "/projects/"+id, map[string]any{"tag_ids": []string{}}, "updateProject", http.StatusOK)
+	bee.code("PUT", "/projects/"+id, map[string]any{"name": "Hijack"}, http.StatusForbidden, "FORBIDDEN_ROLE")
+	me.do("PUT", "/projects/"+id, map[string]any{"end_date": nil, "planned_amount": nil}, "updateProject", http.StatusOK)
+
+	// Reads.
+	detail := me.do("GET", "/projects/"+id+"/detail", nil, "getProjectDetail", http.StatusOK)
+	if len(list(m(detail, "board"), "data")) != 2 || len(list(detail, "members")) != 3 {
+		t.Errorf("detail board / members = %v / %v", m(detail, "board")["data"], detail["members"])
+	}
+	me.do("GET", "/projects/"+id+"/members", nil, "listProjectMembers", http.StatusOK)
+	me.do("GET", "/projects/"+id+"/summary", nil, "getProjectSummary", http.StatusOK)
+
+	// Bee copies her share of the pulled bill into her book.
+	cp := bee.do("POST", "/projects/"+id+"/project-transactions/"+pulledID+"/copy", nil, "copyProjectTransactionToPersonal", http.StatusCreated)
+	if n(m(cp, "transaction"), "amount") != 50 {
+		t.Errorf("Bee's copy = %v", m(cp, "transaction"))
+	}
+
+	// Delete a tag, a split row, a bill; take my transaction back out.
+	me.do("DELETE", "/projects/"+id+"/tags/"+food["id"].(string), nil, "deleteProjectTag", http.StatusOK)
+	var child string
+	for _, r := range list(m(detail, "board"), "data") {
+		for _, c := range list(r.(map[string]any), "children") {
+			if r.(map[string]any)["id"] == ptID {
+				child = c.(map[string]any)["id"].(string)
+			}
+		}
+	}
+	split := me.do("DELETE", "/projects/"+id+"/project-transactions/"+child, nil, "deleteProjectTransaction", http.StatusOK)
+	if m(split, "row")["id"] != ptID || split["removed_row_id"] != nil {
+		t.Errorf("split delete patch = row %v removed %v", m(split, "row")["id"], split["removed_row_id"])
+	}
+	gone := me.do("DELETE", "/projects/"+id+"/project-transactions/"+ptID, nil, "deleteProjectTransaction", http.StatusOK)
+	if gone["removed_row_id"] != ptID {
+		t.Errorf("removed_row_id = %v", gone["removed_row_id"])
+	}
+	out := me.do("DELETE", "/projects/"+id+"/bills/"+billTxID.String(), nil, "removeBillFromProject", http.StatusOK)
+	if out["removed_row_id"] != pulledID {
+		t.Errorf("remove bill: removed_row_id = %v", out["removed_row_id"])
+	}
+
+	// Members: invite by email, the invitee accepts; another rejects.
+	var beeEmail, chaiEmail string
+	_ = f.pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, f.friend).Scan(&beeEmail)
+	_ = f.pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, f.mate).Scan(&chaiEmail)
+	inv := me.do("POST", "/projects/"+id+"/members", map[string]any{"email": chaiEmail, "display_name": "Chai"},
+		"addProjectMember", http.StatusCreated)
+	var pending string
+	for _, x := range list(inv, "members") {
+		if x.(map[string]any)["status"] == "pending" {
+			pending = x.(map[string]any)["id"].(string)
+		}
+	}
+	me.do("POST", "/projects/"+id+"/members/"+pending+"/request-link", nil, "requestProjectMemberLink", http.StatusOK)
+	var nid uuid.UUID
+	if err := f.pool.QueryRow(ctx, `SELECT id FROM notifications WHERE recipient_user_id = $1 AND type = 'project_invite'
+		ORDER BY created_at DESC LIMIT 1`, f.mate).Scan(&nid); err != nil {
+		t.Fatalf("invite notification: %v", err)
+	}
+	chai := evClient{t, eventsEngine(f, f.mate)}
+	acc := chai.do("POST", "/projects/link-requests/"+nid.String()+"/accept", nil, "acceptProjectLinkRequest", http.StatusOK)
+	if m(acc, "event")["my_role"] != "contributor" {
+		t.Errorf("accepted: my_role = %v", m(acc, "event")["my_role"])
+	}
+	_ = beeEmail
+	me.do("PUT", "/projects/"+id+"/members/"+gran, map[string]any{"role": "viewer"}, "updateProjectMember", http.StatusOK)
+	me.do("DELETE", "/projects/"+id+"/members/"+gran, nil, "removeProjectMember", http.StatusOK)
+
+	// Hand over, leave, delete.
+	me.do("POST", "/projects/"+id+"/transfer-ownership", map[string]any{"new_owner_user_id": f.friend},
+		"transferProjectOwnership", http.StatusOK)
+	me.do("POST", "/projects/"+id+"/leave", nil, "leaveProject", http.StatusOK)
+	bee.do("DELETE", "/projects/"+id, nil, "deleteProject", http.StatusOK)
+
+	// A second invite, rejected.
+	second := me.do("POST", "/projects", map[string]any{"name": "Other"}, "createProject", http.StatusCreated)
+	sid := m(second, "event")["id"].(string)
+	me.do("POST", "/projects/"+sid+"/members", map[string]any{"email": chaiEmail, "display_name": "Chai"}, "addProjectMember", http.StatusCreated)
+	if err := f.pool.QueryRow(ctx, `SELECT id FROM notifications WHERE recipient_user_id = $1 AND type = 'project_invite'
+		ORDER BY created_at DESC LIMIT 1`, f.mate).Scan(&nid); err != nil {
+		t.Fatalf("second invite: %v", err)
+	}
+	chai.do("POST", "/projects/link-requests/"+nid.String()+"/reject", nil, "rejectProjectLinkRequest", http.StatusOK)
+}
+
+// TestQuickCreateAndAddBillsAccountBalances — the money-moving writes carry
+// the wallet balances.
 func TestQuickCreateAndAddBillsAccountBalances(t *testing.T) {
 	f := newQCFixture(t)
-	r := touchEngine(f)
+	me := evClient{t, eventsEngine(f, f.owner)}
 
-	// A new bill moves money: the wallet's post-commit balance comes back.
-	status, body := apitest.Do(t, r, "POST", "/api/v1/projects/quick", map[string]any{
+	q := me.do("POST", "/projects/quick", map[string]any{
 		"name": "Trip",
 		"new_transaction": map[string]any{
 			"type": "expense", "account_id": f.acctPersonal, "amount": 150, "category_id": f.cat, "date": "2026-09-15",
 		},
 		"transaction_ids": []uuid.UUID{f.bill1},
-	})
-	if status != http.StatusOK {
-		t.Fatalf("quick create: %d %s", status, body)
+	}, "quickCreateEvent", http.StatusCreated)
+	bs := list(q, "account_balances")
+	if len(bs) != 1 || n(bs[0].(map[string]any), "balance") != 850 || q["new_transaction_id"] == nil {
+		t.Errorf("quick create account_balances = %v", bs)
 	}
-	apitest.Conform(t, "quickCreateEvent", status, body)
-	var q walletBalances
-	_ = json.Unmarshal(body, &q)
-	if len(q.AccountBalances) != 1 || q.AccountBalances[0].AccountID != f.acctPersonal.String() ||
-		q.AccountBalances[0].Balance != f.accountBalance(t, f.acctPersonal) || q.AccountBalances[0].Balance != 850 {
-		t.Errorf("quick create account_balances = %+v, want the wallet at 850", q.AccountBalances)
+	id := m(q, "detail", "event")["id"].(string)
+	if pos := m(q, "detail", "summary", "my_position"); n(pos, "net") != 200 {
+		t.Errorf("my net after the pull = %v, want 200 (Bee 100 + Grandma 100 owe me)", pos)
 	}
 
-	// Pulling only an existing bill moves no money.
-	status, body = apitest.Do(t, r, "POST", "/api/v1/projects/quick", map[string]any{
-		"name": "Second", "transaction_ids": []uuid.UUID{f.bill2},
-	})
-	if status != http.StatusOK {
-		t.Fatalf("quick create (pull only): %d %s", status, body)
-	}
-	apitest.Conform(t, "quickCreateEvent", status, body)
-	q = walletBalances{}
-	_ = json.Unmarshal(body, &q)
-	if q.AccountBalances == nil || len(q.AccountBalances) != 0 {
-		t.Errorf("pull-only account_balances = %v, want []", q.AccountBalances)
+	pullOnly := me.do("POST", "/projects/quick", map[string]any{"name": "Second", "transaction_ids": []uuid.UUID{f.bill2}},
+		"quickCreateEvent", http.StatusCreated)
+	if bs := list(pullOnly, "account_balances"); bs == nil || len(bs) != 0 {
+		t.Errorf("pull-only account_balances = %v, want []", pullOnly["account_balances"])
 	}
 
-	// addBills with a new bill on the first event.
-	status, body = apitest.Do(t, r, "POST", "/api/v1/projects/"+q0ID(t, f)+"/bills", map[string]any{
+	a := me.do("POST", "/projects/"+id+"/bills", map[string]any{
 		"new_transaction": map[string]any{
 			"type": "expense", "account_id": f.acctPersonal, "amount": 50, "category_id": f.cat, "date": "2026-09-16",
 		},
-	})
-	if status != http.StatusOK {
-		t.Fatalf("add bills: %d %s", status, body)
-	}
-	apitest.Conform(t, "addBillsToEvent", status, body)
-	var a walletBalances
-	_ = json.Unmarshal(body, &a)
-	if len(a.AccountBalances) != 1 || a.AccountBalances[0].Balance != 800 {
-		t.Errorf("add bills account_balances = %+v, want the wallet at 800", a.AccountBalances)
+	}, "addBillsToEvent", http.StatusOK)
+	if bs := list(a, "account_balances"); len(bs) != 1 || n(bs[0].(map[string]any), "balance") != 800 {
+		t.Errorf("add bills account_balances = %v, want the wallet at 800", a["account_balances"])
 	}
 }
 
-// q0ID — the id of the owner's first project.
-func q0ID(t *testing.T, f *qcFixture) string {
-	t.Helper()
-	var id string
-	if err := f.pool.QueryRow(context.Background(),
-		`SELECT id::text FROM projects WHERE owner_user_id = $1 ORDER BY created_at LIMIT 1`, f.owner).Scan(&id); err != nil {
-		t.Fatalf("first project: %v", err)
-	}
-	return id
-}
-
+// The board shows members by their live names.
 func TestBoardRowsCarryTransactionMember(t *testing.T) {
 	f := newQCFixture(t)
-	r := touchEngine(f)
-	status, body := apitest.Do(t, r, "POST", "/api/v1/projects/quick", map[string]any{
-		"name": "Trip", "transaction_ids": []uuid.UUID{f.bill1},
-	})
-	if status != http.StatusOK {
-		t.Fatalf("quick create: %d %s", status, body)
-	}
-	var q walletBalances
-	_ = json.Unmarshal(body, &q)
-
-	// The linked friend renames themself: the board shows the live name.
+	me := evClient{t, eventsEngine(f, f.owner)}
+	q := me.do("POST", "/projects/quick", map[string]any{"name": "Trip", "transaction_ids": []uuid.UUID{f.bill1}},
+		"quickCreateEvent", http.StatusCreated)
+	id := m(q, "detail", "event")["id"].(string)
 	if _, err := f.pool.Exec(context.Background(), `UPDATE users SET display_name = 'Bee Live' WHERE id = $1`, f.friend); err != nil {
 		t.Fatal(err)
 	}
-	status, body = apitest.Do(t, r, "GET", "/api/v1/projects/"+q.ID+"/transactions", nil)
-	if status != http.StatusOK {
-		t.Fatalf("board: %d %s", status, body)
+	board := me.do("GET", "/projects/"+id+"/transactions", nil, "listBoardRows", http.StatusOK)
+	rows := list(board, "data")
+	if len(rows) != 1 {
+		t.Fatalf("board = %v", rows)
 	}
-	apitest.Conform(t, "listBoardRows", status, body)
-	var rows struct {
-		Data []struct {
-			ID                  string  `json:"id"`
-			TransactionMemberID string  `json:"transaction_member_id"`
-			Parent              *string `json:"parent_project_transaction_id"`
-			TransactionMember   struct {
-				ID     string  `json:"id"`
-				UserID *string `json:"user_id"`
-				Name   string  `json:"name"`
-				IsMe   bool    `json:"is_me"`
-			} `json:"transaction_member"`
-		} `json:"data"`
+	row := rows[0].(map[string]any)
+	if m(row, "transaction_member")["is_me"] != true {
+		t.Errorf("payer = %v, want me", row["transaction_member"])
 	}
-	_ = json.Unmarshal(body, &rows)
-	if len(rows.Data) < 3 {
-		t.Fatalf("board rows = %d, want a parent and 2 split children: %s", len(rows.Data), body)
+	names := map[string]bool{}
+	for _, c := range list(row, "children") {
+		names[m(c, "transaction_member")["name"].(string)] = true
 	}
-	sawMe, sawLive, sawAdHoc := false, false, false
-	for _, row := range rows.Data {
-		m := row.TransactionMember
-		if m.ID != row.TransactionMemberID {
-			t.Errorf("transaction_member.id = %s, want %s", m.ID, row.TransactionMemberID)
+	if !names["Bee Live"] || !names["Grandma"] {
+		t.Errorf("split members = %v", names)
+	}
+}
+
+// Deleting an event: my linked transactions stay (unlinked) or go with it.
+func TestDeleteEventWithLinkedTxs(t *testing.T) {
+	f := newQCFixture(t)
+	me := evClient{t, eventsEngine(f, f.owner)}
+	start := f.accountBalance(t, f.acctPersonal)
+	mk := func(name string) (string, float64) {
+		t.Helper()
+		q := me.do("POST", "/projects/quick", map[string]any{
+			"name": name,
+			"new_transaction": map[string]any{
+				"type": "expense", "account_id": f.acctPersonal, "amount": 100, "category_id": f.cat, "date": "2026-09-15",
+			},
+		}, "quickCreateEvent", http.StatusCreated)
+		ev := m(q, "detail", "event")
+		return ev["id"].(string), n(ev, "linked_tx_count")
+	}
+	keep, count := mk("Keep")
+	if count != 1 {
+		t.Errorf("linked_tx_count = %v, want 1", count)
+	}
+	out := me.do("DELETE", "/projects/"+keep, nil, "deleteProject", http.StatusOK)
+	if n(out, "deleted_transaction_count") != 0 || f.accountBalance(t, f.acctPersonal) != start-100 {
+		t.Errorf("plain delete removed my tx: %v", out)
+	}
+	if got := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE user_id = $1 AND amount = 100 AND project_id IS NULL`, f.owner); got != 1 {
+		t.Errorf("my tx should stay, unlinked (%d)", got)
+	}
+	drop, _ := mk("Drop")
+	out = me.do("DELETE", "/projects/"+drop+"?delete_linked_txs=true", nil, "deleteProject", http.StatusOK)
+	if n(out, "deleted_transaction_count") != 1 || len(list(out, "account_balances")) != 1 || f.accountBalance(t, f.acctPersonal) != start-100 {
+		t.Errorf("delete with linked txs: %v (wallet %v)", out, f.accountBalance(t, f.acctPersonal))
+	}
+}
+
+// DELETE /transactions ?also_delete_link: the bill made from the row goes
+// with it; without it the bill stays, unlinked.
+func TestDeleteTxWithLinkedBill(t *testing.T) {
+	f := newQCFixture(t)
+	me := evClient{t, eventsEngine(f, f.owner)}
+	mk := func(name string) (string, uuid.UUID) {
+		t.Helper()
+		q := me.do("POST", "/projects/quick", map[string]any{
+			"name": name,
+			"new_transaction": map[string]any{
+				"type": "expense", "account_id": f.acctPersonal, "amount": 100, "category_id": f.cat, "date": "2026-09-15",
+			},
+		}, "quickCreateEvent", http.StatusCreated)
+		evID := m(q, "detail", "event")["id"].(string)
+		var txID uuid.UUID
+		if err := f.pool.QueryRow(context.Background(), `SELECT id FROM transactions WHERE user_id = $1 AND project_id = $2`,
+			f.owner, evID).Scan(&txID); err != nil {
+			t.Fatal(err)
 		}
-		switch {
-		case m.UserID != nil && *m.UserID == f.owner.String():
-			sawMe = sawMe || m.IsMe
-			if !m.IsMe {
-				t.Errorf("the caller's own member must have is_me")
-			}
-		case m.UserID != nil && *m.UserID == f.friend.String():
-			sawLive = sawLive || m.Name == "Bee Live"
-			if m.IsMe {
-				t.Errorf("another user's member has is_me")
-			}
-		default:
-			sawAdHoc = sawAdHoc || m.Name == "Grandma"
-		}
+		return evID, txID
 	}
-	if !sawMe || !sawLive || !sawAdHoc {
-		t.Errorf("member refs: me=%v live-name=%v ad-hoc=%v in %s", sawMe, sawLive, sawAdHoc, body)
+	bills := func(ev string) int {
+		return f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE project_id = $1 AND parent_project_transaction_id IS NULL`, ev)
+	}
+	keep, tx := mk("Keep")
+	res, err := f.txs.DeleteWrite(context.Background(), f.owner, tx, false)
+	if err != nil || res.BillID != nil || bills(keep) != 1 {
+		t.Fatalf("plain delete: %v %+v bills %d", err, res, bills(keep))
+	}
+	drop, tx := mk("Drop")
+	res, err = f.txs.DeleteWrite(context.Background(), f.owner, tx, true)
+	if err != nil || res.BillID == nil || bills(drop) != 0 {
+		t.Fatalf("also_delete_link: %v %+v bills %d", err, res, bills(drop))
 	}
 }

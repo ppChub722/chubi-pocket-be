@@ -62,7 +62,8 @@ type CategoryDetail struct {
 	ParentName       *string `json:"parent_name"`
 	ChildCount       int     `json:"child_count"`
 	TransactionCount int     `json:"transaction_count"`
-	// BudgetCount = budgets deleted along with this category (FK CASCADE).
+	// BudgetCount = budgets tracking this category (a delete takes it out of
+	// their scope).
 	BudgetCount int `json:"budget_count"`
 	// IsFeeCategory: this is the user's fee category (user_preferences.fee_category_id).
 	IsFeeCategory bool `json:"is_fee_category"`

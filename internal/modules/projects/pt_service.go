@@ -4,24 +4,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// CreateProjectTransaction inserts a parent project_transaction row plus
-// any split children, all atomic.
+// CreateProjectTransaction — a board-only bill (no wallet) plus its splits
+// and event tags, atomically. Returns the patch.
 func (s *Service) CreateProjectTransaction(
 	ctx context.Context, callerUserID, projectID uuid.UUID, req CreateProjectTransactionRequest,
-) (*ProjectTransaction, error) {
+) (*EventPatch, error) {
 	if err := s.store.AssertWritable(ctx, projectID, "create_pt"); err != nil {
 		return nil, err
 	}
 	if _, err := s.store.AssertCanWrite(ctx, projectID, callerUserID); err != nil {
 		return nil, err
 	}
-
-	// Validate transaction_member_id belongs to this project.
 	member, err := s.store.GetMember(ctx, req.TransactionMemberID)
 	if err != nil {
 		return nil, err
@@ -29,6 +31,7 @@ func (s *Service) CreateProjectTransaction(
 	if member.ProjectID != projectID {
 		return nil, ErrMemberNotInProject
 	}
+	req.TagNames = nil // names are a Go-side input only
 
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -40,7 +43,9 @@ func (s *Service) CreateProjectTransaction(
 	if err != nil {
 		return nil, err
 	}
-
+	if pt, err = s.store.GetPTTx(ctx, tx, pt.ID); err != nil {
+		return nil, err
+	}
 	// Contract §5. My own row → my personal copy when I switched that on
 	// (no notification: I did it). Someone else recorded it as mine →
 	// project_tx_recorded_for_you, whose auto copies it for me.
@@ -60,18 +65,44 @@ func (s *Service) CreateProjectTransaction(
 			return nil, err
 		}
 	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return pt, s.attachMembers(ctx, callerUserID, pt)
+	return s.patch(ctx, callerUserID, projectID, &pt.ID, nil, nil)
 }
 
-// UpdateProjectTransaction edits a parent row and (optionally) full-replaces
-// its split children. Children cannot be edited directly.
+// originTx — the personal transaction bill ptID was made from
+// (project_transactions.linked_transaction_id), locked; nil when the bill is
+// board-only or its transaction is gone.
+type originTx struct {
+	id        uuid.UUID
+	userID    uuid.UUID
+	accountID *uuid.UUID
+}
+
+func linkedOriginTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) (*originTx, error) {
+	var o originTx
+	err := tx.QueryRow(ctx, `SELECT t.id, t.user_id, t.account_id FROM project_transactions pt
+		JOIN transactions t ON t.id = pt.linked_transaction_id
+		WHERE pt.id = $1 FOR UPDATE OF t`, ptID).Scan(&o.id, &o.userID, &o.accountID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("origin tx: %w", err)
+	}
+	return &o, nil
+}
+
+// UpdateProjectTransaction edits a bill and (optionally) full-replaces its
+// splits / tags. Any member with rights edits a bill's money (the event is a
+// shared book, owner 2026-10-13). A linked bill's transaction is linked by
+// PROMPT: it changes only when its owner edits with also_update_link (the
+// wallet moves); another member's edit reaches the owner as
+// project_tx_changed with "อัปเดตตาม" (applyBillEditTx).
 func (s *Service) UpdateProjectTransaction(
 	ctx context.Context, callerUserID, projectID, ptID uuid.UUID, req UpdateProjectTransactionRequest,
-) (*ProjectTransaction, error) {
+) (*EventPatch, error) {
 	if err := s.store.AssertWritable(ctx, projectID, "edit_pt"); err != nil {
 		return nil, err
 	}
@@ -79,10 +110,13 @@ func (s *Service) UpdateProjectTransaction(
 	if err != nil {
 		return nil, err
 	}
+	if current.ProjectID != projectID {
+		return nil, ErrPTNotFound
+	}
 	if current.ParentProjectTransactionID != nil {
 		return nil, ErrPTIsChild
 	}
-	// Members can edit any project_tx (full edit rights, see plan §1).
+	// Members can edit any bill (full edit rights, see plan §1).
 	if _, err := s.store.AssertCanWrite(ctx, projectID, callerUserID); err != nil {
 		return nil, err
 	}
@@ -93,132 +127,198 @@ func (s *Service) UpdateProjectTransaction(
 	}
 	defer tx.Rollback(ctx)
 
-	beforeShares := splitSharesTx(ctx, tx, ptID)
-	updated, err := s.store.UpdatePTTx(ctx, tx, projectID, ptID, callerUserID, req)
+	amountChange := req.Amount != nil && math.Abs(*req.Amount-current.Amount) > 0.005
+	dateChange := req.Date != nil && *req.Date != current.Date
+	origin, err := linkedOriginTx(ctx, tx, ptID)
 	if err != nil {
 		return nil, err
 	}
 
+	updated, err := s.applyBillEditTx(ctx, tx, callerUserID, projectID, current, req)
+	if err != nil {
+		return nil, err
+	}
+	var touched []uuid.UUID
+	if origin != nil && origin.userID == callerUserID && req.AlsoUpdateLink && (amountChange || dateChange) {
+		if s.txs == nil {
+			return nil, errors.New("transactions module not wired")
+		}
+		up := transactions.UpdateRequest{Amount: req.Amount, Date: req.Date}
+		if err := s.txs.UpdateInTx(ctx, tx, callerUserID, origin.id, up); err != nil {
+			return nil, fmt.Errorf("linked transaction: %w", err)
+		}
+		if origin.accountID != nil {
+			touched = append(touched, *origin.accountID)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.patch(ctx, callerUserID, projectID, &updated.ID, nil, touched)
+}
+
+// applyBillEditTx writes the edit and tells the bill's stakeholders
+// (project_tx_changed, their own switches decide the copy update).
+func (s *Service) applyBillEditTx(
+	ctx context.Context, tx pgx.Tx, editorUserID, projectID uuid.UUID, current *ProjectTransaction,
+	req UpdateProjectTransactionRequest,
+) (*ProjectTransaction, error) {
+	beforeShares := splitSharesTx(ctx, tx, current.ID)
+	updated, err := s.store.UpdatePTTx(ctx, tx, projectID, current.ID, editorUserID, req)
+	if err != nil {
+		return nil, err
+	}
 	if s.notifs != nil {
-		recipients, err := s.store.PTRecipientsForChange(ctx, ptID, callerUserID)
+		recipients, err := s.store.PTRecipientsForChange(ctx, current.ID, editorUserID)
 		if err == nil && len(recipients) > 0 {
-			afterShares := splitSharesTx(ctx, tx, ptID)
+			afterShares := splitSharesTx(ctx, tx, current.ID)
 			diff := buildDiff(current, updated)
 			for _, recipient := range recipients {
-				if err := s.notifyChangedTx(ctx, tx, recipient, callerUserID,
+				if err := s.notifyChangedTx(ctx, tx, recipient, editorUserID,
 					current, updated, beforeShares, afterShares, diff); err != nil {
 					return nil, err
 				}
 			}
 		}
 	}
+	return updated, nil
+}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
+// SyncBillFromTxTx — the transactions.EventBillSyncer hook: the owner edited
+// the personal transaction a bill was made from and asked to update the bill
+// too (also_update_link); the bill takes the new amount / date. Inside the
+// edit's DB transaction.
+func (s *Service) SyncBillFromTxTx(ctx context.Context, tx pgx.Tx, userID, ptID uuid.UUID, amount float64, date string) error {
+	current, err := s.store.GetPTTx(ctx, tx, ptID)
+	if err != nil {
+		return err
 	}
-	return updated, s.attachMembers(ctx, callerUserID, updated)
+	if current.ParentProjectTransactionID != nil {
+		return nil
+	}
+	if math.Abs(current.Amount-amount) <= 0.005 && current.Date == date {
+		return nil
+	}
+	if _, err := s.applyBillEditTx(ctx, tx, userID, current.ProjectID, current,
+		UpdateProjectTransactionRequest{Amount: &amount, Date: &date}); err != nil {
+		if errors.Is(err, ErrSplitsExceedParent) {
+			return transactions.ErrSplitsExceedAmount // the board splits no longer fit
+		}
+		return err
+	}
+	return nil
+}
+
+// DeleteBillOfTxTx — transactions.EventBillDeleter: the bill made from
+// transaction txID goes with it when userID may edit the event (an active
+// non-viewer member, the event not cancelled / archived); otherwise it
+// stays, unlinked. Inside the delete's DB transaction, before the row goes.
+func (s *Service) DeleteBillOfTxTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (*uuid.UUID, error) {
+	var ptID, projectID uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT id, project_id FROM project_transactions
+		WHERE linked_transaction_id = $1 AND parent_project_transaction_id IS NULL`, txID).Scan(&ptID, &projectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("linked bill: %w", err)
+	}
+	if err := s.store.AssertWritable(ctx, projectID, "edit_pt"); err != nil {
+		return nil, nil
+	}
+	if _, err := s.store.AssertCanWrite(ctx, projectID, userID); err != nil {
+		return nil, nil
+	}
+	if err := s.deleteBoardRowTx(ctx, tx, userID, projectID, ptID); err != nil {
+		return nil, err
+	}
+	return &ptID, nil
 }
 
 // DeleteProjectTransaction removes a parent (FK-cascading its children) or
 // a single child split row.
 func (s *Service) DeleteProjectTransaction(
 	ctx context.Context, callerUserID, projectID, ptID uuid.UUID,
-) error {
+) (*EventPatch, error) {
 	if err := s.store.AssertWritable(ctx, projectID, "edit_pt"); err != nil {
-		return err
+		return nil, err
 	}
 	pt, err := s.store.GetPT(ctx, ptID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if pt.ProjectID != projectID {
-		return ErrPTNotFound
+		return nil, ErrPTNotFound
 	}
 	if _, err := s.store.AssertCanWrite(ctx, projectID, callerUserID); err != nil {
-		return err
+		return nil, err
 	}
 
-	// One tx: personal copies are unlinked first (they stay as loose
-	// transactions), then the row goes — see deleteBoardRowTx.
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin: %w", err)
+		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	// My own bill's row (I recorded it, I'm its actor): its member splits go
 	// back onto my bill, same as removing the bill from the event. Anyone
 	// else deleting it only unlinks — never write another user's book.
-	var originTx uuid.UUID
+	var originTxID uuid.UUID
 	err = tx.QueryRow(ctx, `SELECT id FROM transactions
 		WHERE source_project_transaction_id = $1 AND user_id = $2
-		ORDER BY created_at LIMIT 1`, ptID, callerUserID).Scan(&originTx)
+		ORDER BY created_at LIMIT 1`, ptID, callerUserID).Scan(&originTxID)
 	switch {
 	case err == nil:
 		origin, err := isBoardOriginTx(ctx, tx, callerUserID, ptID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if origin {
-			if _, err := s.detachBillTx(ctx, tx, callerUserID, originTx, true); err != nil {
-				return err
+			if _, err := s.detachBillTx(ctx, tx, callerUserID, originTxID, true); err != nil {
+				return nil, err
 			}
 			break
 		}
 		if err := s.deleteBoardRowTx(ctx, tx, callerUserID, projectID, ptID); err != nil {
-			return err
+			return nil, err
 		}
 	case errors.Is(err, pgx.ErrNoRows):
 		if err := s.deleteBoardRowTx(ctx, tx, callerUserID, projectID, ptID); err != nil {
-			return err
+			return nil, err
 		}
 	default:
-		return fmt.Errorf("origin bill: %w", err)
+		return nil, fmt.Errorf("origin bill: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	if pt.ParentProjectTransactionID != nil {
+		return s.patch(ctx, callerUserID, projectID, pt.ParentProjectTransactionID, nil, nil)
+	}
+	return s.patch(ctx, callerUserID, projectID, nil, &ptID, nil)
 }
 
-func (s *Service) ListPT(ctx context.Context, callerUserID, projectID uuid.UUID, page, perPage int) (*ListPTResponse, error) {
+// ListPT — GET /projects/:id/transactions (the board).
+func (s *Service) ListPT(ctx context.Context, callerUserID, projectID uuid.UUID, f BoardFilter) (*BoardRowList, error) {
 	if _, err := s.store.GetByIDForCaller(ctx, callerUserID, projectID); err != nil {
 		return nil, err
 	}
-	if page <= 0 {
-		page = 1
-	}
-	if perPage <= 0 {
-		perPage = 20
-	}
-	if perPage > 100 {
-		perPage = 100
-	}
-	rows, total, err := s.store.ListPT(ctx, projectID, page, perPage)
+	e, err := loadEvent(ctx, s.store.db, callerUserID, projectID)
 	if err != nil {
 		return nil, err
 	}
-	ptrs := make([]*ProjectTransaction, len(rows))
-	for i := range rows {
-		ptrs[i] = &rows[i]
-	}
-	if err := s.attachMembers(ctx, callerUserID, ptrs...); err != nil {
+	f.Page, f.PerPage = clampPage(f.Page, f.PerPage)
+	rows, total, err := loadBoard(ctx, s.store.db, callerUserID, projectID, e, f, nil)
+	if err != nil {
 		return nil, err
 	}
-	totalPages := (total + perPage - 1) / perPage
-	if totalPages == 0 {
-		totalPages = 1
-	}
-	return &ListPTResponse{
-		Data:       rows,
-		Pagination: Pagination{Page: page, PerPage: perPage, Total: total, TotalPages: totalPages},
-	}, nil
+	return &BoardRowList{Data: rows, Pagination: shared.NewPage(f.Page, f.PerPage, total)}, nil
 }
 
-// ToggleMark adds/removes the caller's project_member id from the row's
-// `marks` array. Idempotent.
+// ToggleMark adds / removes the caller's member id on the row's marks
+// (idempotent). The patch's row is the bill (a split's parent).
 func (s *Service) ToggleMark(
 	ctx context.Context, callerUserID, projectID, ptID uuid.UUID, marked bool,
-) (*ProjectTransaction, error) {
+) (*EventPatch, error) {
 	if err := s.store.AssertWritable(ctx, projectID, "resolve"); err != nil {
 		return nil, err
 	}
@@ -233,30 +333,14 @@ func (s *Service) ToggleMark(
 	if current.ProjectID != projectID {
 		return nil, ErrPTNotFound
 	}
-	pt, err := s.store.ToggleMark(ctx, projectID, ptID, member.ID, marked)
-	if err != nil {
+	if err := s.store.ToggleMark(ctx, projectID, ptID, member.ID, marked); err != nil {
 		return nil, err
 	}
-	return pt, s.attachMembers(ctx, callerUserID, pt)
-}
-
-func (s *Service) Summary(ctx context.Context, callerUserID, projectID uuid.UUID) (*SummaryResponse, error) {
-	if _, err := s.store.GetByIDForCaller(ctx, callerUserID, projectID); err != nil {
-		return nil, err
+	rowID := current.ID
+	if current.ParentProjectTransactionID != nil {
+		rowID = *current.ParentProjectTransactionID
 	}
-	return s.store.SummaryAggregate(ctx, projectID, callerUserID)
-}
-
-// ListTags — the project's tags (members only), most used first.
-func (s *Service) ListTags(ctx context.Context, callerUserID, projectID uuid.UUID) (*ProjectTagsResponse, error) {
-	if _, err := s.store.GetByIDForCaller(ctx, callerUserID, projectID); err != nil {
-		return nil, err
-	}
-	tags, err := s.store.ListTags(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
-	return &ProjectTagsResponse{Data: tags}, nil
+	return s.patch(ctx, callerUserID, projectID, &rowID, nil, nil)
 }
 
 // buildDiff produces a small map of changed numeric/string fields for the

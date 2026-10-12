@@ -13,6 +13,7 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // Handler — the /transactions routes (API spec v2: bare bodies on success,
@@ -132,6 +133,15 @@ func (h *Handler) List(c *gin.Context) {
 	if c.Query("no_wallet") == "true" {
 		f.NoWallet = true
 	}
+	f.CanJoinEvent = c.Query("can_join_event") == "true"
+	if v := c.Query("counterparty_key"); v != "" {
+		k, err := shared.ParseDebtKey(v)
+		if err != nil {
+			response.BadRequest(c, "INVALID_PERSON_KEY", err.Error(), nil)
+			return
+		}
+		f.CounterpartyKey = k.Key()
+	}
 
 	resp, err := h.service.List(c.Request.Context(), userID, f)
 	if err != nil {
@@ -200,7 +210,7 @@ func (h *Handler) Delete(c *gin.Context) {
 		return
 	}
 
-	res, err := h.service.DeleteWrite(c.Request.Context(), userID, id)
+	res, err := h.service.DeleteWrite(c.Request.Context(), userID, id, c.Query("also_delete_link") == "true")
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -345,6 +355,10 @@ func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 	return id, true
 }
 
+// MapError — the transaction error codes, for modules whose writes edit
+// transactions (a recurring item's link).
+func MapError(c *gin.Context, err error) { mapServiceError(c, err) }
+
 func mapServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrTxNotFound):
@@ -384,6 +398,12 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "SYSTEM_TRANSACTION_IMMUTABLE", err.Error(), nil)
 	case errors.Is(err, ErrCategoryAuthorOnly):
 		response.Fail(c, http.StatusForbidden, "CATEGORY_AUTHOR_ONLY", err.Error(), nil)
+	case errors.Is(err, ErrFutureDateNotAllowed):
+		response.BadRequest(c, "FUTURE_DATE_NOT_ALLOWED", err.Error(), nil)
+	case errors.Is(err, ErrDebtTxAuthorOnly):
+		response.Fail(c, http.StatusForbidden, "DEBT_TX_AUTHOR_ONLY", err.Error(), nil)
+	case errors.Is(err, ErrDebtTxNeedsWallet):
+		response.BadRequest(c, "DEBT_TX_NEEDS_WALLET", err.Error(), nil)
 	case errors.Is(err, ErrRowLocked):
 		response.Fail(c, http.StatusForbidden, "ROW_LOCKED", err.Error(), nil)
 	case errors.Is(err, ErrSplitsOnTransfer):

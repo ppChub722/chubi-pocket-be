@@ -1,0 +1,409 @@
+package projects
+
+// Event tags (owner 2026-10-12). Two layers:
+//   - event-scoped tags (event_tags): owned by the event, shared by all its
+//     members, real entities with icon / colour; bills carry them.
+//   - MY personal tags on an event (project_my_tags): each member groups
+//     events their own way; private to that member.
+//
+// Name matching (case-insensitive, trimmed) bridges the two: a pulled
+// personal transaction's tags become event tags by name, a copy into my book
+// gets my personal tags with the same names, and import creates personal
+// tags for the event tags I don't have yet.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
+)
+
+var (
+	// ErrEventTagNotFound — the path's tag isn't this event's (404).
+	ErrEventTagNotFound = errors.New("event tag not found")
+	// ErrUnknownTag — a tag id in a body isn't this event's / mine (400 TAG_NOT_FOUND).
+	ErrUnknownTag = errors.New("tag not found")
+	// ErrTagNameTaken — the event already has a tag with that name (409).
+	ErrTagNameTaken = errors.New("this event already has a tag with that name")
+	// ErrTagNameRequired — create needs a name.
+	ErrTagNameRequired = errors.New("name is required")
+)
+
+func cleanTagName(n string) string {
+	n = strings.TrimSpace(n)
+	if r := []rune(n); len(r) > 50 {
+		n = string(r[:50])
+	}
+	return n
+}
+
+// setRowTagsTx replaces bill ptID's event tags (every id must be this event's).
+func setRowTagsTx(ctx context.Context, tx pgx.Tx, projectID, ptID uuid.UUID, tagIDs []uuid.UUID) error {
+	tagIDs = uniqueIDs(tagIDs)
+	if len(tagIDs) > 0 {
+		var n int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM event_tags WHERE project_id = $1 AND id = ANY($2)`,
+			projectID, tagIDs).Scan(&n); err != nil {
+			return fmt.Errorf("check event tags: %w", err)
+		}
+		if n != len(tagIDs) {
+			return ErrUnknownTag
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM project_transaction_tags WHERE project_transaction_id = $1`, ptID); err != nil {
+		return fmt.Errorf("clear row tags: %w", err)
+	}
+	if len(tagIDs) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO project_transaction_tags (project_transaction_id, event_tag_id)
+		SELECT $1, unnest($2::uuid[])`, ptID, tagIDs)
+	if err != nil {
+		return fmt.Errorf("set row tags: %w", err)
+	}
+	return nil
+}
+
+// ensureEventTagsTx — the event tags with these names (case-insensitive),
+// created when missing. Returns their ids (deduped, order kept).
+func ensureEventTagsTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UUID, names []string) ([]uuid.UUID, error) {
+	out := make([]uuid.UUID, 0, len(names))
+	seen := map[string]bool{}
+	for _, raw := range names {
+		name := cleanTagName(raw)
+		key := strings.ToLower(name)
+		if name == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		var id uuid.UUID
+		err := tx.QueryRow(ctx, `SELECT id FROM event_tags WHERE project_id = $1 AND LOWER(name) = $2`,
+			projectID, key).Scan(&id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			id, _ = uuid.NewV7()
+			_, err = tx.Exec(ctx, `INSERT INTO event_tags (id, project_id, name, created_by_user_id, updated_by_user_id)
+				VALUES ($1, $2, $3, $4, $4)`, id, projectID, name, userID)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("event tag %q: %w", name, err)
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// personalTagNamesTx — the names of userID's tags on transaction txID.
+func personalTagNamesTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) ([]string, error) {
+	rows, err := tx.Query(ctx, `SELECT t.name FROM transaction_tags tt JOIN tags t ON t.id = tt.tag_id
+		WHERE tt.transaction_id = $1 AND t.user_id = $2 ORDER BY LOWER(t.name)`, txID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("tx tags: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// personalTagNamesByIDTx — the names of userID's tags tagIDs (a new bill's
+// tag_ids, before its transaction exists).
+func personalTagNamesByIDTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, tagIDs []uuid.UUID) ([]string, error) {
+	if len(tagIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT name FROM tags WHERE user_id = $1 AND id = ANY($2) ORDER BY LOWER(name)`, userID, tagIDs)
+	if err != nil {
+		return nil, fmt.Errorf("tag names: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// MatchPersonalTags — the name-matching helper for resolve / claim (owner
+// 2026-10-12): userID's personal tags whose names match (case-insensitive)
+// and the names that have no personal tag yet (the app asks before
+// creating those).
+func MatchPersonalTags(ctx context.Context, q shared.Querier, userID uuid.UUID, names []string) (matched []uuid.UUID, missing []string, err error) {
+	lowered := make([]string, 0, len(names))
+	for _, n := range names {
+		if n = cleanTagName(n); n != "" {
+			lowered = append(lowered, strings.ToLower(n))
+		}
+	}
+	if len(lowered) == 0 {
+		return nil, nil, nil
+	}
+	rows, err := q.Query(ctx, `SELECT id, LOWER(name) FROM tags WHERE user_id = $1 AND LOWER(name) = ANY($2)`, userID, lowered)
+	if err != nil {
+		return nil, nil, fmt.Errorf("match tags: %w", err)
+	}
+	have := map[string]uuid.UUID{}
+	for rows.Next() {
+		var (
+			id   uuid.UUID
+			name string
+		)
+		if err := rows.Scan(&id, &name); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		have[name] = id
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	seen := map[string]bool{}
+	for i, n := range names {
+		_ = i
+		key := strings.ToLower(cleanTagName(n))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if id, ok := have[key]; ok {
+			matched = append(matched, id)
+		} else {
+			missing = append(missing, cleanTagName(n))
+		}
+	}
+	return matched, missing, nil
+}
+
+// setMyTagsTx replaces userID's personal tags on project projectID.
+func setMyTagsTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UUID, tagIDs []uuid.UUID) error {
+	tagIDs = uniqueIDs(tagIDs)
+	if len(tagIDs) > 0 {
+		var n int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM tags WHERE user_id = $1 AND id = ANY($2)`,
+			userID, tagIDs).Scan(&n); err != nil {
+			return fmt.Errorf("check my tags: %w", err)
+		}
+		if n != len(tagIDs) {
+			return ErrUnknownTag
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM project_my_tags WHERE project_id = $1 AND user_id = $2`, projectID, userID); err != nil {
+		return fmt.Errorf("clear my tags: %w", err)
+	}
+	if len(tagIDs) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO project_my_tags (project_id, user_id, tag_id)
+		SELECT $1, $2, unnest($3::uuid[])`, projectID, userID, tagIDs)
+	if err != nil {
+		return fmt.Errorf("set my tags: %w", err)
+	}
+	return nil
+}
+
+// --- service: event tag CRUD + import ---
+
+// tagWriteGate — an active non-viewer member of an event not cancelled /
+// archived.
+func (s *Service) tagWriteGate(ctx context.Context, callerUserID, projectID uuid.UUID) error {
+	if _, err := s.store.GetByIDForCaller(ctx, callerUserID, projectID); err != nil {
+		return err
+	}
+	if err := s.store.AssertWritable(ctx, projectID, "edit_pt"); err != nil {
+		return err
+	}
+	_, err := s.store.AssertCanWrite(ctx, projectID, callerUserID)
+	return err
+}
+
+// ListTags — GET /projects/:id/tags.
+func (s *Service) ListTags(ctx context.Context, callerUserID, projectID uuid.UUID) (*EventTagList, error) {
+	if _, err := s.store.GetByIDForCaller(ctx, callerUserID, projectID); err != nil {
+		return nil, err
+	}
+	tags, err := loadEventTags(ctx, s.store.db, callerUserID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return &EventTagList{Data: tags}, nil
+}
+
+func iconJSON(ic *shared.IconCode) ([]byte, error) {
+	if ic == nil {
+		return nil, nil
+	}
+	return json.Marshal(ic)
+}
+
+func isNameTaken(err error) bool { return err != nil && isUniqueViolation(err) }
+
+// CreateTag — POST /projects/:id/tags.
+func (s *Service) CreateTag(ctx context.Context, callerUserID, projectID uuid.UUID, req EventTagRequest) (*EventTagWriteResult, error) {
+	if req.Name == nil || cleanTagName(*req.Name) == "" {
+		return nil, ErrTagNameRequired
+	}
+	if err := s.tagWriteGate(ctx, callerUserID, projectID); err != nil {
+		return nil, err
+	}
+	icon, err := iconJSON(req.IconCode)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := uuid.NewV7()
+	_, err = s.store.db.Exec(ctx, `INSERT INTO event_tags (id, project_id, name, icon_code, created_by_user_id, updated_by_user_id)
+		VALUES ($1, $2, $3, $4::jsonb, $5, $5)`, id, projectID, cleanTagName(*req.Name), icon, callerUserID)
+	if isNameTaken(err) {
+		return nil, ErrTagNameTaken
+	}
+	if err != nil {
+		return nil, fmt.Errorf("create event tag: %w", err)
+	}
+	return s.tagResult(ctx, callerUserID, projectID, id)
+}
+
+// UpdateTag — PUT /projects/:id/tags/:tag_id (rename / restyle).
+func (s *Service) UpdateTag(ctx context.Context, callerUserID, projectID, tagID uuid.UUID, req EventTagRequest) (*EventTagWriteResult, error) {
+	if err := s.tagWriteGate(ctx, callerUserID, projectID); err != nil {
+		return nil, err
+	}
+	q := `UPDATE event_tags SET updated_by_user_id = $3`
+	args := []any{tagID, projectID, callerUserID}
+	if req.Name != nil {
+		if cleanTagName(*req.Name) == "" {
+			return nil, ErrTagNameRequired
+		}
+		args = append(args, cleanTagName(*req.Name))
+		q += fmt.Sprintf(", name = $%d", len(args))
+	}
+	if req.iconPresent {
+		icon, err := iconJSON(req.IconCode)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, icon)
+		q += fmt.Sprintf(", icon_code = $%d::jsonb", len(args))
+	}
+	tag, err := s.store.db.Exec(ctx, q+` WHERE id = $1 AND project_id = $2`, args...)
+	if isNameTaken(err) {
+		return nil, ErrTagNameTaken
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update event tag: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrEventTagNotFound
+	}
+	return s.tagResult(ctx, callerUserID, projectID, tagID)
+}
+
+// DeleteTag — DELETE /projects/:id/tags/:tag_id (it comes off every bill).
+func (s *Service) DeleteTag(ctx context.Context, callerUserID, projectID, tagID uuid.UUID) (*EventPatch, error) {
+	if err := s.tagWriteGate(ctx, callerUserID, projectID); err != nil {
+		return nil, err
+	}
+	tag, err := s.store.db.Exec(ctx, `DELETE FROM event_tags WHERE id = $1 AND project_id = $2`, tagID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("delete event tag: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrEventTagNotFound
+	}
+	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
+}
+
+func (s *Service) tagResult(ctx context.Context, callerUserID, projectID, tagID uuid.UUID) (*EventTagWriteResult, error) {
+	p, err := s.patch(ctx, callerUserID, projectID, nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	out := &EventTagWriteResult{EventPatch: *p}
+	for _, t := range p.Tags {
+		if t.ID == tagID {
+			out.Tag = t
+		}
+	}
+	return out, nil
+}
+
+// ImportTags — POST /projects/:id/tags/import: a personal tag (same name
+// and icon) for each listed event tag (none listed = all) I don't have by
+// name yet. Any member may.
+func (s *Service) ImportTags(ctx context.Context, callerUserID, projectID uuid.UUID, req EventTagImportRequest) (*EventTagImportResult, error) {
+	if _, err := s.store.GetByIDForCaller(ctx, callerUserID, projectID); err != nil {
+		return nil, err
+	}
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	q := `SELECT et.name, et.icon_code FROM event_tags et WHERE et.project_id = $1
+		AND NOT EXISTS (SELECT 1 FROM tags t WHERE t.user_id = $2 AND LOWER(t.name) = LOWER(et.name))`
+	args := []any{projectID, callerUserID}
+	if ids := uniqueIDs(req.TagIDs); len(ids) > 0 {
+		var n int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM event_tags WHERE project_id = $1 AND id = ANY($2)`,
+			projectID, ids).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n != len(ids) {
+			return nil, ErrUnknownTag
+		}
+		args = append(args, ids)
+		q += ` AND et.id = ANY($3)`
+	}
+	rows, err := tx.Query(ctx, q+` ORDER BY LOWER(et.name)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("tags to import: %w", err)
+	}
+	type src struct {
+		name string
+		icon []byte
+	}
+	var todo []src
+	for rows.Next() {
+		var t src
+		if err := rows.Scan(&t.name, &t.icon); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		todo = append(todo, t)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := &EventTagImportResult{Created: []shared.TagRef{}}
+	for _, t := range todo {
+		id, _ := uuid.NewV7()
+		if _, err := tx.Exec(ctx, `INSERT INTO tags (id, user_id, name, icon_code, created_by_user_id, updated_by_user_id)
+			VALUES ($1, $2, $3, $4::jsonb, $2, $2)`, id, callerUserID, t.name, t.icon); err != nil {
+			return nil, fmt.Errorf("import tag %q: %w", t.name, err)
+		}
+		out.Created = append(out.Created, shared.TagRef{ID: id, Name: t.name, IconCode: shared.IconFromJSON(t.icon)})
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	if out.Tags, err = loadEventTags(ctx, s.store.db, callerUserID, projectID); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

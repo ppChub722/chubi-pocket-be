@@ -28,28 +28,41 @@ func NewService(store *Store) *Service {
 
 func (s *Service) WithNotificationService(n *notifications.Service) { s.notifs = n }
 
-// WithTransactionsService wires the personal-book create path used by quick
-// create (spec §10/4.24). Direct import is safe — transactions does not
-// import projects (its PT lookups are inlined to avoid the cycle).
+// WithTransactionsService wires the personal-book paths (quick create, bills,
+// copies, linked money). Direct import is safe — transactions does not
+// import projects.
 func (s *Service) WithTransactionsService(t *transactions.Service) { s.txs = t }
 
-// --- Project CRUD ---
+// --- Event CRUD ---
 
-func (s *Service) Create(ctx context.Context, ownerUserID uuid.UUID, req CreateProjectRequest) (*Project, error) {
+// Create — POST /projects: the event, my owner member row and my personal
+// tags in one tx; returns the page-ready detail.
+func (s *Service) Create(ctx context.Context, ownerUserID uuid.UUID, req CreateProjectRequest) (*EventDetail, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	p, err := s.createTx(ctx, tx, ownerUserID, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := setMyTagsTx(ctx, tx, p.ID, ownerUserID, req.TagIDs); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.detail(ctx, ownerUserID, p.ID, 1, 20)
+}
 
+// createTx — the project + the caller's owner member row.
+func (s *Service) createTx(ctx context.Context, tx pgx.Tx, ownerUserID uuid.UUID, req CreateProjectRequest) (*Project, error) {
 	p, err := s.store.CreateInTx(ctx, tx, ownerUserID, req)
 	if err != nil {
 		return nil, err
 	}
-
-	// Owner gets an auto active member row with role=owner.
-	var ownerName string
-	_ = tx.QueryRow(ctx, `SELECT display_name FROM users WHERE id = $1`, ownerUserID).Scan(&ownerName)
+	ownerName := userDisplayOrEmpty(ctx, tx, ownerUserID)
 	if ownerName == "" {
 		ownerName = "Owner"
 	}
@@ -58,134 +71,211 @@ func (s *Service) Create(ctx context.Context, ownerUserID uuid.UUID, req CreateP
 	); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-	// Re-fetch via GetByID so `members_count` is populated (the in-tx insert
-	// returned the bare project before the owner-member row landed).
-	return s.store.GetByID(ctx, p.ID)
+	return p, nil
 }
 
-func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*ListResponse, error) {
-	if f.Page <= 0 {
-		f.Page = 1
-	}
-	if f.PerPage <= 0 {
-		f.PerPage = 20
-	}
-	if f.PerPage > 100 {
-		f.PerPage = 100
-	}
-	rows, total, err := s.store.ListForUser(ctx, userID, f)
+// List — GET /projects.
+func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*EventList, error) {
+	f.Page, f.PerPage = clampPage(f.Page, f.PerPage)
+	ids, total, err := s.store.ListIDs(ctx, userID, f)
 	if err != nil {
 		return nil, err
 	}
-	totalPages := (total + f.PerPage - 1) / f.PerPage
-	if totalPages == 0 {
-		totalPages = 1
+	events, err := loadEvents(ctx, s.store.db, userID, ids)
+	if err != nil {
+		return nil, err
 	}
-	return &ListResponse{
-		Data: rows,
-		Pagination: Pagination{
-			Page: f.Page, PerPage: f.PerPage, Total: total, TotalPages: totalPages,
-		},
-	}, nil
+	out := &EventList{Data: make([]Event, 0, len(ids)), Pagination: shared.NewPage(f.Page, f.PerPage, total)}
+	for _, id := range ids {
+		out.Data = append(out.Data, events[id])
+	}
+	return out, nil
 }
 
-func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Project, error) {
-	return s.store.GetByIDForCaller(ctx, userID, id)
+// Get — GET /projects/:id (the Event row).
+func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Event, error) {
+	if _, err := s.store.GetByIDForCaller(ctx, userID, id); err != nil {
+		return nil, err
+	}
+	e, err := loadEvent(ctx, s.store.db, userID, id)
+	return &e, err
 }
 
-func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateProjectRequest) (*Project, error) {
-	p, err := s.store.GetByID(ctx, id)
+// Detail — GET /projects/:id/detail.
+func (s *Service) Detail(ctx context.Context, userID, id uuid.UUID, page, perPage int) (*EventDetail, error) {
+	return s.detail(ctx, userID, id, page, perPage)
+}
+
+// Summary — GET /projects/:id/summary.
+func (s *Service) Summary(ctx context.Context, userID, id uuid.UUID) (*EventSummary, error) {
+	if _, err := s.store.GetByIDForCaller(ctx, userID, id); err != nil {
+		return nil, err
+	}
+	e, err := loadEvent(ctx, s.store.db, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	sum, err := loadSummary(ctx, s.store.db, userID, id, e)
+	return &sum, err
+}
+
+// Update — PUT /projects/:id. The owner edits the event; MY tags (tag_ids)
+// are any member's own.
+func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateProjectRequest) (*EventPatch, error) {
+	p, err := s.store.GetByIDForCaller(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	if p.OwnerUserID != userID && !req.onlyMyTags() {
+		return nil, ErrNotOwner
+	}
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if !req.onlyMyTags() {
+		if err := s.store.UpdateTx(ctx, tx, userID, id, p, req); err != nil {
+			return nil, err
+		}
+	}
+	if req.has("tag_ids") {
+		if err := setMyTagsTx(ctx, tx, id, userID, req.TagIDs); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.patch(ctx, userID, id, nil, nil, nil)
+}
+
+// Delete — DELETE /projects/:id (owner). Other members' personal
+// transactions stay in their books, unlinked; mine too unless deleteLinked
+// (owner 2026-10-13: "ยืนยันและลบ x รายการ"), then they go (balances back).
+func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked bool) (*EventDeleteResult, error) {
+	p, err := s.store.GetByIDForCaller(ctx, userID, id)
 	if err != nil {
 		return nil, err
 	}
 	if p.OwnerUserID != userID {
 		return nil, ErrNotOwner
 	}
-	return s.store.Update(ctx, userID, id, req)
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	out := &EventDeleteResult{ID: id}
+	var touched []uuid.UUID
+	if deleteLinked {
+		if s.txs == nil {
+			return nil, errors.New("transactions module not wired")
+		}
+		rows, err := tx.Query(ctx, `SELECT id FROM transactions WHERE project_id = $1 AND user_id = $2`, id, userID)
+		if err != nil {
+			return nil, fmt.Errorf("linked txs: %w", err)
+		}
+		var ids []uuid.UUID
+		for rows.Next() {
+			var tid uuid.UUID
+			if err := rows.Scan(&tid); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ids = append(ids, tid)
+		}
+		rows.Close()
+		// Unlink first (the CHECK needs both columns cleared together).
+		if _, err := tx.Exec(ctx, `UPDATE transactions SET project_id = NULL, source_project_transaction_id = NULL
+			WHERE id = ANY($1)`, ids); err != nil {
+			return nil, fmt.Errorf("unlink: %w", err)
+		}
+		for _, tid := range ids {
+			acc, err := s.txs.DeleteInTx(ctx, tx, userID, tid)
+			if err != nil {
+				return nil, err
+			}
+			touched = append(touched, acc...)
+		}
+		out.DeletedTransactionCount = len(ids)
+	}
+	if err := s.store.DeleteTx(ctx, tx, id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	var err2 error
+	if out.AccountBalances, err2 = shared.LoadWalletBalances(ctx, s.store.db, uniqueIDs(touched)); err2 != nil {
+		return nil, err2
+	}
+	return out, nil
 }
 
-func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
-	p, err := s.store.GetByID(ctx, id)
-	if err != nil {
-		return err
-	}
-	if p.OwnerUserID != userID {
-		return ErrNotOwner
-	}
-	hasTx, err := s.store.HasTransactions(ctx, id)
-	if err != nil {
-		return err
-	}
-	if hasTx {
-		return ErrProjectHasTxs
-	}
-	return s.store.Delete(ctx, userID, id)
-}
-
-func (s *Service) Leave(ctx context.Context, userID, projectID uuid.UUID) error {
+// Leave — POST /projects/:id/leave.
+func (s *Service) Leave(ctx context.Context, userID, projectID uuid.UUID) (*DeletedResult, error) {
 	p, err := s.store.GetByID(ctx, projectID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if p.OwnerUserID == userID {
-		return ErrOwnerCannotLeave
+		return nil, ErrOwnerCannotLeave
 	}
-	// Find caller's member row.
 	var memberID uuid.UUID
 	if err := s.store.db.QueryRow(ctx,
 		`SELECT id FROM project_members WHERE project_id = $1 AND user_id = $2 AND status = 'active'`,
 		projectID, userID).Scan(&memberID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNotMember
+			return nil, ErrNotMember
 		}
-		return fmt.Errorf("find member: %w", err)
+		return nil, fmt.Errorf("find member: %w", err)
 	}
-	_, err = s.store.SoftRemoveMember(ctx, projectID, memberID, userID)
-	return err
+	if _, err := s.store.SoftRemoveMember(ctx, projectID, memberID, userID); err != nil {
+		return nil, err
+	}
+	return &DeletedResult{ID: projectID}, nil
 }
 
-func (s *Service) TransferOwnership(ctx context.Context, callerUserID, projectID, newOwnerUserID uuid.UUID) error {
+// TransferOwnership — POST /projects/:id/transfer-ownership.
+func (s *Service) TransferOwnership(ctx context.Context, callerUserID, projectID, newOwnerUserID uuid.UUID) (*EventPatch, error) {
 	p, err := s.store.GetByID(ctx, projectID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if p.OwnerUserID != callerUserID {
-		return ErrNotOwner
+		return nil, ErrNotOwner
 	}
-
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin: %w", err)
+		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-
 	if err := s.store.TransferOwnershipTx(ctx, tx, projectID, callerUserID, newOwnerUserID); err != nil {
-		return err
+		return nil, err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
 }
 
 // --- Members ---
 
-func (s *Service) ListMembers(ctx context.Context, userID, projectID uuid.UUID) ([]ProjectMember, error) {
+func (s *Service) ListMembers(ctx context.Context, userID, projectID uuid.UUID) (*EventMemberList, error) {
 	if _, err := s.store.GetByIDForCaller(ctx, userID, projectID); err != nil {
 		return nil, err
 	}
-	return s.store.ListMembers(ctx, projectID)
+	m, err := loadMembers(ctx, s.store.db, userID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return &EventMemberList{Data: m}, nil
 }
 
-// AddMember dispatches across the 2 variants:
-//
-//	(a) Email + DisplayName            → invite-by-email
-//	(b) AdHoc=true + DisplayName       → ad-hoc
-//
-// The from-contact variant was removed when contacts (user-scoped) were
-// dropped from project_members. FE looks up the contact's linked_user_id
-// locally and either invites by email or adds ad-hoc.
-func (s *Service) AddMember(ctx context.Context, callerUserID, projectID uuid.UUID, req AddMemberRequest) (*ProjectMember, error) {
+// AddMember — (a) ad_hoc + display_name; (b) email + display_name (invite).
+// Owner only.
+func (s *Service) AddMember(ctx context.Context, callerUserID, projectID uuid.UUID, req AddMemberRequest) (*EventPatch, error) {
 	p, err := s.store.GetByID(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -200,36 +290,28 @@ func (s *Service) AddMember(ctx context.Context, callerUserID, projectID uuid.UU
 	if role == "" {
 		role = RoleContributor
 	}
-	if role == RoleOwner {
-		return nil, errors.New("owner role is set via transfer-ownership; cannot be assigned directly")
-	}
-
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-
-	var member *ProjectMember
-
 	switch {
 	case req.Email != nil && req.DisplayName != nil:
-		member, err = s.addMemberByEmailTx(ctx, tx, projectID, callerUserID, *req.DisplayName, *req.Email, role, req.IconCode)
+		_, err = s.addMemberByEmailTx(ctx, tx, projectID, callerUserID, *req.DisplayName, *req.Email, role, req.IconCode)
 	case req.AdHoc && req.DisplayName != nil:
-		member, err = s.store.InsertMemberTx(ctx, tx,
+		_, err = s.store.InsertMemberTx(ctx, tx,
 			projectID, nil, *req.DisplayName, role, MemberStatusActive, callerUserID, req.IconCode,
 		)
 	default:
-		return nil, errors.New("AddMember requires one of: (email + display_name), or (ad_hoc=true + display_name)")
+		return nil, ErrBadMemberRequest
 	}
 	if err != nil {
 		return nil, err
 	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return member, nil
+	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
 }
 
 func (s *Service) addMemberByEmailTx(
@@ -252,25 +334,23 @@ func (s *Service) addMemberByEmailTx(
 		return nil, err
 	}
 	if matchedUser != nil && *matchedUser != callerUserID && s.notifs != nil {
-		projectName := projectNameOrEmpty(ctx, tx, projectID)
-		actorName := userDisplayOrEmpty(ctx, tx, callerUserID)
 		_ = s.notifs.DispatchProjectInvite(ctx, tx, *matchedUser, callerUserID,
 			notifications.ProjectInvitePayload{
 				ProjectMemberID:    member.ID,
 				ProjectID:          projectID,
-				ProjectName:        projectName,
+				ProjectName:        projectNameOrEmpty(ctx, tx, projectID),
 				InviterUserID:      callerUserID,
-				InviterDisplayName: actorName,
+				InviterDisplayName: userDisplayOrEmpty(ctx, tx, callerUserID),
 				Role:               role,
 			})
 	}
 	return member, nil
 }
 
-// UpdateMember changes role. Owner-only operation.
+// UpdateMember changes role / icon. Owner-only operation.
 func (s *Service) UpdateMember(
 	ctx context.Context, callerUserID, projectID, memberID uuid.UUID, req UpdateMemberRequest,
-) (*ProjectMember, error) {
+) (*EventPatch, error) {
 	p, err := s.store.GetByID(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -281,23 +361,18 @@ func (s *Service) UpdateMember(
 	if err := s.store.AssertWritable(ctx, projectID, "member_crud"); err != nil {
 		return nil, err
 	}
-	if req.Role != nil && *req.Role == RoleOwner {
-		return nil, errors.New("use transfer-ownership to change owner")
+	target, err := s.store.GetMember(ctx, memberID)
+	if err != nil {
+		return nil, err
 	}
-	// Contract §6b: the owner's own row can't be demoted here either.
+	if target.ProjectID != projectID {
+		return nil, ErrMemberNotInProject
+	}
 	if req.Role != nil {
-		target, err := s.store.GetMember(ctx, memberID)
-		if err != nil {
-			return nil, err
-		}
-		if target.ProjectID != projectID {
-			return nil, ErrMemberNotInProject
-		}
+		// Contract §6b: the owner's own row can't be demoted here.
 		if target.Role == RoleOwner {
 			return nil, ErrCannotChangeOwner
 		}
-	}
-	if req.Role != nil {
 		if _, err := s.store.UpdateMemberRole(ctx, projectID, memberID, *req.Role, callerUserID); err != nil {
 			return nil, err
 		}
@@ -307,40 +382,41 @@ func (s *Service) UpdateMember(
 			return nil, err
 		}
 	}
-	return s.store.GetMember(ctx, memberID)
+	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
 }
 
 // RemoveMember soft-removes a member. Owner-only; cannot remove the owner.
-func (s *Service) RemoveMember(ctx context.Context, callerUserID, projectID, memberID uuid.UUID) error {
+func (s *Service) RemoveMember(ctx context.Context, callerUserID, projectID, memberID uuid.UUID) (*EventPatch, error) {
 	p, err := s.store.GetByID(ctx, projectID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if p.OwnerUserID != callerUserID {
-		return ErrNotOwner
+		return nil, ErrNotOwner
 	}
 	if err := s.store.AssertWritable(ctx, projectID, "member_crud"); err != nil {
-		return err
+		return nil, err
 	}
 	target, err := s.store.GetMember(ctx, memberID)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if target.ProjectID != projectID {
+		return nil, ErrMemberNotInProject
 	}
 	if target.Role == RoleOwner {
-		return ErrCannotRemoveOwner
+		return nil, ErrCannotRemoveOwner
 	}
-	_, err = s.store.SoftRemoveMember(ctx, projectID, memberID, callerUserID)
-	return err
+	if _, err := s.store.SoftRemoveMember(ctx, projectID, memberID, callerUserID); err != nil {
+		return nil, err
+	}
+	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
 }
 
-// RequestLink re-fires the project_invite notification for an existing
-// pending member. Post-migration 27, project_members has no contact_id, so
-// there's no email to look up server-side. The owner re-invites by removing
-// the pending member and adding again with the corrected email.
+// RequestLink — re-send a pending member's invite. Members carry no email
+// since migration 27, so there is nothing to re-send server-side: a pending
+// member is acknowledged, anything else is refused.
 func (s *Service) RequestLink(ctx context.Context, callerUserID, projectID, memberID uuid.UUID) error {
-	if s.notifs == nil {
-		return errors.New("notifications module not wired")
-	}
 	p, err := s.store.GetByID(ctx, projectID)
 	if err != nil {
 		return err
@@ -355,17 +431,18 @@ func (s *Service) RequestLink(ctx context.Context, callerUserID, projectID, memb
 	if target.ProjectID != projectID {
 		return ErrMemberNotInProject
 	}
-	if target.UserID != nil {
-		return errors.New("member is already linked")
+	if target.UserID != nil || target.Status != MemberStatusPending {
+		return ErrNotPending
 	}
-	// No email source on the member row anymore — silent void, same response
-	// shape as a miss. Owner can re-invite by add-member with the email.
 	return nil
 }
 
-// AcceptLinkRequest accepts a project_invite notification — populates
-// project_members.user_id for the recipient.
-func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID uuid.UUID) (*ProjectMember, error) {
+// ErrNotPending — request-link on a member that isn't a pending invite.
+var ErrNotPending = errors.New("this member isn't waiting for an invite")
+
+// AcceptLinkRequest accepts a project_invite notification — the pending
+// member row becomes the caller's. Returns the event detail.
+func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID uuid.UUID) (*EventDetail, error) {
 	if s.notifs == nil {
 		return nil, errors.New("notifications module not wired")
 	}
@@ -380,33 +457,23 @@ func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID 
 		return nil, err
 	}
 	if n.Type != notifications.TypeProjectInvite {
-		return nil, fmt.Errorf("notification is not a project_invite")
+		return nil, ErrLinkRequestNotForYou
 	}
-
 	var p notifications.ProjectInvitePayload
 	if err := json.Unmarshal(n.Payload, &p); err != nil {
 		return nil, fmt.Errorf("payload: %w", err)
 	}
-
 	member, err := s.store.GetMemberTx(ctx, tx, p.ProjectMemberID)
 	if err != nil {
 		return nil, err
 	}
-	if member.UserID != nil && *member.UserID != userID {
+	switch {
+	case member.UserID != nil && *member.UserID != userID:
 		return nil, ErrMemberAlreadyExists
-	}
-	if member.UserID != nil && *member.UserID == userID {
-		// Idempotent re-accept.
-		_, _ = s.notifs.MarkActionedTx(ctx, tx, userID, notificationID)
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit: %w", err)
+	case member.UserID == nil:
+		if _, err := s.store.LinkMemberToUserTx(ctx, tx, p.ProjectMemberID, userID); err != nil {
+			return nil, err
 		}
-		return member, nil
-	}
-
-	updated, err := s.store.LinkMemberToUserTx(ctx, tx, p.ProjectMemberID, userID)
-	if err != nil {
-		return nil, err
 	}
 	if _, err := s.notifs.MarkActionedTx(ctx, tx, userID, notificationID); err != nil {
 		return nil, err
@@ -414,7 +481,7 @@ func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return updated, nil
+	return s.detail(ctx, userID, member.ProjectID, 1, 20)
 }
 
 func (s *Service) RejectLinkRequest(ctx context.Context, userID, notificationID uuid.UUID) error {
@@ -431,7 +498,7 @@ func (s *Service) RejectLinkRequest(ctx context.Context, userID, notificationID 
 		return err
 	}
 	if n.Type != notifications.TypeProjectInvite {
-		return fmt.Errorf("notification is not a project_invite")
+		return ErrLinkRequestNotForYou
 	}
 	// Contract §6b: the invite's still-unlinked member row stops showing as
 	// "pending" — it becomes a left row (its history, if any, stays).
@@ -452,26 +519,14 @@ func (s *Service) RejectLinkRequest(ctx context.Context, userID, notificationID 
 
 // --- Public exports for other modules ---
 
-// GetMember exposes the row to other modules for project_member_id ownership
-// validation.
+// GetMember exposes the row to other modules.
 func (s *Service) GetMember(ctx context.Context, memberID uuid.UUID) (*ProjectMember, error) {
 	return s.store.GetMember(ctx, memberID)
 }
 
-// IsActiveMember is a fast yes/no for notifications dispatchers and other
-// cross-module callers.
+// IsActiveMember is a fast yes/no for other modules.
 func (s *Service) IsActiveMember(ctx context.Context, projectID, userID uuid.UUID) (bool, error) {
 	return s.store.IsActiveMember(ctx, projectID, userID)
-}
-
-// OwnerUserID returns just the owner id — used by project_tx_changed
-// recipient resolution.
-func (s *Service) OwnerUserID(ctx context.Context, projectID uuid.UUID) (uuid.UUID, error) {
-	p, err := s.store.GetByID(ctx, projectID)
-	if err != nil {
-		return uuid.Nil, err
-	}
-	return p.OwnerUserID, nil
 }
 
 // --- Helpers ---
@@ -487,4 +542,3 @@ func userDisplayOrEmpty(ctx context.Context, tx pgx.Tx, userID uuid.UUID) string
 	_ = tx.QueryRow(ctx, `SELECT display_name FROM users WHERE id = $1`, userID).Scan(&name)
 	return name
 }
-

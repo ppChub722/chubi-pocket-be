@@ -4,6 +4,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -21,7 +22,7 @@ const (
 
 // Upcoming item kinds.
 const (
-	KindScheduled = "scheduled" // subscription / recurring / installment
+	KindRecurring = "recurring" // an upcoming recurring item (one-off or from a setting)
 	KindCardDue   = "card_due"  // credit card / pay-later payment due date
 )
 
@@ -44,7 +45,7 @@ type Response struct {
 	Upcoming      Upcoming                         `json:"upcoming"`
 	Budgets       BudgetsTile                      `json:"budgets"`
 	Debts         DebtsTile                        `json:"debts"`
-	SavingGoals   GoalsTile                        `json:"saving_goals"`
+	SavingGoals   shared.SavingTotals              `json:"saving_goals"`
 	Recent        []transactions.TransactionDetail `json:"recent"`
 	Pending       PendingBlock                     `json:"pending"`
 	Attention     AttentionBlock                   `json:"attention"`
@@ -100,11 +101,11 @@ type Upcoming struct {
 	TotalIncome  float64        `json:"total_income"`
 }
 
-// UpcomingItem — DaysUntil is negative when overdue (scheduled only: a
-// card due date always rolls forward to the next occurrence).
+// UpcomingItem — an upcoming recurring item or a card due date (a card due
+// date always rolls forward to the next occurrence).
 type UpcomingItem struct {
 	Kind      string           `json:"kind"`
-	ID        uuid.UUID        `json:"id"` // scheduled tx id, or account id for card_due
+	ID        uuid.UUID        `json:"id"` // recurring item id, or account id for card_due
 	Name      string           `json:"name"`
 	Type      string           `json:"type"` // income | expense
 	Amount    float64          `json:"amount"`
@@ -123,17 +124,5 @@ type BudgetsTile struct {
 	OverLimitCount int     `json:"over_limit_count"`
 }
 
-type DebtsTile struct {
-	OwedToMe  float64 `json:"owed_to_me"`
-	IOwe      float64 `json:"i_owe"`
-	Net       float64 `json:"net"`
-	OpenCount int     `json:"open_count"`
-}
-
-type GoalsTile struct {
-	Count          int     `json:"count"`
-	CompletedCount int     `json:"completed_count"`
-	TotalTarget    float64 `json:"total_target"`
-	TotalCurrent   float64 `json:"total_current"`
-	ProgressPct    float64 `json:"progress_pct"`
-}
+// DebtsTile — spec schema DebtTotals (the same rule as the debts header).
+type DebtsTile = personal_debts.DebtTotals

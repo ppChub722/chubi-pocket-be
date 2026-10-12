@@ -1,10 +1,10 @@
 package projects
 
 import (
-	"strings"
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -101,11 +101,13 @@ func (s *Service) copyToPersonalTx(
 		return uuid.Nil, err
 	}
 	// A tag named like one of the user's categories files the copy there
-	// (earlier tags win).
+	// (earlier tags win); the user's personal tags with the same names are
+	// attached (claim rule, owner 2026-10-12).
 	var categoryID *uuid.UUID
-	if len(pt.Tags) > 0 {
-		lowered := make([]string, len(pt.Tags))
-		for i, t := range pt.Tags {
+	var tagIDs []uuid.UUID
+	if len(pt.TagNames) > 0 {
+		lowered := make([]string, len(pt.TagNames))
+		for i, t := range pt.TagNames {
 			lowered[i] = strings.ToLower(t)
 		}
 		var id uuid.UUID
@@ -118,6 +120,9 @@ func (s *Service) copyToPersonalTx(
 			LIMIT 1`, userID, pt.Type, lowered).Scan(&id); err == nil {
 			categoryID = &id
 		}
+		if tagIDs, _, err = MatchPersonalTags(ctx, tx, userID, pt.TagNames); err != nil {
+			return uuid.Nil, err
+		}
 	}
 	created, err := s.txs.CreateInTx(ctx, tx, userID, transactions.CreateRequest{
 		Type:                       transactions.TxType(pt.Type),
@@ -126,6 +131,7 @@ func (s *Service) copyToPersonalTx(
 		Date:                       pt.Date,
 		Description:                pt.Description,
 		Note:                       pt.Note,
+		TagIDs:                     tagIDs,
 		SourceProjectTransactionID: &pt.ID,
 	})
 	if err != nil {
@@ -140,31 +146,42 @@ func (s *Service) copyToPersonalTx(
 
 // CopyToPersonal — POST /projects/:id/project-transactions/:pt_id/copy:
 // the "add to my book" button on project_tx_recorded_for_you.
-func (s *Service) CopyToPersonal(ctx context.Context, userID, projectID, ptID uuid.UUID) (uuid.UUID, error) {
+func (s *Service) CopyToPersonal(ctx context.Context, userID, projectID, ptID uuid.UUID) (*EventCopyResult, error) {
 	member, err := s.store.MemberByUserID(ctx, projectID, userID)
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
 	pt, err := s.store.GetPT(ctx, ptID)
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
 	if pt.ProjectID != projectID {
-		return uuid.Nil, ErrPTNotFound
+		return nil, ErrPTNotFound
 	}
 	if pt.ParentProjectTransactionID != nil {
-		return uuid.Nil, ErrPTIsChild
+		return nil, ErrPTIsChild
 	}
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("begin: %w", err)
+		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	id, err := s.copyToPersonalTx(ctx, tx, userID, member.ID, pt)
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
-	return id, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	p, err := s.patch(ctx, userID, projectID, &pt.ID, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	d, err := s.txs.Get(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	return &EventCopyResult{EventPatch: *p, Transaction: d}, nil
 }
 
 // notifyRecordedTx — project_tx_recorded_for_you to the row's actor when

@@ -40,7 +40,7 @@ func (s *Service) DeliveryFor(
 }
 
 // SettingsTx exposes the recipient's settings to producers (e.g. the
-// split_paid auto-action needs default_account_id).
+// project auto-actions).
 func (s *Service) SettingsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) (*Settings, error) {
 	return s.store.GetSettingsTx(ctx, tx, userID)
 }
@@ -74,14 +74,6 @@ func (s *Service) DispatchSplitCreated(
 ) error {
 	deepLink := splitDeepLink(p.RecipientDebtID)
 	return s.dispatchTx(ctx, tx, TypeSplitCreated, recipientUserID, &actorUserID, p, &deepLink, actioned)
-}
-
-func (s *Service) DispatchSplitPaid(
-	ctx context.Context, tx pgx.Tx,
-	recipientUserID uuid.UUID, actorUserID uuid.UUID, p SplitPaidPayload, actioned bool,
-) error {
-	deepLink := splitDeepLink(p.RecipientDebtID)
-	return s.dispatchTx(ctx, tx, TypeSplitPaid, recipientUserID, &actorUserID, p, &deepLink, actioned)
 }
 
 func (s *Service) DispatchProjectTxRecorded(

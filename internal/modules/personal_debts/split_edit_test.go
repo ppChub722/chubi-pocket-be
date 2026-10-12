@@ -41,8 +41,7 @@ func newSplitEditFixture(t *testing.T) *splitEditFixture {
 	f.debts.WithNotifications(f.notifs)
 	f.txs.WithDebtsCreator(f.debts.CreateForTransactionTx)
 	f.txs.WithSplitsEditor(f.debts.EditForTransactionTx)
-	f.txs.WithDebtValidator(f.debts.ValidateOwnership)
-	f.txs.WithDebtAutoBumper(f.debts.AutoBumpInTx)
+	f.txs.WithDebtLinks(f.debts)
 
 	seed, err := pool.Begin(ctx)
 	if err != nil {
@@ -143,9 +142,9 @@ func (f *splitEditFixture) changes(t *testing.T) []notifications.Notification {
 	return out
 }
 
-func (f *splitEditFixture) mirror(t *testing.T) *PersonalDebt {
+func (f *splitEditFixture) mirror(t *testing.T) *Entry {
 	t.Helper()
-	d, err := scanDebt(f.pool.QueryRow(f.ctx, `SELECT `+debtColumns+` FROM personal_debts
+	d, err := scanEntry(f.pool.QueryRow(f.ctx, `SELECT `+entryColumns+` FROM personal_debts
 		WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, f.partner))
 	if err != nil {
 		return nil
@@ -191,7 +190,7 @@ func TestEditSplits(t *testing.T) {
 		t.Errorf("apply superseded: err = %v, want stale", err)
 	}
 	res, err := f.debts.ApplySplitChange(f.ctx, f.partner, ch[1].ID)
-	if err != nil || res.Result != "updated" || res.Debt.Amount != 130 {
+	if err != nil || res.Result != "updated" || res.Entry == nil || res.Entry.Amount != 130 || res.PersonBalance.Net != -130 {
 		t.Fatalf("apply newest: %+v, %v", res, err)
 	}
 	if _, err := f.debts.ApplySplitChange(f.ctx, f.partner, ch[1].ID); !errors.Is(err, ErrNotificationActioned) {
@@ -205,15 +204,15 @@ func TestEditSplits(t *testing.T) {
 	if err := f.edit(t, keep(s["Partner"], 200), keep(s["Cee"], 150)); !errors.Is(err, transactions.ErrSplitsExceedAmount) {
 		t.Errorf("over the bill: err = %v", err)
 	}
-	if _, err := f.debts.Settle(f.ctx, f.me, s["Cee"].DebtID, SettleRequest{Amount: testdb.Float(20)}); err != nil {
-		t.Fatalf("settle Cee: %v", err)
+	// The paid label doesn't constrain edits (it never changes numbers).
+	if _, err := f.pool.Exec(f.ctx, `UPDATE personal_debts SET paid = TRUE WHERE id = $1`, s["Cee"].DebtID); err != nil {
+		t.Fatal(err)
 	}
-	// Repayments don't constrain edits: 10 < 20 repaid → overpaid by 10.
 	if err := f.edit(t, keep(s["Partner"], 130), keep(s["Cee"], 10)); err != nil {
-		t.Fatalf("below repaid: %v", err)
+		t.Fatalf("edit a paid split: %v", err)
 	}
-	if c := f.splits(t)["Cee"]; c.Amount != 10 || c.SettledAmount != 20 || c.Status != StatusOpen {
-		t.Errorf("overpaid Cee = %+v, want 10 / 20 open", c)
+	if c := f.splits(t)["Cee"]; c.Amount != 10 || !c.Paid || c.Direction != DirectionPaid || c.Key != "n:cee" {
+		t.Errorf("Cee = %+v, want 10, still labelled paid", c)
 	}
 	other := uuid.New()
 	if err := f.edit(t, transactions.SplitEdit{DebtID: &other, OwedAmount: 10}); !errors.Is(err, transactions.ErrSplitUnknownDebt) {
@@ -225,7 +224,7 @@ func TestEditSplits(t *testing.T) {
 	}
 	ch = f.changes(t)
 	pending := ch[len(ch)-1]
-	if err := f.debts.Delete(f.ctx, f.me, s["Partner"].DebtID); err != nil {
+	if _, err := f.debts.DeleteEntry(f.ctx, f.me, s["Partner"].DebtID); err != nil {
 		t.Fatalf("delete split debt: %v", err)
 	}
 	if _, err := f.debts.ApplySplitChange(f.ctx, f.partner, pending.ID); !errors.Is(err, ErrSplitChangeStale) {
@@ -306,84 +305,15 @@ func TestEditSplitsBeforePartnerAdded(t *testing.T) {
 	}
 }
 
-// TestRepaymentLifecycle — removing a person who repaid keeps the row at
-// 0 (overpaid, owed the other way); deleting a repayment transaction takes
-// what it repaid off the debt. (Editing / unlinking repayments waits for
-// the debt-repayment round: still read-only.)
-func TestRepaymentLifecycle(t *testing.T) {
-	f := newSplitEditFixture(t)
-	f.txs.WithDebtSettledAdjuster(f.debts.AdjustSettledInTx)
-	s := f.splits(t)
-	beam := s["Beam"].DebtID
-	res, err := f.debts.Settle(f.ctx, f.me, beam, SettleRequest{Amount: testdb.Float(50)})
-	if err != nil {
-		t.Fatalf("settle: %v", err)
-	}
-	repay := res.Transaction.(*transactions.TransactionDetail)
-	debt := func() *PersonalDebt {
-		d, err := f.debts.store.GetByID(f.ctx, f.me, beam)
-		if err != nil {
-			t.Fatalf("get debt: %v", err)
-		}
-		return d
-	}
-
-	// Remove Beam → kept at 0, overpaid 50 → People counts it as I owe Beam 50.
-	if err := f.edit(t, keep(s["Partner"], 100)); err != nil {
-		t.Fatalf("remove repaid person: %v", err)
-	}
-	if d := debt(); d.Amount != 0 || d.SettledAmount != 50 || d.Status != StatusOpen {
-		t.Fatalf("removed Beam = %+v, want 0 / 50 open", d)
-	}
-	people, err := f.debts.People(f.ctx, f.me)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if people.TotalIOwe != 50 {
-		t.Errorf("total I owe = %v, want 50 (Beam overpaid)", people.TotalIOwe)
-	}
-	if _, err := f.debts.Settle(f.ctx, f.me, beam, SettleRequest{}); !errors.Is(err, ErrDebtOverpaid) {
-		t.Errorf("settle an overpaid debt: err = %v", err)
-	}
-
-	// Repayment rows stay read-only for edits (for now).
-	amt := 30.0
-	if _, err := f.txs.Update(f.ctx, f.me, repay.ID, transactions.UpdateRequest{Amount: &amt}); !errors.Is(err, transactions.ErrSystemTransactionImmutable) {
-		t.Errorf("edit a repayment: err = %v, want immutable", err)
-	}
-
-	// Deleting Beam's repayment → repaid 0 → 0 / 0 = settled (nothing owed).
-	if err := f.txs.Delete(f.ctx, f.me, repay.ID); err != nil {
-		t.Fatalf("delete Beam's repayment: %v", err)
-	}
-	if d := debt(); d.SettledAmount != 0 || d.Status != StatusSettled {
-		t.Errorf("after deleting the repayment: %+v, want 0 repaid, settled", d)
-	}
-
-	// Delete a repayment on an open debt → repaid drops, back to open.
-	partner := s["Partner"].DebtID
-	r2, err := f.debts.Settle(f.ctx, f.me, partner, SettleRequest{Amount: testdb.Float(40)})
-	if err != nil {
-		t.Fatalf("settle partner: %v", err)
-	}
-	if err := f.txs.Delete(f.ctx, f.me, r2.Transaction.(*transactions.TransactionDetail).ID); err != nil {
-		t.Fatalf("delete repayment: %v", err)
-	}
-	d, _ := f.debts.store.GetByID(f.ctx, f.me, partner)
-	if d.SettledAmount != 0 || d.Status != StatusOpen {
-		t.Errorf("after deleting the repayment: %+v, want 0 repaid, open", d)
-	}
-}
-
 // TestEditSplitsIdentity — a saved split without a contact can be renamed
-// or linked to a contact in place, keeping its repayments; a split whose
+// or linked to a contact in place, keeping its paid label; a split whose
 // contact is linked to an app user is renamed in place or swapped for someone else (remove + add).
 func TestEditSplitsIdentity(t *testing.T) {
 	f := newSplitEditFixture(t)
 	s := f.splits(t)
 	beamID := s["Beam"].DebtID
-	if _, err := f.debts.Settle(f.ctx, f.me, beamID, SettleRequest{Amount: testdb.Float(50)}); err != nil {
-		t.Fatalf("settle: %v", err)
+	if _, err := f.pool.Exec(f.ctx, `UPDATE personal_debts SET paid = TRUE WHERE id = $1`, beamID); err != nil {
+		t.Fatal(err)
 	}
 	ident := func(r transactions.SplitRef, name string, contact *uuid.UUID) transactions.SplitEdit {
 		e := keep(r, r.Amount)
@@ -401,13 +331,13 @@ func TestEditSplitsIdentity(t *testing.T) {
 	}
 	partnerNotifs := countNotifs(f.partner, "split_created") + countNotifs(f.partner, "split_changed")
 
-	// Rename: same row, repayment kept, nobody told.
+	// Rename: same row, paid label kept, nobody told.
 	if err := f.edit(t, ident(s["Beam"], "Bam", nil), keep(s["Partner"], 100)); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	s = f.splits(t)
-	if r, ok := s["Bam"]; !ok || r.DebtID != beamID || r.SettledAmount != 50 || r.ContactID != nil {
-		t.Fatalf("renamed split = %+v, want same debt, 50 repaid, no contact", s["Bam"])
+	if r, ok := s["Bam"]; !ok || r.DebtID != beamID || !r.Paid || r.ContactID != nil {
+		t.Fatalf("renamed split = %+v, want same debt, still paid, no contact", s["Bam"])
 	}
 	if n := countNotifs(f.partner, "split_created") + countNotifs(f.partner, "split_changed"); n != partnerNotifs {
 		t.Errorf("rename notified the partner: %d -> %d", partnerNotifs, n)
@@ -424,7 +354,7 @@ func TestEditSplitsIdentity(t *testing.T) {
 	}
 
 	// Link to a contact with an app account: name from the contact, same
-	// row, repayment kept, split_created to them (auto → mirror at 100).
+	// row, paid label kept, split_created to them (auto → mirror at 100).
 	bee := testdb.User(t, f.pool)
 	seed, err := f.pool.Begin(f.ctx)
 	if err != nil {
@@ -456,14 +386,14 @@ func TestEditSplitsIdentity(t *testing.T) {
 	}
 	s = f.splits(t)
 	r, ok := s["Bee"]
-	if !ok || r.DebtID != beamID || r.SettledAmount != 50 || r.ContactID == nil || *r.ContactID != beeContact {
-		t.Fatalf("linked split = %+v, want same debt, 50 repaid, Bee's contact", r)
+	if !ok || r.DebtID != beamID || !r.Paid || r.ContactID == nil || *r.ContactID != beeContact {
+		t.Fatalf("linked split = %+v, want same debt, still paid, Bee's contact", r)
 	}
 	if n := countNotifs(bee, "split_created"); n != 1 {
 		t.Errorf("split_created to Bee = %d, want 1", n)
 	}
 	var mirrorAmount float64
-	if err := f.pool.QueryRow(f.ctx, `SELECT amount FROM personal_debts WHERE user_id = $1 AND direction = 'i_owe'`,
+	if err := f.pool.QueryRow(f.ctx, `SELECT amount FROM personal_debts WHERE user_id = $1 AND direction = 'received'`,
 		bee).Scan(&mirrorAmount); err != nil || mirrorAmount != 100 {
 		t.Errorf("Bee's mirror amount = %v (err %v), want 100", mirrorAmount, err)
 	}
@@ -512,9 +442,8 @@ func TestEditSplitsIdentity(t *testing.T) {
 		t.Errorf("old Partner should hear one split_changed (removed), got %d", len(ch))
 	}
 
-	// Bee's split (50 repaid) → Partner's contact: Bee's row stays at 0 (what
-	// they paid shows as overpaid) and hears "removed"; Partner hears
-	// split_created for the new row.
+	// Bee's split → Partner's contact: Bee's row goes and Bee hears
+	// "removed"; Partner hears split_created for the new row.
 	beeChanged := countNotifs(bee, "split_changed")
 	partnerCreated := countNotifs(f.partner, "split_created")
 	beeRow := keep(s["Bee"], 100)
@@ -530,11 +459,11 @@ func TestEditSplitsIdentity(t *testing.T) {
 			old = &r
 		}
 	}
-	if old == nil || old.Amount != 0 || old.SettledAmount != 50 {
-		t.Errorf("old Bee split = %+v, want amount 0 with 50 repaid", old)
+	if old != nil {
+		t.Errorf("old Bee split = %+v, want it gone (remove + add)", old)
 	}
 	np, ok := s["Partner"]
-	if !ok || np.Amount != 100 || np.SettledAmount != 0 || np.ContactID == nil || *np.ContactID != f.partnerContact {
+	if !ok || np.Amount != 100 || np.Paid || np.ContactID == nil || *np.ContactID != f.partnerContact {
 		t.Fatalf("new Partner split = %+v, want a fresh row of 100", np)
 	}
 	if n := countNotifs(bee, "split_changed"); n != beeChanged+1 {
@@ -545,15 +474,18 @@ func TestEditSplitsIdentity(t *testing.T) {
 	}
 }
 
-// TestEditSplitsOnRepayment — a repayment's splits can't be edited, even
-// when its system category is gone.
-func TestEditSplitsOnRepayment(t *testing.T) {
+// TestEditSplitsOnDebtTx — a debt entry's wallet transaction never carries
+// splits, even when its system category is gone.
+func TestEditSplitsOnDebtTx(t *testing.T) {
 	f := newSplitEditFixture(t)
-	res, err := f.debts.Settle(f.ctx, f.me, f.splits(t)["Beam"].DebtID, SettleRequest{Amount: testdb.Float(20)})
+	wallet := testdb.Account(t, f.pool, f.me)
+	res, err := f.debts.CreateEntry(f.ctx, f.me, "n:beam", CreateEntryRequest{
+		Direction: DirectionReceived, Amount: 20, AccountID: &wallet,
+	})
 	if err != nil {
-		t.Fatalf("settle: %v", err)
+		t.Fatalf("receive from Beam: %v", err)
 	}
-	repay := res.Transaction.(*transactions.TransactionDetail).ID
+	repay := res.Transaction.ID
 	if _, err := f.pool.Exec(f.ctx, `UPDATE transactions SET category_id = NULL WHERE id = $1`, repay); err != nil {
 		t.Fatal(err)
 	}
@@ -570,8 +502,8 @@ func TestEditSplitsIdentityUnlinkedContact(t *testing.T) {
 	f := newSplitEditFixture(t)
 	s := f.splits(t)
 	beamID := s["Beam"].DebtID
-	if _, err := f.debts.Settle(f.ctx, f.me, beamID, SettleRequest{Amount: testdb.Float(30)}); err != nil {
-		t.Fatalf("settle: %v", err)
+	if _, err := f.pool.Exec(f.ctx, `UPDATE personal_debts SET paid = TRUE WHERE id = $1`, beamID); err != nil {
+		t.Fatal(err)
 	}
 	newContact := func(name string, linked *uuid.UUID) uuid.UUID {
 		t.Helper()
@@ -601,8 +533,8 @@ func TestEditSplitsIdentityUnlinkedContact(t *testing.T) {
 	}
 	check := func(step string, r transactions.SplitRef, name string, contact *uuid.UUID) {
 		t.Helper()
-		if r.PersonName != name || !sameUUID(r.ContactID, contact) || r.SettledAmount != 30 {
-			t.Errorf("%s: %+v, want %s / %v / 30 repaid", step, r, name, contact)
+		if r.PersonName != name || !sameUUID(r.ContactID, contact) || !r.Paid {
+			t.Errorf("%s: %+v, want %s / %v / labelled paid", step, r, name, contact)
 		}
 	}
 
@@ -633,14 +565,14 @@ func TestEditSplitsIdentityUnlinkedContact(t *testing.T) {
 	}
 
 	// Now linked to an app user → back to a free name = remove + add: Bee's
-	// row stays at 0 with the 30 repaid, a fresh "Beam" row of 100 appears.
+	// row goes (Bee hears "removed"), a fresh "Beam" row of 100 appears.
 	if err := f.edit(t, kept(nil, true, "Beam"), keep(f.splits(t)["Partner"], 100)); err != nil {
 		t.Fatalf("drop a linked contact: %v", err)
 	}
-	var oldAmount, oldSettled float64
-	if err := f.pool.QueryRow(f.ctx, `SELECT amount, settled_amount FROM personal_debts WHERE id = $1`,
-		beamID).Scan(&oldAmount, &oldSettled); err != nil || oldAmount != 0 || oldSettled != 30 {
-		t.Errorf("old Bee row = %v / %v (err %v), want 0 with 30 repaid", oldAmount, oldSettled, err)
+	var gone bool
+	if err := f.pool.QueryRow(f.ctx, `SELECT NOT EXISTS (SELECT 1 FROM personal_debts WHERE id = $1)`,
+		beamID).Scan(&gone); err != nil || !gone {
+		t.Errorf("old Bee row should be gone (err %v)", err)
 	}
 	if r, ok := f.splits(t)["Beam"]; !ok || r.DebtID == beamID || r.Amount != 100 || r.ContactID != nil {
 		t.Errorf("new split = %+v, want a fresh free-name row of 100", r)

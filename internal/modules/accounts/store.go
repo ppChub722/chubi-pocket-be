@@ -31,7 +31,7 @@ var (
 const accountColumns = `id, user_id, name, type, balance, currency, icon_code, logo_url,
 	description, note, status,
 	credit_limit, statement_date, payment_due_date, minimum_payment,
-	sort_order, created_at, updated_at, identifiers`
+	sort_order, created_at, updated_at, identifiers, track_balance`
 
 func scanAccount(row pgx.Row) (*Account, error) {
 	var a Account
@@ -40,7 +40,7 @@ func scanAccount(row pgx.Row) (*Account, error) {
 		&a.ID, &a.UserID, &a.Name, &a.Type, &a.Balance, &a.Currency, &iconBytes, &a.LogoURL,
 		&a.Description, &a.Note, &a.Status,
 		&a.CreditLimit, &a.StatementDate, &a.PaymentDueDate, &a.MinimumPayment,
-		&a.SortOrder, &a.CreatedAt, &a.UpdatedAt, &identifiersBytes,
+		&a.SortOrder, &a.CreatedAt, &a.UpdatedAt, &identifiersBytes, &a.TrackBalance,
 	)
 	if err != nil {
 		return nil, err
@@ -212,16 +212,16 @@ func (s *Store) InsertTx(ctx context.Context, tx pgx.Tx, a *Account) (*Account, 
 		(id, user_id, name, type, balance, currency, icon_code, logo_url,
 		 description, note, status,
 		 credit_limit, statement_date, payment_due_date, minimum_payment,
-		 sort_order, created_by_user_id, identifiers)
+		 sort_order, created_by_user_id, identifiers, track_balance)
 		VALUES ($1, $2, $3, $4, 0, $5, $6::jsonb, $7,
 		        $8, $9, 'active',
-		        $10, $11, $12, $13, $14, $2, $15::jsonb)
+		        $10, $11, $12, $13, $14, $2, $15::jsonb, $16)
 		RETURNING ` + accountColumns
 	created, err := scanAccount(tx.QueryRow(ctx, q,
 		a.ID, a.UserID, a.Name, a.Type, a.Currency, iconJSON, a.LogoURL,
 		shared.CleanText(a.Description), shared.CleanText(a.Note),
 		a.CreditLimit, a.StatementDate, a.PaymentDueDate, a.MinimumPayment,
-		a.SortOrder, identifiersJSON))
+		a.SortOrder, identifiersJSON, a.TrackBalance))
 	if err != nil {
 		return nil, fmt.Errorf("insert account: %w", err)
 	}
@@ -284,6 +284,9 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequ
 		if req.MinimumPayment != nil {
 			add("minimum_payment", *req.MinimumPayment)
 		}
+	}
+	if req.TrackBalance != nil {
+		add("track_balance", *req.TrackBalance)
 	}
 	if req.Identifiers != nil {
 		// Already normalized by the service.

@@ -5,7 +5,6 @@ package me
 import (
 	"context"
 	"fmt"
-	"math"
 	"net/http"
 	"time"
 
@@ -20,19 +19,9 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// GoalsCount is counts.goals (same numbers as the Home saving_goals tile).
-type GoalsCount struct {
-	Count       int     `json:"count"`
-	ProgressPct float64 `json:"progress_pct"`
-}
-
-// DebtsSummary / BudgetsSummary / ScheduledCount — the figures the More
+// DebtsSummary / BudgetsSummary / RecurringCount — the figures the More
 // tiles show next to the counts (the same numbers as the Home tiles).
-type DebtsSummary struct {
-	OwedToMe float64 `json:"owed_to_me"`
-	IOwe     float64 `json:"i_owe"`
-	Net      float64 `json:"net"`
-}
+type DebtsSummary = personal_debts.DebtTotals
 
 type BudgetsSummary struct {
 	TotalBudget    float64 `json:"total_budget"`
@@ -41,24 +30,24 @@ type BudgetsSummary struct {
 	OverLimitCount int     `json:"over_limit_count"`
 }
 
-type ScheduledCount struct {
+type RecurringCount struct {
 	ActiveCount   int `json:"active_count"`
 	UpcomingCount int `json:"upcoming_count"`
 }
 
 // Counts is spec schema MeCounts.counts.
 type Counts struct {
-	Categories   int        `json:"categories"`
-	Tags         int        `json:"tags"`
-	Contacts     int        `json:"contacts"`
-	ActiveEvents int        `json:"active_events"`
-	OpenDebts    int        `json:"open_debts"`
-	Budgets      int        `json:"budgets"`
-	Goals        GoalsCount `json:"goals"`
+	Categories   int                 `json:"categories"`
+	Tags         int                 `json:"tags"`
+	Contacts     int                 `json:"contacts"`
+	ActiveEvents int                 `json:"active_events"`
+	OpenDebts    int                 `json:"open_debts"`
+	Budgets      int                 `json:"budgets"`
+	Goals        shared.SavingTotals `json:"goals"`
 
 	DebtsSummary   DebtsSummary   `json:"debts_summary"`
 	BudgetsSummary BudgetsSummary `json:"budgets_summary"`
-	Scheduled      ScheduledCount `json:"scheduled"`
+	Recurring      RecurringCount `json:"recurring"`
 }
 
 // MeCounts is spec schema MeCounts.
@@ -74,7 +63,11 @@ type Service struct {
 	db      *pgxpool.Pool
 	budgets *budgets.Service
 	debts   *personal_debts.Service
+	due     shared.DueChecker
 }
+
+// WithDueCheck runs the recurring due check before the counts (the boot call).
+func (s *Service) WithDueCheck(fn shared.DueChecker) *Service { s.due = fn; return s }
 
 func NewService(db *pgxpool.Pool) *Service { return &Service{db: db} }
 
@@ -88,77 +81,82 @@ func (s *Service) WithDebts(d *personal_debts.Service) *Service { s.debts = d; r
 //   - tags: all
 //   - contacts: active
 //   - active_events: status active, caller owns it or is an active member
-//   - open_debts: open personal_debts rows (the Home debts tile open_count)
+//   - open_debts: people with something open (debts_summary.open_count)
 //   - budgets: active personal (scope user) budgets (the Home budgets tile)
 //   - goals: active goals; progress = sum(min(current,target)) / sum(target)
 //     with current = linked account balance * allocation_pct / 100
 //   - debts_summary / budgets_summary: the Home debts / budgets tile numbers
-//   - scheduled: active scheduled transactions, and those due within the Home
+//   - recurring: active recurring settings, and upcoming items within the Home
 //     window (overdue included)
-const countsSQL = `SELECT
+var countsSQL = `SELECT
 	(SELECT COUNT(*) FROM categories WHERE user_id = $1 AND status = 'active' AND is_system = FALSE),
 	(SELECT COUNT(*) FROM tags WHERE user_id = $1),
 	(SELECT COUNT(*) FROM contacts WHERE user_id = $1 AND status = 'active'),
 	(SELECT COUNT(*) FROM projects p WHERE p.status = 'active' AND (p.owner_user_id = $1 OR EXISTS (
 		SELECT 1 FROM project_members m WHERE m.project_id = p.id AND m.user_id = $1 AND m.status = 'active'))),
-	(SELECT COUNT(*) FROM personal_debts WHERE user_id = $1 AND status = 'open'),
-	(SELECT COUNT(*) FROM budgets WHERE user_id = $1 AND scope = 'user' AND status = 'active'),
-	g.cnt, g.target, g.current
-FROM (
-	SELECT COUNT(*) AS cnt,
-	       COALESCE(SUM(sg.target_amount), 0)::float8 AS target,
-	       COALESCE(SUM(LEAST(ROUND(a.balance * sg.allocation_pct / 100, 2), sg.target_amount)), 0)::float8 AS current
-	FROM saving_goals sg JOIN accounts a ON a.id = sg.linked_account_id
-	WHERE sg.user_id = $1 AND sg.status = 'active'
-) g`
+	(SELECT COUNT(*) FROM (SELECT 1 FROM personal_debts pd WHERE pd.user_id = $1
+		GROUP BY ` + shared.DebtKeySQL("pd") + `
+		HAVING ABS(SUM(` + shared.DebtSignedSQL("pd") + `)) > 0.005 OR BOOL_OR(NOT pd.paid)) open_people),
+	(SELECT COUNT(*) FROM budgets WHERE user_id = $1 AND status = 'active' AND closed_on IS NULL)`
 
 func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string) (*MeCounts, error) {
+	if s.due != nil {
+		if err := s.due(ctx, userID, headerTZ); err != nil {
+			return nil, err
+		}
+	}
 	badges, err := shared.LoadBadges(ctx, s.db, userID)
 	if err != nil {
 		return nil, err
 	}
 	out := &MeCounts{Badges: badges}
-	var target, current float64
 	if err := s.db.QueryRow(ctx, countsSQL, userID).Scan(
 		&out.Counts.Categories, &out.Counts.Tags, &out.Counts.Contacts,
 		&out.Counts.ActiveEvents, &out.Counts.OpenDebts, &out.Counts.Budgets,
-		&out.Counts.Goals.Count, &target, &current,
 	); err != nil {
 		return nil, fmt.Errorf("me counts: %w", err)
 	}
-	if target > 0 {
-		out.Counts.Goals.ProgressPct = math.Round(current/target*10000) / 100
+	// Savings: the same numbers as the Home tile.
+	goals, err := shared.LoadSavingTotals(ctx, s.db, userID)
+	if err != nil {
+		return nil, err
 	}
+	out.Counts.Goals = *goals
 
 	// Debts: the same totals as the Home debts tile.
 	if s.debts != nil {
-		r, err := s.debts.People(ctx, userID)
+		t, err := s.debts.Totals(ctx, userID)
 		if err != nil {
 			return nil, err
 		}
-		out.Counts.DebtsSummary = DebtsSummary{OwedToMe: r.TotalOwedToMe, IOwe: r.TotalIOwe, Net: r.NetPosition}
+		out.Counts.DebtsSummary = t
 	}
 	// Budgets: every active personal budget at its own current period.
 	today := time.Now()
 	if s.budgets != nil {
-		r, err := s.budgets.Overview(ctx, userID, "", budgets.ScopeUser, nil, headerTZ)
+		r, err := s.budgets.Totals(ctx, userID, headerTZ)
 		if err != nil {
 			return nil, err
 		}
 		out.Counts.BudgetsSummary = BudgetsSummary{
 			TotalBudget: r.TotalBudget, TotalSpent: r.TotalSpent,
-			UtilizationPct: r.OverallUtilizationPct, OverLimitCount: r.BudgetsOverLimit,
+			UtilizationPct: r.UtilizationPct, OverLimitCount: r.OverLimitCount,
 		}
 		if loc, _, err := s.budgets.ResolveTimezone(ctx, userID, headerTZ); err == nil && loc != nil {
 			today = today.In(loc)
 		}
 	}
-	// Scheduled: active ones, and those due within the Home window.
+	// Recurring: active settings, and upcoming items within the Home window.
+	todayStr := today.Format("2006-01-02")
 	until := today.AddDate(0, 0, upcomingDays).Format("2006-01-02")
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE next_billing_date <= $2::date)
-		FROM scheduled_transactions WHERE user_id = $1 AND status = 'active'`, userID, until).Scan(
-		&out.Counts.Scheduled.ActiveCount, &out.Counts.Scheduled.UpcomingCount); err != nil {
-		return nil, fmt.Errorf("me scheduled: %w", err)
+	if err := s.db.QueryRow(ctx, `SELECT
+		(SELECT COUNT(*) FROM recurring_rules WHERE user_id = $1 AND status = 'active'),
+		(SELECT COUNT(*) FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.rule_id
+		 WHERE i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
+		   AND NOT i.archived AND i.date > $2::date AND i.date <= $3::date
+		   AND (i.rule_id IS NULL OR r.status = 'active'))`, userID, todayStr, until).Scan(
+		&out.Counts.Recurring.ActiveCount, &out.Counts.Recurring.UpcomingCount); err != nil {
+		return nil, fmt.Errorf("me recurring: %w", err)
 	}
 	return out, nil
 }

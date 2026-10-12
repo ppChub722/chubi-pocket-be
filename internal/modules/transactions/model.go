@@ -32,7 +32,7 @@ type Transaction struct {
 	Description                *string    `json:"description"`
 	Note                       *string    `json:"note"`
 	TransferGroupID            *uuid.UUID `json:"transfer_group_id"`
-	SourcePersonalDebtID       *uuid.UUID `json:"source_personal_debt_id"`
+	SourcePersonalDebtID       *uuid.UUID `json:"-"` // the debt entry this row is the wallet side of (see Counterparty)
 	SourceProjectTransactionID *uuid.UUID `json:"source_project_transaction_id"`
 	ProjectID                  *uuid.UUID `json:"-"`
 	CreatedAt                  time.Time  `json:"created_at"`
@@ -94,17 +94,17 @@ type SetTagsRequest struct {
 	TagIDs *[]uuid.UUID `json:"tag_ids" binding:"required"`
 }
 
-// SplitRef — one personal_debts row a split-bill transaction made (spec
+// SplitRef — one split entry a bill made in its author's debt ledger (spec
 // schema Split). Person is resolved by the one person-name rule
 // (shared.PersonNameSQL); DisplayName (JSON person_name) = Person.Name.
 type SplitRef struct {
-	DebtID        uuid.UUID        `json:"debt_id"`
-	Person        shared.PersonRef `json:"person"`
-	DisplayName   string           `json:"person_name"`
-	Direction     string           `json:"direction"`
-	Amount        float64          `json:"amount"`
-	SettledAmount float64          `json:"settled_amount"`
-	Status        string           `json:"status"`
+	DebtID      uuid.UUID        `json:"debt_id"`
+	Key         string           `json:"key"`
+	Person      shared.PersonRef `json:"person"`
+	DisplayName string           `json:"person_name"`
+	Direction   string           `json:"direction"` // paid | received
+	Amount      float64          `json:"amount"`
+	Paid        bool             `json:"paid"`
 
 	// PersonName — the stored snapshot (counterparty_person_name); ContactID
 	// — the stored contact. Go-side only (the response shows Person).
@@ -133,7 +133,13 @@ type TransactionDetail struct {
 	Tags         []shared.TagRef     `json:"tags"` // the caller's tags on the row
 	Project      *shared.EventRef    `json:"project"`
 	TransferPeer *TransferPeer       `json:"transfer_peer"` // transfer rows only
-	IsRepayment  bool                `json:"is_repayment"`  // source_personal_debt_id is set
+	// The debt entry this row is the wallet side of (one record: an edit /
+	// delete of either changes both). Shown to the row's author only.
+	Counterparty *shared.DebtLink `json:"counterparty"`
+	// The event bill the row belongs to (tx detail → the bill).
+	EventBill *EventBillLink `json:"event_bill"`
+	// The recurring item linked to the row (its author only).
+	RecurringItem *shared.RecurringItemLink `json:"recurring_item"`
 	// The author's share (spec 12 §4.5, shared.ShareAmountExpr): amount −
 	// what others owe on it (split debts, an event row's member splits).
 	// Expense / income only (nil = null for transfers); what reports and
@@ -175,6 +181,15 @@ type TransactionDetail struct {
 	HasSplits bool `json:"-"`
 }
 
+// EventBillLink — spec schema EventBillLink. Linked = the bill was made from
+// this row (shared.EventBillPredicate: money shared); false = a personal copy
+// of a share.
+type EventBillLink struct {
+	Event  shared.EventRef `json:"event"`
+	BillID uuid.UUID       `json:"bill_id"`
+	Linked bool            `json:"linked"`
+}
+
 // TransferResponse — both rows of a transfer (OUT first, IN second), as
 // Create / Update return them to Go callers. The HTTP responses use
 // WriteResult.
@@ -189,12 +204,25 @@ type TransferResponse struct {
 type WriteResult struct {
 	Rows            []TransactionDetail    `json:"rows"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
+	// The debt person's new balance when the row is a debt entry's wallet
+	// side (a personal_debts.DebtPerson; null otherwise).
+	PersonBalance any `json:"person_balance"`
+	// A date after today: the upcoming item the write made / moved (a
+	// recurring RecurringItem; rows = []).
+	Upcoming any `json:"upcoming"`
 }
 
 // DeleteResult — DELETE /transactions/:id (spec DeleteTransactionResult).
 type DeleteResult struct {
 	ID              uuid.UUID              `json:"id"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
+	// The debt entry deleted with it and that person's new balance (nulls
+	// when the row was not a debt entry's wallet side).
+	DebtEntryID   *uuid.UUID `json:"debt_entry_id"`
+	PersonBalance any        `json:"person_balance"`
+	// also_delete_link: the recurring item / event bill deleted with it.
+	RecurringItemID *uuid.UUID `json:"recurring_item_id"`
+	BillID          *uuid.UUID `json:"bill_id"`
 }
 
 type CreateRequest struct {
@@ -233,6 +261,9 @@ type UpdateRequest struct {
 	AccountID           *uuid.UUID  `json:"account_id"              binding:"omitempty"`
 	TransferToAccountID *uuid.UUID  `json:"transfer_to_account_id"  binding:"omitempty"`
 	TagIDs              []uuid.UUID `json:"tag_ids"                 binding:"omitempty"`
+	// AlsoUpdateLink — the row is linked (an event bill made from it, a
+	// recurring item): change the other side too (the app asks at save).
+	AlsoUpdateLink bool `json:"also_update_link"`
 
 	// Track presence so callers can explicitly clear nullable fields.
 	categoryIDPresent          bool
@@ -285,6 +316,27 @@ func (r *UpdateRequest) SetText(description, note *string) {
 	r.descriptionPresent, r.notePresent = true, true
 }
 
+// MarkPresent marks body keys as sent (null included) — for Go callers that
+// mirror a partial edit of another record (a recurring item's link).
+func (r *UpdateRequest) MarkPresent(keys ...string) {
+	for _, k := range keys {
+		switch k {
+		case "category_id":
+			r.categoryIDPresent = true
+		case "description":
+			r.descriptionPresent = true
+		case "note":
+			r.notePresent = true
+		case "account_id":
+			r.accountIDPresent = true
+		case "transfer_to_account_id":
+			r.transferToAccountIDPresent = true
+		case "tag_ids":
+			r.tagIDsPresent = true
+		}
+	}
+}
+
 // AccountIDChange returns (newID, true) when account_id was present in the
 // request body (newID may be nil → clear to floating). (nil, false) = unchanged.
 func (r *UpdateRequest) AccountIDChange() (*uuid.UUID, bool) {
@@ -315,6 +367,11 @@ type ListFilter struct {
 	TagIDs          []uuid.UUID // rows having ANY of these tags
 	IncludeChildren bool        // with CategoryID: also its subcategories
 	Uncategorized   bool        // only rows with no category
+	// CanJoinEvent — only rows the caller may pull into an event (the
+	// event's "add existing bills" picker).
+	CanJoinEvent bool
+	// CounterpartyKey — only the wallet sides of this debt person's entries.
+	CounterpartyKey string
 	Page            int
 	PerPage         int
 	Sort            string // date_desc | date_asc | amount_desc | amount_asc

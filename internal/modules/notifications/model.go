@@ -11,7 +11,6 @@ import (
 // at the DB level by migration 000015.
 const (
 	TypeSplitCreated            = "split_created"
-	TypeSplitPaid               = "split_paid"
 	TypeSplitReceived           = "split_received" // retired 2026-10-08 — no longer sent
 	TypeProjectTxRecordedForYou = "project_tx_recorded_for_you"
 	TypeProjectTxChanged        = "project_tx_changed"
@@ -19,7 +18,9 @@ const (
 	TypeContactLinkRequest      = "contact_link_request"
 	TypeAccountInvite           = "account_invite"
 	TypeProjectAdded            = "project_added"
-	TypeSplitChanged            = "split_changed" // 2026-10-10: a split I'm in was re-amounted / removed
+	TypeSplitChanged            = "split_changed"    // 2026-10-10: a split I'm in was re-amounted / removed
+	TypeRecurringDue            = "recurring_due"    // 0.3.1-10: grouped "n recurring items wait in pending"
+	TypeRecurringEnding         = "recurring_ending" // 0.3.1-10: a recurring setting has 2 items left
 )
 
 // Notification is the DB row.
@@ -48,7 +49,7 @@ type Settings struct {
 	UserID     uuid.UUID `json:"user_id"`
 	MutedTypes []string  `json:"muted_types"`
 	AutoTypes  []string  `json:"auto_types"`
-	// Wallet the split_paid auto-action records into; nil = no wallet.
+	// Wallet the auto-actions record into; nil = no wallet.
 	DefaultAccountID *uuid.UUID `json:"default_account_id"`
 	// Rows I record myself in a project → my personal copy too. No
 	// notification involved (I did it), so it's a plain switch.
@@ -148,20 +149,6 @@ const (
 	SplitChangeAmount  = "amount"
 	SplitChangeRemoved = "removed"
 )
-
-type SplitPaidPayload struct {
-	SplitID            uuid.UUID  `json:"split_id"`
-	PayerUserID        uuid.UUID  `json:"payer_user_id"`
-	PayerDisplayName   string     `json:"payer_display_name"`
-	Amount             float64    `json:"amount"`
-	Currency           string     `json:"currency"`
-	PayerTransactionID *uuid.UUID `json:"payer_transaction_id"`
-	// Set when the recipient'"'"'s auto-action already recorded the receipt.
-	RecordedTransactionID *uuid.UUID `json:"recorded_transaction_id"`
-	ProjectID             *uuid.UUID `json:"project_id"`
-	// The recipient's own debt row (contract §5) — the deep link opens it.
-	RecipientDebtID *uuid.UUID `json:"recipient_debt_id"`
-}
 
 type ProjectTxRecordedPayload struct {
 	ProjectTransactionID uuid.UUID `json:"project_transaction_id"`

@@ -22,6 +22,8 @@ var (
 	ErrTypeChangeNeedsLimit = errors.New("changing account type to a credit type requires credit_limit")
 	ErrBalanceNotEditable   = errors.New("balance is not directly editable; use POST /v1/accounts/:id/adjust-balance")
 	ErrAdjustNoOp           = errors.New("new_balance equals current balance — nothing to adjust")
+	ErrBalanceNotTracked    = errors.New("this wallet doesn't track its balance; turn track_balance on first")
+	ErrCurrentBalanceAlone  = errors.New("current_balance goes with track_balance: true")
 )
 
 type Service struct {
@@ -82,6 +84,10 @@ func buildTotals(accs []Account, currency string) AccountTotals {
 	for _, a := range accs {
 		if a.IsShared {
 			t.SharedCount++
+		}
+		if !a.TrackBalance {
+			t.UntrackedCount++
+			continue
 		}
 		if a.Currency != currency {
 			t.OtherCurrencyCount++
@@ -231,6 +237,7 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 		PaymentDueDate: req.PaymentDueDate,
 		MinimumPayment: req.MinimumPayment,
 		Identifiers:    identifiers,
+		TrackBalance:   req.TrackBalance == nil || *req.TrackBalance,
 	}
 	created, err := s.store.InsertTx(ctx, tx, row)
 	if err != nil {
@@ -249,8 +256,8 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 		return nil, err
 	}
 
-	// Opening balance auto-transaction
-	if req.Balance != 0 {
+	// Opening balance auto-transaction (none for a wallet without a balance)
+	if req.Balance != 0 && row.TrackBalance {
 		kind := categories.SystemOpeningIn
 		amount := req.Balance
 		if req.Balance < 0 {
@@ -319,9 +326,19 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		}
 		req.Identifiers = &norm
 	}
+	if req.CurrentBalance != nil && (req.TrackBalance == nil || !*req.TrackBalance) {
+		return nil, ErrCurrentBalanceAlone
+	}
 
 	if _, err := s.store.Update(ctx, userID, id, req, clearCreditFields); err != nil {
 		return nil, err
+	}
+	// Turned back on with the balance it has now: one adjustment row.
+	if req.CurrentBalance != nil {
+		if _, err := s.AdjustBalance(ctx, userID, id, AdjustBalanceRequest{NewBalance: req.CurrentBalance}); err != nil &&
+			!errors.Is(err, ErrAdjustNoOp) {
+			return nil, err
+		}
 	}
 	// sort_order is the caller's own position (not a column of the wallet).
 	if req.SortOrder != nil {
@@ -362,6 +379,9 @@ func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID
 		return nil, err
 	}
 
+	if !current.TrackBalance {
+		return nil, ErrBalanceNotTracked
+	}
 	delta := *req.NewBalance - current.Balance
 	if delta == 0 {
 		return nil, ErrAdjustNoOp

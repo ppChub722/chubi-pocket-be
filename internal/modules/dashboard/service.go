@@ -33,7 +33,11 @@ type Service struct {
 	budgets      *budgets.Service
 	goals        *saving_goals.Service
 	debts        *personal_debts.Service
+	due          shared.DueChecker
 }
+
+// WithDueCheck runs the recurring due check before the dashboard is built.
+func (s *Service) WithDueCheck(fn shared.DueChecker) { s.due = fn }
 
 func NewService(
 	store *Store,
@@ -49,6 +53,11 @@ func NewService(
 // Get builds the dashboard for `month` (YYYY-MM; "" = current month in
 // the caller's timezone).
 func (s *Service) Get(ctx context.Context, userID uuid.UUID, month, headerTZ string) (*Response, error) {
+	if s.due != nil {
+		if err := s.due(ctx, userID, headerTZ); err != nil {
+			return nil, err
+		}
+	}
 	loc, _, err := s.budgets.ResolveTimezone(ctx, userID, headerTZ)
 	if err != nil {
 		return nil, err
@@ -98,10 +107,10 @@ func (s *Service) Get(ctx context.Context, userID uuid.UUID, month, headerTZ str
 	g.Go(func() error { return s.fillRecent(gctx, userID, out) })
 	g.Go(func() error { return s.fillPending(gctx, userID, out) })
 	g.Go(func() error { return s.fillAttention(gctx, userID, out) })
-	var scheduled []scheduledRow
+	var scheduled []upcomingRow
 	g.Go(func() error {
 		var err error
-		scheduled, err = s.store.DueScheduled(gctx, userID, today.AddDate(0, 0, upcomingDays).Format(dateLayout))
+		scheduled, err = s.store.UpcomingItems(gctx, userID, today.Format(dateLayout), today.AddDate(0, 0, upcomingDays).Format(dateLayout))
 		return err
 	})
 	if err := g.Wait(); err != nil {
@@ -196,54 +205,37 @@ func (s *Service) fillTrend(ctx context.Context, userID uuid.UUID, start, end ti
 	return nil
 }
 
-// fillBudgets — every active personal budget at its own current period
-// (weekly / monthly / yearly alike), not just monthly ones.
+// fillBudgets — every active budget at its own current period.
 func (s *Service) fillBudgets(ctx context.Context, userID uuid.UUID, headerTZ string, out *Response) error {
-	r, err := s.budgets.Overview(ctx, userID, "", budgets.ScopeUser, nil, headerTZ)
+	r, err := s.budgets.Totals(ctx, userID, headerTZ)
 	if err != nil {
 		return err
 	}
 	out.Budgets = BudgetsTile{
-		Count:          len(r.Budgets),
+		Count:          r.Count,
 		TotalBudget:    r.TotalBudget,
 		TotalSpent:     r.TotalSpent,
-		UtilizationPct: r.OverallUtilizationPct,
-		OverLimitCount: r.BudgetsOverLimit,
+		UtilizationPct: r.UtilizationPct,
+		OverLimitCount: r.OverLimitCount,
 	}
 	return nil
 }
 
 func (s *Service) fillDebts(ctx context.Context, userID uuid.UUID, out *Response) error {
-	r, err := s.debts.People(ctx, userID)
+	t, err := s.debts.Totals(ctx, userID)
 	if err != nil {
 		return err
-	}
-	t := DebtsTile{OwedToMe: r.TotalOwedToMe, IOwe: r.TotalIOwe, Net: r.NetPosition}
-	for _, p := range r.Data {
-		t.OpenCount += p.OpenCount
 	}
 	out.Debts = t
 	return nil
 }
 
 func (s *Service) fillGoals(ctx context.Context, userID uuid.UUID, out *Response) error {
-	r, err := s.goals.List(ctx, userID, saving_goals.ListFilter{Status: "active"})
+	t, err := s.goals.Totals(ctx, userID)
 	if err != nil {
 		return err
 	}
-	var t GoalsTile
-	for _, g := range r.Data {
-		t.Count++
-		if g.IsCompleted {
-			t.CompletedCount++
-		}
-		t.TotalTarget += g.TargetAmount
-		t.TotalCurrent += math.Min(g.CurrentAmount, g.TargetAmount)
-	}
-	if t.TotalTarget > 0 {
-		t.ProgressPct = round2(t.TotalCurrent / t.TotalTarget * 100)
-	}
-	out.SavingGoals = t
+	out.SavingGoals = *t
 	return nil
 }
 
@@ -257,12 +249,13 @@ func (s *Service) fillRecent(ctx context.Context, userID uuid.UUID, out *Respons
 }
 
 // netWorth — accounts the caller reports on (scope 'none' wallets are
-// hidden from personal figures, spec §14/5). Positive balances are
-// assets, negative ones (credit cards, overdrafts) liabilities.
+// hidden from personal figures, spec §14/5; wallets without a balance
+// too). Positive balances are assets, negative ones (credit cards,
+// overdrafts) liabilities.
 func netWorth(accts []accounts.Account) NetWorth {
 	var nw NetWorth
 	for _, a := range accts {
-		if a.MyReportScope == accounts.ReportScopeNone {
+		if a.MyReportScope == accounts.ReportScopeNone || !a.TrackBalance {
 			continue
 		}
 		nw.AccountsCount++
@@ -277,10 +270,10 @@ func netWorth(accts []accounts.Account) NetWorth {
 	return nw
 }
 
-// buildUpcoming merges scheduled items (overdue included) with credit
-// card / pay-later due dates inside the window. A card only shows when
-// it has an outstanding balance; its amount is that balance.
-func buildUpcoming(today time.Time, scheduled []scheduledRow, accts []accounts.Account) Upcoming {
+// buildUpcoming merges the upcoming recurring items with credit card /
+// pay-later due dates inside the window. A card only shows when it has an
+// outstanding balance; its amount is that balance.
+func buildUpcoming(today time.Time, scheduled []upcomingRow, accts []accounts.Account) Upcoming {
 	up := Upcoming{Days: upcomingDays, Items: make([]UpcomingItem, 0)}
 	for _, r := range scheduled {
 		due, err := time.ParseInLocation(dateLayout, r.DueDate, today.Location())
@@ -289,13 +282,13 @@ func buildUpcoming(today time.Time, scheduled []scheduledRow, accts []accounts.A
 		}
 		days := daysBetween(today, due)
 		up.Items = append(up.Items, UpcomingItem{
-			Kind: KindScheduled, ID: r.ID, Name: r.Name, Type: r.Type, Amount: r.Amount,
+			Kind: KindRecurring, ID: r.ID, Name: r.Name, Type: r.Type, Amount: r.Amount,
 			DueDate: r.DueDate, DaysUntil: days, Overdue: days < 0,
 			IconCode: r.IconCode, LogoURL: r.LogoURL,
 		})
 	}
 	for _, a := range accts {
-		if !accounts.IsCreditType(a.Type) || a.PaymentDueDate == nil || a.Balance >= 0 {
+		if !accounts.IsCreditType(a.Type) || !a.TrackBalance || a.PaymentDueDate == nil || a.Balance >= 0 {
 			continue
 		}
 		due := nextDayOfMonth(today, *a.PaymentDueDate)

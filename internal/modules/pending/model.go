@@ -20,9 +20,10 @@ const (
 	KindCreate     = "create"      // a new transaction
 	KindSettleDebt = "settle_debt" // a new transaction that settles TargetDebtID
 	KindUpdateTx   = "update_tx"   // edits TargetTransactionID
+	KindSaving     = "saving"      // a saving entry (goals v2): never a transaction
 )
 
-// SourceManual — typed in by the user. Other sources (split_paid,
+// SourceManual — typed in by the user. Other sources (
 // project_copy, project_update, ocr, chat) arrive with their features.
 const SourceManual = "manual"
 
@@ -41,6 +42,8 @@ type Draft struct {
 	// ProjectID — the event the bill goes into on confirm (kind create only).
 	// Not checked at save: the event is validated when the draft is submitted.
 	ProjectID *uuid.UUID `json:"project_id,omitempty"`
+	// GoalID — kind saving: the goal the money goes into (absent = spare).
+	GoalID *uuid.UUID `json:"goal_id,omitempty"`
 }
 
 // SubmitError — why a draft didn't go through (kept on the row).
@@ -110,13 +113,14 @@ type ResolvedSplit struct {
 // resolved so the page renders without other calls. A dangling id is null
 // here and its draft key is listed in Missing.
 type DraftResolved struct {
-	Account           *shared.AccountRef  `json:"account"`
-	TransferToAccount *shared.AccountRef  `json:"transfer_to_account"`
-	Category          *shared.CategoryRef `json:"category"`
-	Tags              []shared.TagRef     `json:"tags"`
-	Project           *shared.EventRef    `json:"project"`
-	Splits            []ResolvedSplit     `json:"splits"`
-	Missing           []string            `json:"missing"`
+	Account           *shared.AccountRef    `json:"account"`
+	TransferToAccount *shared.AccountRef    `json:"transfer_to_account"`
+	Category          *shared.CategoryRef   `json:"category"`
+	Tags              []shared.TagRef       `json:"tags"`
+	Project           *shared.EventRef      `json:"project"`
+	Goal              *shared.SavingGoalRef `json:"goal"`
+	Splits            []ResolvedSplit       `json:"splits"`
+	Missing           []string              `json:"missing"`
 }
 
 type Submitted struct {
@@ -125,6 +129,8 @@ type Submitted struct {
 	Rows []transactions.TransactionDetail `json:"rows"`
 	// TransactionID — the row the draft became (Go side only).
 	TransactionID *uuid.UUID `json:"-"`
+	// SavingEntryID — a saving draft: the saving entry it became.
+	SavingEntryID *uuid.UUID `json:"saving_entry_id"`
 }
 
 type Failed struct {

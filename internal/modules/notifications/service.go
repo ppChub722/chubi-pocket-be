@@ -1,6 +1,8 @@
 package notifications
 
 import (
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
+
 	"context"
 	"errors"
 
@@ -10,6 +12,7 @@ import (
 
 type Service struct {
 	store *Store
+	due   shared.DueChecker // the recurring due check (recurring.go)
 }
 
 func NewService(store *Store) *Service {
@@ -59,13 +62,12 @@ func (s *Service) GetSettings(ctx context.Context, userID uuid.UUID) (*Settings,
 // an action.
 var (
 	mutableTypes = map[string]bool{
-		TypeSplitCreated: true, TypeSplitPaid: true,
+		TypeSplitCreated: true, TypeRecurringDue: true, TypeRecurringEnding: true,
 		TypeProjectTxRecordedForYou: true, TypeProjectTxChanged: true, TypeProjectAdded: true,
 		TypeSplitChanged: true,
 	}
 	autoableTypes = map[string]bool{
 		TypeSplitCreated:            true, // add to my debts
-		TypeSplitPaid:               true, // record the receipt
 		TypeProjectTxRecordedForYou: true, // copy into my book
 		TypeProjectTxChanged:        true, // update my copy to match
 		TypeSplitChanged:            true, // update my debt to match

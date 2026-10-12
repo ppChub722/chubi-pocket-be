@@ -1,7 +1,6 @@
 package personal_debts
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -12,7 +11,9 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Handler struct {
@@ -23,70 +24,117 @@ func NewHandler(s *Service) *Handler {
 	return &Handler{service: s}
 }
 
-// GET /v1/personal-debts/people
-// Aggregated by counterparty with net position. Spec §12.5 dashboard.
-func (h *Handler) People(c *gin.Context) {
+func caller(c *gin.Context) (uuid.UUID, bool) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
 		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+	}
+	return userID, ok
+}
+
+// GET /v1/personal-debts/people — one page of people + the header totals.
+func (h *Handler) People(c *gin.Context) {
+	userID, ok := caller(c)
+	if !ok {
 		return
 	}
-	out, err := h.service.People(c.Request.Context(), userID)
+	f := PeopleFilter{
+		Q: c.Query("q"), All: c.Query("all") == "true", Side: c.Query("side"),
+		Page: atoiOr(c.Query("page"), 1), PerPage: atoiOr(c.Query("per_page"), 30),
+	}
+	if f.Side != "" && f.Side != "owed_to_me" && f.Side != "i_owe" {
+		response.BadRequest(c, "VALIDATION_ERROR", "side must be owed_to_me or i_owe", nil)
+		return
+	}
+	out, err := h.service.People(c.Request.Context(), userID, f)
 	if err != nil {
-		response.InternalError(c, "People view failed", err.Error())
+		mapServiceError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, out)
 }
 
-// GET /v1/personal-debts
-func (h *Handler) List(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
+// GET /v1/personal-debts/people/:key — the person page.
+func (h *Handler) Person(c *gin.Context) {
+	userID, ok := caller(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
 		return
 	}
-	f := ListFilter{
-		Direction: c.Query("direction"),
-		Status:    c.Query("status"),
-		Page:      atoiOr(c.Query("page"), 1),
-		PerPage:   atoiOr(c.Query("per_page"), 20),
+	out, err := h.service.Person(c.Request.Context(), userID, c.Param("key"),
+		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 30))
+	if err != nil {
+		mapServiceError(c, err)
+		return
 	}
-	if v := c.Query("counterparty_contact_id"); v != "" {
+	c.JSON(http.StatusOK, out)
+}
+
+// GET /v1/personal-debts/people/:key/entries
+func (h *Handler) Entries(c *gin.Context) {
+	userID, ok := caller(c)
+	if !ok {
+		return
+	}
+	f := EntryFilter{
+		Q: c.Query("q"), Sort: c.Query("sort"), Direction: c.Query("direction"),
+		Money: c.Query("money") == "true",
+		Page:  atoiOr(c.Query("page"), 1), PerPage: atoiOr(c.Query("per_page"), 30),
+	}
+	switch f.Sort {
+	case "", "date_desc", "date_asc", "amount_desc", "amount_asc":
+	default:
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid sort", nil)
+		return
+	}
+	if f.Direction != "" && f.Direction != DirectionPaid && f.Direction != DirectionReceived {
+		response.BadRequest(c, "VALIDATION_ERROR", "direction must be paid or received", nil)
+		return
+	}
+	if v := c.Query("paid"); v != "" {
+		b := v == "true"
+		f.Paid = &b
+	}
+	if v := c.Query("account_id"); v != "" {
 		id, err := uuid.Parse(v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid counterparty_contact_id", nil)
+			response.BadRequest(c, "VALIDATION_ERROR", "Invalid account_id", nil)
 			return
 		}
-		f.CounterpartyContactID = &id
+		f.AccountID = &id
 	}
-	if v := c.Query("from"); v != "" {
-		f.From = &v
+	for _, p := range []struct {
+		key string
+		dst **string
+	}{{"from", &f.From}, {"to", &f.To}} {
+		if v := c.Query(p.key); v != "" {
+			if !validDate(v) {
+				response.BadRequest(c, "VALIDATION_ERROR", "Invalid "+p.key, nil)
+				return
+			}
+			vv := v
+			*p.dst = &vv
+		}
 	}
-	if v := c.Query("to"); v != "" {
-		f.To = &v
-	}
-	out, err := h.service.List(c.Request.Context(), userID, f)
+	out, err := h.service.Entries(c.Request.Context(), userID, c.Param("key"), f)
 	if err != nil {
-		response.InternalError(c, "List failed", err.Error())
+		mapServiceError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/personal-debts (manual create)
-func (h *Handler) Create(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
+// POST /v1/personal-debts/people/:key/entries — the one debt write.
+func (h *Handler) CreateEntry(c *gin.Context) {
+	userID, ok := caller(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
 		return
 	}
-	var req CreateRequest
+	var req CreateEntryRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
-	out, err := h.service.Create(c.Request.Context(), userID, req)
+	out, err := h.service.CreateEntry(c.Request.Context(), userID, c.Param("key"), req)
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -94,18 +142,17 @@ func (h *Handler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, out)
 }
 
-// GET /v1/personal-debts/:id
+// GET /v1/personal-debts/:id — the entry, page-ready (tx detail in debt mode).
 func (h *Handler) Get(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
+	userID, ok := caller(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
 	if !ok {
 		return
 	}
-	out, err := h.service.Get(c.Request.Context(), userID, id)
+	out, err := h.service.GetEntry(c.Request.Context(), userID, id)
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -113,32 +160,22 @@ func (h *Handler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// PUT /v1/personal-debts/:id (direct edit — barter, forgiveness, math fix)
+// PUT /v1/personal-debts/:id
 func (h *Handler) Update(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
+	userID, ok := caller(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
 	if !ok {
 		return
 	}
-	var req UpdateRequest
+	var req UpdateEntryRequest
 	if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
-	// Explicit `null` clears (contract §7); absent keys leave the field.
-	var raw map[string]json.RawMessage
-	if body, ok := c.Get(gin.BodyBytesKey); ok {
-		_ = json.Unmarshal(body.([]byte), &raw)
-	}
-	isNull := func(k string) bool { v, ok := raw[k]; return ok && string(v) == "null" }
-	req.ClearContact = isNull("counterparty_contact_id")
-	req.ClearDescription = isNull("description")
-	req.ClearNote = isNull("note")
-	out, err := h.service.Update(c.Request.Context(), userID, id, req)
+	out, err := h.service.UpdateEntry(c.Request.Context(), userID, id, req)
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -148,65 +185,15 @@ func (h *Handler) Update(c *gin.Context) {
 
 // DELETE /v1/personal-debts/:id
 func (h *Handler) Delete(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
+	userID, ok := caller(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
 	if !ok {
 		return
 	}
-	if err := h.service.Delete(c.Request.Context(), userID, id); err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	response.OK(c, "Personal debt deleted", nil)
-}
-
-// POST /v1/personal-debts/:id/cancel
-func (h *Handler) Cancel(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-	out, err := h.service.Cancel(c.Request.Context(), userID, id)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}
-
-// POST /v1/personal-debts/:id/settle
-// Records a payment against a debt: always a transaction — into
-// account_id, or a floating (no-wallet) row when it is omitted.
-func (h *Handler) Settle(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-	var req SettleRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-		return
-	}
-	// Optional wallet: none = a floating transaction (contract §7, rev.
-	// 2026-10-08). The old ?direct=true is ignored — settling always records.
-	if req.AccountID != nil && *req.AccountID == uuid.Nil {
-		req.AccountID = nil
-	}
-	out, err := h.service.Settle(c.Request.Context(), userID, id, req)
+	out, err := h.service.DeleteEntry(c.Request.Context(), userID, id)
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -217,30 +204,44 @@ func (h *Handler) Settle(c *gin.Context) {
 func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid debt id", nil)
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid entry id", nil)
 		return uuid.Nil, false
 	}
 	return id, true
 }
 
+func validDate(s string) bool {
+	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
+		return false
+	}
+	_, err1 := strconv.Atoi(s[:4])
+	_, err2 := strconv.Atoi(s[5:7])
+	_, err3 := strconv.Atoi(s[8:])
+	return err1 == nil && err2 == nil && err3 == nil
+}
+
 func mapServiceError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, ErrDebtNotFound):
-		response.NotFound(c, "NOT_FOUND", "Personal debt not found")
-	case errors.Is(err, ErrAlreadySettled):
-		response.BadRequest(c, "ALREADY_SETTLED", "Debt is already settled", nil)
-	case errors.Is(err, ErrAlreadyCancelled):
-		response.BadRequest(c, "ALREADY_CANCELLED", "Debt is already cancelled", nil)
-	case errors.Is(err, ErrDebtOverpaid):
-		response.BadRequest(c, "DEBT_OVERPAID", err.Error(), nil)
-	case errors.Is(err, ErrOverpayment):
-		response.BadRequest(c, "OVERPAYMENT", "Settle amount exceeds outstanding", nil)
-	case errors.Is(err, ErrInvalidSettled):
-		response.BadRequest(c, "INVALID_SETTLED_AMOUNT", "settled_amount cannot exceed amount", nil)
+	case errors.Is(err, ErrEntryNotFound):
+		response.NotFound(c, "NOT_FOUND", "Debt entry not found")
+	case errors.Is(err, ErrPersonNotFound):
+		response.NotFound(c, "NOT_FOUND", err.Error())
+	case errors.Is(err, shared.ErrInvalidPersonKey):
+		response.BadRequest(c, "INVALID_PERSON_KEY", err.Error(), nil)
 	case errors.Is(err, ErrContactNotFound):
 		response.BadRequest(c, "CONTACT_NOT_FOUND", "Contact not found", nil)
+	case errors.Is(err, ErrTagsNeedWallet):
+		response.BadRequest(c, "TAGS_NEED_WALLET", err.Error(), nil)
+	case errors.Is(err, ErrMarkPaidNotFound):
+		response.BadRequest(c, "ENTRY_NOT_FOUND", err.Error(), nil)
+	case errors.Is(err, ErrManagedBySource):
+		response.Fail(c, http.StatusConflict, "ENTRY_MANAGED_BY_SOURCE", err.Error(), nil)
+	case errors.Is(err, transactions.ErrAccountForbidden):
+		response.BadRequest(c, "ACCOUNT_NOT_FOUND", "Account not found", nil)
+	case errors.Is(err, transactions.ErrTagNotFound):
+		response.BadRequest(c, "TAG_NOT_FOUND", "Tag not found", nil)
 	default:
-		response.InternalError(c, "Personal debt operation failed", err.Error())
+		response.InternalError(c, "Debt operation failed", err.Error())
 	}
 }
 
@@ -258,9 +259,8 @@ func atoiOr(s string, dflt int) int {
 // POST /v1/personal-debts/split-requests/:notification_id/accept —
 // "add to my debts" on a split_created notification (contract §5).
 func (h *Handler) AcceptSplitRequest(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
+	userID, ok := caller(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
 		return
 	}
 	nid, err := uuid.Parse(c.Param("notification_id"))
@@ -290,9 +290,8 @@ func (h *Handler) AcceptSplitRequest(c *gin.Context) {
 // POST /v1/personal-debts/split-changes/:notification_id/apply —
 // "อัปเดตตาม" on a split_changed notification (one shot).
 func (h *Handler) ApplySplitChange(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
+	userID, ok := caller(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
 		return
 	}
 	nid, err := uuid.Parse(c.Param("notification_id"))

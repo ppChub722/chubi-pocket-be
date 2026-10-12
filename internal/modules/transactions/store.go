@@ -208,6 +208,20 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	if f.NoWallet {
 		whereClauses = append(whereClauses, "t.account_id IS NULL")
 	}
+	if f.CanJoinEvent {
+		// What the event "add existing bills" picker may pull (the can_join_event
+		// rule of a row): mine, expense / income, not in an event, not a debt
+		// entry or system row, no split labelled paid.
+		whereClauses = append(whereClauses, `t.user_id = $1 AND t.type IN ('expense', 'income')
+			AND t.project_id IS NULL AND t.source_personal_debt_id IS NULL AND t.source_project_transaction_id IS NULL
+			AND NOT EXISTS (SELECT 1 FROM categories jc WHERE jc.id = t.category_id AND jc.is_system)
+			AND NOT EXISTS (SELECT 1 FROM personal_debts jd WHERE jd.source_transaction_id = t.id AND jd.user_id = t.user_id AND jd.paid)`)
+	}
+	if f.CounterpartyKey != "" {
+		args = append(args, f.CounterpartyKey)
+		whereClauses = append(whereClauses, fmt.Sprintf(`t.user_id = $1 AND EXISTS (SELECT 1 FROM personal_debts kd
+			WHERE kd.id = t.source_personal_debt_id AND kd.user_id = t.user_id AND %s = $%d)`, shared.DebtKeySQL("kd"), len(args)))
+	}
 
 	where := strings.Join(whereClauses, " AND ")
 
