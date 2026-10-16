@@ -294,3 +294,51 @@ func (h *Handler) DeleteEntry(c *gin.Context) {
 	out, err := h.service.DeleteEntry(c.Request.Context(), uid, id)
 	reply(c, http.StatusOK, out, err)
 }
+
+// PUT /v1/saving-goals/:id/auto-save
+func (h *Handler) PutAutoSave(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	var req AutoSaveRequest
+	if _, ok := bind(c, &req); !ok {
+		return
+	}
+	out, err := h.service.PutAutoSaveGoal(c.Request.Context(), uid, id, req)
+	reply(c, http.StatusOK, out, err)
+}
+
+// DELETE /v1/saving-goals/:id/auto-save
+func (h *Handler) DeleteAutoSave(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.DeleteAutoSaveGoal(c.Request.Context(), uid, id)
+	reply(c, http.StatusOK, out, err)
+}
+
+// PUT /v1/saving-goals/spare/auto-save
+func (h *Handler) PutAutoSaveSpare(c *gin.Context) {
+	uid, ok := user(c)
+	if !ok {
+		return
+	}
+	var req AutoSaveRequest
+	if _, ok := bind(c, &req); !ok {
+		return
+	}
+	out, err := h.service.PutAutoSaveSpare(c.Request.Context(), uid, req)
+	reply(c, http.StatusOK, out, err)
+}
+
+// DELETE /v1/saving-goals/spare/auto-save
+func (h *Handler) DeleteAutoSaveSpare(c *gin.Context) {
+	uid, ok := user(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.DeleteAutoSaveSpare(c.Request.Context(), uid)
+	reply(c, http.StatusOK, out, err)
+}

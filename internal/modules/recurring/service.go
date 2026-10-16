@@ -191,6 +191,9 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 			return err
 		}
 	}
+	if err := s.produceAutoSaves(ctx, tx, userID, today); err != nil {
+		return err
+	}
 	if s.notifs != nil && len(due) > 0 {
 		if err := s.notifs.RecurringDueTx(ctx, tx, userID, len(due)); err != nil {
 			return err

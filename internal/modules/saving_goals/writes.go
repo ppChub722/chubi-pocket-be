@@ -634,11 +634,11 @@ func (s *Service) writeResult(ctx context.Context, userID uuid.UUID, entryIDs, g
 
 // SaveFromDraftTx — pending: a saving draft submitted (save `amount` from
 // the wallet into the goal, nil = spare). Returns the entry id.
-func (s *Service) SaveFromDraftTx(ctx context.Context, tx pgx.Tx, userID, accountID uuid.UUID, goalID *uuid.UUID,
+func (s *Service) SaveFromDraftTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, accountID *uuid.UUID, goalID *uuid.UUID,
 	amount float64, date string, note *string, source string) (uuid.UUID, error) {
 	d := date
 	ids, _, _, err := s.createEntriesTx(ctx, tx, userID, EntryRequest{
-		Kind: KindSave, Amount: amount, Date: &d, Note: note, GoalID: goalID, WalletID: &accountID,
+		Kind: KindSave, Amount: amount, Date: &d, Note: note, GoalID: goalID, WalletID: accountID,
 	}, source)
 	if err != nil {
 		return uuid.Nil, err

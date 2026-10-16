@@ -208,7 +208,7 @@ func main() {
 	// ออม settings; a goal's page lists its auto-saves.
 	pendingService.WithSavings(savingGoalsService)
 	recurringService.WithSavings(savingGoalsService)
-	savingGoalsService.WithAutoSave(recurringService.AutoSaves)
+
 	meService.WithDueCheck(recurringService.DueCheck)
 	dashboardService.WithDueCheck(recurringService.DueCheck)
 	notificationsService.WithDueCheck(recurringService.DueCheck)
@@ -496,6 +496,10 @@ func main() {
 			protected.DELETE("/saving-entries/:id", savingGoalsHandler.DeleteEntry)
 			protected.PUT("/saving-goals/:id", savingGoalsHandler.Update)
 			protected.DELETE("/saving-goals/:id", savingGoalsHandler.Delete)
+			protected.PUT("/saving-goals/:id/auto-save", savingGoalsHandler.PutAutoSave)
+			protected.DELETE("/saving-goals/:id/auto-save", savingGoalsHandler.DeleteAutoSave)
+			protected.PUT("/saving-goals/spare/auto-save", savingGoalsHandler.PutAutoSaveSpare)
+			protected.DELETE("/saving-goals/spare/auto-save", savingGoalsHandler.DeleteAutoSaveSpare)
 			protected.POST("/saving-goals/:id/archive", savingGoalsHandler.Archive)
 			protected.POST("/saving-goals/:id/restore", savingGoalsHandler.Restore)
 

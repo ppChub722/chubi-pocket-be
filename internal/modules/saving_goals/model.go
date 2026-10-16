@@ -119,15 +119,25 @@ type GoalView struct {
 	Currency        string           `json:"currency"`
 	ClosedAt        *time.Time       `json:"closed_at"`
 	Actions         Actions          `json:"actions"`
-	CreatedAt       time.Time        `json:"created_at"`
-	UpdatedAt       time.Time        `json:"updated_at"`
+	// 0.4.0 page numbers (spec 09 §0.7): this month the goal is planned to get
+	// month_plan (its auto-saving amount, else needed_monthly), month_saved is what
+	// went in so far (net), month_short = month_plan − month_saved (≥ 0).
+	// status: reached | on_track | behind | none (behind_months = how late).
+	MonthPlan    *float64  `json:"month_plan"`
+	MonthSaved   float64   `json:"month_saved"`
+	MonthShort   *float64  `json:"month_short"`
+	Status       string    `json:"status"`
+	BehindMonths *int      `json:"behind_months"`
+	AutoSave     *AutoSave `json:"auto_save"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // WalletShare — spec SavingWalletShare.
 type WalletShare struct {
 	Wallet   *shared.AccountRef `json:"wallet"` // nil = money with no wallet
-	Amount   float64           `json:"amount"`
-	SharePct int               `json:"share_pct"`
+	Amount   float64            `json:"amount"`
+	SharePct int                `json:"share_pct"`
 }
 
 // Spare — spec SavingSpare.
@@ -171,19 +181,16 @@ type HistoryPoint struct {
 	Cumulative float64 `json:"cumulative"`
 }
 
-// AutoSave — spec SavingAutoSave (filled by the recurring module).
-type AutoSave struct {
-	Recurring shared.RecurringRef `json:"recurring"`
-	Amount    float64             `json:"amount"`
-	Rule      any                 `json:"rule"`
-	NextDate  *string             `json:"next_date"`
-}
-
 type ListSummary struct {
-	Saved    float64 `json:"saved"`
-	InGoals  float64 `json:"in_goals"`
-	Spare    float64 `json:"spare"`
-	Currency string  `json:"currency"`
+	Saved   float64 `json:"saved"`
+	InGoals float64 `json:"in_goals"`
+	Spare   float64 `json:"spare"`
+	// 0.4.0: saved_total = every saving (goals + unallocated, wallet-less too),
+	// month_short_total = Σ the goals' month_short, unallocated = the spare bucket.
+	SavedTotal      float64 `json:"saved_total"`
+	MonthShortTotal float64 `json:"month_short_total"`
+	Unallocated     float64 `json:"unallocated"`
+	Currency        string  `json:"currency"`
 }
 
 // GoalList — spec SavingGoalList.
@@ -198,7 +205,6 @@ type GoalDetail struct {
 	Goal     GoalView       `json:"goal"`
 	ByWallet []WalletShare  `json:"by_wallet"`
 	History  []HistoryPoint `json:"history"`
-	AutoSave []AutoSave     `json:"auto_save"`
 	Entries  EntryList      `json:"entries"`
 }
 
@@ -206,7 +212,7 @@ type GoalDetail struct {
 type SpareDetail struct {
 	Spare    Spare          `json:"spare"`
 	History  []HistoryPoint `json:"history"`
-	AutoSave []AutoSave     `json:"auto_save"`
+	AutoSave *AutoSave      `json:"auto_save"`
 	Entries  EntryList      `json:"entries"`
 }
 

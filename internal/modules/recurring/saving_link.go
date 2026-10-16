@@ -13,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
-	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 const typeSaving = "saving"
@@ -64,42 +63,3 @@ func checkRuleRefsTx(ctx context.Context, q rowQuerier, userID uuid.UUID, r *Rul
 	return nil
 }
 
-// AutoSaves — saving_goals.AutoSaveLister: the active saving settings into
-// a goal (nil = spare).
-func (s *Service) AutoSaves(ctx context.Context, userID uuid.UUID, goalID *uuid.UUID) ([]saving_goals.AutoSave, error) {
-	cond := `goal_id IS NULL`
-	args := []any{userID}
-	if goalID != nil {
-		cond, args = `goal_id = $2`, append(args, *goalID)
-	}
-	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules
-		WHERE user_id = $1 AND type = 'saving' AND status = 'active' AND `+cond+` ORDER BY created_at, id`, args...)
-	if err != nil {
-		return nil, err
-	}
-	var rules []*Rule
-	for rows.Next() {
-		r, err := scanRule(rows)
-		if err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rules = append(rules, r)
-	}
-	rows.Close()
-	out := []saving_goals.AutoSave{}
-	for _, r := range rules {
-		var next *string
-		var d *string
-		if err := s.db.QueryRow(ctx, `SELECT to_char(MIN(i.date), 'YYYY-MM-DD') FROM recurring_items i
-			WHERE i.rule_id = $1 AND `+statusSQL+` = 'upcoming'`, r.ID).Scan(&d); err != nil {
-			return nil, err
-		}
-		next = d
-		out = append(out, saving_goals.AutoSave{
-			Recurring: shared.RecurringRef{ID: r.ID, Name: r.Name, IconCode: r.IconCode},
-			Amount:    r.Amount, Rule: r.apiRule(), NextDate: next,
-		})
-	}
-	return out, nil
-}

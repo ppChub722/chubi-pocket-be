@@ -59,7 +59,6 @@ func newRecFix(t *testing.T) *recFix {
 	f.savings = saving_goals.NewService(saving_goals.NewStore(pool))
 	f.pending.WithSavings(f.savings)
 	f.svc.WithSavings(f.savings)
-	f.savings.WithAutoSave(f.svc.AutoSaves)
 
 	h := NewHandler(f.svc)
 	th := transactions.NewHandler(f.txs)
@@ -527,7 +526,7 @@ func TestRecurringSaving(t *testing.T) {
 		t.Errorf("a saving moved money: %v", f.balance())
 	}
 	page, err := f.savings.Get(f.ctx, f.me, goal, 20)
-	if err != nil || page.Goal.SavedAmount != 4000 || len(page.AutoSave) != 1 || page.Entries.Data[0].Source != "recurring" ||
+	if err != nil || page.Goal.SavedAmount != 4000 || page.Entries.Data[0].Source != "recurring" ||
 		page.Entries.Data[0].Recurring == nil {
 		t.Errorf("goal page = %+v %v", page, err)
 	}
@@ -536,5 +535,69 @@ func TestRecurringSaving(t *testing.T) {
 	f.call("DELETE", "/recurring-items/"+produced[0].ID.String()+"?delete_linked_tx=true", "deleteRecurringItem", nil, 200, &del)
 	if page, _ = f.savings.Get(f.ctx, f.me, goal, 20); page.Goal.SavedAmount != 0 {
 		t.Errorf("after delete: saved %v", page.Goal.SavedAmount)
+	}
+}
+
+// Goal auto-saving: the due check makes ONE saving draft a month, on the
+// setting's day, from its wallet or with none; it does not repeat in the month.
+func TestGoalAutoSaveDraft(t *testing.T) {
+	f := newRecFix(t)
+	goal := uuid.New()
+	f.exec(`INSERT INTO saving_goals (id, user_id, name, target_amount) VALUES ($1, $2, 'Japan', 80000)`, goal, f.me)
+	day := f.today.Day()
+	// Not yet due: a day after today (when today is not the last day), no draft.
+	if day < 28 {
+		if err := f.savings.SetAutoSave(f.ctx, f.me, &goal, saving_goals.AutoSaveRequest{Amount: 500, Day: day + 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.svc.DueCheck(f.ctx, f.me, ""); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM pending_transactions WHERE user_id = $1 AND source = 'auto_save'`, f.me).Scan(&n)
+		if n != 0 {
+			t.Fatalf("drafts before the day = %d", n)
+		}
+	}
+	// Due today, from the wallet; and no wallet for unallocated.
+	if err := f.savings.SetAutoSave(f.ctx, f.me, &goal, saving_goals.AutoSaveRequest{Amount: 500, Day: day, AccountID: &f.wallet}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.savings.SetAutoSave(f.ctx, f.me, nil, saving_goals.AutoSaveRequest{Amount: 100, Day: day}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ { // the second run changes nothing
+		if err := f.svc.DueCheck(f.ctx, f.me, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := f.pool.Query(f.ctx, `SELECT kind, draft->>'goal_id', draft->>'account_id', (draft->>'amount')::float8
+		FROM pending_transactions WHERE user_id = $1 AND source = 'auto_save' ORDER BY (draft->>'amount')::float8`, f.me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type d struct {
+		kind         string
+		goal, wallet *string
+		amount       float64
+	}
+	var got []d
+	for rows.Next() {
+		var x d
+		if err := rows.Scan(&x.kind, &x.goal, &x.wallet, &x.amount); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, x)
+	}
+	if len(got) != 2 || got[0].amount != 100 || got[0].goal != nil || got[0].wallet != nil ||
+		got[1].amount != 500 || got[1].goal == nil || *got[1].goal != goal.String() || got[1].wallet == nil || got[0].kind != "saving" {
+		t.Fatalf("drafts = %+v", got)
+	}
+	// The goal page shows the setting and the next date moved to next month.
+	page, err := f.savings.Get(f.ctx, f.me, goal, 20)
+	if err != nil || page.Goal.AutoSave == nil || page.Goal.AutoSave.Amount != 500 || page.Goal.AutoSave.Wallet == nil ||
+		page.Goal.AutoSave.NextDate == nil || *page.Goal.AutoSave.NextDate <= f.day(0) {
+		t.Errorf("goal auto_save = %+v (%v)", page.Goal.AutoSave, err)
 	}
 }

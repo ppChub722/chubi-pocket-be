@@ -19,18 +19,11 @@ const (
 	entriesPerPage  = 20
 )
 
-// AutoSaveLister — the active recurring ออม rules into a goal (nil = the
-// spare bucket); wired from the recurring module.
-type AutoSaveLister func(ctx context.Context, userID uuid.UUID, goalID *uuid.UUID) ([]AutoSave, error)
-
 type Service struct {
-	store    *Store
-	autoSave AutoSaveLister
+	store *Store
 }
 
 func NewService(store *Store) *Service { return &Service{store: store} }
-
-func (s *Service) WithAutoSave(fn AutoSaveLister) { s.autoSave = fn }
 
 func round2(f float64) float64 { return math.Round(f*100) / 100 }
 
@@ -296,8 +289,37 @@ func (s *Service) goalViews(ctx context.Context, userID uuid.UUID, goals []*Goal
 	if err != nil {
 		return nil, err
 	}
+	autos, err := s.autoViews(ctx, userID, today)
+	if err != nil {
+		return nil, err
+	}
+	month := monthKey(today)
 	for _, g := range goals {
-		out = append(out, goalView(g, saved[g.ID], nets[g.ID], today, currency))
+		v := goalView(g, saved[g.ID], nets[g.ID], today, currency)
+		v.AutoSave = autos[g.ID]
+		v.MonthSaved = round2(nets[g.ID][month])
+		active := v.State == StateActive
+		switch {
+		case !active:
+		case v.AutoSave != nil:
+			v.MonthPlan = fptr(v.AutoSave.Amount)
+		case v.NeededMonthly != nil:
+			v.MonthPlan = v.NeededMonthly
+		}
+		if v.MonthPlan != nil {
+			v.MonthShort = fptr(round2(math.Max(0, *v.MonthPlan-v.MonthSaved)))
+		}
+		switch v.Pace {
+		case "reached":
+			v.Status = "reached"
+		case "on_track":
+			v.Status = "on_track"
+		case "late":
+			v.Status, v.BehindMonths = "behind", v.LateMonths
+		default:
+			v.Status = "none"
+		}
+		out = append(out, v)
 	}
 	return out, nil
 }
@@ -493,6 +515,13 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status string) (*G
 		return nil, err
 	}
 	out.Summary.Saved, out.Summary.InGoals, out.Summary.Spare = t.Saved, t.InGoals, t.Spare
+	out.Summary.SavedTotal, out.Summary.Unallocated = t.Saved, t.Spare
+	for _, v := range out.Data {
+		if v.MonthShort != nil {
+			out.Summary.MonthShortTotal += *v.MonthShort
+		}
+	}
+	out.Summary.MonthShortTotal = round2(out.Summary.MonthShortTotal)
 	return out, nil
 }
 
@@ -509,7 +538,7 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int) (*
 	if err != nil {
 		return nil, err
 	}
-	out := &GoalDetail{Goal: views[0], AutoSave: []AutoSave{}}
+	out := &GoalDetail{Goal: views[0]}
 	per, err := bucketBalances(ctx, s.store.db, userID, &g.ID)
 	if err != nil {
 		return nil, err
@@ -522,11 +551,6 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int) (*
 		return nil, err
 	}
 	out.History = history(nets[g.ID], g.CreatedAt, today)
-	if s.autoSave != nil {
-		if out.AutoSave, err = s.autoSave(ctx, userID, &g.ID); err != nil {
-			return nil, err
-		}
-	}
 	if out.Entries, err = s.entryPage(ctx, userID, whereGoal, 1, perPage, g.ID); err != nil {
 		return nil, err
 	}
@@ -539,7 +563,12 @@ func (s *Service) Spare(ctx context.Context, userID uuid.UUID, perPage int) (*Sp
 	if err != nil {
 		return nil, err
 	}
-	out := &SpareDetail{AutoSave: []AutoSave{}}
+	out := &SpareDetail{}
+	autos, err := s.autoViews(ctx, userID, today)
+	if err != nil {
+		return nil, err
+	}
+	out.AutoSave = autos[uuid.Nil]
 	if out.Spare, err = s.spare(ctx, s.store.db, userID); err != nil {
 		return nil, err
 	}
@@ -548,11 +577,6 @@ func (s *Service) Spare(ctx context.Context, userID uuid.UUID, perPage int) (*Sp
 		return nil, err
 	}
 	out.History = history(nets[uuid.Nil], today, today)
-	if s.autoSave != nil {
-		if out.AutoSave, err = s.autoSave(ctx, userID, nil); err != nil {
-			return nil, err
-		}
-	}
 	if out.Entries, err = s.entryPage(ctx, userID, whereSpare, 1, perPage); err != nil {
 		return nil, err
 	}

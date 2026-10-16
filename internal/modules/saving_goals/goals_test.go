@@ -49,6 +49,10 @@ func newGoalFix(t *testing.T) *goalFix {
 		g.GET("/saving-goals/:id", h.Get)
 		g.PUT("/saving-goals/:id", h.Update)
 		g.DELETE("/saving-goals/:id", h.Delete)
+		g.PUT("/saving-goals/:id/auto-save", h.PutAutoSave)
+		g.DELETE("/saving-goals/:id/auto-save", h.DeleteAutoSave)
+		g.PUT("/saving-goals/spare/auto-save", h.PutAutoSaveSpare)
+		g.DELETE("/saving-goals/spare/auto-save", h.DeleteAutoSaveSpare)
 		g.POST("/saving-goals/:id/close", h.Close)
 		g.POST("/saving-goals/:id/archive", h.Archive)
 		g.POST("/saving-goals/:id/restore", h.Restore)
@@ -353,5 +357,48 @@ func TestSavingsWithoutWallet(t *testing.T) {
 	f.call("GET", "/saving-goals/"+goal.String(), "getSavingGoal", nil, http.StatusOK, &g)
 	if g.Goal.SavedAmount != 500 {
 		t.Errorf("saved after unlinking = %v, want 500", g.Goal.SavedAmount)
+	}
+}
+
+// TestGoalMonthNumbersAndAutoSave — the goal's month plan / saved / short and
+// status, the list summary, and the auto-save endpoints.
+func TestGoalMonthNumbersAndAutoSave(t *testing.T) {
+	f := newGoalFix(t)
+	dl := f.today.AddDate(0, 5, 0).Format(dateLayout)
+	goal := f.goal("Japan", 80000, &dl)
+	f.save(f.kbank, &goal, 10000)
+
+	var d GoalDetail
+	f.call("GET", "/saving-goals/"+goal.String(), "getSavingGoal", nil, http.StatusOK, &d)
+	g := d.Goal
+	if g.MonthSaved != 10000 || g.MonthPlan == nil || g.MonthShort == nil || *g.MonthShort != round2(*g.MonthPlan-10000) && *g.MonthShort != 0 || g.AutoSave != nil {
+		t.Fatalf("goal month numbers = %+v", g)
+	}
+	// An auto-saving amount becomes the plan.
+	f.call("PUT", "/saving-goals/"+goal.String()+"/auto-save", "setGoalAutoSave",
+		map[string]any{"amount": 15000, "day": 31, "account_id": f.kbank}, http.StatusOK, &d)
+	g = d.Goal
+	if g.AutoSave == nil || g.AutoSave.Day != 31 || g.AutoSave.Wallet == nil || g.AutoSave.Wallet.ID != f.kbank ||
+		g.MonthPlan == nil || *g.MonthPlan != 15000 || g.MonthShort == nil || *g.MonthShort != 5000 {
+		t.Fatalf("with auto-save = plan %v short %v auto %+v", g.MonthPlan, g.MonthShort, g.AutoSave)
+	}
+	f.call("PUT", "/saving-goals/"+goal.String()+"/auto-save", "", map[string]any{"amount": 0, "day": 5}, http.StatusBadRequest, nil)
+	f.call("PUT", "/saving-goals/"+goal.String()+"/auto-save", "", map[string]any{"amount": 10, "day": 32}, http.StatusBadRequest, nil)
+	f.call("PUT", "/saving-goals/"+goal.String()+"/auto-save", "", map[string]any{"amount": 10, "day": 5, "account_id": f.untrack}, http.StatusBadRequest, nil)
+
+	var l GoalList
+	f.call("GET", "/saving-goals", "listSavingGoals", nil, http.StatusOK, &l)
+	if l.Summary.SavedTotal != 10000 || l.Summary.MonthShortTotal != 5000 || l.Summary.Unallocated != 0 {
+		t.Errorf("summary = %+v", l.Summary)
+	}
+	var sp SpareDetail
+	f.call("PUT", "/saving-goals/spare/auto-save", "setSpareAutoSave", map[string]any{"amount": 200, "day": 1}, http.StatusOK, &sp)
+	if sp.AutoSave == nil || sp.AutoSave.Wallet != nil || sp.AutoSave.Amount != 200 {
+		t.Errorf("spare auto-save = %+v", sp.AutoSave)
+	}
+	f.call("DELETE", "/saving-goals/spare/auto-save", "clearSpareAutoSave", nil, http.StatusOK, &sp)
+	f.call("DELETE", "/saving-goals/"+goal.String()+"/auto-save", "clearGoalAutoSave", nil, http.StatusOK, &d)
+	if sp.AutoSave != nil || d.Goal.AutoSave != nil {
+		t.Errorf("cleared: spare %+v goal %+v", sp.AutoSave, d.Goal.AutoSave)
 	}
 }

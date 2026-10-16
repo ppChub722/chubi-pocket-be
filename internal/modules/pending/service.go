@@ -373,7 +373,7 @@ func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *Pending
 	return &txID, nil
 }
 
-// submitSaving — a saving entry from the draft (wallet → goal / spare),
+// submitSaving — a saving entry from the draft (wallet or none → goal / spare),
 // removing the draft, one DB tx. Returns the entry id.
 func (s *Service) submitSaving(ctx context.Context, userID uuid.UUID, p *PendingTransaction) (*uuid.UUID, error) {
 	if s.savings == nil {
@@ -385,9 +385,6 @@ func (s *Service) submitSaving(ctx context.Context, userID uuid.UUID, p *Pending
 	}
 	if d.Date == nil {
 		return nil, &submitErr{"MISSING_DATE", "date is required"}
-	}
-	if d.AccountID == nil {
-		return nil, &submitErr{"MISSING_ACCOUNT", "a wallet is required"}
 	}
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -402,7 +399,7 @@ func (s *Service) submitSaving(ctx context.Context, userID uuid.UUID, p *Pending
 	if note == nil {
 		note = d.Description
 	}
-	id, err := s.savings.SaveFromDraftTx(ctx, tx, userID, *d.AccountID, d.GoalID, *d.Amount, *d.Date, note, source)
+	id, err := s.savings.SaveFromDraftTx(ctx, tx, userID, d.AccountID, d.GoalID, *d.Amount, *d.Date, note, source)
 	if err != nil {
 		return nil, err
 	}

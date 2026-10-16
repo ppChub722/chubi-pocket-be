@@ -4223,6 +4223,75 @@ paths:
       x-breaking: v2 body (no linked_account_id / allocation_pct).
       x-used-by:
         - { page: goal-detail, calls: 1 }
+  /saving-goals/{id}/auto-save:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    put:
+      tags: [Saving goals]
+      summary: Set a goal's auto-saving
+      operationId: setGoalAutoSave
+      description: 'Creates or replaces the goal''s auto-saving: `amount` on `day` of each month, from `account_id` or no wallet. On the day the due check makes ONE saving draft (🐷, source auto_save) per month; the user confirms it (a wallet-less draft saves with no wallet). Returns the goal page. 404 / 409 GOAL_NOT_ACTIVE for a closed goal.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SavingAutoSaveRequest' }
+      responses:
+        '200':
+          description: 'The goal page.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SavingGoalDetail' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-breaking: 'New (0.4.0). Replaces the recurring ออม settings.'
+    delete:
+      tags: [Saving goals]
+      summary: Stop a goal's auto-saving
+      operationId: clearGoalAutoSave
+      description: 'Idempotent. Returns the goal page.'
+      responses:
+        '200':
+          description: 'The goal page.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SavingGoalDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-breaking: 'New (0.4.0).'
+  /saving-goals/spare/auto-save:
+    put:
+      tags: [Saving goals]
+      summary: Set the auto-saving of unallocated money
+      operationId: setSpareAutoSave
+      description: 'Like the goal auto-saving, into the spare bucket (a draft with no goal). Returns the spare page.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SavingAutoSaveRequest' }
+      responses:
+        '200':
+          description: 'The spare page.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SavingSpareDetail' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+      x-breaking: 'New (0.4.0).'
+    delete:
+      tags: [Saving goals]
+      summary: Stop the auto-saving of unallocated money
+      operationId: clearSpareAutoSave
+      description: 'Idempotent. Returns the spare page.'
+      responses:
+        '200':
+          description: 'The spare page.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SavingSpareDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+      x-breaking: 'New (0.4.0).'
   /saving-goals/spare:
     get:
       tags: [Saving goals]
@@ -5793,7 +5862,7 @@ components:
         - pace_monthly = the net saved into the goal over the last 3 months, this month included (fewer when the goal is younger), per month; null when nothing was saved.
         - eta_date = today + ⌈remaining / pace_monthly⌉ months; null when reached or no pace.
         - pace: reached (saved ≥ target) · on_track (eta ≤ deadline) · late (eta after the deadline, or no pace with a deadline; late_months = whole months past it, null without an eta) · none (no deadline, or not active).
-      required: [id, name, description, note, icon_code, target_amount, deadline, state, saved_amount, progress_pct, remaining_amount, days_remaining, needed_monthly, pace_monthly, eta_date, pace, late_months, milestones, currency, closed_at, actions, created_at, updated_at]
+      required: [id, name, description, note, icon_code, target_amount, deadline, state, saved_amount, progress_pct, remaining_amount, days_remaining, needed_monthly, pace_monthly, eta_date, pace, late_months, milestones, currency, closed_at, actions, month_plan, month_saved, month_short, status, behind_months, auto_save, created_at, updated_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         name: { type: string, maxLength: 100 }
@@ -5834,6 +5903,12 @@ components:
             archive: { type: boolean }
             restore: { type: boolean }
             delete: { type: boolean }
+        month_plan: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'What the goal should get THIS month: its auto-saving amount, else needed_monthly; null for a closed goal or when there is neither.' }
+        month_saved: { $ref: '#/components/schemas/Money', description: 'Net saved into the goal so far this month (user timezone).' }
+        month_short: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'max(0, month_plan − month_saved); null with no plan.' }
+        status: { type: string, enum: [reached, on_track, behind, none], description: 'reached = saved ≥ target; on_track = the pace gets there by the deadline; behind = it does not (behind_months); none = no deadline / closed.' }
+        behind_months: { type: [integer, 'null'], description: 'With status behind: how many months late.' }
+        auto_save: { oneOf: [{ $ref: '#/components/schemas/SavingAutoSave' }, { type: 'null' }], description: 'The goal''s auto-saving (null = none).' }
         created_at: { $ref: '#/components/schemas/DateTime' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
     AccountDeletePreview:
@@ -5912,13 +5987,20 @@ components:
         cumulative: { $ref: '#/components/schemas/Money', description: 'The balance at the end of that month (this month: today).' }
     SavingAutoSave:
       type: object
-      description: 'An active recurring ออม into this bucket.'
-      required: [recurring, amount, rule, next_date]
+      description: 'Auto-saving of a goal (or of unallocated money): on `day` of each month a pending saving draft (🐷) of `amount` is made (from `wallet`, or no wallet); the user confirms it.'
+      required: [amount, day, wallet, next_date]
       properties:
-        recurring: { $ref: '#/components/schemas/RecurringRef' }
         amount: { $ref: '#/components/schemas/Money' }
-        rule: { $ref: '#/components/schemas/RecurrenceRule' }
-        next_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }] }
+        day: { type: integer, minimum: 1, maximum: 31, description: 'Day of the month; 31 = the last day of a short month.' }
+        wallet: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'Source wallet; null = none.' }
+        next_date: { $ref: '#/components/schemas/Date', description: 'When the next draft is made (this month''s day if its draft is still to come, else next month''s).' }
+    SavingAutoSaveRequest:
+      type: object
+      required: [amount, day]
+      properties:
+        amount: { type: number, exclusiveMinimum: 0 }
+        day: { type: integer, minimum: 1, maximum: 31 }
+        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Source wallet (active, tracks its balance) or none.' }
     SavingGoalList:
       type: object
       required: [summary, spare, data]
@@ -5926,23 +6008,25 @@ components:
         summary:
           type: object
           description: 'saved = in_goals + spare (active goals and spare; the same numbers as Home / More).'
-          required: [saved, in_goals, spare, currency]
+          required: [saved, in_goals, spare, currency, saved_total, month_short_total, unallocated]
           properties:
             saved: { $ref: '#/components/schemas/Money' }
             in_goals: { $ref: '#/components/schemas/Money' }
             spare: { $ref: '#/components/schemas/Money' }
             currency: { $ref: '#/components/schemas/CurrencyCode' }
+            saved_total: { $ref: '#/components/schemas/Money', description: 'Every saving: goals + unallocated, wallet-less money included (= saved).' }
+            month_short_total: { $ref: '#/components/schemas/Money', description: 'Σ the active goals'' month_short.' }
+            unallocated: { $ref: '#/components/schemas/Money', description: 'The spare bucket (saved money with no goal).' }
         spare: { $ref: '#/components/schemas/SavingSpare' }
         data: { type: array, items: { $ref: '#/components/schemas/SavingGoal' } }
     SavingGoalDetail:
       type: object
       description: 'The goal page in one call.'
-      required: [goal, by_wallet, history, auto_save, entries]
+      required: [goal, by_wallet, history, entries]
       properties:
         goal: { $ref: '#/components/schemas/SavingGoal' }
         by_wallet: { type: array, items: { $ref: '#/components/schemas/SavingWalletShare' } }
         history: { type: array, items: { $ref: '#/components/schemas/SavingHistoryPoint' }, description: 'Month by month from the first entry (or creation) to this month.' }
-        auto_save: { type: array, items: { $ref: '#/components/schemas/SavingAutoSave' } }
         entries: { $ref: '#/components/schemas/SavingEntryList' }
     SavingSpareDetail:
       type: object
@@ -5950,7 +6034,7 @@ components:
       properties:
         spare: { $ref: '#/components/schemas/SavingSpare' }
         history: { type: array, items: { $ref: '#/components/schemas/SavingHistoryPoint' } }
-        auto_save: { type: array, items: { $ref: '#/components/schemas/SavingAutoSave' } }
+        auto_save: { oneOf: [{ $ref: '#/components/schemas/SavingAutoSave' }, { type: 'null' }], description: 'The auto-saving of unallocated money (null = none).' }
         entries: { $ref: '#/components/schemas/SavingEntryList' }
     WalletSavings:
       type: object
