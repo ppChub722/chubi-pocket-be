@@ -1967,6 +1967,19 @@ paths:
             }
           },
           {
+            "name": "dismissed",
+            "in": "query",
+            "description": "Dismissed (hidden) rows are excluded by default. true = only the hidden ones (the \"ที่ซ่อนไว้\" page); all = both.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false",
+                "all"
+              ]
+            }
+          },
+          {
             "name": "actioned",
             "in": "query",
             "schema": {
@@ -2112,6 +2125,22 @@ paths:
         },
         "x-breaking": "Response is NotificationActionResult."
       }
+  /notifications/{id}/restore:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post:
+      tags: [Notifications]
+      summary: Restore a dismissed (hidden) notification
+      operationId: restoreNotification
+      description: 'Clears dismissed_at; the row is back in the default list. Idempotent (a row that is not dismissed is returned as is). Returns the notification and the fresh badges.'
+      responses:
+        '200':
+          description: 'Final state.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationActionResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-breaking: 'New endpoint (0.3.3).'
   /notifications/{id}/dismiss:
     parameters: [{"$ref":"#/components/parameters/IdPath"}]
     post: {

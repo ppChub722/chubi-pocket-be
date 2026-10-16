@@ -117,6 +117,13 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Not
 	case "false":
 		whereClauses = append(whereClauses, "n.read_at IS NULL")
 	}
+	switch strings.ToLower(strings.TrimSpace(f.Dismissed)) {
+	case "true":
+		whereClauses = append(whereClauses, "n.dismissed_at IS NOT NULL")
+	case "all":
+	default:
+		whereClauses = append(whereClauses, "n.dismissed_at IS NULL")
+	}
 	switch strings.ToLower(strings.TrimSpace(f.Actioned)) {
 	case "true":
 		whereClauses = append(whereClauses, "n.actioned_at IS NOT NULL")
@@ -502,4 +509,21 @@ func (s *Store) RefreshSplitCreatedTx(ctx context.Context, tx pgx.Tx, recipientU
 		return false, fmt.Errorf("refresh split_created: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// Restore brings a dismissed (hidden) notification back: dismissed_at is
+// cleared, read_at stays. Idempotent — a row that is not dismissed is
+// returned as is.
+func (s *Store) Restore(ctx context.Context, userID, id uuid.UUID) (*Notification, error) {
+	q := `UPDATE notifications SET dismissed_at = NULL, updated_by_user_id = $1
+		WHERE id = $2 AND recipient_user_id = $1
+		RETURNING ` + notificationColumns
+	n, err := scanNotification(s.db.QueryRow(ctx, q, userID, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotificationNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("restore: %w", err)
+	}
+	return n, nil
 }

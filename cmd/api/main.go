@@ -444,6 +444,7 @@ func main() {
 			protected.POST("/notifications/:id/read", notificationsHandler.MarkRead)
 			protected.POST("/notifications/:id/actioned", notificationsHandler.MarkActioned)
 			protected.POST("/notifications/:id/dismiss", notificationsHandler.MarkDismissed)
+			protected.POST("/notifications/:id/restore", notificationsHandler.Restore)
 			protected.DELETE("/notifications/:id", notificationsHandler.Delete)
 
 			// Projects (Phase 1b.2). Static-path-before-param applies:
