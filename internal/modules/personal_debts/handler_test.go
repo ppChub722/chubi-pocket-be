@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -465,5 +466,28 @@ func TestTransactionFilters(t *testing.T) {
 	f.exec(`UPDATE personal_debts SET paid = TRUE WHERE id = $1`, (*splitBill.Splits)[0].DebtID)
 	if got := ids(transactions.ListFilter{CanJoinEvent: true}); got[splitBill.ID] {
 		t.Errorf("a bill with a split labelled paid can't join an event")
+	}
+}
+
+// TestArchivedContactRules — no new entries with an archived contact
+// (409 CONTACT_ARCHIVED, last_used_at untouched); its existing debts stay in
+// the ledger.
+func TestArchivedContactRules(t *testing.T) {
+	f := newDebtHFix(t)
+	key := "c:" + f.contact.String()
+	f.call("POST", entriesPath(key), map[string]any{"direction": "paid", "amount": 100, "date": "2026-10-01"},
+		"createDebtEntry", http.StatusCreated)
+
+	f.exec(`UPDATE contacts SET status = 'archived', last_used_at = NULL WHERE id = $1`, f.contact)
+	f.code("POST", entriesPath(key), map[string]any{"direction": "paid", "amount": 50, "date": "2026-10-02"},
+		http.StatusConflict, "CONTACT_ARCHIVED")
+	var used *time.Time
+	if err := f.pool.QueryRow(f.ctx, `SELECT last_used_at FROM contacts WHERE id = $1`, f.contact).Scan(&used); err != nil || used != nil {
+		t.Errorf("last_used_at = %v (%v), want untouched", used, err)
+	}
+	// The old debt still counts.
+	people := f.call("GET", "/api/v1/personal-debts/people", nil, "listDebtPeople", http.StatusOK)
+	if len(people["data"].([]any)) != 1 {
+		t.Errorf("people = %v", people)
 	}
 }

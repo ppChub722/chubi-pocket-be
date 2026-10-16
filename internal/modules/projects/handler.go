@@ -619,6 +619,8 @@ func mapQuickCreateError(c *gin.Context, err error) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, ErrQuickTxSplitPaid):
 		response.Fail(c, http.StatusUnprocessableEntity, "TX_SPLIT_PAID", err.Error(), nil)
+	case errors.Is(err, transactions.ErrSplitContactArchived):
+		response.Fail(c, http.StatusConflict, "CONTACT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, transactions.ErrSplitContactNotFound):
 		response.BadRequest(c, "CONTACT_NOT_FOUND", "Split contact not found", nil)
 	case errors.Is(err, ErrQuickTxIsRepayment), errors.Is(err, ErrQuickTxSystemRow):

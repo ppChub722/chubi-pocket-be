@@ -526,13 +526,17 @@ func quickDebtsFromInputsTx(
 	for _, in := range inputs {
 		d := quickDebt{ContactID: in.ContactID, PersonName: in.PersonName, Amount: in.OwedAmount}
 		if in.ContactID != nil {
-			err := tx.QueryRow(ctx, `SELECT linked_user_id FROM contacts WHERE id = $1 AND user_id = $2`,
-				*in.ContactID, callerUserID).Scan(&d.LinkedUserID)
+			var status string
+			err := tx.QueryRow(ctx, `SELECT linked_user_id, status FROM contacts WHERE id = $1 AND user_id = $2`,
+				*in.ContactID, callerUserID).Scan(&d.LinkedUserID, &status)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, transactions.ErrSplitContactNotFound
 			}
 			if err != nil {
 				return nil, fmt.Errorf("split contact: %w", err)
+			}
+			if status == "archived" {
+				return nil, transactions.ErrSplitContactArchived
 			}
 		}
 		out = append(out, d)

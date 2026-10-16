@@ -31,6 +31,9 @@ var (
 	// ErrContactNotFound — the contact doesn't exist or belongs to another
 	// user. Never link an entry to someone else's contact row.
 	ErrContactNotFound = errors.New("contact not found")
+	// ErrContactArchived — no new entries or splits with an archived contact
+	// (409 CONTACT_ARCHIVED); restore the contact first.
+	ErrContactArchived = errors.New("contact is archived")
 	// ErrTagsNeedWallet — tags belong to the wallet transaction.
 	ErrTagsNeedWallet = errors.New("tags go on the wallet transaction: pick a wallet first")
 	// ErrMarkPaidNotFound — a mark_paid_ids entry isn't this person's.
@@ -46,19 +49,24 @@ type querier interface {
 }
 
 // assertContactOwned returns ErrContactNotFound unless contactID is one of
-// userID's own contacts. nil contactID is always fine (free-text name).
+// userID's own contacts, and ErrContactArchived when it is archived (no new
+// debts or splits with an archived contact). nil contactID is always fine
+// (free-text name).
 func assertContactOwned(ctx context.Context, q querier, userID uuid.UUID, contactID *uuid.UUID) error {
 	if contactID == nil {
 		return nil
 	}
-	var ok bool
-	if err := q.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM contacts WHERE id = $1 AND user_id = $2)`,
-		*contactID, userID).Scan(&ok); err != nil {
+	var status string
+	err := q.QueryRow(ctx, `SELECT status FROM contacts WHERE id = $1 AND user_id = $2`,
+		*contactID, userID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrContactNotFound
+	}
+	if err != nil {
 		return fmt.Errorf("check contact owner: %w", err)
 	}
-	if !ok {
-		return ErrContactNotFound
+	if status == "archived" {
+		return ErrContactArchived
 	}
 	return nil
 }
@@ -134,7 +142,7 @@ func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 		return nil, fmt.Errorf("insert entry: %w", err)
 	}
 	if e.ContactID != nil {
-		_, _ = tx.Exec(ctx, `UPDATE contacts SET last_used_at = NOW() WHERE id = $1 AND user_id = $2`,
+		_, _ = tx.Exec(ctx, `UPDATE contacts SET last_used_at = NOW() WHERE id = $1 AND user_id = $2 AND status <> 'archived'`,
 			*e.ContactID, e.UserID)
 	}
 	return row, nil
@@ -531,7 +539,7 @@ func (s *Store) AbsorbForContact(ctx context.Context, userID, contactID uuid.UUI
 		return 0, fmt.Errorf("absorb: %w", err)
 	}
 	if tag.RowsAffected() > 0 {
-		_, _ = tx.Exec(ctx, `UPDATE contacts SET last_used_at = NOW() WHERE id = $1 AND user_id = $2`,
+		_, _ = tx.Exec(ctx, `UPDATE contacts SET last_used_at = NOW() WHERE id = $1 AND user_id = $2 AND status <> 'archived'`,
 			contactID, userID)
 	}
 	if err := tx.Commit(ctx); err != nil {
