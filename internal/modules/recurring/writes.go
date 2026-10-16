@@ -576,7 +576,7 @@ func (s *Service) checkWalletsActive(ctx context.Context, tx pgx.Tx, r *Rule) er
 		return err
 	}
 	if archived {
-		return ErrAccountNotFound
+		return transactions.ErrAccountArchived
 	}
 	return nil
 }

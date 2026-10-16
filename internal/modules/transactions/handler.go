@@ -130,6 +130,9 @@ func (h *Handler) List(c *gin.Context) {
 			*p.dst = &v
 		}
 	}
+	if c.Query("include_archived") == "true" {
+		f.IncludeArchived = true
+	}
 	if c.Query("no_wallet") == "true" {
 		f.NoWallet = true
 	}
@@ -363,6 +366,8 @@ func mapServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrTxNotFound):
 		response.NotFound(c, "NOT_FOUND", "Transaction not found")
+	case errors.Is(err, ErrAccountArchived):
+		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, ErrAccountForbidden):
 		response.NotFound(c, "ACCOUNT_NOT_FOUND", "Account not found")
 	case errors.Is(err, ErrCategoryForbidden):

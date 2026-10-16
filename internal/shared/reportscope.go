@@ -18,7 +18,8 @@ import "fmt"
 // Rows on accounts where U's scope is 'none' — or where U has no
 // membership at all — are excluded. Floating rows (account_id IS NULL,
 // migration 000042 "no wallet") have no membership to consult, so they
-// count for their author only. Personal accounts are backfilled
+// count for their author only. Rows on an ARCHIVED wallet never count
+// (0.3.3: archived = ignored in every calculation). Personal accounts are backfilled
 // with an owner row at 'all' (migration 000039), so single-member
 // behavior is identical to the pre-shared-wallets `user_id = U` filter.
 //
@@ -33,7 +34,9 @@ import "fmt"
 func ReportScopePredicate(txAlias, userParam string) string {
 	// Correlated scalar subquery: pick the governing membership row,
 	// translate its scope into a boolean; no row → NULL → FALSE.
-	return fmt.Sprintf(`CASE WHEN %[1]s.account_id IS NULL THEN %[1]s.user_id = %[2]s ELSE COALESCE((
+	return fmt.Sprintf(`CASE WHEN %[1]s.account_id IS NULL THEN %[1]s.user_id = %[2]s
+	WHEN EXISTS (SELECT 1 FROM accounts ra WHERE ra.id = %[1]s.account_id AND ra.status = 'archived') THEN FALSE
+	ELSE COALESCE((
 		SELECT CASE
 			WHEN am.report_scope = 'all' THEN TRUE
 			WHEN am.report_scope = 'own' THEN %[1]s.user_id = %[2]s

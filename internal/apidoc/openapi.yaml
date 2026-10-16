@@ -69,6 +69,7 @@ paths:
         - { name: from, in: query, schema: { $ref: '#/components/schemas/Date' } }
         - { name: to, in: query, schema: { $ref: '#/components/schemas/Date' } }
         - { name: no_wallet, in: query, description: 'Only rows without a wallet.', schema: { type: boolean } }
+        - { name: include_archived, in: query, description: 'Rows on archived wallets are hidden by default; true shows them (listing that wallet by account_id always does).', schema: { type: boolean } }
         - { name: q, in: query, description: 'Substring over description, note, category (incl. parent) and wallet names (max 100).', schema: { type: string, maxLength: 100 } }
         - { name: tag_id, in: query, description: 'Repeatable; rows having ANY of these tags.', schema: { type: array, items: { $ref: '#/components/schemas/Uuid' } }, style: form, explode: true }
         - { name: sort, in: query, schema: { type: string, enum: [date_desc, date_asc, amount_desc, amount_asc], default: date_desc } }
@@ -838,8 +839,7 @@ paths:
               "type": "string",
               "enum": [
                 "active",
-                "archived",
-                "closed"
+                "archived"
               ],
               "default": "active"
             }
@@ -1066,7 +1066,7 @@ paths:
           "Accounts"
         ],
         "summary": "Archive a wallet",
-        "operationId": "archiveAccount",
+        "operationId": "deleteAccount",
         "description": "Soft delete; returns the wallet with status archived. Errors: 409 ACCOUNT_HAS_MEMBERS (other active members: remove them or transfer first), 403 NOT_OWNER, 404 NOT_FOUND.",
         "responses": {
           "200": {
@@ -2702,6 +2702,28 @@ paths:
         }
       }
 
+  /accounts/{id}/archive:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    post:
+      tags: [Accounts]
+      summary: Archive a wallet
+      operationId: archiveAccount
+      description: 'Owner only; 409 ACCOUNT_HAS_MEMBERS while other members are active. An archived wallet is hidden from the default list (`?status=archived` / `all` show it), ignored by EVERY calculation (wallet totals, summaries, budgets, dashboard; its rows are hidden from `GET /transactions` unless `include_archived=true` or `account_id` is that wallet) and READ-ONLY: any write on it (new / edit / delete a row, transfer in or out, debt entry, recurring setting, goal money) answers 409 ACCOUNT_ARCHIVED until `POST /accounts/{id}/restore`. Idempotent. Returns the wallet (status archived).'
+      responses:
+        '200':
+          description: 'The wallet, archived.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'ACCOUNT_HAS_MEMBERS: other members are still active.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: 'New endpoint (0.3.3). DELETE /accounts/{id} still archives until the wallet delete ships (step 12).'
   /accounts/{id}/restore:
     parameters: [{ $ref: '#/components/parameters/IdPath' }]
     post: {
@@ -6199,8 +6221,7 @@ components:
             "type": "string",
             "enum": [
               "active",
-              "archived",
-              "closed"
+              "archived"
             ]
           },
           "credit_limit": {

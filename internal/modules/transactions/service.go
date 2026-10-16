@@ -17,6 +17,7 @@ import (
 // Service errors — mapped to HTTP codes by the handler.
 var (
 	ErrAccountForbidden            = errors.New("account not found or not owned")
+	ErrAccountArchived             = errors.New("wallet is archived: restore it first")
 	ErrCategoryForbidden           = errors.New("category not found or not owned")
 	ErrCategoryTypeMismatch        = errors.New("category type does not match transaction type")
 	ErrTransferSameAccount         = errors.New("transfer source and destination must differ")
@@ -703,7 +704,7 @@ func (s *Service) authorizeRowMutation(
 		if !active {
 			return ErrRowLocked
 		}
-		return nil
+		return s.assertWritable(ctx, current.AccountID)
 	}
 	// Non-author: visibility guaranteed membership, but keep the guard.
 	if !active {
@@ -711,6 +712,24 @@ func (s *Service) authorizeRowMutation(
 	}
 	if _, catChange := req.CategoryIDChange(); catChange {
 		return ErrCategoryAuthorOnly
+	}
+	return s.assertWritable(ctx, current.AccountID)
+}
+
+// assertWritable — rows on an archived wallet are read-only (409
+// ACCOUNT_ARCHIVED): no edit, delete, tag or split change until restored.
+func (s *Service) assertWritable(ctx context.Context, ids ...*uuid.UUID) error {
+	for _, id := range ids {
+		if id == nil {
+			continue
+		}
+		archived, err := s.store.accountArchived(ctx, *id)
+		if err != nil {
+			return err
+		}
+		if archived {
+			return ErrAccountArchived
+		}
 	}
 	return nil
 }
@@ -1068,7 +1087,7 @@ func (s *Service) authorizePairMutation(
 	}
 	// A wallet-less leg (its wallet was deleted) needs no membership.
 	if (outRow.AccountID == nil || activeOut) && (inRow.AccountID == nil || activeIn) {
-		return nil
+		return s.assertWritable(ctx, outRow.AccountID, inRow.AccountID)
 	}
 	if current.UserID == userID {
 		return ErrRowLocked

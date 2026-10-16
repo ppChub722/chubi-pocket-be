@@ -6,3 +6,5 @@ CREATE UNIQUE INDEX idx_categories_name
     NULLS NOT DISTINCT
     WHERE status = 'active';
 CREATE INDEX idx_categories_user ON categories(user_id, status);
+ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_status_check;
+ALTER TABLE accounts ADD CONSTRAINT accounts_status_check CHECK (status IN ('active', 'archived', 'closed'));

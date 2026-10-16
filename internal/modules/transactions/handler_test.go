@@ -780,3 +780,61 @@ func TestTransferWalletlessLeg(t *testing.T) {
 	}
 	f.call("getTransaction", "GET", outPath, nil, http.StatusNotFound)
 }
+
+// TestArchivedWalletIsIgnoredAndReadOnly — archiving a wallet takes its rows
+// out of every calculation and the default list, and refuses writes on it
+// (409 ACCOUNT_ARCHIVED) until it is restored.
+func TestArchivedWalletIsIgnoredAndReadOnly(t *testing.T) {
+	f := newHFix(t, true)
+	mk := func(acc uuid.UUID, amount float64) uuid.UUID {
+		res := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
+			"type": "expense", "account_id": acc, "amount": amount, "date": "2026-10-05",
+		}, http.StatusCreated))
+		return res.Rows[0].ID
+	}
+	rowA := mk(f.walletA, 100)
+	mk(f.walletB, 50)
+	summary := func() float64 {
+		return decode[transactions.SummaryResponse](t, f.call("getTransactionSummary", "GET",
+			"/api/v1/transactions/summary?from=2026-10-01&to=2026-10-31", nil, http.StatusOK)).TotalExpense
+	}
+	rows := func(q string) int {
+		return len(decode[transactions.ListResponse](t, f.call("listTransactions", "GET",
+			"/api/v1/transactions?from=2026-10-01&to=2026-10-31"+q, nil, http.StatusOK)).Data)
+	}
+	if summary() != 150 || rows("") != 2 {
+		t.Fatalf("before: summary %v rows %d", summary(), rows(""))
+	}
+
+	f.exec(`UPDATE accounts SET status = 'archived' WHERE id = $1`, f.walletA)
+	if got := summary(); got != 50 {
+		t.Errorf("summary with A archived = %v, want 50", got)
+	}
+	if n := rows(""); n != 1 {
+		t.Errorf("default list = %d rows, want 1", n)
+	}
+	if n := rows("&include_archived=true"); n != 2 {
+		t.Errorf("include_archived list = %d rows, want 2", n)
+	}
+	if n := rows("&account_id=" + f.walletA.String()); n != 1 {
+		t.Errorf("list of the archived wallet = %d rows, want its 1", n)
+	}
+
+	path := "/api/v1/transactions/" + rowA.String()
+	create := map[string]any{"type": "expense", "account_id": f.walletA, "amount": 10, "date": "2026-10-06"}
+	f.call("", "POST", "/api/v1/transactions", create, http.StatusConflict)
+	f.call("", "PUT", path, map[string]any{"amount": 90}, http.StatusConflict)
+	f.call("", "DELETE", path, nil, http.StatusConflict)
+	f.call("", "POST", "/api/v1/transactions", map[string]any{
+		"type": "transfer", "account_id": f.walletB, "transfer_to_account_id": f.walletA, "amount": 5, "date": "2026-10-06",
+	}, http.StatusConflict)
+	if f.balance(f.walletA) != -100 {
+		t.Errorf("archived wallet balance moved: %v", f.balance(f.walletA))
+	}
+
+	f.exec(`UPDATE accounts SET status = 'active' WHERE id = $1`, f.walletA)
+	if got := summary(); got != 150 {
+		t.Errorf("summary after restore = %v, want 150", got)
+	}
+	f.call("updateTransaction", "PUT", path, map[string]any{"amount": 90}, http.StatusOK)
+}

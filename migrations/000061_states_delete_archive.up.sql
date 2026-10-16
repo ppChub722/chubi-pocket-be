@@ -10,3 +10,8 @@ CREATE UNIQUE INDEX idx_categories_name
     ON categories(user_id, type, parent_id, LOWER(name))
     NULLS NOT DISTINCT;
 CREATE INDEX idx_categories_user ON categories(user_id);
+
+-- Step 11: a wallet is active or archived ('closed' merged into 'archived').
+UPDATE accounts SET status = 'archived' WHERE status = 'closed';
+ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_status_check;
+ALTER TABLE accounts ADD CONSTRAINT accounts_status_check CHECK (status IN ('active', 'archived'));

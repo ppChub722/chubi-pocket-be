@@ -362,6 +362,9 @@ type ListFilter struct {
 	From       *string // YYYY-MM-DD
 	To         *string
 	NoWallet   bool // true → only rows with account_id IS NULL
+	// IncludeArchived — rows on archived wallets are hidden unless asked for
+	// (or when listing that wallet itself via AccountID).
+	IncludeArchived bool
 	// Contract §1 + dashboard drill-down.
 	Q               string      // substring over description, note, category (incl. parent) and wallet names
 	TagIDs          []uuid.UUID // rows having ANY of these tags

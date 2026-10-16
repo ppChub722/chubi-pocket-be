@@ -167,6 +167,10 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		args = append(args, *f.AccountID)
 		whereClauses = append(whereClauses, fmt.Sprintf("t.account_id = $%d", len(args)))
 	}
+	if f.AccountID == nil && !f.IncludeArchived {
+		whereClauses = append(whereClauses,
+			"NOT EXISTS (SELECT 1 FROM accounts xa WHERE xa.id = t.account_id AND xa.status = 'archived')")
+	}
 	if f.CategoryID != nil {
 		args = append(args, *f.CategoryID)
 		if f.IncludeChildren {
@@ -310,7 +314,8 @@ func (s *Store) LockAccountsForUpdate(ctx context.Context, tx pgx.Tx, ids []uuid
 	return nil
 }
 
-// GetAccountBalanceTx reads the current cached balance under lock. Returns
+// GetAccountBalanceTx reads the current cached balance under lock (an archived wallet is
+// read-only: ErrAccountArchived). Returns
 // also the currency for currency-mismatch checks on transfers.
 //
 // This doubles as the WRITE authorization gate: the caller must hold an
@@ -318,14 +323,28 @@ func (s *Store) LockAccountsForUpdate(ctx context.Context, tx pgx.Tx, ids []uuid
 // require active membership"). Personal accounts pass via the backfilled
 // owner row — no special case.
 func (s *Store) GetAccountBalanceTx(ctx context.Context, tx pgx.Tx, userID, accountID uuid.UUID) (balance float64, currency string, err error) {
+	var status string
 	err = tx.QueryRow(ctx,
-		`SELECT a.balance, a.currency FROM accounts a
+		`SELECT a.balance, a.currency, a.status FROM accounts a
 		 WHERE a.id = $1 AND `+shared.ActiveMembershipPredicate("a.id", "$2"),
-		accountID, userID).Scan(&balance, &currency)
+		accountID, userID).Scan(&balance, &currency, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, "", ErrAccountForbidden
 	}
+	if err == nil && status == "archived" {
+		return 0, "", ErrAccountArchived
+	}
 	return
+}
+
+// accountArchived — true when the wallet is archived (read-only).
+func (s *Store) accountArchived(ctx context.Context, id uuid.UUID) (bool, error) {
+	var archived bool
+	err := s.db.QueryRow(ctx, `SELECT status = 'archived' FROM accounts WHERE id = $1`, id).Scan(&archived)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return archived, err
 }
 
 // ApplyBalanceDeltaTx adjusts accounts.balance by `delta` (positive or

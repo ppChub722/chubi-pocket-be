@@ -82,6 +82,9 @@ func buildTotals(accs []Account, currency string) AccountTotals {
 	t := AccountTotals{Currency: currency, ByType: []TypeTotal{}}
 	byType := map[string]*TypeTotal{}
 	for _, a := range accs {
+		if a.Status == StatusArchived {
+			continue // archived wallets are ignored in every total
+		}
 		if a.IsShared {
 			t.SharedCount++
 		}

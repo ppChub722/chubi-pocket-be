@@ -61,6 +61,7 @@ func (e *accEnv) as(uid uuid.UUID) *gin.Engine {
 		g.GET("/accounts/:id", h.Get)
 		g.PUT("/accounts/:id", h.Update)
 		g.DELETE("/accounts/:id", h.Delete)
+		g.POST("/accounts/:id/archive", h.Archive)
 		g.POST("/accounts/:id/restore", h.Restore)
 		g.POST("/accounts/:id/adjust-balance", h.AdjustBalance)
 		g.POST("/accounts/:id/identifiers", h.AddIdentifier)
@@ -352,7 +353,7 @@ func TestAccountCRUD(t *testing.T) {
 	if code := e.errCode(rs, "DELETE", "/api/v1/accounts/"+old.String(), nil, http.StatusNotFound); code != "NOT_FOUND" {
 		t.Errorf("stranger archive code %q", code)
 	}
-	arch := dec[aJSON](t, e.call(r, "archiveAccount", "DELETE", "/api/v1/accounts/"+old.String(), nil, http.StatusOK))
+	arch := dec[aJSON](t, e.call(r, "deleteAccount", "DELETE", "/api/v1/accounts/"+old.String(), nil, http.StatusOK))
 	if arch.Status != "archived" || arch.ID != old {
 		t.Errorf("archived = %+v", arch)
 	}
@@ -373,6 +374,11 @@ func TestAccountCRUD(t *testing.T) {
 	if rest.Status != "active" {
 		t.Errorf("restored = %+v", rest)
 	}
+	// POST /archive is the same as the old DELETE (idempotent), then back.
+	if a := dec[aJSON](t, e.call(r, "archiveAccount", "POST", "/api/v1/accounts/"+old.String()+"/archive", nil, http.StatusOK)); a.Status != "archived" {
+		t.Errorf("POST archive = %+v", a)
+	}
+	e.call(r, "restoreAccount", "POST", "/api/v1/accounts/"+old.String()+"/restore", nil, http.StatusOK)
 	if code := e.errCode(rs, "POST", "/api/v1/accounts/"+old.String()+"/restore", nil, http.StatusNotFound); code != "NOT_FOUND" {
 		t.Errorf("stranger restore code %q", code)
 	}
@@ -577,7 +583,7 @@ func TestAccountMembers(t *testing.T) {
 		t.Errorf("unknown member code %q", code)
 	}
 	// Now the friend is the only active member again: archive works.
-	if a := dec[aJSON](t, e.call(rf, "archiveAccount", "DELETE", path, nil, http.StatusOK)); a.Status != "archived" {
+	if a := dec[aJSON](t, e.call(rf, "deleteAccount", "DELETE", path, nil, http.StatusOK)); a.Status != "archived" {
 		t.Errorf("archive = %+v", a)
 	}
 }

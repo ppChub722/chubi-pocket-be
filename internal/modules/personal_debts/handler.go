@@ -238,6 +238,8 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "ENTRY_NOT_FOUND", err.Error(), nil)
 	case errors.Is(err, ErrManagedBySource):
 		response.Fail(c, http.StatusConflict, "ENTRY_MANAGED_BY_SOURCE", err.Error(), nil)
+	case errors.Is(err, transactions.ErrAccountArchived):
+		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, transactions.ErrAccountForbidden):
 		response.BadRequest(c, "ACCOUNT_NOT_FOUND", "Account not found", nil)
 	case errors.Is(err, transactions.ErrTagNotFound):

@@ -54,7 +54,7 @@ func (h *Handler) List(c *gin.Context) {
 	}
 
 	status := c.DefaultQuery("status", StatusActive)
-	if status != StatusActive && status != StatusArchived && status != StatusClosed && status != "all" {
+	if status != StatusActive && status != StatusArchived && status != "all" {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
 		return
 	}
@@ -284,4 +284,10 @@ func mapServiceError(c *gin.Context, err error) {
 	default:
 		response.InternalError(c, "Account operation failed", err.Error())
 	}
+}
+
+// POST /v1/accounts/:id/archive (owner only) — hides the wallet, takes it
+// out of every calculation and makes it read-only until restored.
+func (h *Handler) Archive(c *gin.Context) {
+	h.Delete(c)
 }

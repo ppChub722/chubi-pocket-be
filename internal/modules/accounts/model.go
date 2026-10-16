@@ -18,7 +18,6 @@ const (
 
 	StatusActive   = "active"
 	StatusArchived = "archived"
-	StatusClosed   = "closed"
 )
 
 // IsCreditType returns true for the two account types that carry billing fields.
