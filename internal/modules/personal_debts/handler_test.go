@@ -480,6 +480,7 @@ func TestContactsAndDebtsAreIndependent(t *testing.T) {
 		"createDebtEntry", http.StatusCreated)
 
 	f.exec(`UPDATE contacts SET status = 'archived', last_used_at = NULL WHERE id = $1`, f.contact)
+	f.exec(`UPDATE contacts SET nickname = 'Beebee', show_nickname = TRUE WHERE id = $1`, f.contact)
 	f.call("POST", entriesPath(key), map[string]any{"direction": "paid", "amount": 50, "date": "2026-10-02"},
 		"createDebtEntry", http.StatusCreated)
 	f.call("POST", entriesPath(key), map[string]any{"direction": "received", "amount": 30, "date": "2026-10-03"},
@@ -511,7 +512,7 @@ func TestContactsAndDebtsAreIndependent(t *testing.T) {
 		Scan(&n, &linked, &sum, &names); err != nil {
 		t.Fatal(err)
 	}
-	if n != 3 || linked != 0 || sum != 180 || names != "Bee old/Bee old" {
+	if n != 3 || linked != 0 || sum != 180 || names != "Beebee/Beebee" {
 		t.Errorf("after contact delete: rows %d linked %d sum %v names %q", n, linked, sum, names)
 	}
 	people := f.call("GET", "/api/v1/personal-debts/people", nil, "listDebtPeople", http.StatusOK)

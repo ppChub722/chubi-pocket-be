@@ -542,13 +542,16 @@ func (s *Store) AbsorbForContact(ctx context.Context, userID, contactID uuid.UUI
 	return int(tag.RowsAffected()), nil
 }
 
-// RestoreOnContactDeleteTx snapshots the contact's display_name onto every
+// RestoreOnContactDeleteTx snapshots the contact's SHOWN name (nickname / linked
+// profile name / display_name: shared.PersonNameSQL) onto every
 // entry referencing it, BEFORE the FK ON DELETE SET NULL fires (the entries
 // become a typed-name person). Called inside the contact-delete tx.
 func (s *Store) RestoreOnContactDeleteTx(ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID) (int, error) {
 	var displayName string
 	if err := tx.QueryRow(ctx,
-		`SELECT display_name FROM contacts WHERE id = $1 AND user_id = $2`,
+		`SELECT `+shared.PersonNameSQL("c", "u")+` FROM contacts c
+		 LEFT JOIN users u ON u.id = c.linked_user_id
+		 WHERE c.id = $1 AND c.user_id = $2`,
 		contactID, userID).Scan(&displayName); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, nil
