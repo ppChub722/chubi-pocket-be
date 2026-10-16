@@ -8636,7 +8636,7 @@ components:
     BudgetForecast:
       type: object
       description: 'The period dashboard ("ภาพรวม"); figures that don''t apply are null. avg_daily = used / elapsed days (today included); forecast_end = avg_daily × days in the period + expected; forecast_over_date = the first day used + expected + avg_daily × (days after today) passes the amount; daily_allowance = (amount − used − expected) / days left (today included), floored, never below 0. An open-ended budget has no end: avg_monthly, forecast_over_date and this_month instead. Past periods: only history fields.'
-      required: [elapsed_days, total_days, daily_allowance, avg_daily, avg_monthly, forecast_end, forecast_over_by, forecast_over_date, remaining_after_expected, this_month, history_avg, history_count]
+      required: [elapsed_days, total_days, daily_allowance, avg_daily, avg_monthly, forecast_end, forecast_over_by, forecast_over_date, remaining_after_expected, this_month, history_avg, history_count, available, projected_end, days_left, pace_pct]
       properties:
         elapsed_days: { type: [integer, 'null'] }
         total_days: { type: [integer, 'null'] }
@@ -8650,6 +8650,10 @@ components:
         this_month: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
         history_avg: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'Average used of up to 6 periods before this one (recurring only).' }
         history_count: { type: integer }
+        available: { $ref: '#/components/schemas/Money', description: 'limit − used (this period).' }
+        projected_end: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'Where the period ends at the current pace (= forecast_end); null when open-ended or not current.' }
+        days_left: { type: [integer, 'null'], description: 'Days left in the current period, today included; null otherwise.' }
+        pace_pct: { type: [integer, 'null'], description: 'How much of the period has elapsed (elapsed / total days, 0–100) for the pace tick; null otherwise.' }
     BudgetPeriod:
       type: object
       description: 'One period (an instance). `pct` = used / amount (rounded, not clamped); `status` over > warn > pace > ok (pace only for the current period); `tone` danger / warning / neutral. Expected is the current period only.'
@@ -8755,7 +8759,7 @@ components:
     BudgetItem:
       type: object
       description: 'One thing counted in a period.'
-      required: [kind, id, source, counts_as, date, amount, description, category, account, tags, event, recurring]
+      required: [kind, id, source, counts_as, date, amount, description, category, account, tags, event, recurring, reason]
       properties:
         kind: { type: string, enum: [transaction, event_bill, recurring_item, pending], description: 'What `id` points at.' }
         id: { $ref: '#/components/schemas/Uuid' }
@@ -8768,6 +8772,7 @@ components:
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
         tags: { type: array, items: { type: string }, description: 'Tag names.' }
         event: { oneOf: [{ $ref: '#/components/schemas/EventRef' }, { type: 'null' }] }
+        reason: { type: string, enum: [all, category, sub_category, tag, wallet, ''], description: 'Why the row counts in this budget (first match): all = the budget counts all expenses; category = its category is a scope category; sub_category = a sub-category of one; tag = it carries a scope tag; wallet = it is on a scope wallet. Empty only if nothing matches (never for a counted row).' }
         recurring: { oneOf: [{ $ref: '#/components/schemas/RecurringItemLink' }, { type: 'null' }] }
     BudgetItemList:
       type: object

@@ -169,6 +169,20 @@ func TestBudgetRecurringCategory(t *testing.T) {
 	if d.Items.Pagination.Total < 3 || d.Items.Data[0].CountsAs != "expected" {
 		t.Errorf("items = %+v", d.Items)
 	}
+	// Detail numbers (0.4.0): available, the pace tick, and the reason per row.
+	if d.Forecast.Available != 500 || d.Forecast.PacePct == nil || *d.Forecast.PacePct < 0 || *d.Forecast.PacePct > 100 ||
+		d.Forecast.DaysLeft == nil || d.Forecast.ProjectedEnd == nil {
+		t.Errorf("forecast = %+v", d.Forecast)
+	}
+	reasons := map[string]int{}
+	for _, it := range d.Items.Data {
+		if it.CountsAs == "used" {
+			reasons[it.Reason]++
+		}
+	}
+	if reasons[ReasonCategory] != 1 || reasons[ReasonSubCategory] != 1 {
+		t.Errorf("reasons = %v, want one category (Food) and one sub_category (Cafe)", reasons)
+	}
 	if d.Periods.Data[1].Used != 400 || d.Periods.Data[1].IsCurrent {
 		t.Errorf("last month = %+v", d.Periods.Data[1])
 	}

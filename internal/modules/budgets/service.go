@@ -143,7 +143,7 @@ type figures struct {
 // forecastOf — the period dashboard (current & active only; else the
 // history fields alone).
 func forecastOf(r *periodRow, f figures, today time.Time, live bool) (Forecast, bool) {
-	out := Forecast{RemainingAfterExpected: round2(r.Amount - f.used - f.expected)}
+	out := Forecast{RemainingAfterExpected: round2(r.Amount - f.used - f.expected), Available: round2(r.Amount - f.used)}
 	if !live {
 		out.RemainingAfterExpected = round2(r.Amount - f.used)
 		return out, false
@@ -189,7 +189,11 @@ func forecastOf(r *periodRow, f figures, today time.Time, live bool) (Forecast, 
 	left := days(today, *r.End) + 1
 	out.TotalDays = iptr(total)
 	end := round2(avg*float64(total) + f.expected)
-	out.ForecastEnd = fptr(end)
+	out.ForecastEnd, out.ProjectedEnd = fptr(end), fptr(end)
+	if left > 0 {
+		out.DaysLeft = iptr(left)
+	}
+	out.PacePct = iptr(int(math.Round(math.Min(1, float64(elapsed)/float64(total)) * 100)))
 	if end > r.Amount+0.005 {
 		out.ForecastOverBy = fptr(round2(end - r.Amount))
 	}
@@ -339,10 +343,10 @@ func budgetView(b *Budget, state string, p Period, rf *refs) View {
 	return v
 }
 
-func itemView(c countRow, rf *refs) Item {
+func itemView(c countRow, rf *refs, reason func(countRow) string) Item {
 	it := Item{
 		Kind: c.Kind, ID: c.ID, Source: c.Source, CountsAs: c.CountsAs, Date: dstr(c.Date), Amount: round2(c.Amount),
-		Description: c.Description, Tags: c.Tags,
+		Description: c.Description, Tags: c.Tags, Reason: reason(c),
 	}
 	if c.CategoryID != nil {
 		if ref, ok := rf.cats[*c.CategoryID]; ok {
@@ -715,11 +719,15 @@ func (s *Service) detail(ctx context.Context, b *Budget, periodID *uuid.UUID, to
 	}
 	out.Periods.HasMore = len(prs) > recentPeriods
 	// The first page of items.
-	out.Items = pageItems(f.rows, rf, 1, itemsPerPage)
+	reason, err := s.reasoner(ctx, b)
+	if err != nil {
+		return nil, err
+	}
+	out.Items = pageItems(f.rows, rf, reason, 1, itemsPerPage)
 	return out, nil
 }
 
-func pageItems(rows []countRow, rf *refs, page, perPage int) ItemList {
+func pageItems(rows []countRow, rf *refs, reason func(countRow) string, page, perPage int) ItemList {
 	if page < 1 {
 		page = 1
 	}
@@ -728,7 +736,7 @@ func pageItems(rows []countRow, rf *refs, page, perPage int) ItemList {
 	}
 	out := ItemList{Data: []Item{}, Pagination: shared.NewPage(page, perPage, len(rows))}
 	for i := (page - 1) * perPage; i < len(rows) && i < page*perPage; i++ {
-		out.Data = append(out.Data, itemView(rows[i], rf))
+		out.Data = append(out.Data, itemView(rows[i], rf, reason))
 	}
 	return out
 }
@@ -853,7 +861,11 @@ func (s *Service) Items(ctx context.Context, userID, id uuid.UUID, periodID *uui
 	if err != nil {
 		return nil, err
 	}
-	out := pageItems(rows, rf, page, perPage)
+	reason, err := s.reasoner(ctx, b)
+	if err != nil {
+		return nil, err
+	}
+	out := pageItems(rows, rf, reason, page, perPage)
 	return &out, nil
 }
 

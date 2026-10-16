@@ -220,6 +220,13 @@ type Forecast struct {
 	ThisMonth              *float64 `json:"this_month"`
 	HistoryAvg             *float64 `json:"history_avg"`
 	HistoryCount           int      `json:"history_count"`
+	// 0.4.0 detail numbers: available = limit − used; projected_end = forecast_end;
+	// days_left (today included) and pace_pct = elapsed / total days (the pace
+	// tick); the last three are null for an open-ended or non-current period.
+	Available    float64  `json:"available"`
+	ProjectedEnd *float64 `json:"projected_end"`
+	DaysLeft     *int     `json:"days_left"`
+	PacePct      *int     `json:"pace_pct"`
 }
 
 // SourceRow — spec BudgetSourceRow.
@@ -251,6 +258,8 @@ type Item struct {
 	Tags        []string                  `json:"tags"`
 	Event       *shared.EventRef          `json:"event"`
 	Recurring   *shared.RecurringItemLink `json:"recurring"`
+	// Reason — why the row counts here: all | category | sub_category | tag | wallet.
+	Reason string `json:"reason"`
 }
 
 type ItemList struct {
