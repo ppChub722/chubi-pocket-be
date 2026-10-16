@@ -149,26 +149,43 @@ func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 func peopleSQL(keyFilter string) string {
 	return `
 		WITH e AS (
-			SELECT ` + shared.DebtKeySQL("pd") + ` AS key,
+			SELECT ` + shared.DebtKeySQL("pd") + ` AS key, pd.id,
 			       pd.counterparty_contact_id AS cid, pd.counterparty_person_name AS snap,
 			       ` + shared.DebtSignedSQL("pd") + ` AS signed, pd.paid, pd.date, pd.created_at
 			FROM personal_debts pd
 			WHERE pd.user_id = $1 ` + keyFilter + `
+		), e2 AS (
+			-- the running balance in book order; a cycle ends where it hits 0
+			SELECT e.*, ROW_NUMBER() OVER w AS rn, SUM(signed) OVER w AS run
+			FROM e WINDOW w AS (PARTITION BY key ORDER BY date, created_at, id)
+		), e3 AS (
+			SELECT e2.*, MAX(CASE WHEN ABS(run) < 0.005 THEN rn END) OVER (PARTITION BY key) AS cleared_rn
+			FROM e2
 		), g AS (
 			SELECT key, (ARRAY_AGG(cid))[1] AS cid,
 			       (ARRAY_AGG(snap ORDER BY created_at DESC))[1] AS snap,
 			       SUM(signed) AS net,
 			       COUNT(*) FILTER (WHERE NOT paid) AS open_count,
-			       COUNT(*) AS entry_count, MAX(date) AS last
-			FROM e GROUP BY key
+			       COUNT(*) AS entry_count, MAX(date) AS last,
+			       MAX(date) FILTER (WHERE rn = cleared_rn) AS cleared,
+			       MIN(date) FILTER (WHERE NOT paid AND (cleared_rn IS NULL OR rn > cleared_rn)) AS oldest_open
+			FROM e3 GROUP BY key
 		)
 		SELECT g.key, g.cid, COALESCE(` + shared.PersonNameSQL("c", "lu") + `, g.snap) AS name,
 		       CASE WHEN c.id IS NOT NULL THEN ` + shared.PersonIconSQL("c", "lu") + ` END AS icon,
-		       lu.id AS linked, g.net, g.open_count, g.entry_count, g.last
+		       lu.id AS linked, g.net, g.open_count, g.entry_count, g.last,
+		       to_char(g.cleared, 'YYYY-MM-DD') AS cleared_at,
+		       (` + todayInUserTZ + ` - g.oldest_open) AS days_out
 		FROM g
 		LEFT JOIN contacts c ON c.id = g.cid AND c.user_id = $1
 		LEFT JOIN users lu ON lu.id = c.linked_user_id`
 }
+
+// todayInUserTZ — the user's calendar date today (their stored timezone, else
+// Asia/Bangkok); $1 = user id.
+const todayInUserTZ = `(NOW() AT TIME ZONE COALESCE(
+	(SELECT z.name FROM pg_timezone_names z JOIN user_preferences up ON up.preferences->>'timezone' = z.name
+	 WHERE up.user_id = $1 LIMIT 1), 'Asia/Bangkok'))::date`
 
 // openSQL — the person has something open: net ≠ 0 or an entry not labelled paid.
 const openSQL = `(ABS(p.net) > 0.005 OR p.open_count > 0)`
@@ -182,7 +199,7 @@ func scanPerson(rows pgx.Rows) (DebtPerson, error) {
 		linked *uuid.UUID
 		last   *string
 	)
-	if err := rows.Scan(&p.Key, &cid, &name, &icon, &linked, &p.Net, &p.OpenCount, &p.EntryCount, &last); err != nil {
+	if err := rows.Scan(&p.Key, &cid, &name, &icon, &linked, &p.Net, &p.OpenCount, &p.EntryCount, &last, &p.ClearedAt, &p.DaysOutstanding); err != nil {
 		return p, err
 	}
 	p.Net = round2(p.Net)
@@ -211,7 +228,7 @@ func (s *Store) listPeople(ctx context.Context, userID uuid.UUID, f PeopleFilter
 		args = append(args, "%"+shared.EscapeLike(q)+"%")
 		where = append(where, fmt.Sprintf("p.name ILIKE $%d", len(args)))
 	}
-	base := `SELECT key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD')
+	base := `SELECT key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD'), cleared_at, days_out
 		FROM (` + peopleSQL("") + `) p WHERE ` + strings.Join(where, " AND ")
 	var total int
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM (`+base+`) x`, args...).Scan(&total); err != nil {
@@ -241,14 +258,17 @@ func (s *Store) totals(ctx context.Context, q shared.Querier, userID uuid.UUID) 
 	rows, err := q.Query(ctx, `
 		SELECT COALESCE(SUM(p.net) FILTER (WHERE p.net > 0.005), 0),
 		       COALESCE(SUM(-p.net) FILTER (WHERE p.net < -0.005), 0),
-		       COUNT(*) FILTER (WHERE `+openSQL+`)
+		       COUNT(*) FILTER (WHERE `+openSQL+`),
+		       COUNT(*) FILTER (WHERE p.net > 0.005),
+		       COUNT(*) FILTER (WHERE p.net < -0.005),
+		       COUNT(*) FILTER (WHERE p.days_out > 30)
 		FROM (`+peopleSQL("")+`) p`, userID)
 	if err != nil {
 		return t, fmt.Errorf("debt totals: %w", err)
 	}
 	defer rows.Close()
 	if rows.Next() {
-		if err := rows.Scan(&t.OwedToMe, &t.IOwe, &t.OpenCount); err != nil {
+		if err := rows.Scan(&t.OwedToMe, &t.IOwe, &t.OpenCount, &t.OwedToMePeople, &t.IOwePeople, &t.Over30DaysPeople); err != nil {
 			return t, err
 		}
 	}
@@ -262,7 +282,7 @@ func (s *Store) totals(ctx context.Context, q shared.Querier, userID uuid.UUID) 
 // the caller's.
 func (s *Store) personBalance(ctx context.Context, q shared.Querier, userID uuid.UUID, k shared.DebtPersonKey) (DebtPerson, bool, error) {
 	key := k.Key()
-	rows, err := q.Query(ctx, `SELECT key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD')
+	rows, err := q.Query(ctx, `SELECT key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD'), cleared_at, days_out
 		FROM (`+peopleSQL("AND "+shared.DebtKeySQL("pd")+" = $2")+`) p`, userID, key)
 	if err != nil {
 		return DebtPerson{}, false, fmt.Errorf("person balance: %w", err)
@@ -419,6 +439,21 @@ func (s *Store) listEntries(ctx context.Context, userID uuid.UUID, key string, f
 	if f.To != nil {
 		add("pd.date <= $%d::date", *f.To)
 	}
+	mark, err := s.cycleBoundary(ctx, s.db, userID, key)
+	if err != nil {
+		return nil, 0, err
+	}
+	if mark != nil && (f.Cycle == "current" || f.Cycle == "earlier") {
+		op := ">"
+		if f.Cycle == "earlier" {
+			op = "<="
+		}
+		args = append(args, mark.Date, mark.Created, mark.ID)
+		where = append(where, fmt.Sprintf("(pd.date, pd.created_at, pd.id) %s ($%d::date, $%d::timestamptz, $%d::uuid)",
+			op, len(args)-2, len(args)-1, len(args)))
+	} else if mark == nil && f.Cycle == "earlier" {
+		where = append(where, "FALSE")
+	}
 	w := strings.Join(where, " AND ")
 	var total int
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM personal_debts pd
@@ -437,6 +472,12 @@ func (s *Store) listEntries(ctx context.Context, userID uuid.UUID, key string, f
 	args = append(args, f.PerPage, (f.Page-1)*f.PerPage)
 	out, err := loadViews(ctx, s.db, fmt.Sprintf(`WHERE %s ORDER BY %s, pd.id LIMIT $%d OFFSET $%d`,
 		w, order, len(args)-1, len(args)), args...)
+	if err == nil {
+		for i := range out {
+			cur := mark.after(out[i].Date, out[i].CreatedAt, out[i].ID)
+			out[i].InCurrentCycle = &cur
+		}
+	}
 	return out, total, err
 }
 
@@ -446,6 +487,22 @@ func (s *Store) entryCounts(ctx context.Context, userID uuid.UUID, key string) (
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(t.id) FROM personal_debts pd
 		LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id
 		WHERE pd.user_id = $1 AND `+shared.DebtKeySQL("pd")+` = $2`, userID, key).Scan(&c.Entries, &c.Money)
+	if err != nil {
+		return c, err
+	}
+	mark, err := s.cycleBoundary(ctx, s.db, userID, key)
+	if err != nil {
+		return c, err
+	}
+	if mark == nil {
+		c.Current = c.Entries
+		return c, nil
+	}
+	err = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM personal_debts pd
+		WHERE pd.user_id = $1 AND `+shared.DebtKeySQL("pd")+` = $2
+		  AND (pd.date, pd.created_at, pd.id) > ($3::date, $4::timestamptz, $5::uuid)`,
+		userID, key, mark.Date, mark.Created, mark.ID).Scan(&c.Current)
+	c.Earlier = c.Entries - c.Current
 	return c, err
 }
 

@@ -60,7 +60,7 @@ func (h *Handler) Person(c *gin.Context) {
 	if !ok {
 		return
 	}
-	out, err := h.service.Person(c.Request.Context(), userID, c.Param("key"),
+	out, err := h.service.Person(c.Request.Context(), userID, c.Param("key"), c.Query("cycle"),
 		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 30))
 	if err != nil {
 		mapServiceError(c, err)
@@ -77,8 +77,14 @@ func (h *Handler) Entries(c *gin.Context) {
 	}
 	f := EntryFilter{
 		Q: c.Query("q"), Sort: c.Query("sort"), Direction: c.Query("direction"),
-		Money: c.Query("money") == "true",
+		Money: c.Query("money") == "true", Cycle: c.Query("cycle"),
 		Page:  atoiOr(c.Query("page"), 1), PerPage: atoiOr(c.Query("per_page"), 30),
+	}
+	switch f.Cycle {
+	case "", "current", "earlier":
+	default:
+		response.BadRequest(c, "VALIDATION_ERROR", "cycle must be current or earlier", nil)
+		return
 	}
 	switch f.Sort {
 	case "", "date_desc", "date_asc", "amount_desc", "amount_asc":
@@ -320,4 +326,19 @@ func (h *Handler) ApplySplitChange(c *gin.Context) {
 	default:
 		c.JSON(http.StatusOK, out)
 	}
+}
+
+// GET /v1/personal-debts/people/:key/summary-message — the text to send the
+// person ("สรุปยอด…"): their current-cycle entries and the total.
+func (h *Handler) SummaryMessage(c *gin.Context) {
+	userID, ok := caller(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.SummaryMessage(c.Request.Context(), userID, c.Param("key"))
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
 }

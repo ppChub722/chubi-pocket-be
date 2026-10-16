@@ -430,6 +430,7 @@ func main() {
 			protected.GET("/personal-debts/people", personalDebtsHandler.People)
 			protected.GET("/personal-debts/people/:key", personalDebtsHandler.Person)
 			protected.GET("/personal-debts/people/:key/entries", personalDebtsHandler.Entries)
+			protected.GET("/personal-debts/people/:key/summary-message", personalDebtsHandler.SummaryMessage)
 			protected.POST("/personal-debts/people/:key/entries", personalDebtsHandler.CreateEntry)
 			protected.POST("/personal-debts/split-requests/:notification_id/accept", personalDebtsHandler.AcceptSplitRequest)
 			protected.POST("/personal-debts/split-changes/:notification_id/apply", personalDebtsHandler.ApplySplitChange)

@@ -3959,6 +3959,7 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
+        - { name: cycle, in: query, description: 'current = entries after the last time the balance with the person hit 0; earlier = the entries before it (older cycles). Omitted = all.', schema: { type: string, enum: [current, earlier] } }
       responses:
         '200':
           description: The person page.
@@ -3971,12 +3972,33 @@ paths:
       x-breaking: New (replaces the client-side grouping of /personal-debts).
       x-used-by:
         - { page: debt-person, calls: 1 }
+  /personal-debts/people/{key}/summary-message:
+    parameters:
+      - { $ref: '#/components/parameters/PersonKeyPath' }
+    get:
+      tags: [Debts]
+      summary: The summary text to send a person
+      operationId: getDebtSummaryMessage
+      description: 'Thai text generated from the CURRENT-cycle entries (oldest first, each signed) and the person''s net, both directions; the FE only shares it. A `c:` key of one of the caller''s contacts answers even with no entries; an `n:` key with no entries → 404 NOT_FOUND.'
+      responses:
+        '200':
+          description: The text.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DebtSummaryMessage' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-breaking: New (0.4.0).
+      x-used-by:
+        - { page: debt-person, calls: 1 }
   /personal-debts/people/{key}/entries:
     parameters:
       - { $ref: '#/components/parameters/PersonKeyPath' }
     get:
       tags: [Debts]
       summary: A person's entries (filter / sort / page)
+        - { name: cycle, in: query, description: 'current = entries after the last time the balance with the person hit 0; earlier = the entries before it (older cycles). Omitted = all.', schema: { type: string, enum: [current, earlier] } }
       operationId: listDebtEntries
       description: |
         `q` matches description / note (case-insensitive). `direction` paid | received. `paid` true | false (the label). `money=true` = only entries with a wallet transaction (the "ประวัติการจ่าย" tab); `account_id` = only entries whose transaction sits on that wallet. `from` / `to` = entry date range (inclusive). `sort`: date_desc (default) | date_asc | amount_desc | amount_asc (ties: newest created first).
@@ -3988,6 +4010,7 @@ paths:
         - { name: sort, in: query, schema: { type: string, enum: [date_desc, date_asc, amount_desc, amount_asc] } }
         - { name: direction, in: query, schema: { type: string, enum: [paid, received] } }
         - { name: paid, in: query, schema: { type: boolean } }
+        - { name: cycle, in: query, description: 'current = entries after the last time the balance with the person hit 0; earlier = the entries before it (older cycles). Omitted = all.', schema: { type: string, enum: [current, earlier] } }
         - { name: money, in: query, schema: { type: boolean } }
         - { name: account_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
         - { name: from, in: query, schema: { $ref: '#/components/schemas/Date' } }
@@ -5342,7 +5365,10 @@ components:
               "owed_to_me": 700,
               "i_owe": 40,
               "net": 660,
-              "open_count": 4
+              "open_count": 4,
+              "owed_to_me_people": 3,
+              "i_owe_people": 1,
+              "over_30_days_people": 1
             },
             "budgets_summary": {
               "total_budget": 5000,
@@ -8722,13 +8748,15 @@ components:
     DebtPerson:
       type: object
       description: 'A person''s balance (people list row, header of the person page, and `person_balance` in every debt write so the FE patches without re-fetching).'
-      required: [key, person, net, open_count, entry_count, last_activity_at]
+      required: [key, person, net, open_count, entry_count, last_activity_at, cleared_at, days_outstanding]
       properties:
         key: { $ref: '#/components/schemas/PersonKey' }
         person: { $ref: '#/components/schemas/PersonRef' }
         net: { $ref: '#/components/schemas/Money', description: 'Σ paid − Σ received. > 0 = they owe me (ติดคุณ), < 0 = I owe them (คุณติด), 0 = หายกัน.' }
         open_count: { type: integer, minimum: 0, description: 'Entries not labelled paid.' }
         entry_count: { type: integer, minimum: 0 }
+        cleared_at: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The CYCLE boundary: the date of the last entry after which the running balance (entries in book order: date, created) was 0; null when it never was. Entries after it = the current cycle.' }
+        days_outstanding: { type: [integer, 'null'], description: 'Age in days (user timezone) of the oldest entry of the CURRENT cycle not labelled paid; null when there is none.' }
         last_activity_at: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The latest entry date (null with no entries).' }
       example:
         key: n:mom
@@ -8740,12 +8768,23 @@ components:
     DebtTotals:
       type: object
       description: 'The debts header / Home tile / More tile numbers (one rule everywhere). owed_to_me = Σ net of people with net > 0; i_owe = Σ |net| of people with net < 0.'
-      required: [owed_to_me, i_owe, net, open_count]
+      required: [owed_to_me, i_owe, net, open_count, owed_to_me_people, i_owe_people, over_30_days_people]
       properties:
         owed_to_me: { $ref: '#/components/schemas/Money' }
         i_owe: { $ref: '#/components/schemas/Money' }
         net: { $ref: '#/components/schemas/Money', description: 'owed_to_me − i_owe.' }
         open_count: { type: integer, minimum: 0, description: 'People with something open (the default people list size).' }
+        owed_to_me_people: { type: integer, minimum: 0, description: 'People with net > 0 (the card''s "N คน").' }
+        i_owe_people: { type: integer, minimum: 0, description: 'People with net < 0.' }
+        over_30_days_people: { type: integer, minimum: 0, description: 'People whose oldest open entry of the current cycle is more than 30 days old.' }
+    DebtSummaryMessage:
+      type: object
+      description: 'The text to send a person (Thai, both directions).'
+      required: [text, entries, net]
+      properties:
+        text: { type: string, description: 'Multi-line: "สรุปยอดกับ <name>", one "• <date> <what> <±amount> <unit> (<description>)" line per CURRENT-cycle entry, oldest first (+ = I paid for them, − = they paid me), then the total: they owe me / I owe them / cleared.' }
+        entries: { type: integer, description: 'Entries listed (the current cycle).' }
+        net: { $ref: '#/components/schemas/Money' }
     DebtPeopleList:
       type: object
       required: [data, totals, pagination]
@@ -8774,7 +8813,7 @@ components:
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'Null only for an old floating repayment.' }
     DebtEntry:
       type: object
-      required: [id, key, direction, amount, date, description, note, paid, source, transaction, created_at, updated_at]
+      required: [id, key, direction, amount, date, description, note, paid, source, transaction, created_at, in_current_cycle, updated_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         key: { $ref: '#/components/schemas/PersonKey' }
@@ -8787,6 +8826,7 @@ components:
         source: { oneOf: [{ $ref: '#/components/schemas/DebtSource' }, { type: 'null' }], description: 'Null = a manual entry (fully editable).' }
         transaction: { oneOf: [{ $ref: '#/components/schemas/DebtEntryTx' }, { type: 'null' }], description: 'Null = ledger-only.' }
         created_at: { $ref: '#/components/schemas/DateTime' }
+        in_current_cycle: { type: [boolean, 'null'], description: 'Only in the person''s entry lists (person page, entries): true = after the cycle boundary (cleared_at); null elsewhere.' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
       example:
         id: 0191c2a0-0000-7000-8000-0000000000e1
@@ -8816,10 +8856,12 @@ components:
           properties:
             counts:
               type: object
-              required: [entries, money]
+              required: [entries, money, current, earlier]
               properties:
                 entries: { type: integer, description: 'All entries (tab "รายการหนี้").' }
                 money: { type: integer, description: 'Entries with a wallet transaction (tab "ประวัติการจ่าย").' }
+                current: { type: integer, description: 'Entries of the CURRENT cycle (after the last time the balance hit 0).' }
+                earlier: { type: integer, description: 'Entries of earlier cycles (the ones a hidden "รอบก่อนหน้า" fold holds).' }
             items: { type: array, items: { $ref: '#/components/schemas/DebtEntry' } }
             pagination: { $ref: '#/components/schemas/Page' }
     DebtEntryDetail:

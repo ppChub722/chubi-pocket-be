@@ -100,7 +100,10 @@ type DebtEntry struct {
 	Source      *DebtSource `json:"source"`
 	Transaction *EntryTx    `json:"transaction"`
 	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
+	// InCurrentCycle — only in the person's entry lists: true = after the last
+	// time the balance hit 0; null elsewhere.
+	InCurrentCycle *bool     `json:"in_current_cycle"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // DebtPerson — spec schema DebtPerson (a person's balance).
@@ -111,6 +114,11 @@ type DebtPerson struct {
 	OpenCount      int              `json:"open_count"`
 	EntryCount     int              `json:"entry_count"`
 	LastActivityAt *string          `json:"last_activity_at"`
+	// ClearedAt — the last time the balance with this person hit 0 (the end of
+	// the previous cycle); null when it never did. DaysOutstanding — age in days
+	// of the oldest entry of the CURRENT cycle not labelled paid; null when none.
+	ClearedAt       *string `json:"cleared_at"`
+	DaysOutstanding *int    `json:"days_outstanding"`
 }
 
 // DebtTotals — spec schema DebtTotals (the debts header, Home + More tiles).
@@ -119,6 +127,11 @@ type DebtTotals struct {
 	IOwe      float64 `json:"i_owe"`
 	Net       float64 `json:"net"`
 	OpenCount int     `json:"open_count"`
+	// 0.4.0 summary cards: how many people sit on each side, and how many have
+	// had an open entry for more than 30 days (current cycle).
+	OwedToMePeople   int `json:"owed_to_me_people"`
+	IOwePeople       int `json:"i_owe_people"`
+	Over30DaysPeople int `json:"over_30_days_people"`
 }
 
 // PeopleList — spec schema DebtPeopleList.
@@ -132,6 +145,9 @@ type PeopleList struct {
 type EntryCounts struct {
 	Entries int `json:"entries"`
 	Money   int `json:"money"`
+	// Current / Earlier — entries of the current cycle / earlier cycles.
+	Current int `json:"current"`
+	Earlier int `json:"earlier"`
 }
 
 // PersonPage — spec schema DebtPersonPage.
@@ -246,6 +262,7 @@ type EntryFilter struct {
 	Direction string
 	Paid      *bool
 	Money     bool
+	Cycle     string // current | earlier | "" = all
 	AccountID *uuid.UUID
 	From      *string
 	To        *string

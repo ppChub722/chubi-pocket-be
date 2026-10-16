@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,6 +68,7 @@ func newDebtHFix(t *testing.T) *debtHFix {
 		g.GET("/personal-debts/people", h.People)
 		g.GET("/personal-debts/people/:key", h.Person)
 		g.GET("/personal-debts/people/:key/entries", h.Entries)
+		g.GET("/personal-debts/people/:key/summary-message", h.SummaryMessage)
 		g.POST("/personal-debts/people/:key/entries", h.CreateEntry)
 		g.GET("/personal-debts/:id", h.Get)
 		g.PUT("/personal-debts/:id", h.Update)
@@ -518,5 +520,57 @@ func TestContactsAndDebtsAreIndependent(t *testing.T) {
 	people := f.call("GET", "/api/v1/personal-debts/people", nil, "listDebtPeople", http.StatusOK)
 	if d := people["data"].([]any); len(d) != 1 {
 		t.Errorf("people = %v, want one typed-name person", people)
+	}
+}
+
+// TestDebtCyclesAndSummary — a person's cycle ends where the balance hit 0:
+// entries split into current / earlier, days_outstanding counts the current
+// cycle's oldest open entry, the totals count people per side and the ones
+// open for over 30 days, and the summary message lists the current cycle.
+func TestDebtCyclesAndSummary(t *testing.T) {
+	f := newDebtHFix(t)
+	day := func(n int) string { return time.Now().AddDate(0, 0, n).Format("2006-01-02") }
+	add := func(key, dir string, amount float64, date string) {
+		f.call("POST", entriesPath(key), map[string]any{"direction": dir, "amount": amount, "date": date},
+			"createDebtEntry", http.StatusCreated)
+	}
+	add("n:Mom", "paid", 100, day(-40))
+	add("n:Mom", "received", 100, day(-30)) // balance 0 → a cycle ends here
+	add("n:Mom", "paid", 50, day(-5))
+	add("n:Mom", "paid", 20, day(-2))
+	add("n:Dad", "paid", 10, day(-40)) // open for over 30 days
+
+	page := f.call("GET", "/api/v1/personal-debts/people/n:mom", nil, "getDebtPerson", http.StatusOK)
+	if page["cleared_at"] != day(-30) || num(page, "net") != 70 || num(page, "days_outstanding") < 4 || num(page, "days_outstanding") > 6 {
+		t.Errorf("person = cleared %v days %v net %v", page["cleared_at"], page["days_outstanding"], page["net"])
+	}
+	if num(page, "counts", "entries") != 4 || num(page, "counts", "current") != 2 || num(page, "counts", "earlier") != 2 {
+		t.Errorf("counts = %v", page["counts"])
+	}
+	cur := 0
+	for _, it := range page["items"].([]any) {
+		if b, ok := it.(map[string]any)["in_current_cycle"].(bool); ok && b {
+			cur++
+		}
+	}
+	if cur != 2 {
+		t.Errorf("items flagged current = %d, want 2", cur)
+	}
+	el := f.call("GET", "/api/v1/personal-debts/people/n:mom/entries?cycle=earlier", nil, "listDebtEntries", http.StatusOK)
+	if len(el["data"].([]any)) != 2 {
+		t.Errorf("earlier entries = %v", el["data"])
+	}
+	f.call("GET", "/api/v1/personal-debts/people/n:mom/entries?cycle=nope", nil, "", http.StatusBadRequest)
+
+	people := f.call("GET", "/api/v1/personal-debts/people", nil, "listDebtPeople", http.StatusOK)
+	if num(people, "totals", "owed_to_me_people") != 2 || num(people, "totals", "i_owe_people") != 0 || num(people, "totals", "over_30_days_people") != 1 {
+		t.Errorf("totals = %v", people["totals"])
+	}
+
+	msg := f.call("GET", "/api/v1/personal-debts/people/n:mom/summary-message", nil, "getDebtSummaryMessage", http.StatusOK)
+	text, _ := msg["text"].(string)
+	if num(msg, "entries") != 2 || num(msg, "net") != 70 || !strings.Contains(text, "รวม Mom ค้างจ่ายฉัน 70 บาท") ||
+		!strings.Contains(text, "+50") || strings.Contains(text, "100") {
+		t.Errorf("message = %q", text)
 	}
 }

@@ -60,7 +60,7 @@ func (s *Service) Totals(ctx context.Context, userID uuid.UUID) (DebtTotals, err
 }
 
 // Person — GET /personal-debts/people/:key.
-func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey string, page, perPage int) (*PersonPage, error) {
+func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey, cycle string, page, perPage int) (*PersonPage, error) {
 	k, err := shared.ParseDebtKey(rawKey)
 	if err != nil {
 		return nil, err
@@ -75,7 +75,7 @@ func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey string, p
 		}
 	}
 	page, perPage = clampPage(page, perPage, 30)
-	items, total, err := s.store.listEntries(ctx, userID, k.Key(), EntryFilter{Page: page, PerPage: perPage})
+	items, total, err := s.store.listEntries(ctx, userID, k.Key(), EntryFilter{Page: page, PerPage: perPage, Cycle: cycle})
 	if err != nil {
 		return nil, err
 	}
