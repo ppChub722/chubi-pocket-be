@@ -115,3 +115,12 @@ func decodeIcon(b []byte) (*shared.IconCode, error) {
 	}
 	return ic, nil
 }
+
+// UserCurrency is the caller's display currency (users.currency).
+func (s *Store) UserCurrency(ctx context.Context, userID uuid.UUID) (string, error) {
+	var cur string
+	if err := s.db.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, userID).Scan(&cur); err != nil {
+		return "", fmt.Errorf("user currency: %w", err)
+	}
+	return cur, nil
+}

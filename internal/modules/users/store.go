@@ -111,6 +111,21 @@ func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfi
 		}
 	}
 
+	if req.Currency != nil {
+		cur := strings.ToUpper(*req.Currency)
+		// Relabel only: the column follows the setting, amounts are untouched.
+		for _, q := range []string{
+			`UPDATE users SET currency = $2, updated_by_user_id = $1 WHERE id = $1`,
+			`UPDATE accounts SET currency = $2 WHERE user_id = $1`,
+			`UPDATE personal_debts SET currency = $2 WHERE user_id = $1`,
+			`UPDATE project_transactions SET currency = $2 WHERE record_user_id = $1`,
+		} {
+			if _, err := tx.Exec(ctx, q, id, cur); err != nil {
+				return fmt.Errorf("relabel currency: %w", err)
+			}
+		}
+	}
+
 	if len(req.Preferences) > 0 {
 		patch, err := json.Marshal(req.Preferences)
 		if err != nil {

@@ -182,6 +182,21 @@ func TestRecurringLifecycle(t *testing.T) {
 	if list.Counts.Current != 1 || len(list.Data) != 1 || list.Data[0].Counts.Pending != 3 {
 		t.Fatalf("list = %+v", list)
 	}
+	// The summary card: per-month equivalent (100 every 7 days = 434.82) and
+	// the nearest upcoming date; q narrows the list, not the summary.
+	if sm := list.Summary; sm.MonthPay != 434.82 || sm.MonthReceive != 0 || sm.Next == nil ||
+		sm.Next.ID != id || sm.Next.Date != f.day(7) || sm.Next.Amount != 100 || sm.Next.Type != "expense" {
+		t.Errorf("summary = %+v next %+v", sm, sm.Next)
+	}
+	var none RecurringList
+	f.call("GET", "/recurring?q=zzz", "listRecurring", nil, 200, &none)
+	if len(none.Data) != 0 || none.Summary.MonthPay != 434.82 {
+		t.Errorf("q=zzz: %d rows, summary %+v", len(none.Data), none.Summary)
+	}
+	f.call("GET", "/recurring?q=netf", "listRecurring", nil, 200, &none)
+	if len(none.Data) != 1 {
+		t.Errorf("q=netf rows = %d", len(none.Data))
+	}
 	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, nil)
 
 	produced := f.items(id, "produced")
@@ -285,6 +300,11 @@ func TestRecurringLifecycle(t *testing.T) {
 	f.call("POST", "/recurring/"+id.String()+"/pause", "pauseRecurring", nil, 200, &d)
 	if d.Recurring.Status != "paused" || d.Recurring.Counts.Upcoming != 0 || !d.Recurring.Actions.Resume {
 		t.Fatalf("pause = %+v", d.Recurring)
+	var paused RecurringList
+	f.call("GET", "/recurring", "listRecurring", nil, 200, &paused)
+	if sm := paused.Summary; sm.MonthPay != 0 || sm.Next != nil {
+		t.Errorf("paused summary = %+v, want zeros and no next", sm)
+	}
 	}
 	f.call("POST", "/recurring/"+id.String()+"/pause", "pauseRecurring", nil, 409, nil)
 	f.call("POST", "/recurring/"+id.String()+"/resume", "resumeRecurring", nil, 200, &d)

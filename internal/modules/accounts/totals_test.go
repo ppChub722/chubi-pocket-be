@@ -3,7 +3,7 @@ package accounts
 import "testing"
 
 // The "shared pot": the summed balance of the shared wallets in the user's
-// currency (signed), next to how many there are.
+// (signed; currency is a label, USD counts as-is), next to how many there are.
 func TestTotalsSharedBalance(t *testing.T) {
 	accs := []Account{
 		{Type: TypeBank, Group: "asset", Currency: "THB", Balance: 1000, IsShared: true, TrackBalance: true},
@@ -12,7 +12,7 @@ func TestTotalsSharedBalance(t *testing.T) {
 		{Type: TypeBank, Group: "asset", Currency: "USD", Balance: 50, IsShared: true, TrackBalance: true},
 	}
 	got := buildTotals(accs, "THB")
-	if got.SharedCount != 3 || got.SharedBalance != 700 || got.OtherCurrencyCount != 1 {
-		t.Errorf("totals = %+v, want shared_count 3 (incl. the USD one), shared_balance 700 (THB only), 1 other currency", got)
+	if got.SharedCount != 3 || got.SharedBalance != 750 {
+		t.Errorf("totals = %+v, want shared_count 3, shared_balance 750 (currency ignored)", got)
 	}
 }

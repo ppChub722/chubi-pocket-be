@@ -47,11 +47,9 @@ func (s *Store) InsertPTTx(
 	if err := validateSplits(req.TransactionMemberID, req.Amount, req.Splits); err != nil {
 		return nil, err
 	}
-	currency := req.Currency
-	if currency == "" {
-		if err := tx.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, recordUserID).Scan(&currency); err != nil {
-			return nil, fmt.Errorf("currency: %w", err)
-		}
+	var currency string
+	if err := tx.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, recordUserID).Scan(&currency); err != nil {
+		return nil, fmt.Errorf("currency: %w", err)
 	}
 	id, err := uuid.NewV7()
 	if err != nil {

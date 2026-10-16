@@ -61,7 +61,7 @@ func (s *Service) createMirrorTx(ctx context.Context, tx pgx.Tx, splitter *Entry
 		UserID: partnerUserID, Direction: opposite(splitter.Direction),
 		ContactID: partnerContactID, PersonName: personName,
 		SourceProjectTransactionID: splitter.SourceProjectTransactionID, ProjectID: splitter.ProjectID,
-		Amount: splitter.Amount, Currency: splitter.Currency, Date: splitter.Date,
+		Amount: splitter.Amount, Date: splitter.Date,
 		SourceKind: &kind, Description: splitter.Description,
 	})
 	if err != nil {

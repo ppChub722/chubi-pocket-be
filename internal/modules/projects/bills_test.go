@@ -504,7 +504,7 @@ func TestCopyIsMyShare(t *testing.T) {
 	}
 
 	pt, err := f.svc.CreateProjectTransaction(ctx, f.owner, resp.Detail.Event.ID, CreateProjectTransactionRequest{
-		TransactionMemberID: me, Type: "expense", Amount: 600, Currency: "THB", Date: "2026-09-10",
+		TransactionMemberID: me, Type: "expense", Amount: 600, Date: "2026-09-10",
 		Splits: []ProjectSplitInput{{MemberID: bee, Amount: 200}, {MemberID: gran, Amount: 200}},
 	})
 	if err != nil {
@@ -525,7 +525,7 @@ func TestCopyIsMyShare(t *testing.T) {
 
 	// Fully split to others: no share, no auto copy, no error.
 	full, err := f.svc.CreateProjectTransaction(ctx, f.owner, resp.Detail.Event.ID, CreateProjectTransactionRequest{
-		TransactionMemberID: me, Type: "expense", Amount: 600, Currency: "THB", Date: "2026-09-11",
+		TransactionMemberID: me, Type: "expense", Amount: 600, Date: "2026-09-11",
 		Splits: []ProjectSplitInput{{MemberID: bee, Amount: 300}, {MemberID: gran, Amount: 300}},
 	})
 	if err != nil {

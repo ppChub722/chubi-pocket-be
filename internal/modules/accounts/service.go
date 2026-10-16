@@ -89,10 +89,6 @@ func buildTotals(accs []Account, currency string) AccountTotals {
 			t.UntrackedCount++
 			continue
 		}
-		if a.Currency != currency {
-			t.OtherCurrencyCount++
-			continue
-		}
 		if a.IsShared {
 			t.SharedBalance += a.Balance
 		}

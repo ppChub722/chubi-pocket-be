@@ -522,7 +522,7 @@ func (s *Service) CreateForTransactionTx(
 		in := inputs[i]
 		splitter, err := insertEntryTx(ctx, tx, &Entry{
 			UserID: userID, Direction: direction, ContactID: in.ContactID, PersonName: in.PersonName,
-			SourceTransactionID: &parentTxID, Amount: in.OwedAmount, Currency: parentCurrency,
+			SourceTransactionID: &parentTxID, Amount: in.OwedAmount,
 			Date: date, SourceKind: &kind, Description: parentDescription,
 		})
 		if err != nil {

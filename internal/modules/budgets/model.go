@@ -147,6 +147,10 @@ type Period struct {
 	Status     string    `json:"status"`
 	Tone       string    `json:"tone"`
 	DaysLeft   *int      `json:"days_left"`
+	// OnPace — the forecast says this period will end over its amount (the
+	// "on pace to exceed" row badge); independent of status (a warn period can
+	// be on pace too).
+	OnPace bool `json:"on_pace_to_exceed"`
 }
 
 type Actions struct {
@@ -186,6 +190,14 @@ type ListSummary struct {
 	PaceCount     int `json:"pace_count"`
 	EndedCount    int `json:"ended_count"`
 	ArchivedCount int `json:"archived_count"`
+
+	// The summary card (spec BudgetListSummary): over the active budgets, each at
+	// its current period; used counts a transaction once across overlapping budgets.
+	TotalLimit     float64      `json:"total_limit"`
+	TotalUsed      float64      `json:"total_used"`
+	TotalRemaining float64      `json:"total_remaining"`
+	UsedPct        int          `json:"used_pct"`
+	Counts         HealthCounts `json:"counts"`
 }
 
 // List — spec BudgetList.
@@ -323,4 +335,12 @@ type PeriodRequest struct {
 	Note   *string  `json:"note"`
 
 	present map[string]bool
+}
+
+// HealthCounts — ok + near + over = all (the active budgets).
+type HealthCounts struct {
+	All  int `json:"all"`
+	OK   int `json:"ok"`
+	Near int `json:"near"`
+	Over int `json:"over"`
 }

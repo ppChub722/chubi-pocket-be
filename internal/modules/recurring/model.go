@@ -159,6 +159,7 @@ type ListCounts struct {
 type RecurringList struct {
 	Data       []Recurring `json:"data"`
 	Counts     ListCounts  `json:"counts"`
+	Summary    ListSummary `json:"summary"`
 	Pagination shared.Page `json:"pagination"`
 }
 

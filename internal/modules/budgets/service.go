@@ -205,7 +205,8 @@ func periodView(b *Budget, r *periodRow, f figures, current bool, today time.Tim
 	p := Period{
 		ID: r.ID, Seq: r.Seq, Start: r.Start.Format(dateLayout), End: dstr(r.End), Amount: r.Amount,
 		BaseAmount: b.Amount, Overridden: r.Overridden, Note: r.Note, IsCurrent: current,
-		Used: round2(f.used), Expected: round2(f.expected), Remaining: round2(r.Amount - f.used),
+		OnPace: pace && current,
+		Used:   round2(f.used), Expected: round2(f.expected), Remaining: round2(r.Amount - f.used),
 	}
 	if f.used > r.Amount {
 		p.OverBy = round2(f.used - r.Amount)
@@ -441,7 +442,7 @@ func (s *Service) periodFigures(ctx context.Context, b *Budget, prs []*periodRow
 
 // --- reads ---
 
-func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, tz string) (*List, error) {
+func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, health, tz string) (*List, error) {
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
 		return nil, err
@@ -461,6 +462,7 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, tz
 	var (
 		picked []entry
 		sum    ListSummary
+		seen   = map[string]bool{} // counted rows already in total_used
 	)
 	for _, b := range all {
 		base, err := s.store.baseSeq(ctx, s.store.db, b)
@@ -496,15 +498,37 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, tz
 			switch p.Status {
 			case PeriodOver:
 				sum.OverCount++
+				sum.Counts.Over++
 			case PeriodWarn:
 				sum.WarnCount++
+				sum.Counts.Near++
 			case PeriodPace:
 				sum.PaceCount++
+				sum.Counts.OK++
+			default:
+				sum.Counts.OK++
+			}
+			sum.Counts.All++
+			sum.TotalLimit += prs[cur].Amount
+			for _, r := range figs[cur].rows {
+				if r.CountsAs != "used" {
+					continue
+				}
+				k := r.Kind + ":" + r.ID.String()
+				if !seen[k] {
+					seen[k] = true
+					sum.TotalUsed += r.Amount
+				}
 			}
 		}
-		if group == status {
+		if group == status && healthMatches(health, p.Status) {
 			picked = append(picked, entry{b, state, p})
 		}
+	}
+	sum.TotalLimit, sum.TotalUsed = round2(sum.TotalLimit), round2(sum.TotalUsed)
+	sum.TotalRemaining = round2(sum.TotalLimit - sum.TotalUsed)
+	if sum.TotalLimit > 0 {
+		sum.UsedPct = int(math.Round(sum.TotalUsed / sum.TotalLimit * 100))
 	}
 	rank := map[string]int{PeriodOver: 0, PeriodWarn: 1, PeriodPace: 2, PeriodOK: 3}
 	sort.SliceStable(picked, func(i, j int) bool {
@@ -540,7 +564,7 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, tz
 
 // Totals — the Home tile / More budgets_summary.
 func (s *Service) Totals(ctx context.Context, userID uuid.UUID, tz string) (*Totals, error) {
-	l, err := s.List(ctx, userID, "active", "", tz)
+	l, err := s.List(ctx, userID, "active", "", "", tz)
 	if err != nil {
 		return nil, err
 	}
@@ -1193,4 +1217,18 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 		return ErrBudgetNotFound
 	}
 	return nil
+}
+
+// healthMatches — the list's `health` filter on a period status: normal =
+// ok or pace, near = warn, over = over ("" = everything).
+func healthMatches(health, status string) bool {
+	switch health {
+	case "normal":
+		return status == PeriodOK || status == PeriodPace
+	case "near":
+		return status == PeriodWarn
+	case "over":
+		return status == PeriodOver
+	}
+	return true
 }

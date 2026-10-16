@@ -366,3 +366,54 @@ func TestBudgetRuleChangeScopes(t *testing.T) {
 		t.Errorf("all: current %+v", d.Budget.Period)
 	}
 }
+
+// TestBudgetListSummaryCard — the summary card: limits add up, used counts a
+// transaction ONCE across overlapping budgets, counts split ok / near / over,
+// `health` narrows the rows but never the summary.
+func TestBudgetListSummaryCard(t *testing.T) {
+	f := newBudFix(t)
+	monthStart := time.Date(f.today.Year(), f.today.Month(), 1, 0, 0, 0, 0, time.UTC).Format(dateLayout)
+	mk := func(name string, amount float64, cat uuid.UUID) {
+		f.call("POST", "/budgets", "createBudget", map[string]any{
+			"name": name, "amount": amount, "recurring": true, "rule": map[string]any{"freq": "monthly"},
+			"start_date": monthStart,
+			"scope":      map[string]any{"categories": []map[string]any{{"id": cat}}},
+		}, http.StatusCreated, nil)
+	}
+	mk("Food", 1000, f.food)
+	mk("Cafe", 300, f.cafe) // a sub-category of Food: the two scopes overlap
+	cur := f.today.Format(dateLayout)
+	f.tx(300, &f.food, cur)
+	f.tx(200, &f.cafe, cur) // counted by BOTH budgets
+
+	var l List
+	f.call("GET", "/budgets", "listBudgets", nil, http.StatusOK, &l)
+	s := l.Summary
+	if s.TotalLimit != 1300 || s.TotalUsed != 500 || s.TotalRemaining != 800 || s.UsedPct != 38 ||
+		s.Counts != (HealthCounts{All: 2, OK: 2}) {
+		t.Fatalf("summary = %+v", s)
+	}
+	sumOfRows := 0.0
+	for _, v := range l.Data {
+		sumOfRows += v.Period.Used
+	}
+	if sumOfRows != 700 {
+		t.Errorf("rows' used add up to %v, want 700 (the overlap counted by both)", sumOfRows)
+	}
+
+	f.tx(200, &f.cafe, cur) // Cafe 400 / 300 → over
+	f.call("GET", "/budgets?health=over", "listBudgets", nil, http.StatusOK, &l)
+	if len(l.Data) != 1 || l.Data[0].Name != "Cafe" || l.Summary.Counts.Over != 1 || l.Summary.Counts.All != 2 ||
+		l.Summary.TotalUsed != 700 || l.Summary.Counts.OK != 1 {
+		t.Errorf("health=over: rows %d summary %+v", len(l.Data), l.Summary)
+	}
+	f.call("GET", "/budgets?health=normal", "listBudgets", nil, http.StatusOK, &l)
+	if len(l.Data) != 1 || l.Data[0].Name != "Food" {
+		t.Errorf("health=normal rows = %d", len(l.Data))
+	}
+	f.call("GET", "/budgets?health=near", "listBudgets", nil, http.StatusOK, &l)
+	if len(l.Data) != 0 || l.Summary.Counts.All != 2 {
+		t.Errorf("health=near rows = %d summary %+v", len(l.Data), l.Summary)
+	}
+	f.call("GET", "/budgets?health=nope", "", nil, http.StatusBadRequest, nil)
+}

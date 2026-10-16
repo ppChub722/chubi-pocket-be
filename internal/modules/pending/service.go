@@ -486,7 +486,6 @@ func toSubmitError(err error) SubmitError {
 		{transactions.ErrCategoryTypeMismatch, "CATEGORY_TYPE_MISMATCH"},
 		{transactions.ErrSystemCategoryNotAllowed, "CATEGORY_NOT_FOUND"},
 		{transactions.ErrTransferSameAccount, "TRANSFER_SAME_ACCOUNT"},
-		{transactions.ErrTransferCurrencyMismatch, "TRANSFER_CURRENCY_MISMATCH"},
 		{transactions.ErrTransferToAccountRequired, "TRANSFER_NEEDS_WALLETS"},
 		{transactions.ErrTransferRequiresAccount, "TRANSFER_NEEDS_WALLETS"},
 		{transactions.ErrSplitsOnTransfer, "SPLITS_ON_TRANSFER"},

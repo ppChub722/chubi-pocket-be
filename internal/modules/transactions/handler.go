@@ -375,8 +375,6 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "CONTACT_NOT_FOUND", "Split contact not found", nil)
 	case errors.Is(err, ErrTransferSameAccount):
 		response.BadRequest(c, "TRANSFER_SAME_ACCOUNT", err.Error(), nil)
-	case errors.Is(err, ErrTransferCurrencyMismatch):
-		response.BadRequest(c, "TRANSFER_CURRENCY_MISMATCH", err.Error(), nil)
 	case errors.Is(err, ErrSystemCategoryNotAllowed):
 		response.BadRequest(c, "SYSTEM_CATEGORY_NOT_ALLOWED", err.Error(), nil)
 	case errors.Is(err, ErrSplitsNotSupportedYet):

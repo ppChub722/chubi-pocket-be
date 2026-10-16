@@ -74,13 +74,17 @@ func (s *Service) Get(ctx context.Context, userID uuid.UUID, month, headerTZ str
 		start = m
 	}
 	end := start.AddDate(0, 1, -1)
+	currency, err := s.store.UserCurrency(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
 
 	out := &Response{
 		Month:         start.Format("2006-01"),
 		From:          start.Format(dateLayout),
 		To:            end.Format(dateLayout),
 		Today:         today.Format(dateLayout),
-		Currency:      "THB", // single-currency assumption, same as /transactions/summary
+		Currency:      currency,
 		TopCategories: []CategorySlice{},
 		Trend:         []TrendPoint{},
 		Upcoming:      Upcoming{Days: upcomingDays, Items: []UpcomingItem{}},

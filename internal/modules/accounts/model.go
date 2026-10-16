@@ -266,16 +266,15 @@ type TypeTotal struct {
 
 // AccountTotals - spec AccountList.totals.
 type AccountTotals struct {
-	Assets             float64     `json:"assets"`
-	Liabilities        float64     `json:"liabilities"`
-	Net                float64     `json:"net"`
-	Currency           string      `json:"currency"`
-	ByType             []TypeTotal `json:"by_type"`
-	CreditUsed         float64     `json:"credit_used"`
-	CreditLimit        float64     `json:"credit_limit"`
-	SharedCount        int         `json:"shared_count"`
-	SharedBalance      float64     `json:"shared_balance"`
-	OtherCurrencyCount int         `json:"other_currency_count"`
+	Assets        float64     `json:"assets"`
+	Liabilities   float64     `json:"liabilities"`
+	Net           float64     `json:"net"`
+	Currency      string      `json:"currency"`
+	ByType        []TypeTotal `json:"by_type"`
+	CreditUsed    float64     `json:"credit_used"`
+	CreditLimit   float64     `json:"credit_limit"`
+	SharedCount   int         `json:"shared_count"`
+	SharedBalance float64     `json:"shared_balance"`
 	// UntrackedCount — wallets with track_balance false (never summed).
 	UntrackedCount int `json:"untracked_count"`
 }

@@ -96,21 +96,21 @@ func TestUpdateMe(t *testing.T) {
 		"display_name": "New name",
 		"email":        email,
 		"preferences":  map[string]any{"theme": "dark", "fee_category_id": cat.String()},
-		"currency":     "USD", // not part of the request: must be ignored
+		"currency":     "usd", // relabel (no conversion), upper-cased
 	}
 	out := f.do(t, "PUT", "/api/v1/users/me", body, "updateMe", http.StatusOK)
 	if out["display_name"] != "New name" || out["email"] != email {
 		t.Errorf("updated = %v", out)
 	}
-	if out["currency"] != "THB" {
-		t.Errorf("currency is locked, got %v", out["currency"])
+	if out["currency"] != "USD" {
+		t.Errorf("currency relabel, got %v", out["currency"])
 	}
 	prefs := out["preferences"].(map[string]any)
 	if prefs["theme"] != "dark" || prefs["fee_category_id"] != cat.String() || prefs["timezone"] != "Asia/Bangkok" {
 		t.Errorf("preferences = %v", prefs)
 	}
 	var cur string
-	if err := f.pool.QueryRow(context.Background(), `SELECT currency FROM users WHERE id = $1`, f.uid).Scan(&cur); err != nil || cur != "THB" {
+	if err := f.pool.QueryRow(context.Background(), `SELECT currency FROM users WHERE id = $1`, f.uid).Scan(&cur); err != nil || cur != "USD" {
 		t.Errorf("stored currency = %q (%v)", cur, err)
 	}
 

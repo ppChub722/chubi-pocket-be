@@ -127,12 +127,17 @@ func (h *Handler) List(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
 		return
 	}
+	health := c.Query("health")
+	if health != "" && health != "normal" && health != "near" && health != "over" {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid health", nil)
+		return
+	}
 	sortBy := c.DefaultQuery("sort", "risk")
 	if sortBy != "risk" && sortBy != "name" && sortBy != "newest" {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid sort", nil)
 		return
 	}
-	out, err := h.service.List(c.Request.Context(), uid, status, sortBy, tz(c))
+	out, err := h.service.List(c.Request.Context(), uid, status, sortBy, health, tz(c))
 	reply(c, http.StatusOK, out, err)
 }
 

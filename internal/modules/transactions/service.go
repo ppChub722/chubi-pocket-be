@@ -20,7 +20,6 @@ var (
 	ErrCategoryForbidden           = errors.New("category not found or not owned")
 	ErrCategoryTypeMismatch        = errors.New("category type does not match transaction type")
 	ErrTransferSameAccount         = errors.New("transfer source and destination must differ")
-	ErrTransferCurrencyMismatch    = errors.New("transfer source and destination must share currency")
 	ErrSystemCategoryNotAllowed    = errors.New("user category required (system categories are auto-assigned)")
 	ErrSplitsNotSupportedYet       = errors.New("splits are not supported in Phase 1a; ships in Phase 1b")
 	ErrSplitsOnTransfer            = errors.New("transfer transactions cannot have splits")
@@ -433,16 +432,11 @@ func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 		return nil, err
 	}
 
-	_, srcCurrency, err := s.store.GetAccountBalanceTx(ctx, tx, userID, src)
-	if err != nil {
-		return nil, err
-	}
-	_, dstCurrency, err := s.store.GetAccountBalanceTx(ctx, tx, userID, dst)
-	if err != nil {
-		return nil, err
-	}
-	if srcCurrency != dstCurrency {
-		return nil, ErrTransferCurrencyMismatch
+	// Membership gate on both wallets; currency is a label, never compared.
+	for _, id := range []uuid.UUID{src, dst} {
+		if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, id); err != nil {
+			return nil, err
+		}
 	}
 
 	transferOutCat, err := s.cats.SystemFor(ctx, userID, categories.SystemTransferOut)

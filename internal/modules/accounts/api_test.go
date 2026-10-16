@@ -209,15 +209,14 @@ func TestAccountCRUD(t *testing.T) {
 		Data   []aJSON `json:"data"`
 		Total  int     `json:"total"`
 		Totals struct {
-			Assets             float64 `json:"assets"`
-			Liabilities        float64 `json:"liabilities"`
-			Net                float64 `json:"net"`
-			Currency           string  `json:"currency"`
-			CreditUsed         float64 `json:"credit_used"`
-			CreditLimit        float64 `json:"credit_limit"`
-			SharedCount        int     `json:"shared_count"`
-			OtherCurrencyCount int     `json:"other_currency_count"`
-			ByType             []struct {
+			Assets      float64 `json:"assets"`
+			Liabilities float64 `json:"liabilities"`
+			Net         float64 `json:"net"`
+			Currency    string  `json:"currency"`
+			CreditUsed  float64 `json:"credit_used"`
+			CreditLimit float64 `json:"credit_limit"`
+			SharedCount int     `json:"shared_count"`
+			ByType      []struct {
 				Type    string  `json:"type"`
 				Count   int     `json:"count"`
 				Balance float64 `json:"balance"`
@@ -226,9 +225,9 @@ func TestAccountCRUD(t *testing.T) {
 		ArchivedCount int `json:"archived_count"`
 	}](t, raw)
 	tt := list.Totals
-	if list.Total != 5 || tt.Currency != "THB" || tt.Assets != 500 || tt.Liabilities != 1200 || tt.Net != -700 ||
-		tt.CreditUsed != 1200 || tt.CreditLimit != 5000 || tt.OtherCurrencyCount != 1 || tt.SharedCount != 0 {
-		t.Errorf("list = total %d totals %+v, want 5 / assets 500, liabilities 1200, net -700, 1 other currency", list.Total, tt)
+	if list.Total != 5 || tt.Currency != "THB" || tt.Assets != 599 || tt.Liabilities != 1200 || tt.Net != -601 ||
+		tt.CreditUsed != 1200 || tt.CreditLimit != 5000 || tt.SharedCount != 0 {
+		t.Errorf("list = total %d totals %+v, want 5 / assets 599 (USD wallet counted as-is), liabilities 1200, net -601", list.Total, tt)
 	}
 	if len(tt.ByType) < 3 || tt.ByType[0].Type != "cash" {
 		t.Errorf("by_type = %+v", tt.ByType)

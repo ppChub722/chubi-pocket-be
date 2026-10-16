@@ -366,7 +366,6 @@ func (s *Service) pullBillsTx(
 			TransactionMemberID: actorMemberID,
 			Type:                bill.Type,
 			Amount:              bill.Amount,
-			Currency:            bill.Currency,
 			Date:                bill.Date,
 			Description:         bill.Description,
 			Note:                bill.Note,

@@ -25,8 +25,11 @@ type Profile struct {
 }
 
 type UpdateProfileRequest struct {
-	DisplayName *string          `json:"display_name" binding:"omitempty,min=1,max=100"`
-	IconCode    *shared.IconCode `json:"icon_code"    binding:"omitempty"`
+	DisplayName *string `json:"display_name" binding:"omitempty,min=1,max=100"`
+	// Currency relabels the user's records (no conversion): users, wallets, debts
+	// and event rows all follow in one tx. ISO-4217-shaped, 3 letters.
+	Currency *string          `json:"currency" binding:"omitempty,len=3,alpha"`
+	IconCode *shared.IconCode `json:"icon_code"    binding:"omitempty"`
 	// Email is editable post-registration. When set, it must be a valid
 	// address; uniqueness is enforced by the DB index on `users.email` —
 	// duplicates surface as ErrEmailExists at the service layer. Pass nil

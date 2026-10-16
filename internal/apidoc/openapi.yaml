@@ -3448,6 +3448,7 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
+        - { name: q, in: query, description: 'Case-insensitive substring of the name.', schema: { type: string } }
         - { name: status, in: query, schema: { type: string, enum: [current, archived, all] } }
       responses:
         '200':
@@ -4362,6 +4363,7 @@ paths:
       parameters:
         - { name: status, in: query, schema: { type: string, enum: [active, ended, archived] } }
         - { name: sort, in: query, schema: { type: string, enum: [risk, name, newest] } }
+        - { name: health, in: query, description: 'Only the rows whose current period is normal (status ok or pace) / near (warn) / over; the summary is NOT narrowed (a tile tap = one call).', schema: { type: string, enum: [normal, near, over] } }
       responses:
         '200':
           description: The page.
@@ -5051,7 +5053,7 @@ components:
         code:
           type: string
           description: |
-            MISSING_TYPE, MISSING_AMOUNT, MISSING_DATE, MISSING_ACCOUNT, WALLET_NOT_TRACKED, GOAL_NOT_ACTIVE, INVALID_SPLIT, SPLITS_EXCEED_AMOUNT, ACCOUNT_NOT_FOUND, CATEGORY_NOT_FOUND, CATEGORY_TYPE_MISMATCH, TRANSFER_SAME_ACCOUNT, TRANSFER_NEEDS_WALLETS, TRANSFER_CURRENCY_MISMATCH, SPLITS_ON_TRANSFER, CONTACT_NOT_FOUND, TAG_NOT_FOUND, PROJECT_NOT_FOUND, PROJECT_NOT_ACTIVE, PROJECT_LOCKED, PROJECT_NOT_MEMBER, PROJECT_READ_ONLY, TX_NOT_BILLABLE, DEBT_NOT_FOUND, DEBT_ALREADY_SETTLED, OVERPAYMENT, TRANSACTION_NOT_FOUND, NOT_FOUND, SUBMIT_FAILED.
+            MISSING_TYPE, MISSING_AMOUNT, MISSING_DATE, MISSING_ACCOUNT, WALLET_NOT_TRACKED, GOAL_NOT_ACTIVE, INVALID_SPLIT, SPLITS_EXCEED_AMOUNT, ACCOUNT_NOT_FOUND, CATEGORY_NOT_FOUND, CATEGORY_TYPE_MISMATCH, TRANSFER_SAME_ACCOUNT, TRANSFER_NEEDS_WALLETS, SPLITS_ON_TRANSFER, CONTACT_NOT_FOUND, TAG_NOT_FOUND, PROJECT_NOT_FOUND, PROJECT_NOT_ACTIVE, PROJECT_LOCKED, PROJECT_NOT_MEMBER, PROJECT_READ_ONLY, TX_NOT_BILLABLE, DEBT_NOT_FOUND, DEBT_ALREADY_SETTLED, OVERPAYMENT, TRANSACTION_NOT_FOUND, NOT_FOUND, SUBMIT_FAILED.
         message: { type: string }
     PendingTransaction:
       type: object
@@ -6387,7 +6389,7 @@ components:
           },
           "totals": {
             "type": "object",
-            "description": "Over the returned wallets that are in the user's currency; wallets in another (legacy) currency are not summed and are counted in `other_currency_count`.",
+            "description": "Over every tracked returned wallet, summed as-is (currency is a label; no per-currency split).",
             "required": [
               "assets",
               "liabilities",
@@ -6397,7 +6399,6 @@ components:
               "credit_used",
               "credit_limit",
               "shared_count",
-              "other_currency_count",
               "shared_balance",
               "untracked_count"
             ],
@@ -6455,9 +6456,6 @@ components:
               "shared_count": {
                 "type": "integer",
                 "description": "Wallets with more than one active member."
-              },
-              "other_currency_count": {
-                "type": "integer"
               },
               "shared_balance": {
                 "$ref": "#/components/schemas/Money",
@@ -7691,7 +7689,7 @@ components:
           },
           "currency": {
             "$ref": "#/components/schemas/CurrencyCode",
-            "description": "The user's currency. Set once at registration (default THB), then LOCKED: no endpoint changes it. Every wallet takes it."
+            "description": "The user's currency, picked at registration (default THB), changeable with PUT /users/me (relabel only, no conversion). Every record takes it; calculations ignore it."
           },
           "icon_code": {
             "oneOf": [
@@ -7771,6 +7769,10 @@ components:
     UpdateProfileRequest: {
         "type": "object",
         "properties": {
+          "currency": {
+            "$ref": "#/components/schemas/CurrencyCode",
+            "description": "Optional. Relabels the user currency (3 letters, upper-cased). No conversion: amounts stay as they are; the user, wallet, debt and event rows follow the new label. Calculations ignore currency."
+          },
           "display_name": {
             "type": "string",
             "minLength": 1,
@@ -7819,7 +7821,7 @@ components:
           }
         },
         "required": [],
-        "description": "The currency is locked and cannot be changed here."
+        "description": "Currency is a relabel: PUT currency changes the user setting and every wallet / debt / event row of the user follows (no conversion, amounts untouched)."
       }
 
     VersionInfo: {
@@ -8434,7 +8436,7 @@ components:
     BudgetPeriod:
       type: object
       description: 'One period (an instance). `pct` = used / amount (rounded, not clamped); `status` over > warn > pace > ok (pace only for the current period); `tone` danger / warning / neutral. Expected is the current period only.'
-      required: [id, seq, start, end, amount, base_amount, overridden, note, is_current, used, expected, remaining, over_by, pct, status, tone, days_left]
+      required: [id, seq, start, end, amount, base_amount, overridden, note, is_current, used, expected, remaining, over_by, pct, status, tone, days_left, on_pace_to_exceed]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         seq: { type: integer, description: '1 = the first period.' }
@@ -8453,6 +8455,7 @@ components:
         status: { type: string, enum: [ok, pace, warn, over] }
         tone: { type: string, enum: [neutral, warning, danger] }
         days_left: { type: [integer, 'null'], description: 'Today included; null for past / open-ended periods.' }
+        on_pace_to_exceed: { type: boolean, description: 'The forecast says the CURRENT period of an active budget ends over its amount (the "on pace to exceed" row badge). Independent of status: a warn period can be on pace too. False for other periods.' }
     BudgetActions:
       type: object
       required: [edit, close, archive, restore]
@@ -8486,8 +8489,12 @@ components:
         updated_at: { $ref: '#/components/schemas/DateTime' }
     BudgetListSummary:
       type: object
-      description: 'Hero + chip counts. over / warn / pace count the active budgets'' current periods by their status (one each).'
-      required: [active_count, over_count, warn_count, pace_count, ended_count, archived_count]
+      description: |
+        Hero + chip counts + the summary card. Everything is over the ACTIVE budgets (state active or upcoming = `active_count`), each at its CURRENT period.
+        over / warn / pace count those periods by their status (one each).
+        `total_limit` = the plain sum of the current periods' amounts (an overridden period counts its override). `total_used` counts each transaction / event share ONCE even when budgets overlap (named budgets with overlapping scopes): it sums the distinct counted rows of all those periods, so it can be less than the sum of the budgets' `used`. `total_remaining` = total_limit − total_used (negative when over). `used_pct` = total_used / total_limit, rounded, not clamped (0 when the limit is 0).
+        `counts`: all = active_count; over = periods over their amount; near = periods at / above their own warn_pct (status warn); ok = the rest (status ok or pace: on pace to exceed is a badge, see Period.on_pace_to_exceed). ok + near + over = all.
+      required: [active_count, over_count, warn_count, pace_count, ended_count, archived_count, total_limit, total_used, total_remaining, used_pct, counts]
       properties:
         active_count: { type: integer }
         over_count: { type: integer }
@@ -8495,6 +8502,18 @@ components:
         pace_count: { type: integer }
         ended_count: { type: integer }
         archived_count: { type: integer }
+        total_limit: { $ref: '#/components/schemas/Money' }
+        total_used: { $ref: '#/components/schemas/Money' }
+        total_remaining: { type: number, description: 'total_limit − total_used; negative when over.' }
+        used_pct: { type: integer }
+        counts:
+          type: object
+          required: [all, ok, near, over]
+          properties:
+            all: { type: integer }
+            ok: { type: integer }
+            near: { type: integer }
+            over: { type: integer }
     BudgetList:
       type: object
       required: [summary, data]
@@ -9208,7 +9227,7 @@ components:
         updated_at: { $ref: '#/components/schemas/DateTime' }
     RecurringList:
       type: object
-      required: [data, counts, pagination]
+      required: [data, counts, summary, pagination]
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/Recurring' } }
         counts:
@@ -9218,6 +9237,24 @@ components:
             current: { type: integer }
             archived: { type: integer }
             all: { type: integer }
+        summary:
+          type: object
+          description: 'The list''s summary card; the same whatever the status / q / page of the list. month_pay / month_receive = the PER-MONTH EQUIVALENT of the ACTIVE settings (paused, archived and ended ones excluded, so are settings on an archived wallet; transfers and savings are not money in / out): daily = amount × 30.4375 / interval; weekly = amount × weekdays × 4.3481 / interval (no weekdays = 1); monthly = amount / interval; yearly = amount / (12 × interval); custom dates = amount × the dates that fall in the CURRENT month. 2 decimals. next = the nearest upcoming occurrence (today or later) of an active setting of ANY type, null when none; ties by name.'
+          required: [month_pay, month_receive, next]
+          properties:
+            month_pay: { $ref: '#/components/schemas/Money' }
+            month_receive: { $ref: '#/components/schemas/Money' }
+            next:
+              oneOf:
+                - type: object
+                  required: [id, name, date, amount, type]
+                  properties:
+                    id: { $ref: '#/components/schemas/Uuid' }
+                    name: { type: string }
+                    date: { $ref: '#/components/schemas/Date' }
+                    amount: { $ref: '#/components/schemas/Money' }
+                    type: { type: string, enum: [expense, income, transfer, saving] }
+                - { type: 'null' }
         pagination: { $ref: '#/components/schemas/Page' }
     RecurringItemLink:
       type: object

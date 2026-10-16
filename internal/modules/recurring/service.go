@@ -605,7 +605,7 @@ func (s *Service) ruleItems(ctx context.Context, userID, ruleID uuid.UUID, today
 
 // --- reads ---
 
-func (s *Service) List(ctx context.Context, userID uuid.UUID, status string, page, perPage int, tz string) (*RecurringList, error) {
+func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q string, page, perPage int, tz string) (*RecurringList, error) {
 	if err := s.DueCheck(ctx, userID, tz); err != nil {
 		return nil, err
 	}
@@ -621,21 +621,29 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status string, pag
 	case "all":
 		cond = `TRUE`
 	}
+	args := []any{userID}
+	if q = strings.TrimSpace(q); q != "" {
+		args = append(args, "%"+shared.EscapeLike(q)+"%")
+		cond += ` AND name ILIKE $2`
+	}
 	out := &RecurringList{Data: []Recurring{}}
+	if out.Summary, err = s.summary(ctx, userID, today); err != nil {
+		return nil, err
+	}
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FILTER (WHERE status <> 'archived'),
 		COUNT(*) FILTER (WHERE status = 'archived'), COUNT(*) FROM recurring_rules WHERE user_id = $1`, userID).Scan(
 		&out.Counts.Current, &out.Counts.Archived, &out.Counts.All); err != nil {
 		return nil, err
 	}
 	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM recurring_rules WHERE user_id = $1 AND `+cond, userID).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM recurring_rules WHERE user_id = $1 AND `+cond, args...).Scan(&total); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules r WHERE user_id = $1 AND `+cond+`
 		ORDER BY (SELECT MIN(i.date) FROM recurring_items i WHERE i.rule_id = r.id AND i.produced_at IS NULL
 		          AND i.pending_id IS NULL AND i.transaction_id IS NULL AND NOT i.archived) ASC NULLS LAST,
 		         LOWER(name), id
-		LIMIT $2 OFFSET $3`, userID, perPage, (page-1)*perPage)
+		LIMIT $`+fmt.Sprint(len(args)+1)+` OFFSET $`+fmt.Sprint(len(args)+2), append(args, perPage, (page-1)*perPage)...)
 	if err != nil {
 		return nil, err
 	}

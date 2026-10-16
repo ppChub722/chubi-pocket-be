@@ -399,9 +399,9 @@ type CreateProjectTransactionRequest struct {
 	TagIDs              []uuid.UUID         `json:"tag_ids"`
 	Splits              []ProjectSplitInput `json:"splits"                binding:"omitempty,dive"`
 
-	// Set in Go: the currency (the recorder's), event tags by name (a
-	// pulled bill's copied tags) and the transaction the bill is made from.
-	Currency            string     `json:"-"`
+	// Set in Go: event tags by name (a pulled bill's copied tags) and the
+	// transaction the bill is made from. The currency is always the
+	// recorder's users.currency (InsertPTTx).
 	TagNames            []string   `json:"-"`
 	LinkedTransactionID *uuid.UUID `json:"-"`
 }

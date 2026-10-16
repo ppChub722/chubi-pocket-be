@@ -144,7 +144,7 @@ func (h *Handler) List(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
 		return
 	}
-	out, err := h.service.List(c.Request.Context(), uid, status,
+	out, err := h.service.List(c.Request.Context(), uid, status, c.Query("q"),
 		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20), tz(c))
 	reply(c, http.StatusOK, out, err)
 }

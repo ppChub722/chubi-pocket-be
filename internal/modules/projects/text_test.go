@@ -49,7 +49,7 @@ func TestUpdateTextFields(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	pt, err := store.InsertPTTx(ctx, tx, p.Event.ID, uid, CreateProjectTransactionRequest{
-		TransactionMemberID: m.ID, Type: "expense", Amount: 100, Currency: "THB", Date: "2026-10-10",
+		TransactionMemberID: m.ID, Type: "expense", Amount: 100, Date: "2026-10-10",
 		Description: testdb.Str("D1"), Note: testdb.Str("N1"),
 	})
 	if err != nil {
