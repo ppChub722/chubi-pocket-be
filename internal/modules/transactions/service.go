@@ -179,10 +179,20 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*Li
 		f.PerPage = 100
 	}
 
-	rows, total, totals, err := s.store.List(ctx, userID, f)
+	from, to, today, err := s.listRange(ctx, userID, f)
 	if err != nil {
 		return nil, err
 	}
+	f.RangeFrom, f.RangeTo = from, to
+	rows, total, totals, daily, err := s.store.List(ctx, userID, f)
+	if err != nil {
+		return nil, err
+	}
+
+	if daily == nil {
+		daily = []DailyPoint{}
+	}
+	avg := avgDailySpend(daily, from, to, today)
 	data, err := buildDetails(ctx, s.store.db, userID, rows, false)
 	if err != nil {
 		return nil, err
@@ -191,6 +201,7 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*Li
 		Data:       data,
 		Pagination: shared.NewPage(f.Page, f.PerPage, total),
 		Totals:     totals,
+		Daily:      daily, AvgDailySpend: avg,
 	}, nil
 }
 

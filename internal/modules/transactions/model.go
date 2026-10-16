@@ -362,6 +362,10 @@ type ListFilter struct {
 	From       *string // YYYY-MM-DD
 	To         *string
 	NoWallet   bool // true → only rows with account_id IS NULL
+	// TZ — the X-Timezone header (the month of the daily series); RangeFrom / RangeTo
+	// — set by the service: the days the series covers.
+	TZ                 string
+	RangeFrom, RangeTo time.Time
 	// IncludeArchived — rows on archived wallets are hidden unless asked for
 	// (or when listing that wallet itself via AccountID).
 	IncludeArchived bool
@@ -395,6 +399,10 @@ type ListResponse struct {
 	Data       []TransactionDetail `json:"data"`
 	Pagination shared.Page         `json:"pagination"`
 	Totals     Totals              `json:"totals"`
+	// AvgDailySpend — expense / the days of the range that have happened; Daily —
+	// the day-by-day series. Range = the list's from / to, else the current month.
+	AvgDailySpend float64      `json:"avg_daily_spend"`
+	Daily         []DailyPoint `json:"daily"`
 }
 
 type SummaryRequest struct {

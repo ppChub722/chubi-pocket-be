@@ -838,3 +838,39 @@ func TestArchivedWalletIsIgnoredAndReadOnly(t *testing.T) {
 	}
 	f.call("updateTransaction", "PUT", path, map[string]any{"amount": 90}, http.StatusOK)
 }
+
+// TestListDailySeriesAndAverage — the list's date range gives a zero-filled
+// daily series and the average daily spend over the days that happened.
+func TestListDailySeriesAndAverage(t *testing.T) {
+	f := newHFix(t, true)
+	mk := func(typ string, amount float64, date string) {
+		f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
+			"type": typ, "account_id": f.walletA, "amount": amount, "date": date,
+		}, http.StatusCreated)
+	}
+	mk("expense", 100, "2026-01-02")
+	mk("expense", 50, "2026-01-02")
+	mk("income", 400, "2026-01-03")
+	mk("expense", 30, "2026-01-10")
+	mk("expense", 999, "2026-02-01") // outside the January range
+	out := decode[transactions.ListResponse](t, f.call("listTransactions", "GET",
+		"/api/v1/transactions?from=2026-01-01&to=2026-01-31", nil, http.StatusOK))
+	if len(out.Daily) != 31 || out.Daily[0].Date != "2026-01-01" || out.Daily[30].Date != "2026-01-31" {
+		t.Fatalf("daily = %d points", len(out.Daily))
+	}
+	if d := out.Daily[1]; d.Date != "2026-01-02" || d.Expense != 150 || d.Income != 0 {
+		t.Errorf("Jan 2 = %+v", d)
+	}
+	if d := out.Daily[2]; d.Income != 400 || d.Expense != 0 {
+		t.Errorf("Jan 3 = %+v", d)
+	}
+	// 180 spent over the 31 days of January (all in the past): 5.81 a day.
+	if out.AvgDailySpend != 5.81 || out.Totals.Expense != 180 || out.Totals.Income != 400 {
+		t.Errorf("avg %v totals %+v", out.AvgDailySpend, out.Totals)
+	}
+	// No range: the current month, a series of that month.
+	now := decode[transactions.ListResponse](t, f.call("listTransactions", "GET", "/api/v1/transactions", nil, http.StatusOK))
+	if len(now.Daily) < 28 || len(now.Daily) > 31 {
+		t.Errorf("current month series = %d points", len(now.Daily))
+	}
+}

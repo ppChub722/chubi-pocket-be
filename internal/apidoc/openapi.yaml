@@ -5094,13 +5094,22 @@ components:
         expense: { $ref: '#/components/schemas/Money' }
         net: { $ref: '#/components/schemas/Money' }
         count: { type: integer, description: 'income + expense rows (pagination.total also counts transfers). '}
+    TransactionDailyPoint:
+      type: object
+      required: [date, income, expense]
+      properties:
+        date: { $ref: '#/components/schemas/Date' }
+        income: { $ref: '#/components/schemas/Money' }
+        expense: { $ref: '#/components/schemas/Money' }
     TransactionList:
       type: object
-      required: [data, pagination, totals]
+      required: [data, pagination, totals, avg_daily_spend, daily]
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/Transaction' } }
         pagination: { $ref: '#/components/schemas/Page' }
+        avg_daily_spend: { $ref: '#/components/schemas/Money', description: 'Expense (my share) of the list''s date range / the days of that range that have happened (to today). Range = from / to (to omitted with from: that month''s end), else the CURRENT month (user timezone).' }
         totals: { $ref: '#/components/schemas/Totals' }
+        daily: { type: array, items: { $ref: '#/components/schemas/TransactionDailyPoint' }, description: 'One point per day of the same range as avg_daily_spend (zero-filled, filters applied, my share; the whole range even past today); empty when the range is over 366 days.' }
     SplitInput:
       type: object
       required: [person_name, owed_amount]

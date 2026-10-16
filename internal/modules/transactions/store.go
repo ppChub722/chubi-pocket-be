@@ -159,7 +159,7 @@ func (s *Store) CountByCategory(ctx context.Context, categoryID uuid.UUID) (int,
 // List returns a page of rows (Service.List resolves them with
 // buildDetails), the filtered row count and the money totals over the
 // whole filtered set. Sort = date_desc by default.
-func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Transaction, int, Totals, error) {
+func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Transaction, int, Totals, []DailyPoint, error) {
 	whereClauses := []string{txVisible("t", "$1")}
 	args := []any{userID}
 
@@ -242,9 +242,15 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		COUNT(*) FILTER (WHERE t.type <> 'transfer')
 		FROM transactions t WHERE `+where, args...).Scan(&total, &totals.Income, &totals.Expense, &totals.Count)
 	if err != nil {
-		return nil, 0, Totals{}, fmt.Errorf("count: %w", err)
+		return nil, 0, Totals{}, nil, fmt.Errorf("count: %w", err)
 	}
 	totals.Net = totals.Income - totals.Expense
+	var daily []DailyPoint
+	if !f.RangeFrom.IsZero() {
+		if daily, err = s.dailySeries(ctx, where, args, f.RangeFrom, f.RangeTo); err != nil {
+			return nil, 0, Totals{}, nil, err
+		}
+	}
 
 	orderBy := "t.date DESC, t.created_at DESC"
 	switch f.Sort {
@@ -268,7 +274,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
-		return nil, 0, Totals{}, fmt.Errorf("list: %w", err)
+		return nil, 0, Totals{}, nil, fmt.Errorf("list: %w", err)
 	}
 	defer rows.Close()
 
@@ -276,14 +282,14 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	for rows.Next() {
 		t, err := scanTx(rows)
 		if err != nil {
-			return nil, 0, Totals{}, fmt.Errorf("scan: %w", err)
+			return nil, 0, Totals{}, nil, fmt.Errorf("scan: %w", err)
 		}
 		out = append(out, *t)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, Totals{}, err
+		return nil, 0, Totals{}, nil, err
 	}
-	return out, total, totals, nil
+	return out, total, totals, daily, nil
 }
 
 // EventSplitsTotal — for an event bill (shared.EventBillPredicate), Σ the

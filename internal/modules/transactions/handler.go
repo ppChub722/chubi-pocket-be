@@ -146,6 +146,7 @@ func (h *Handler) List(c *gin.Context) {
 		f.CounterpartyKey = k.Key()
 	}
 
+	f.TZ = c.GetHeader("X-Timezone")
 	resp, err := h.service.List(c.Request.Context(), userID, f)
 	if err != nil {
 		response.InternalError(c, "Failed to list transactions", err.Error())
