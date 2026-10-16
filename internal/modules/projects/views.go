@@ -95,6 +95,13 @@ func loadEvents(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids [
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	evIDs := make([]uuid.UUID, 0, len(out))
+	for id := range out {
+		evIDs = append(evIDs, id)
+	}
+	if err := fillMyNumbers(ctx, q, callerID, out, evIDs); err != nil {
+		return nil, err
+	}
 	// MY personal tags on each event.
 	trows, err := q.Query(ctx, `SELECT mt.project_id, t.id, t.name, t.icon_code
 		FROM project_my_tags mt JOIN tags t ON t.id = mt.tag_id
@@ -264,6 +271,11 @@ func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid
 	}
 	for _, p := range ps {
 		ep := EventPosition{Member: refs[p.id], Paid: round2(p.paid), Share: round2(p.share), Net: round2(p.paid - p.share)}
+		if ep.Net > 0.005 {
+			ep.Receivable = ep.Net
+		} else if ep.Net < -0.005 {
+			ep.Payable = -ep.Net
+		}
 		s.Members = append(s.Members, ep)
 		if ep.Member.IsMe {
 			me := ep

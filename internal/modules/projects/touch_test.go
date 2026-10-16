@@ -173,6 +173,21 @@ func TestEventsAPI(t *testing.T) {
 	if pos := m(bill, "summary", "my_position"); n(pos, "net") != 100 || n(pos, "share") != 200 {
 		t.Errorf("my position = %v (paid 300, share 200, net 100)", pos)
 	}
+	// 0.4.0 numbers: paid 300, share 200 → receivable 100; plan 1000 − 300 = 700 left; the list summary.
+	if got := me.do("GET", "/projects", nil, "listProjects", http.StatusOK); true {
+		e0 := list(got, "data")[0].(map[string]any)
+		if n(e0, "my_paid") != 300 || n(e0, "my_share") != 200 || n(e0, "my_receivable") != 100 || n(e0, "my_payable") != 0 || n(e0, "remaining") != 700 {
+			t.Errorf("event numbers = %v", e0)
+		}
+		sm := m(got, "summary")
+		if n(sm, "my_share_total") != 200 || n(sm, "paid_total") != 300 || n(sm, "receivable_total") != 100 ||
+			n(m(sm, "counts"), "active") != 1 || n(m(sm, "counts"), "unsettled") != 1 || n(m(sm, "counts"), "ended") != 0 {
+			t.Errorf("list summary = %v", sm)
+		}
+	}
+	if pos := m(bill, "summary", "my_position"); n(pos, "receivable") != 100 || n(pos, "payable") != 0 {
+		t.Errorf("my position split = %v", pos)
+	}
 	byTag := list(m(bill, "summary"), "by_tag")
 	if len(byTag) != 1 || n(byTag[0].(map[string]any), "share") != 200 || m(byTag[0], "tag")["name"] != "Food" {
 		t.Errorf("by_tag = %v", byTag)

@@ -86,6 +86,9 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*Ev
 		return nil, err
 	}
 	out := &EventList{Data: make([]Event, 0, len(ids)), Pagination: shared.NewPage(f.Page, f.PerPage, total)}
+	if out.Summary, err = s.listSummary(ctx, userID); err != nil {
+		return nil, err
+	}
 	for _, id := range ids {
 		out.Data = append(out.Data, events[id])
 	}

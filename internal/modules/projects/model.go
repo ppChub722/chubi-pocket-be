@@ -101,31 +101,39 @@ type ProjectTransaction struct {
 
 // Event — spec schema Event.
 type Event struct {
-	ID               uuid.UUID        `json:"id"`
-	OwnerUserID      uuid.UUID        `json:"owner_user_id"`
-	Name             string           `json:"name"`
-	IconCode         *shared.IconCode `json:"icon_code"`
-	Description      *string          `json:"description"`
-	Note             *string          `json:"note"`
-	Status           string           `json:"status"`
-	StartDate        *string          `json:"start_date"`
-	EndDate          *string          `json:"end_date"`
-	PlannedAmount    *float64         `json:"planned_amount"`
-	MembersCount     int              `json:"members_count"`
-	TotalExpense     float64          `json:"total_expense"`
-	TotalIncome      float64          `json:"total_income"`
-	MyNet            float64          `json:"my_net"`
-	Tags             []shared.TagRef  `json:"tags"`
-	MyMemberID       *uuid.UUID       `json:"my_member_id"`
-	MyRole           *string          `json:"my_role"`
-	IsOwner          bool             `json:"is_owner"`
-	IsLocked         bool             `json:"is_locked"`
-	CanAddBill       bool             `json:"can_add_bill"`
-	CanEdit          bool             `json:"can_edit"`
-	CanManageMembers bool             `json:"can_manage_members"`
-	LinkedTxCount    int              `json:"linked_tx_count"`
-	CreatedAt        time.Time        `json:"created_at"`
-	UpdatedAt        time.Time        `json:"updated_at"`
+	ID            uuid.UUID        `json:"id"`
+	OwnerUserID   uuid.UUID        `json:"owner_user_id"`
+	Name          string           `json:"name"`
+	IconCode      *shared.IconCode `json:"icon_code"`
+	Description   *string          `json:"description"`
+	Note          *string          `json:"note"`
+	Status        string           `json:"status"`
+	StartDate     *string          `json:"start_date"`
+	EndDate       *string          `json:"end_date"`
+	PlannedAmount *float64         `json:"planned_amount"`
+	MembersCount  int              `json:"members_count"`
+	TotalExpense  float64          `json:"total_expense"`
+	TotalIncome   float64          `json:"total_income"`
+	MyNet         float64          `json:"my_net"`
+	// 0.4.0 (spec 10): my_paid = what I paid on the expense bills; my_share = my
+	// part of them; my_receivable / my_payable = my_net split by sign (both ≥ 0);
+	// remaining = planned_amount − (expense − income), null without a plan.
+	MyPaid           float64         `json:"my_paid"`
+	MyShare          float64         `json:"my_share"`
+	MyReceivable     float64         `json:"my_receivable"`
+	MyPayable        float64         `json:"my_payable"`
+	Remaining        *float64        `json:"remaining"`
+	Tags             []shared.TagRef `json:"tags"`
+	MyMemberID       *uuid.UUID      `json:"my_member_id"`
+	MyRole           *string         `json:"my_role"`
+	IsOwner          bool            `json:"is_owner"`
+	IsLocked         bool            `json:"is_locked"`
+	CanAddBill       bool            `json:"can_add_bill"`
+	CanEdit          bool            `json:"can_edit"`
+	CanManageMembers bool            `json:"can_manage_members"`
+	LinkedTxCount    int             `json:"linked_tx_count"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
 
 	// myStatus — the caller's member status ("" = not a member).
 	myStatus string
@@ -133,8 +141,9 @@ type Event struct {
 
 // EventList — spec schema EventList.
 type EventList struct {
-	Data       []Event     `json:"data"`
-	Pagination shared.Page `json:"pagination"`
+	Data       []Event          `json:"data"`
+	Summary    EventListSummary `json:"summary"`
+	Pagination shared.Page      `json:"pagination"`
 }
 
 // EventMember — spec schema EventMember.
@@ -182,6 +191,9 @@ type EventPosition struct {
 	Paid   float64          `json:"paid"`
 	Share  float64          `json:"share"`
 	Net    float64          `json:"net"`
+	// Receivable / Payable — net split by sign (both ≥ 0).
+	Receivable float64 `json:"receivable"`
+	Payable    float64 `json:"payable"`
 }
 
 // EventTagTotal — spec schema EventTagTotal.

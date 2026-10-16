@@ -9037,7 +9037,7 @@ components:
     Event:
       type: object
       description: 'An event, page-ready (list row and the detail header). Single currency: amounts are in the user''s currency.'
-      required: [id, owner_user_id, name, icon_code, description, note, status, start_date, end_date, planned_amount, members_count, total_expense, total_income, my_net, tags, my_member_id, my_role, is_owner, is_locked, can_add_bill, can_edit, can_manage_members, created_at, updated_at]
+      required: [id, owner_user_id, name, icon_code, description, note, status, start_date, end_date, planned_amount, members_count, total_expense, my_paid, my_share, my_receivable, my_payable, remaining, total_income, my_net, tags, my_member_id, my_role, is_owner, is_locked, can_add_bill, can_edit, can_manage_members, created_at, updated_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         owner_user_id: { $ref: '#/components/schemas/Uuid' }
@@ -9051,6 +9051,11 @@ components:
         planned_amount: { type: [number, 'null'] }
         members_count: { type: integer, description: 'Active members.' }
         total_expense: { $ref: '#/components/schemas/Money', description: 'Σ expense bills (parents).' }
+        my_paid: { $ref: '#/components/schemas/Money', description: 'What I paid on the expense bills.' }
+        my_share: { $ref: '#/components/schemas/Money', description: 'My part of the expense bills (a bill without splits is all its payer''s).' }
+        my_receivable: { $ref: '#/components/schemas/Money', description: 'my_net when > 0 (others owe me), else 0.' }
+        my_payable: { $ref: '#/components/schemas/Money', description: '−my_net when < 0 (I owe others), else 0.' }
+        remaining: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'planned_amount − (expense − income); null without a plan.' }
         total_income: { $ref: '#/components/schemas/Money' }
         my_net: { $ref: '#/components/schemas/Money', description: 'My position: paid − share on expense bills (> 0 = the others owe me). 0 when I have no part.' }
         tags: { type: array, items: { $ref: '#/components/schemas/TagRef' }, description: 'MY personal tags on the event (private to me; each member groups events their own way).' }
@@ -9066,9 +9071,24 @@ components:
         updated_at: { $ref: '#/components/schemas/DateTime' }
     EventList:
       type: object
-      required: [data, pagination]
+      required: [data, summary, pagination]
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/Event' } }
+        summary:
+          type: object
+          description: 'The list''s summary card, over MY events (active member, not archived), the same whatever the list filter. The three totals are over the ACTIVE events: my_share_total = my part of their expense bills, paid_total = what I paid, receivable_total = what others still owe me (Σ my_receivable). counts: active = active events; unsettled = events (active or ended) where I am owed or owe something; ended = completed + cancelled.'
+          required: [my_share_total, paid_total, receivable_total, counts]
+          properties:
+            my_share_total: { $ref: '#/components/schemas/Money' }
+            paid_total: { $ref: '#/components/schemas/Money' }
+            receivable_total: { $ref: '#/components/schemas/Money' }
+            counts:
+              type: object
+              required: [active, unsettled, ended]
+              properties:
+                active: { type: integer }
+                unsettled: { type: integer }
+                ended: { type: integer }
         pagination: { $ref: '#/components/schemas/Page' }
     EventMember:
       type: object
@@ -9114,12 +9134,14 @@ components:
     EventPosition:
       type: object
       description: 'A member''s standing on expense bills: paid = bills they paid; share = their split rows (a bill without splits is fully its payer''s share); net = paid − share (> 0: the others owe them).'
-      required: [member, paid, share, net]
+      required: [member, paid, share, net, receivable, payable]
       properties:
         member: { $ref: '#/components/schemas/MemberRef' }
         paid: { $ref: '#/components/schemas/Money' }
         share: { $ref: '#/components/schemas/Money' }
         net: { $ref: '#/components/schemas/Money' }
+        receivable: { $ref: '#/components/schemas/Money', description: 'net when > 0 (others owe them), else 0.' }
+        payable: { $ref: '#/components/schemas/Money', description: '−net when < 0 (they owe others), else 0.' }
     EventTagTotal:
       type: object
       description: 'Expense bills by event tag. tag null = untagged.'
