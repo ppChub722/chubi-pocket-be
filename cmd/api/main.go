@@ -376,6 +376,7 @@ func main() {
 			protected.POST("/accounts/invites/:notification_id/reject", accountsHandler.RejectInvite)
 			protected.GET("/accounts/:id", accountsHandler.Get)
 			protected.POST("/accounts/:id/archive", accountsHandler.Archive)
+			protected.GET("/accounts/:id/delete-preview", accountsHandler.DeletePreview)
 			protected.POST("/accounts/:id/restore", accountsHandler.Restore)
 			protected.PUT("/accounts/:id", accountsHandler.Update)
 			protected.DELETE("/accounts/:id", accountsHandler.Delete)

@@ -239,7 +239,10 @@ func (s *Service) Close(ctx context.Context, userID, id uuid.UUID, r CloseReques
 		if err := s.store.insertEntry(ctx, tx, e); err != nil {
 			return nil, err
 		}
-		ids, wallets = append(ids, e.ID), append(wallets, acc)
+		ids = append(ids, e.ID)
+		if acc != uuid.Nil {
+			wallets = append(wallets, acc)
+		}
 	}
 	now := time.Now()
 	g.Status, g.ClosedAt = StateCompleted, &now
@@ -373,16 +376,24 @@ func (s *Service) createEntriesTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 	var rows []*entryRow
 	switch r.Kind {
 	case KindSave:
-		if r.WalletID == nil || len(r.Splits) > 0 || r.ToGoalID != nil {
+		if len(r.Splits) > 0 || r.ToGoalID != nil {
 			return nil, nil, nil, ErrValidation
 		}
-		if err := checkWallet(ctx, tx, userID, *r.WalletID); err != nil {
+		walletID := uuid.Nil // no wallet = unallocated (counts for the goal only)
+		if r.WalletID != nil {
+			if err := checkWallet(ctx, tx, userID, *r.WalletID); err != nil {
+				return nil, nil, nil, err
+			}
+			walletID = *r.WalletID
+		} else if def, err := defaultWallet(ctx, tx, userID); err != nil {
 			return nil, nil, nil, err
+		} else if def != nil {
+			walletID = *def // stamped now, stable afterwards
 		}
 		if err := s.checkGoalTarget(ctx, tx, userID, r.GoalID); err != nil {
 			return nil, nil, nil, err
 		}
-		e := row(*r.WalletID, r.Amount)
+		e := row(walletID, r.Amount)
 		e.FromBucket, e.ToBucket, e.ToGoalID = BucketAvailable, bucketOf(r.GoalID), r.GoalID
 		rows = append(rows, e)
 	case KindWithdraw, KindMove:
@@ -429,7 +440,10 @@ func (s *Service) createEntriesTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 		if err := s.store.insertEntry(ctx, tx, e); err != nil {
 			return nil, nil, nil, err
 		}
-		ids, wallets = append(ids, e.ID), append(wallets, e.AccountID)
+		ids = append(ids, e.ID)
+		if e.AccountID != uuid.Nil {
+			wallets = append(wallets, e.AccountID)
+		}
 	}
 	return ids, goals, wallets, nil
 }
@@ -523,7 +537,7 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, r Entry
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.writeResult(ctx, userID, []uuid.UUID{e.ID}, goalsOf(e), []uuid.UUID{e.AccountID}, entryPageRef(e))
+	return s.writeResult(ctx, userID, []uuid.UUID{e.ID}, goalsOf(e), walletList(e.AccountID), entryPageRef(e))
 }
 
 func (s *Service) deleteEntryTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) (*entryRow, error) {
@@ -556,7 +570,7 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, id uuid.UUID) (*Write
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.writeResult(ctx, userID, nil, goalsOf(e), []uuid.UUID{e.AccountID}, entryPageRef(e))
+	return s.writeResult(ctx, userID, nil, goalsOf(e), walletList(e.AccountID), entryPageRef(e))
 }
 
 // writeResult — the final state after a write.
@@ -648,4 +662,12 @@ func (s *Service) UpdateEntryTx(ctx context.Context, tx pgx.Tx, userID, id uuid.
 func (s *Service) DeleteEntryTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) error {
 	_, err := s.deleteEntryTx(ctx, tx, userID, id)
 	return err
+}
+
+// walletList — the wallet an entry touched (none for money with no wallet).
+func walletList(id uuid.UUID) []uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return []uuid.UUID{id}
 }

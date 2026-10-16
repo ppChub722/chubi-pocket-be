@@ -237,10 +237,12 @@ func (s *Service) shares(ctx context.Context, per map[uuid.UUID]float64) ([]Wall
 			continue
 		}
 		ws := WalletShare{Amount: round2(a)}
-		if r, ok := refs[id]; ok {
-			ws.Wallet = r
-		} else {
-			ws.Wallet = shared.AccountRef{ID: id}
+		if id != uuid.Nil { // uuid.Nil = money with no wallet → wallet null
+			r, ok := refs[id]
+			if !ok {
+				r = shared.AccountRef{ID: id}
+			}
+			ws.Wallet = &r
 		}
 		if total > 0 {
 			ws.SharePct = int(math.Round(a / total * 100))
@@ -251,7 +253,7 @@ func (s *Service) shares(ctx context.Context, per map[uuid.UUID]float64) ([]Wall
 		if out[i].Amount != out[j].Amount {
 			return out[i].Amount > out[j].Amount
 		}
-		return out[i].Wallet.ID.String() < out[j].Wallet.ID.String()
+		return walletKey(out[i]) < walletKey(out[j])
 	})
 	return out, round2(total), nil
 }
@@ -309,7 +311,9 @@ func (s *Service) entryViews(ctx context.Context, rows []*entryRow) ([]Entry, er
 	}
 	var accIDs, goalIDs, ids []uuid.UUID
 	for _, e := range rows {
-		accIDs = append(accIDs, e.AccountID)
+		if e.AccountID != uuid.Nil {
+			accIDs = append(accIDs, e.AccountID)
+		}
 		ids = append(ids, e.ID)
 		for _, g := range []*uuid.UUID{e.FromGoalID, e.ToGoalID} {
 			if g != nil {
@@ -358,9 +362,12 @@ func (s *Service) entryViews(ctx context.Context, rows []*entryRow) ([]Entry, er
 		links[eid] = l
 	}
 	q.Close()
-	bucket := func(b string, goal *uuid.UUID, acc shared.AccountRef) BucketRef {
+	bucket := func(b string, goal *uuid.UUID, acc *shared.AccountRef) BucketRef {
 		switch b {
 		case BucketAvailable:
+			if acc == nil {
+				return BucketRef{Type: "wallet"}
+			}
 			name := acc.Name
 			id := acc.ID
 			return BucketRef{Type: "wallet", ID: &id, Name: &name, IconCode: acc.IconCode}
@@ -377,9 +384,13 @@ func (s *Service) entryViews(ctx context.Context, rows []*entryRow) ([]Entry, er
 		return r
 	}
 	for _, e := range rows {
-		acc, ok := accs[e.AccountID]
-		if !ok {
-			acc = shared.AccountRef{ID: e.AccountID}
+		var acc *shared.AccountRef
+		if e.AccountID != uuid.Nil {
+			a, ok := accs[e.AccountID]
+			if !ok {
+				a = shared.AccountRef{ID: e.AccountID}
+			}
+			acc = &a
 		}
 		v := Entry{
 			ID: e.ID, GroupID: e.GroupID, Kind: e.Kind, Date: e.Date.Format(dateLayout), Note: e.Note, Wallet: acc,
@@ -551,4 +562,12 @@ func (s *Service) Spare(ctx context.Context, userID uuid.UUID, perPage int) (*Sp
 // Totals — Home / More (shared).
 func (s *Service) Totals(ctx context.Context, userID uuid.UUID) (*shared.SavingTotals, error) {
 	return shared.LoadSavingTotals(ctx, s.store.db, userID)
+}
+
+// walletKey — a stable sort key of a share ("" for the no-wallet share).
+func walletKey(w WalletShare) string {
+	if w.Wallet == nil {
+		return ""
+	}
+	return w.Wallet.ID.String()
 }

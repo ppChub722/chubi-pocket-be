@@ -50,9 +50,9 @@ type SavingTotals struct {
 	Available float64 `json:"available"`
 }
 
-// SavingBalance — one (wallet, bucket) balance.
+// SavingBalance — one (wallet, bucket) balance (AccountID uuid.Nil = money with no wallet).
 type SavingBalance struct {
-	AccountID uuid.UUID
+	AccountID uuid.UUID // uuid.Nil = no wallet (unallocated)
 	Bucket    string     // spare | goal
 	GoalID    *uuid.UUID // nil for spare (and a deleted goal)
 	Amount    float64
@@ -85,8 +85,12 @@ func LoadSavingBalances(ctx context.Context, q Querier, userID uuid.UUID, where 
 	var out []SavingBalance
 	for rows.Next() {
 		var b SavingBalance
-		if err := rows.Scan(&b.AccountID, &b.Bucket, &b.GoalID, &b.Amount); err != nil {
+		var acc *uuid.UUID
+		if err := rows.Scan(&acc, &b.Bucket, &b.GoalID, &b.Amount); err != nil {
 			return nil, err
+		}
+		if acc != nil {
+			b.AccountID = *acc
 		}
 		b.Amount = math.Round(b.Amount*100) / 100
 		out = append(out, b)

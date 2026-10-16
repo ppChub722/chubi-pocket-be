@@ -15,3 +15,11 @@ CREATE INDEX idx_categories_user ON categories(user_id);
 UPDATE accounts SET status = 'archived' WHERE status = 'closed';
 ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_status_check;
 ALTER TABLE accounts ADD CONSTRAINT accounts_status_check CHECK (status IN ('active', 'archived'));
+
+-- Step 12: a wallet can be deleted for real. Goal money kept on it stays:
+-- a saving entry may have no wallet (NULL = unallocated: it counts for its
+-- goal, never for a wallet).
+ALTER TABLE saving_entries ALTER COLUMN account_id DROP NOT NULL;
+ALTER TABLE saving_entries DROP CONSTRAINT saving_entries_account_id_fkey;
+ALTER TABLE saving_entries ADD CONSTRAINT saving_entries_account_id_fkey
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE SET NULL;
