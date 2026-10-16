@@ -441,7 +441,6 @@ paths:
       operationId: listCategories
       parameters:
         - { name: type, in: query, schema: { type: string, enum: [expense, income] } }
-        - { name: include_system, in: query, schema: { type: boolean } }
         - { name: status, in: query, description: 'Archived rows are excluded unless asked for.', schema: { type: string, enum: [active, archived, all], default: active } }
       responses:
         '200':
@@ -5319,7 +5318,6 @@ components:
           "include_in_report",
           "description",
           "note",
-          "status",
           "created_at",
           "updated_at"
         ],
@@ -5408,13 +5406,6 @@ components:
             "type": [
               "string",
               "null"
-            ]
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "active",
-              "archived"
             ]
           },
           "created_at": {

@@ -134,9 +134,6 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*CategoryDetai
 }
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Category, error) {
-	if f.Status == "" {
-		f.Status = "active"
-	}
 	cats, err := s.store.List(ctx, userID, f)
 	if err != nil {
 		return nil, err
@@ -274,7 +271,7 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (*DeleteCate
 // On any failure → no rows change.
 func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []ReorderEntry) ([]Category, error) {
 	if len(entries) == 0 {
-		cats, err := s.store.List(ctx, userID, ListFilter{Status: "active"})
+		cats, err := s.store.List(ctx, userID, ListFilter{})
 		if err != nil {
 			return nil, err
 		}
@@ -285,7 +282,7 @@ func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []Reord
 	// chatty per-entry round trips. Includes system rows since they may
 	// appear in the batch (sort_order is editable for them).
 	all, err := s.store.List(ctx, userID, ListFilter{
-		Status: "active", IncludeSystem: true,
+		IncludeSystem: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("preload: %w", err)
@@ -322,7 +319,7 @@ func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []Reord
 				return nil, ErrInvalidParent
 			}
 			if parent.UserID != userID || parent.Type != c.Type ||
-				parent.Status != "active" || parent.IsSystem {
+				parent.IsSystem {
 				return nil, ErrInvalidParent
 			}
 		}
@@ -397,9 +394,6 @@ func (s *Service) validateParent(ctx context.Context, userID uuid.UUID, parentID
 		return err
 	}
 	if parent.Type != expectedType {
-		return ErrInvalidParent
-	}
-	if parent.Status != "active" {
 		return ErrInvalidParent
 	}
 	if parent.IsSystem {

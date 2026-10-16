@@ -89,7 +89,7 @@ func (s *Service) WithDebts(d *personal_debts.Service) *Service { s.debts = d; r
 //   - recurring: active recurring settings, and upcoming items within the Home
 //     window (overdue included)
 var countsSQL = `SELECT
-	(SELECT COUNT(*) FROM categories WHERE user_id = $1 AND status = 'active' AND is_system = FALSE),
+	(SELECT COUNT(*) FROM categories WHERE user_id = $1 AND is_system = FALSE),
 	(SELECT COUNT(*) FROM tags WHERE user_id = $1),
 	(SELECT COUNT(*) FROM contacts WHERE user_id = $1 AND status = 'active'),
 	(SELECT COUNT(*) FROM projects p WHERE p.status = 'active' AND (p.owner_user_id = $1 OR EXISTS (

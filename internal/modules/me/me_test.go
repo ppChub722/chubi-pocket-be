@@ -50,10 +50,8 @@ func TestMyCounts(t *testing.T) {
 		t.Fatalf("empty = %+v", got)
 	}
 
-	// Categories: active non-system counted; archived and system not.
+	// Categories: non-system counted; system not.
 	cat := testdb.Category(t, pool, uid, "Food")
-	testdb.Category(t, pool, uid, "Gone")
-	exec(`UPDATE categories SET status = 'archived' WHERE user_id = $1 AND name = 'Gone'`, uid)
 	exec(`INSERT INTO categories (id, user_id, name, type, is_system, system_kind) VALUES (gen_random_uuid(), $1, 'Sys', 'expense', TRUE, 'debt_repayment')`, uid)
 
 	// Tags, contacts (one archived).

@@ -49,17 +49,13 @@ func (h *Handler) List(c *gin.Context) {
 		return
 	}
 
-	f := ListFilter{Status: c.DefaultQuery("status", "active")}
+	var f ListFilter
 	if t := c.Query("type"); t != "" {
 		if t != "income" && t != "expense" {
 			response.BadRequest(c, "VALIDATION_ERROR", "type must be 'income' or 'expense'", nil)
 			return
 		}
 		f.Type = &t
-	}
-	if f.Status != "active" && f.Status != "archived" && f.Status != "all" {
-		response.BadRequest(c, "VALIDATION_ERROR", "status must be 'active', 'archived', or 'all'", nil)
-		return
 	}
 	if v := c.Query("include_system"); v == "true" || v == "1" {
 		f.IncludeSystem = true

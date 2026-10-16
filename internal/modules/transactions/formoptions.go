@@ -159,11 +159,10 @@ func formDefaultAccount(ctx context.Context, q shared.Querier, userID uuid.UUID,
 
 // formCategories — the caller's active non-system categories, depth-first
 // in display order: by type (expense, income), then siblings by
-// sort_order / created_at. A category under an archived parent is left out
-// with it.
+// sort_order / created_at.
 func formCategories(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]CategoryOption, error) {
 	rows, err := q.Query(ctx, `
-		SELECT id, name, type, icon_code, is_system, system_kind, parent_id, sort_order, status
+		SELECT id, name, type, icon_code, is_system, system_kind, parent_id, sort_order
 		FROM categories
 		WHERE user_id = $1 AND NOT is_system
 		ORDER BY type, sort_order, created_at, id`, userID)
@@ -171,8 +170,7 @@ func formCategories(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]
 		return nil, fmt.Errorf("form categories: %w", err)
 	}
 	type node struct {
-		opt    CategoryOption
-		active bool
+		opt CategoryOption
 	}
 	var (
 		all      []*node
@@ -181,16 +179,15 @@ func formCategories(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]
 	)
 	for rows.Next() {
 		var (
-			n      node
-			icon   []byte
-			status string
+			n    node
+			icon []byte
 		)
 		if err := rows.Scan(&n.opt.ID, &n.opt.Name, &n.opt.Type, &icon, &n.opt.IsSystem, &n.opt.SystemKind,
-			&n.opt.ParentID, &n.opt.SortOrder, &status); err != nil {
+			&n.opt.ParentID, &n.opt.SortOrder); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("form categories scan: %w", err)
 		}
-		n.opt.IconCode, n.active = shared.IconFromJSON(icon), status == "active"
+		n.opt.IconCode = shared.IconFromJSON(icon)
 		all = append(all, &n)
 		byID[n.opt.ID] = &n
 	}
@@ -215,7 +212,7 @@ func formCategories(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]
 	out := []CategoryOption{}
 	var walk func(n *node, depth int, parent *string)
 	walk = func(n *node, depth int, parent *string) {
-		if !n.active || depth > 3 {
+		if depth > 3 {
 			return
 		}
 		o := n.opt
@@ -298,7 +295,7 @@ func formFeeCategory(ctx context.Context, q shared.Querier, userID uuid.UUID) (*
 		FROM user_preferences up
 		JOIN categories c ON c.id::text = up.preferences->>'fee_category_id'
 		WHERE up.user_id = $1 AND c.user_id = $1
-		  AND c.status = 'active' AND NOT c.is_system AND c.type = 'expense'`, userID)
+		  AND NOT c.is_system AND c.type = 'expense'`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("form fee category: %w", err)
 	}
