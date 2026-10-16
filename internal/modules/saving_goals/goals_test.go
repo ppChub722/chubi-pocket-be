@@ -298,8 +298,8 @@ func TestSavingGoalFigures(t *testing.T) {
 }
 
 // TestSavingsWithoutWallet — goal money may have no wallet: a save with no
-// wallet_id stamps the default wallet (or stays wallet-less when there is
-// none); wallet-less money counts for the goal and for no wallet; deleting
+// wallet_id stays wallet-less (the default wallet is NOT used);
+// wallet-less money counts for the goal and for no wallet; deleting
 // a wallet keeps its goal money, unlinked.
 func TestSavingsWithoutWallet(t *testing.T) {
 	f := newGoalFix(t)
@@ -310,7 +310,9 @@ func TestSavingsWithoutWallet(t *testing.T) {
 		return w
 	}
 
-	// No default wallet: the entry has no wallet.
+	// No wallet_id = NO wallet, even when the user has a default wallet.
+	f.exec(`INSERT INTO user_notification_settings (user_id, default_account_id) VALUES ($1, $2)
+		ON CONFLICT (user_id) DO UPDATE SET default_account_id = EXCLUDED.default_account_id`, f.me, f.kbank)
 	w := post(map[string]any{"kind": "save", "amount": 1000, "goal_id": goal})
 	if len(w.Entries) != 1 || w.Entries[0].Wallet != nil || w.Entries[0].From.Type != "wallet" || w.Entries[0].From.ID != nil {
 		t.Fatalf("wallet-less entry = %+v", w.Entries)
@@ -322,12 +324,10 @@ func TestSavingsWithoutWallet(t *testing.T) {
 		t.Errorf("by_wallet = %+v", w.GoalPage)
 	}
 
-	// A default wallet is stamped at write time.
-	f.exec(`INSERT INTO user_notification_settings (user_id, default_account_id) VALUES ($1, $2)
-		ON CONFLICT (user_id) DO UPDATE SET default_account_id = EXCLUDED.default_account_id`, f.me, f.kbank)
-	w = post(map[string]any{"kind": "save", "amount": 2000, "goal_id": goal})
+	// An explicit wallet_id still puts the money in that wallet.
+	w = post(map[string]any{"kind": "save", "amount": 2000, "goal_id": goal, "wallet_id": f.kbank})
 	if w.Entries[0].Wallet == nil || w.Entries[0].Wallet.ID != f.kbank {
-		t.Fatalf("stamped entry = %+v", w.Entries[0].Wallet)
+		t.Fatalf("explicit-wallet entry = %+v", w.Entries[0].Wallet)
 	}
 	if kb := walletOf(w, f.kbank); kb == nil || kb.Saved != 2000 {
 		t.Errorf("kbank savings = %+v (the wallet-less 1000 must not count)", kb)
@@ -336,7 +336,7 @@ func TestSavingsWithoutWallet(t *testing.T) {
 		t.Errorf("goal saved = %v, want 3000", w.Goals[0].SavedAmount)
 	}
 
-	// Withdraw 2500: largest-first takes the stamped 2000 and 500 of the
+	// Withdraw 2500: largest-first takes the wallet's 2000 and 500 of the
 	// wallet-less money; the wallet-less pool can't go below 0 on its own.
 	var out WriteResult
 	f.call("POST", "/saving-entries", "createSavingEntry", map[string]any{"kind": "withdraw", "amount": 2500, "goal_id": goal},

@@ -379,16 +379,12 @@ func (s *Service) createEntriesTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 		if len(r.Splits) > 0 || r.ToGoalID != nil {
 			return nil, nil, nil, ErrValidation
 		}
-		walletID := uuid.Nil // no wallet = unallocated (counts for the goal only)
+		walletID := uuid.Nil // no wallet_id sent = NO wallet (outside any wallet; counts for the goal only)
 		if r.WalletID != nil {
 			if err := checkWallet(ctx, tx, userID, *r.WalletID); err != nil {
 				return nil, nil, nil, err
 			}
 			walletID = *r.WalletID
-		} else if def, err := defaultWallet(ctx, tx, userID); err != nil {
-			return nil, nil, nil, err
-		} else if def != nil {
-			walletID = *def // stamped now, stable afterwards
 		}
 		if err := s.checkGoalTarget(ctx, tx, userID, r.GoalID); err != nil {
 			return nil, nil, nil, err

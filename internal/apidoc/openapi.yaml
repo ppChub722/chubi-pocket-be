@@ -5974,7 +5974,7 @@ components:
         date: { $ref: '#/components/schemas/Date', description: 'Default today.' }
         note: { type: [string, 'null'], maxLength: 500 }
         goal_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'save: the target; withdraw / move: the source. null = spare.' }
-        wallet_id: { $ref: '#/components/schemas/Uuid', description: 'save only. Omitted = the user''s default wallet (stamped now); no default wallet = the money has no wallet (counts for the goal, never for a wallet).' }
+        wallet_id: { $ref: '#/components/schemas/Uuid', description: 'save only, OPTIONAL. Omitted = the money goes in NO wallet (outside any wallet: it counts for the goal, never for a wallet). The default wallet is NOT used.' }
         to_goal_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'move only: the target (null = spare).' }
         splits:
           type: array

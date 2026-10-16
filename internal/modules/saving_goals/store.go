@@ -286,23 +286,3 @@ func (s *Store) userTimezone(ctx context.Context, userID uuid.UUID) (string, err
 	}
 	return *tz, err
 }
-
-// defaultWallet — the user's default wallet (user_notification_settings) when
-// it is still usable for saving (active, member, tracks its balance), else nil.
-func defaultWallet(ctx context.Context, q querier, userID uuid.UUID) (*uuid.UUID, error) {
-	var id *uuid.UUID
-	err := q.QueryRow(ctx, `SELECT default_account_id FROM user_notification_settings WHERE user_id = $1`, userID).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && id == nil) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := checkWallet(ctx, q, userID, *id); err != nil {
-		if errors.Is(err, ErrAccountNotFound) || errors.Is(err, ErrWalletNotTracked) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return id, nil
-}
