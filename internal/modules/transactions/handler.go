@@ -391,8 +391,7 @@ func mapServiceError(c *gin.Context, err error) {
 		errors.Is(err, ErrTransferFieldsOnNonTransfer),
 		errors.Is(err, ErrCategoryRequiredForTransfer),
 		errors.Is(err, ErrTransferCategoryEdit),
-		errors.Is(err, ErrTransferRequiresAccount),
-		errors.Is(err, ErrMoveTransferNeedsToAccount):
+		errors.Is(err, ErrTransferRequiresAccount):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, ErrSystemTransactionImmutable):
 		response.BadRequest(c, "SYSTEM_TRANSACTION_IMMUTABLE", err.Error(), nil)

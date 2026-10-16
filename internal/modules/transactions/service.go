@@ -38,7 +38,6 @@ var (
 	ErrSplitsExceedShare           = errors.New("splits add up to more than your share of this event bill")
 	ErrCategoryRequiredForTransfer = errors.New("transfer category is auto-set; do not pass category_id")
 	ErrTransferRequiresAccount     = errors.New("account_id is required for type=transfer")
-	ErrMoveTransferNeedsToAccount  = errors.New("transfer_to_account_id is required when moving a transfer's account")
 	ErrTransferEditCurrency        = errors.New("cannot edit currency on a transfer; delete and recreate")
 	ErrTransferCategoryEdit        = errors.New("cannot change category on a transfer; delete and recreate")
 	// tag_ids / PUT /:id/tags: every id must be one of the caller's tags.
@@ -839,19 +838,33 @@ func (s *Service) updateTransferInTx(
 		return nil, nil, nil, err
 	}
 
+	// Each leg is re-filed on its own: account_id = the OUT leg's wallet,
+	// transfer_to_account_id = the IN leg's. A leg that has a wallet can't be
+	// cleared (a wallet-less leg only comes from deleting its wallet); a
+	// wallet-less leg can be given one.
 	newOutAccID, outAccChange := req.AccountIDChange()
 	newInAccID, inAccChange := req.TransferToAccountIDChange()
-	if outAccChange != inAccChange {
-		return nil, nil, nil, ErrMoveTransferNeedsToAccount
-	}
-	if outAccChange {
-		// Both sides stay on a wallet, and on different ones.
-		if newOutAccID == nil || newInAccID == nil {
+	if outAccChange && newOutAccID == nil {
+		if outRow.AccountID != nil {
 			return nil, nil, nil, ErrTransferRequiresAccount
 		}
-		if *newOutAccID == *newInAccID {
-			return nil, nil, nil, ErrTransferSameAccount
+		outAccChange = false
+	}
+	if inAccChange && newInAccID == nil {
+		if inRow.AccountID != nil {
+			return nil, nil, nil, ErrTransferRequiresAccount
 		}
+		inAccChange = false
+	}
+	effOut, effIn := outRow.AccountID, inRow.AccountID
+	if outAccChange {
+		effOut = newOutAccID
+	}
+	if inAccChange {
+		effIn = newInAccID
+	}
+	if effOut != nil && effIn != nil && *effOut == *effIn {
+		return nil, nil, nil, ErrTransferSameAccount
 	}
 
 	effectiveAmount := current.Amount
@@ -863,43 +876,38 @@ func (s *Service) updateTransferInTx(
 	touched := nonNilIDs(outRow.AccountID, inRow.AccountID, newOutAccID, newInAccID)
 	lockIDs := uniqueUUIDs(touched)
 	sort.Slice(lockIDs, func(i, j int) bool { return uuidLess(lockIDs[i], lockIDs[j]) })
-	if err := s.store.LockAccountsForUpdate(ctx, tx, lockIDs); err != nil {
-		return nil, nil, nil, err
+	if len(lockIDs) > 0 {
+		if err := s.store.LockAccountsForUpdate(ctx, tx, lockIDs); err != nil {
+			return nil, nil, nil, err
+		}
 	}
 
-	if outAccChange {
-		// Move both sides: reverse old accounts, apply to new accounts.
-		if outRow.AccountID != nil {
-			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *outRow.AccountID, current.Amount); err != nil {
+	// Balances move per leg; a wallet-less leg moves nothing.
+	// sign: OUT leg loses the amount, IN leg gains it.
+	legs := []struct {
+		old, neu *uuid.UUID
+		moved    bool
+		sign     float64
+	}{
+		{outRow.AccountID, newOutAccID, outAccChange, -1},
+		{inRow.AccountID, newInAccID, inAccChange, +1},
+	}
+	for _, l := range legs {
+		switch {
+		case l.moved:
+			if l.old != nil {
+				if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *l.old, -l.sign*current.Amount); err != nil {
+					return nil, nil, nil, err
+				}
+			}
+			if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *l.neu); err != nil {
 				return nil, nil, nil, err
 			}
-		}
-		if inRow.AccountID != nil {
-			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *inRow.AccountID, -current.Amount); err != nil {
+			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *l.neu, l.sign*effectiveAmount); err != nil {
 				return nil, nil, nil, err
 			}
-		}
-		if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *newOutAccID); err != nil {
-			return nil, nil, nil, err
-		}
-		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *newOutAccID, -effectiveAmount); err != nil {
-			return nil, nil, nil, err
-		}
-		if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *newInAccID); err != nil {
-			return nil, nil, nil, err
-		}
-		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *newInAccID, effectiveAmount); err != nil {
-			return nil, nil, nil, err
-		}
-	} else if req.Amount != nil && *req.Amount != current.Amount {
-		old, new := current.Amount, *req.Amount
-		if outRow.AccountID != nil {
-			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *outRow.AccountID, old-new); err != nil {
-				return nil, nil, nil, err
-			}
-		}
-		if inRow.AccountID != nil {
-			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *inRow.AccountID, new-old); err != nil {
+		case req.Amount != nil && *req.Amount != current.Amount && l.old != nil:
+			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *l.old, l.sign*(effectiveAmount-current.Amount)); err != nil {
 				return nil, nil, nil, err
 			}
 		}
@@ -1058,7 +1066,8 @@ func (s *Service) authorizePairMutation(
 		}
 		return nil
 	}
-	if activeOut && activeIn {
+	// A wallet-less leg (its wallet was deleted) needs no membership.
+	if (outRow.AccountID == nil || activeOut) && (inRow.AccountID == nil || activeIn) {
 		return nil
 	}
 	if current.UserID == userID {

@@ -115,9 +115,9 @@ type SplitRef struct {
 // TransferPeer — the other row of a transfer (spec schema TransferPeer).
 // Direction is THIS row's direction (out = the money leaves this wallet).
 type TransferPeer struct {
-	ID        uuid.UUID         `json:"id"`
-	Direction string            `json:"direction"`
-	Account   shared.AccountRef `json:"account"`
+	ID        uuid.UUID          `json:"id"`
+	Direction string             `json:"direction"`
+	Account   *shared.AccountRef `json:"account"` // nil = the twin has no wallet
 }
 
 // TransactionDetail is the page-ready row (spec schema Transaction): the

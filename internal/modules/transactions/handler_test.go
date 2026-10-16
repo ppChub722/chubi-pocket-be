@@ -727,3 +727,56 @@ func TestSummaryHandler(t *testing.T) {
 	f.call("getTransactionSummary", "GET", "/api/v1/transactions/summary?from=2026-10-01&to=2026-10-31&group_by=year", nil, http.StatusBadRequest)
 	f.call("getTransactionSummary", "GET", "/api/v1/transactions/summary?to=2026-10-31", nil, http.StatusBadRequest)
 }
+
+// TestTransferWalletlessLeg — a transfer whose IN leg lost its wallet (the
+// wallet was deleted: the row keeps living with account_id NULL): the twin
+// shows account null, the OUT leg still edits / moves its own balance, the
+// empty leg can be given a wallet again but a leg with a wallet can't be
+// cleared, and the pair deletes cleanly.
+func TestTransferWalletlessLeg(t *testing.T) {
+	f := newHFix(t, true)
+	tr := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
+		"type": "transfer", "account_id": f.walletA, "transfer_to_account_id": f.walletB,
+		"amount": 100, "date": "2026-10-12",
+	}, http.StatusCreated))
+	outID, inID := tr.Rows[0].ID, tr.Rows[1].ID
+	outPath, inPath := "/api/v1/transactions/"+outID.String(), "/api/v1/transactions/"+inID.String()
+	// What deleting wallet B does to the leg.
+	f.exec(`UPDATE transactions SET account_id = NULL WHERE id = $1`, inID)
+
+	got := decode[transactions.TransactionDetail](t, f.call("getTransaction", "GET", outPath, nil, http.StatusOK))
+	if got.TransferPeer == nil || got.TransferPeer.ID != inID || got.TransferPeer.Account != nil {
+		t.Errorf("OUT row peer = %+v, want the IN row with no wallet", got.TransferPeer)
+	}
+	got = decode[transactions.TransactionDetail](t, f.call("getTransaction", "GET", inPath, nil, http.StatusOK))
+	if got.Account != nil || got.TransferPeer == nil || got.TransferPeer.Direction != "in" ||
+		got.TransferPeer.Account == nil || got.TransferPeer.Account.ID != f.walletA {
+		t.Errorf("IN row = account %v peer %+v", got.Account, got.TransferPeer)
+	}
+
+	// Amount edit moves only A (-100 → -60); B is untouched.
+	bBefore := f.balance(f.walletB)
+	res := decode[writeResult](t, f.call("updateTransaction", "PUT", inPath, map[string]any{"amount": 60}, http.StatusOK))
+	if a, _ := balanceOf(res.AccountBalances, f.walletA); a != -60 || f.balance(f.walletB) != bBefore {
+		t.Errorf("after amount edit: A %v B %v (was %v)", a, f.balance(f.walletB), bBefore)
+	}
+	// A leg with a wallet can't be cleared; the empty one can be filled.
+	f.call("updateTransaction", "PUT", outPath, map[string]any{"account_id": nil}, http.StatusBadRequest)
+	f.call("updateTransaction", "PUT", outPath, map[string]any{"transfer_to_account_id": f.walletA}, http.StatusBadRequest)
+	res = decode[writeResult](t, f.call("updateTransaction", "PUT", outPath,
+		map[string]any{"transfer_to_account_id": f.walletB}, http.StatusOK))
+	if b, _ := balanceOf(res.AccountBalances, f.walletB); b != bBefore+60 {
+		t.Errorf("re-filed B = %v, want %v", b, bBefore+60)
+	}
+	if res.Rows[1].Account == nil || res.Rows[1].Account.ID != f.walletB {
+		t.Errorf("IN row after re-file = %+v", res.Rows[1].Account)
+	}
+
+	// Delete a pair whose IN leg is wallet-less again.
+	f.exec(`UPDATE transactions SET account_id = NULL WHERE id = $1`, inID)
+	f.call("deleteTransaction", "DELETE", inPath, nil, http.StatusOK)
+	if f.balance(f.walletA) != 0 {
+		t.Errorf("A after delete = %v, want 0", f.balance(f.walletA))
+	}
+	f.call("getTransaction", "GET", outPath, nil, http.StatusNotFound)
+}

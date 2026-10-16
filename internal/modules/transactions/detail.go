@@ -186,10 +186,14 @@ func buildDetails(
 				UserID: r.UserID, DisplayName: f.authorName, IconCode: shared.IconFromJSON(f.authorIcon),
 			}
 		}
-		if r.Type == TypeTransfer && f.peerID != nil && f.peerAccountID != nil {
-			if a, ok := accounts[*f.peerAccountID]; ok {
-				d.TransferPeer = &TransferPeer{ID: *f.peerID, Direction: transferDirection(f), Account: a}
+		if r.Type == TypeTransfer && f.peerID != nil {
+			p := &TransferPeer{ID: *f.peerID, Direction: transferDirection(f)}
+			if f.peerAccountID != nil {
+				if a, ok := accounts[*f.peerAccountID]; ok {
+					p.Account = &a
+				}
 			}
+			d.TransferPeer = p
 		}
 		out[i] = d
 	}

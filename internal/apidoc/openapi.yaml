@@ -4815,7 +4815,7 @@ components:
           type: string
           enum: [out, in]
           description: 'Direction of THIS row (out = the money leaves this wallet).'
-        account: { $ref: '#/components/schemas/AccountRef' }
+        account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'The other row''s wallet; null = the twin has no wallet (its wallet was deleted), so the page shows "ไม่ผูกกระเป๋า" and offers to pick one.' }
 
     # ───────── transactions ─────────
     Split:
@@ -4988,7 +4988,7 @@ components:
         source_project_transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Event resolve flow only. '}
     UpdateTransactionRequest:
       type: object
-      description: 'Partial. A key present with `null` clears category_id / description / note / account_id / transfer_to_account_id. `type` is immutable.'
+      description: 'Partial. A key present with `null` clears category_id / description / note / account_id / transfer_to_account_id. `type` is immutable. On a transfer, account_id is the OUT leg''s wallet and transfer_to_account_id the IN leg''s; each can be re-filed on its own (a wallet-less leg can be given a wallet), but a leg that has a wallet cannot be cleared (400 VALIDATION_ERROR) and the two legs cannot share a wallet (TRANSFER_SAME_ACCOUNT).'
       properties:
         amount: { type: number, exclusiveMinimum: 0 }
         date: { $ref: '#/components/schemas/Date' }
