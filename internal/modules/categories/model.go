@@ -49,7 +49,6 @@ type Category struct {
 	IncludeInReport bool             `json:"include_in_report"`
 	Description     *string          `json:"description"`
 	Note            *string          `json:"note"`
-	Status          string           `json:"status"`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
 }

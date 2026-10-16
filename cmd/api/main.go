@@ -375,6 +375,8 @@ func main() {
 			protected.POST("/accounts/invites/:notification_id/accept", accountsHandler.AcceptInvite)
 			protected.POST("/accounts/invites/:notification_id/reject", accountsHandler.RejectInvite)
 			protected.GET("/accounts/:id", accountsHandler.Get)
+			protected.POST("/accounts/:id/archive", accountsHandler.Archive)
+			protected.GET("/accounts/:id/delete-preview", accountsHandler.DeletePreview)
 			protected.POST("/accounts/:id/restore", accountsHandler.Restore)
 			protected.PUT("/accounts/:id", accountsHandler.Update)
 			protected.DELETE("/accounts/:id", accountsHandler.Delete)
@@ -444,6 +446,7 @@ func main() {
 			protected.POST("/notifications/:id/read", notificationsHandler.MarkRead)
 			protected.POST("/notifications/:id/actioned", notificationsHandler.MarkActioned)
 			protected.POST("/notifications/:id/dismiss", notificationsHandler.MarkDismissed)
+			protected.POST("/notifications/:id/restore", notificationsHandler.Restore)
 			protected.DELETE("/notifications/:id", notificationsHandler.Delete)
 
 			// Projects (Phase 1b.2). Static-path-before-param applies:

@@ -54,7 +54,7 @@ func (h *Handler) List(c *gin.Context) {
 	}
 
 	status := c.DefaultQuery("status", StatusActive)
-	if status != StatusActive && status != StatusArchived && status != StatusClosed && status != "all" {
+	if status != StatusActive && status != StatusArchived && status != "all" {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
 		return
 	}
@@ -185,25 +185,6 @@ func (h *Handler) AdjustBalance(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
-// DELETE /v1/accounts/:id (always soft → archived)
-func (h *Handler) Delete(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-
-	a, err := h.service.Archive(c.Request.Context(), userID, id)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, a)
-}
 
 // POST /v1/accounts/:id/restore (owner only)
 func (h *Handler) Restore(c *gin.Context) {
@@ -284,4 +265,62 @@ func mapServiceError(c *gin.Context, err error) {
 	default:
 		response.InternalError(c, "Account operation failed", err.Error())
 	}
+}
+
+// DELETE /v1/accounts/:id (0.3.3: a real delete; archive = POST /archive)
+func (h *Handler) Delete(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.Delete(c.Request.Context(), userID, id)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// GET /v1/accounts/:id/delete-preview
+func (h *Handler) DeletePreview(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.DeletePreview(c.Request.Context(), userID, id)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// POST /v1/accounts/:id/archive (owner only) — hides the wallet, takes it
+// out of every calculation and makes it read-only until restored.
+func (h *Handler) Archive(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	a, err := h.service.Archive(c.Request.Context(), userID, id)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, a)
 }

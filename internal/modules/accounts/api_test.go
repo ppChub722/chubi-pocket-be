@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -61,6 +62,8 @@ func (e *accEnv) as(uid uuid.UUID) *gin.Engine {
 		g.GET("/accounts/:id", h.Get)
 		g.PUT("/accounts/:id", h.Update)
 		g.DELETE("/accounts/:id", h.Delete)
+		g.POST("/accounts/:id/archive", h.Archive)
+		g.GET("/accounts/:id/delete-preview", h.DeletePreview)
 		g.POST("/accounts/:id/restore", h.Restore)
 		g.POST("/accounts/:id/adjust-balance", h.AdjustBalance)
 		g.POST("/accounts/:id/identifiers", h.AddIdentifier)
@@ -348,10 +351,10 @@ func TestAccountCRUD(t *testing.T) {
 	}
 
 	// archiveAccount / restoreAccount: owner only, state in the answer.
-	if code := e.errCode(rs, "DELETE", "/api/v1/accounts/"+old.String(), nil, http.StatusNotFound); code != "NOT_FOUND" {
+	if code := e.errCode(rs, "POST", "/api/v1/accounts/"+old.String()+"/archive", nil, http.StatusNotFound); code != "NOT_FOUND" {
 		t.Errorf("stranger archive code %q", code)
 	}
-	arch := dec[aJSON](t, e.call(r, "archiveAccount", "DELETE", "/api/v1/accounts/"+old.String(), nil, http.StatusOK))
+	arch := dec[aJSON](t, e.call(r, "archiveAccount", "POST", "/api/v1/accounts/"+old.String()+"/archive", nil, http.StatusOK))
 	if arch.Status != "archived" || arch.ID != old {
 		t.Errorf("archived = %+v", arch)
 	}
@@ -372,6 +375,11 @@ func TestAccountCRUD(t *testing.T) {
 	if rest.Status != "active" {
 		t.Errorf("restored = %+v", rest)
 	}
+	// POST /archive again is idempotent, then restore.
+	if a := dec[aJSON](t, e.call(r, "archiveAccount", "POST", "/api/v1/accounts/"+old.String()+"/archive", nil, http.StatusOK)); a.Status != "archived" {
+		t.Errorf("POST archive = %+v", a)
+	}
+	e.call(r, "restoreAccount", "POST", "/api/v1/accounts/"+old.String()+"/restore", nil, http.StatusOK)
 	if code := e.errCode(rs, "POST", "/api/v1/accounts/"+old.String()+"/restore", nil, http.StatusNotFound); code != "NOT_FOUND" {
 		t.Errorf("stranger restore code %q", code)
 	}
@@ -575,8 +583,116 @@ func TestAccountMembers(t *testing.T) {
 	if code := e.errCode(rf, "DELETE", path+"/members/"+uuid.NewString(), nil, http.StatusNotFound); code != "NOT_FOUND" {
 		t.Errorf("unknown member code %q", code)
 	}
-	// Now the friend is the only active member again: archive works.
-	if a := dec[aJSON](t, e.call(rf, "archiveAccount", "DELETE", path, nil, http.StatusOK)); a.Status != "archived" {
-		t.Errorf("archive = %+v", a)
+	// Now the friend is the only active member again: the delete works.
+	if out := dec[struct {
+		ID uuid.UUID `json:"id"`
+	}](t, e.call(rf, "deleteAccount", "DELETE", path, nil, http.StatusOK)); out.ID.String() != strings.TrimPrefix(path, "/api/v1/accounts/") {
+		t.Errorf("delete = %+v", out)
 	}
+	if code := e.errCode(rf, "GET", path, nil, http.StatusNotFound); code != "NOT_FOUND" {
+		t.Errorf("deleted wallet still readable: %q", code)
+	}
+}
+
+// TestAccountHardDelete — DELETE is real: the opening row goes, the other
+// rows (and the transfer twin) stay with no wallet, goal money is kept with
+// no wallet, the preview matches what the delete did.
+func TestAccountHardDelete(t *testing.T) {
+	e := newAccEnv(t)
+	ctx := context.Background()
+	owner := testdb.User(t, e.pool)
+	e.seedCategories(owner)
+	r := e.as(owner)
+	txs := transactions.NewService(transactions.NewStore(e.pool), categories.NewService(categories.NewStore(e.pool)))
+
+	mk := func(name string, balance float64) uuid.UUID {
+		return dec[aJSON](t, e.call(r, "createAccount", "POST", "/api/v1/accounts",
+			map[string]any{"name": name, "type": "bank", "balance": balance}, http.StatusCreated)).ID
+	}
+	doomed, keep := mk("Doomed", 500), mk("Keep", 500)
+	if _, err := txs.Create(ctx, owner, transactions.CreateRequest{
+		Type: transactions.TypeExpense, AccountID: &doomed, Amount: 100, Date: "2026-10-05"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := txs.Create(ctx, owner, transactions.CreateRequest{
+		Type: transactions.TypeTransfer, AccountID: &doomed, TransferToAccountID: &keep, Amount: 50, Date: "2026-10-06"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := res.(*transactions.TransferResponse).TransferGroupID
+	goal := uuid.New()
+	for _, q := range []string{
+		`INSERT INTO saving_goals (id, user_id, name, target_amount) VALUES ($1, $2, 'Japan', 1000)`,
+	} {
+		if _, err := e.pool.Exec(ctx, q, goal, owner); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.pool.Exec(ctx, `INSERT INTO saving_entries (id, user_id, group_id, kind, account_id, from_bucket, to_bucket, to_goal_id, amount, date)
+		VALUES ($1, $2, $1, 'save', $3, 'available', 'goal', $4, 70, '2026-10-07')`, uuid.New(), owner, doomed, goal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE user_notification_settings SET default_account_id = $2 WHERE user_id = $1`, owner, doomed); err != nil {
+		t.Fatal(err)
+	}
+	var recurringID uuid.UUID = uuid.New()
+	if _, err := e.pool.Exec(ctx, `INSERT INTO recurring_rules (id, user_id, name, type, amount, account_id, freq, start_date)
+		VALUES ($1, $2, 'Rent', 'expense', 10, $3, 'monthly', '2026-10-01')`, recurringID, owner, doomed); err != nil {
+		t.Fatal(err)
+	}
+
+	raw := e.call(r, "previewAccountDelete", "GET", "/api/v1/accounts/"+doomed.String()+"/delete-preview", nil, http.StatusOK)
+	var got struct {
+		Transactions      int `json:"transactions"`
+		Transfers         int `json:"transfers"`
+		SystemRowsDeleted int `json:"system_rows_deleted"`
+		Recurring         int `json:"recurring"`
+		SavingEntries     struct {
+			Count  int     `json:"count"`
+			Amount float64 `json:"amount"`
+		} `json:"saving_entries"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Transactions != 1 || got.Transfers != 1 || got.SystemRowsDeleted != 1 || got.Recurring != 1 ||
+		got.SavingEntries.Count != 1 || got.SavingEntries.Amount != 70 {
+		t.Errorf("preview = %s", raw)
+	}
+
+	e.call(r, "deleteAccount", "DELETE", "/api/v1/accounts/"+doomed.String(), nil, http.StatusOK)
+	count := func(q string, args ...any) int {
+		var n int
+		if err := e.pool.QueryRow(ctx, q, args...).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := count(`SELECT COUNT(*) FROM accounts WHERE id = $1`, doomed); n != 0 {
+		t.Errorf("wallet still there")
+	}
+	if n := count(`SELECT COUNT(*) FROM transactions WHERE user_id = $1 AND account_id IS NULL AND type = 'expense'`, owner); n != 1 {
+		t.Errorf("wallet-less expense rows = %d, want 1", n)
+	}
+	if n := count(`SELECT COUNT(*) FROM transactions WHERE transfer_group_id = $1`, group); n != 2 {
+		t.Errorf("transfer rows = %d, want both legs kept", n)
+	}
+	if n := count(`SELECT COUNT(*) FROM transactions WHERE transfer_group_id = $1 AND account_id IS NULL`, group); n != 1 {
+		t.Errorf("wallet-less transfer legs = %d, want 1", n)
+	}
+	if n := count(`SELECT COUNT(*) FROM transactions t JOIN categories c ON c.id = t.category_id
+		WHERE t.user_id = $1 AND c.system_kind IN ('OPENING_IN', 'OPENING_OUT') AND t.account_id IS NULL`, owner); n != 0 {
+		t.Errorf("opening row of the deleted wallet survived")
+	}
+	if n := count(`SELECT COUNT(*) FROM saving_entries WHERE user_id = $1 AND account_id IS NULL AND amount = 70`, owner); n != 1 {
+		t.Errorf("goal money not kept without a wallet")
+	}
+	if n := count(`SELECT COUNT(*) FROM recurring_rules WHERE id = $1 AND account_id IS NULL`, recurringID); n != 1 {
+		t.Errorf("recurring rule not unlinked")
+	}
+	var bal float64
+	if err := e.pool.QueryRow(ctx, `SELECT balance FROM accounts WHERE id = $1`, keep).Scan(&bal); err != nil || bal != 550 {
+		t.Errorf("twin wallet balance = %v (%v), want 550 unchanged", bal, err)
+	}
+	e.call(r, "", "DELETE", "/api/v1/accounts/"+doomed.String(), nil, http.StatusNotFound)
 }

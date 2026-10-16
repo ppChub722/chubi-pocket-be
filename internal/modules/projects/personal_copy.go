@@ -113,7 +113,7 @@ func (s *Service) copyToPersonalTx(
 		var id uuid.UUID
 		if err := tx.QueryRow(ctx, `
 			SELECT id FROM categories
-			WHERE user_id = $1 AND type = $2 AND status = 'active' AND NOT is_system
+			WHERE user_id = $1 AND type = $2 AND NOT is_system
 			  AND LOWER(name) = ANY($3::text[])
 			ORDER BY array_position($3::text[], LOWER(name)),
 			         (parent_id IS NOT NULL) DESC, sort_order

@@ -86,13 +86,14 @@ type UpdateSettingsRequest struct {
 }
 
 type ListFilter struct {
-	Read     string // "true" | "false" | "all"
-	Actioned string
-	Type     string
-	From     *string
-	To       *string
-	Page     int
-	PerPage  int
+	Read      string // "true" | "false" | "all"
+	Actioned  string
+	Dismissed string // "" / "false" = visible only (default); "true" = hidden only; "all"
+	Type      string
+	From      *string
+	To        *string
+	Page      int
+	PerPage   int
 }
 
 type Pagination struct {

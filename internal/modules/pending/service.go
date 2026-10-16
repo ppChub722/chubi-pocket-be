@@ -482,6 +482,7 @@ func toSubmitError(err error) SubmitError {
 	}{
 		{ErrPendingNotFound, "NOT_FOUND"},
 		{transactions.ErrAccountForbidden, "ACCOUNT_NOT_FOUND"},
+		{transactions.ErrAccountArchived, "ACCOUNT_ARCHIVED"},
 		{transactions.ErrCategoryForbidden, "CATEGORY_NOT_FOUND"},
 		{transactions.ErrCategoryTypeMismatch, "CATEGORY_TYPE_MISMATCH"},
 		{transactions.ErrSystemCategoryNotAllowed, "CATEGORY_NOT_FOUND"},

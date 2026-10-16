@@ -143,3 +143,9 @@ func (s *Service) UpdateSettingsView(ctx context.Context, userID uuid.UUID, req 
 	}
 	return s.settingsView(ctx, st)
 }
+
+// RestoreResult un-hides a dismissed notification.
+func (s *Service) RestoreResult(ctx context.Context, userID, id uuid.UUID) (*ActionResult, error) {
+	n, err := s.store.Restore(ctx, userID, id)
+	return s.actionResult(ctx, userID, n, err)
+}

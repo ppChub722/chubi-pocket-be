@@ -110,6 +110,8 @@ func mapError(c *gin.Context, err error) {
 		response.BadRequest(c, "INVALID_RULE", err.Error(), nil)
 	case errors.Is(err, ErrEndTooFar):
 		response.BadRequest(c, "END_TOO_FAR", err.Error(), nil)
+	case errors.Is(err, transactions.ErrAccountArchived):
+		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, ErrAccountNotFound):
 		response.BadRequest(c, "ACCOUNT_NOT_FOUND", err.Error(), nil)
 	case errors.Is(err, ErrInvalidCategory):

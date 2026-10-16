@@ -42,6 +42,7 @@ func newFix(t *testing.T) *nfix {
 		g.POST("/notifications/:id/read", h.MarkRead)
 		g.POST("/notifications/:id/actioned", h.MarkActioned)
 		g.POST("/notifications/:id/dismiss", h.MarkDismissed)
+		g.POST("/notifications/:id/restore", h.Restore)
 		g.DELETE("/notifications/:id", h.Delete)
 	})
 	return &nfix{pool: pool, uid: uid, r: r}
@@ -189,6 +190,31 @@ func TestMarkReadActionedDismiss(t *testing.T) {
 	}
 	if num(out, "badges", "unread_notifications") != 0 {
 		t.Errorf("badges after dismiss = %v", out["badges"])
+	}
+
+	// A dismissed row is hidden from the default list, shown by
+	// ?dismissed=true, and restore brings it back (read stays).
+	out = f.do(t, "GET", "/api/v1/notifications?read=all", nil, "listNotifications", http.StatusOK)
+	if len(out["data"].([]any)) != 2 {
+		t.Errorf("default list after dismiss = %v", out["data"])
+	}
+	out = f.do(t, "GET", "/api/v1/notifications?dismissed=true&read=all", nil, "listNotifications", http.StatusOK)
+	if d := out["data"].([]any); len(d) != 1 || d[0].(map[string]any)["id"] != c.String() {
+		t.Errorf("dismissed list = %v", out["data"])
+	}
+	out = f.do(t, "GET", "/api/v1/notifications?dismissed=all&read=all", nil, "listNotifications", http.StatusOK)
+	if len(out["data"].([]any)) != 3 {
+		t.Errorf("dismissed=all = %v", out["data"])
+	}
+	out = f.do(t, "POST", "/api/v1/notifications/"+c.String()+"/restore", nil, "restoreNotification", http.StatusOK)
+	if n = out["notification"].(map[string]any); n["dismissed_at"] != nil || n["state"] != "read" {
+		t.Errorf("restored = %v", n)
+	}
+	f.do(t, "POST", "/api/v1/notifications/"+c.String()+"/restore", nil, "restoreNotification", http.StatusOK)
+	f.do(t, "POST", "/api/v1/notifications/"+uuid.NewString()+"/restore", nil, "restoreNotification", http.StatusNotFound)
+	out = f.do(t, "GET", "/api/v1/notifications?read=all", nil, "listNotifications", http.StatusOK)
+	if len(out["data"].([]any)) != 3 {
+		t.Errorf("list after restore = %v", out["data"])
 	}
 
 	// Unknown id and someone else's row are both 404.

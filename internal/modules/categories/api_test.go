@@ -25,7 +25,6 @@ type catJSON struct {
 	IsSystem   bool    `json:"is_system"`
 	SystemKind *string `json:"system_kind"`
 	SortOrder  int     `json:"sort_order"`
-	Status     string  `json:"status"`
 }
 
 func newCatEngine(t *testing.T, uid uuid.UUID) *gin.Engine {
@@ -91,10 +90,7 @@ func TestCategoryAPI(t *testing.T) {
 		t.Errorf("empty name status = %d, want 400", status)
 	}
 
-	// listCategories: status active (default) / archived / all.
-	if _, err := pool.Exec(ctx, `UPDATE categories SET status = 'archived' WHERE id = $1`, sib.ID); err != nil {
-		t.Fatal(err)
-	}
+	// listCategories: every row, no status (categories are deleted, never archived).
 	list := func(q string) []catJSON {
 		t.Helper()
 		status, raw := apitest.Do(t, r, "GET", "/api/v1/categories"+q, nil)
@@ -105,17 +101,8 @@ func TestCategoryAPI(t *testing.T) {
 		_ = json.Unmarshal(raw, &out)
 		return out.Data
 	}
-	if got := list(""); len(got) != 3 {
-		t.Errorf("active list = %d rows, want 3 (A B C)", len(got))
-	}
-	if got := list("?status=archived"); len(got) != 1 || got[0].ID != sib.ID || got[0].Status != "archived" {
-		t.Errorf("archived list = %+v, want just A2", got)
-	}
-	if got := list("?status=all"); len(got) != 4 {
-		t.Errorf("all list = %d rows, want 4", len(got))
-	}
-	if status, _ := apitest.Do(t, r, "GET", "/api/v1/categories?status=nope", nil); status != http.StatusBadRequest {
-		t.Errorf("bad status param = %d, want 400", status)
+	if got := list(""); len(got) != 4 {
+		t.Errorf("list = %d rows, want 4", len(got))
 	}
 	// system_kind is exposed on system rows.
 	seed, err := pool.Begin(ctx)

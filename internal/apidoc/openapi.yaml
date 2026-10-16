@@ -69,6 +69,7 @@ paths:
         - { name: from, in: query, schema: { $ref: '#/components/schemas/Date' } }
         - { name: to, in: query, schema: { $ref: '#/components/schemas/Date' } }
         - { name: no_wallet, in: query, description: 'Only rows without a wallet.', schema: { type: boolean } }
+        - { name: include_archived, in: query, description: 'Rows on archived wallets are hidden by default; true shows them (listing that wallet by account_id always does).', schema: { type: boolean } }
         - { name: q, in: query, description: 'Substring over description, note, category (incl. parent) and wallet names (max 100).', schema: { type: string, maxLength: 100 } }
         - { name: tag_id, in: query, description: 'Repeatable; rows having ANY of these tags.', schema: { type: array, items: { $ref: '#/components/schemas/Uuid' } }, style: form, explode: true }
         - { name: sort, in: query, schema: { type: string, enum: [date_desc, date_asc, amount_desc, amount_asc], default: date_desc } }
@@ -441,7 +442,6 @@ paths:
       operationId: listCategories
       parameters:
         - { name: type, in: query, schema: { type: string, enum: [expense, income] } }
-        - { name: include_system, in: query, schema: { type: boolean } }
         - { name: status, in: query, description: 'Archived rows are excluded unless asked for.', schema: { type: string, enum: [active, archived, all], default: active } }
       responses:
         '200':
@@ -839,8 +839,7 @@ paths:
               "type": "string",
               "enum": [
                 "active",
-                "archived",
-                "closed"
+                "archived"
               ],
               "default": "active"
             }
@@ -1066,16 +1065,16 @@ paths:
         "tags": [
           "Accounts"
         ],
-        "summary": "Archive a wallet",
-        "operationId": "archiveAccount",
-        "description": "Soft delete; returns the wallet with status archived. Errors: 409 ACCOUNT_HAS_MEMBERS (other active members: remove them or transfer first), 403 NOT_OWNER, 404 NOT_FOUND.",
+        "summary": "Delete a wallet for real",
+        "operationId": "deleteAccount",
+        "description": "Owner only; 409 ACCOUNT_HAS_MEMBERS while other members are active. HARD delete (archive = POST /accounts/{id}/archive): its opening / adjustment rows go with it; every other row of every author stays with no wallet (both legs of a transfer too, the twin leg and its wallet unchanged); recurring settings keep running wallet-less; goal money moved through the wallet is kept with no wallet; the default-wallet setting and budget wallet scopes drop it. Returns what was done (same counts as delete-preview).",
         "responses": {
           "200": {
-            "description": "Final state.",
+            "description": "What was done.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Account"
+                  "$ref": "#/components/schemas/AccountDeleteResult"
                 }
               }
             }
@@ -1090,8 +1089,30 @@ paths:
             "$ref": "#/components/responses/NotFound"
           }
         },
-        "x-breaking": "Response is the Account (was {message, status})."
+        "x-breaking": "0.3.3: DELETE now deletes for real (was: archive). Response is AccountDeleteResult (was the Account). The old app build would hard-delete on its archive button: ships with MIN_APP_BUILD."
       }
+  /accounts/{id}/delete-preview:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      tags: [Accounts]
+      summary: What deleting a wallet would do
+      operationId: previewAccountDelete
+      description: 'Owner only, same guards as the delete (409 ACCOUNT_HAS_MEMBERS). Read-only; the page shows the counts in the confirm ("N รายการจะไม่ผูกกระเป๋า · รายการประจำ N · เงินเก็บ N บาทยังอยู่ แต่ไม่ผูกกระเป๋า").'
+      responses:
+        '200':
+          description: 'The counts.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountDeletePreview' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'ACCOUNT_HAS_MEMBERS.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: 'New endpoint (0.3.3).'
   /accounts/{id}/adjust-balance:
     parameters: [{"$ref":"#/components/parameters/IdPath"}]
     post: {
@@ -1968,6 +1989,19 @@ paths:
             }
           },
           {
+            "name": "dismissed",
+            "in": "query",
+            "description": "Dismissed (hidden) rows are excluded by default. true = only the hidden ones (the \"ที่ซ่อนไว้\" page); all = both.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false",
+                "all"
+              ]
+            }
+          },
+          {
             "name": "actioned",
             "in": "query",
             "schema": {
@@ -2113,6 +2147,22 @@ paths:
         },
         "x-breaking": "Response is NotificationActionResult."
       }
+  /notifications/{id}/restore:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    post:
+      tags: [Notifications]
+      summary: Restore a dismissed (hidden) notification
+      operationId: restoreNotification
+      description: 'Clears dismissed_at; the row is back in the default list. Idempotent (a row that is not dismissed is returned as is). Returns the notification and the fresh badges.'
+      responses:
+        '200':
+          description: 'Final state.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationActionResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-breaking: 'New endpoint (0.3.3).'
   /notifications/{id}/dismiss:
     parameters: [{"$ref":"#/components/parameters/IdPath"}]
     post: {
@@ -2674,6 +2724,28 @@ paths:
         }
       }
 
+  /accounts/{id}/archive:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    post:
+      tags: [Accounts]
+      summary: Archive a wallet
+      operationId: archiveAccount
+      description: 'Owner only; 409 ACCOUNT_HAS_MEMBERS while other members are active. An archived wallet is hidden from the default list (`?status=archived` / `all` show it), ignored by EVERY calculation (wallet totals, summaries, budgets, dashboard; its rows are hidden from `GET /transactions` unless `include_archived=true` or `account_id` is that wallet) and READ-ONLY: any write on it (new / edit / delete a row, transfer in or out, debt entry, recurring setting, goal money) answers 409 ACCOUNT_ARCHIVED until `POST /accounts/{id}/restore`. Idempotent. Returns the wallet (status archived).'
+      responses:
+        '200':
+          description: 'The wallet, archived.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'ACCOUNT_HAS_MEMBERS: other members are still active.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: 'New endpoint (0.3.3).'
   /accounts/{id}/restore:
     parameters: [{ $ref: '#/components/parameters/IdPath' }]
     post: {
@@ -4789,7 +4861,7 @@ components:
           type: string
           enum: [out, in]
           description: 'Direction of THIS row (out = the money leaves this wallet).'
-        account: { $ref: '#/components/schemas/AccountRef' }
+        account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'The other row''s wallet; null = the twin has no wallet (its wallet was deleted), so the page shows "ไม่ผูกกระเป๋า" and offers to pick one.' }
 
     # ───────── transactions ─────────
     Split:
@@ -4962,7 +5034,7 @@ components:
         source_project_transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Event resolve flow only. '}
     UpdateTransactionRequest:
       type: object
-      description: 'Partial. A key present with `null` clears category_id / description / note / account_id / transfer_to_account_id. `type` is immutable.'
+      description: 'Partial. A key present with `null` clears category_id / description / note / account_id / transfer_to_account_id. `type` is immutable. On a transfer, account_id is the OUT leg''s wallet and transfer_to_account_id the IN leg''s; each can be re-filed on its own (a wallet-less leg can be given a wallet), but a leg that has a wallet cannot be cleared (400 VALIDATION_ERROR) and the two legs cannot share a wallet (TRANSFER_SAME_ACCOUNT).'
       properties:
         amount: { type: number, exclusiveMinimum: 0 }
         date: { $ref: '#/components/schemas/Date' }
@@ -5321,7 +5393,6 @@ components:
           "include_in_report",
           "description",
           "note",
-          "status",
           "created_at",
           "updated_at"
         ],
@@ -5410,13 +5481,6 @@ components:
             "type": [
               "string",
               "null"
-            ]
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "active",
-              "archived"
             ]
           },
           "created_at": {
@@ -5746,11 +5810,33 @@ components:
             delete: { type: boolean }
         created_at: { $ref: '#/components/schemas/DateTime' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
+    AccountDeletePreview:
+      type: object
+      description: 'What deleting a wallet does; shown before the confirm.'
+      required: [transactions, transfers, system_rows_deleted, recurring, saving_entries]
+      properties:
+        transactions: { type: integer, description: 'Rows that stay in the books with no wallet (every author; transfer legs counted apart).' }
+        transfers: { type: integer, description: 'Transfer legs on this wallet; the other leg and its wallet are untouched.' }
+        system_rows_deleted: { type: integer, description: 'Opening-balance / adjustment rows: deleted with the wallet.' }
+        recurring: { type: integer, description: 'Recurring settings that lose the wallet (they keep running, wallet-less).' }
+        saving_entries:
+          type: object
+          description: 'Goal money moved through this wallet: kept, unlinked from any wallet.'
+          required: [count, amount]
+          properties:
+            count: { type: integer }
+            amount: { $ref: '#/components/schemas/Money' }
+    AccountDeleteResult:
+      type: object
+      required: [id, deleted]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        deleted: { $ref: '#/components/schemas/AccountDeletePreview' }
     SavingWalletShare:
       type: object
       required: [wallet, amount, share_pct]
       properties:
-        wallet: { $ref: '#/components/schemas/AccountRef' }
+        wallet: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'null = money with no wallet (counts for the goal, never for a wallet).' }
         amount: { $ref: '#/components/schemas/Money' }
         share_pct: { type: integer }
     SavingSpare:
@@ -5770,7 +5856,7 @@ components:
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
     SavingEntry:
       type: object
-      description: 'One saving entry = ONE wallet · from → to · amount. A multi-wallet action = several entries with one group_id.'
+      description: 'One saving entry = ONE wallet (or none) · from → to · amount. A multi-wallet action = several entries with one group_id.'
       required: [id, group_id, kind, date, note, wallet, amount, from, to, source, goal_ids, recurring, created_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
@@ -5778,7 +5864,7 @@ components:
         kind: { type: string, enum: [save, withdraw, move] }
         date: { $ref: '#/components/schemas/Date' }
         note: { type: [string, 'null'], maxLength: 500 }
-        wallet: { $ref: '#/components/schemas/AccountRef' }
+        wallet: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'null = no wallet (unallocated: kept after its wallet was deleted, or saved with no default wallet).' }
         amount: { $ref: '#/components/schemas/Money' }
         from: { $ref: '#/components/schemas/SavingBucketRef' }
         to: { $ref: '#/components/schemas/SavingBucketRef' }
@@ -5890,7 +5976,7 @@ components:
         date: { $ref: '#/components/schemas/Date', description: 'Default today.' }
         note: { type: [string, 'null'], maxLength: 500 }
         goal_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'save: the target; withdraw / move: the source. null = spare.' }
-        wallet_id: { $ref: '#/components/schemas/Uuid', description: 'save only (required).' }
+        wallet_id: { $ref: '#/components/schemas/Uuid', description: 'save only, OPTIONAL. Omitted = the money goes in NO wallet (outside any wallet: it counts for the goal, never for a wallet). The default wallet is NOT used.' }
         to_goal_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'move only: the target (null = spare).' }
         splits:
           type: array
@@ -6181,8 +6267,7 @@ components:
             "type": "string",
             "enum": [
               "active",
-              "archived",
-              "closed"
+              "archived"
             ]
           },
           "credit_limit": {

@@ -33,7 +33,7 @@ var (
 
 const categoryColumns = `id, user_id, name, type, parent_id, is_system, system_kind,
 	icon_code, sort_order, include_in_report, description, note,
-	status, created_at, updated_at`
+	created_at, updated_at`
 
 func scanCategory(row pgx.Row) (*Category, error) {
 	c := Category{Depth: 1, Path: []PathItem{}}
@@ -41,7 +41,7 @@ func scanCategory(row pgx.Row) (*Category, error) {
 	err := row.Scan(
 		&c.ID, &c.UserID, &c.Name, &c.Type, &c.ParentID, &c.IsSystem, &c.SystemKind,
 		&iconBytes, &c.SortOrder, &c.IncludeInReport, &c.Description, &c.Note,
-		&c.Status, &c.CreatedAt, &c.UpdatedAt,
+		&c.CreatedAt, &c.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -72,7 +72,6 @@ func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Category, e
 // ListFilter mirrors the GET /v1/categories query params.
 type ListFilter struct {
 	Type          *string // "income" | "expense" | nil
-	Status        string  // "active" | "archived" | "all" — defaults to "active" at handler
 	IncludeSystem bool
 }
 
@@ -83,10 +82,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Cat
 	if f.Type != nil {
 		args = append(args, *f.Type)
 		q += fmt.Sprintf(" AND type = $%d", len(args))
-	}
-	if f.Status != "all" {
-		args = append(args, f.Status)
-		q += fmt.Sprintf(" AND status = $%d", len(args))
 	}
 	if !f.IncludeSystem {
 		q += " AND is_system = FALSE"
@@ -117,7 +112,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Cat
 func (s *Store) CountChildren(ctx context.Context, id uuid.UUID) (int, error) {
 	var n int
 	err := s.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM categories WHERE parent_id = $1 AND status = 'active'`,
+		`SELECT COUNT(*) FROM categories WHERE parent_id = $1`,
 		id).Scan(&n)
 	return n, err
 }
@@ -241,9 +236,9 @@ func (s *Store) Create(ctx context.Context, c *Category) (*Category, error) {
 	q := `INSERT INTO categories
 		(id, user_id, name, type, parent_id, is_system, system_kind, icon_code,
 		 sort_order, include_in_report, description, note,
-		 status, created_by_user_id)
+		created_by_user_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12,
-			'active', $2)
+			$2)
 		RETURNING ` + categoryColumns
 	created, err := scanCategory(s.db.QueryRow(ctx, q,
 		c.ID, c.UserID, c.Name, c.Type, c.ParentID, c.IsSystem, c.SystemKind,
@@ -378,7 +373,7 @@ func (s *Store) ReorderTx(ctx context.Context, userID uuid.UUID, entries []Reord
 		tag, err := tx.Exec(ctx, `
 			UPDATE categories
 			SET parent_id = $1, sort_order = $2, updated_by_user_id = $3
-			WHERE id = $4 AND user_id = $3 AND status = 'active'`,
+			WHERE id = $4 AND user_id = $3`,
 			e.ParentID, e.SortOrder, userID, e.ID)
 		if err != nil {
 			return nil, fmt.Errorf("reorder %s: %w", e.ID, err)
@@ -394,7 +389,7 @@ func (s *Store) ReorderTx(ctx context.Context, userID uuid.UUID, entries []Reord
 	// Re-read inside the same tx so the response reflects the post-write state.
 	rows, err := tx.Query(ctx, `SELECT `+categoryColumns+`
 		FROM categories
-		WHERE user_id = $1 AND status = 'active'
+		WHERE user_id = $1
 		ORDER BY type, COALESCE(parent_id::text, ''), sort_order, created_at`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list after reorder: %w", err)
@@ -436,9 +431,9 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 		INSERT INTO categories
 			(id, user_id, name, type, parent_id, is_system, system_kind,
 			 icon_code, sort_order, include_in_report, description,
-			 status, created_by_user_id)
+			created_by_user_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11,
-			'active', $12)`
+			$12)`
 
 	// 1. System cats — parent_id = NULL, no description. created_by_user_id
 	// is NULL because system rows are app-owned, not user-owned.
@@ -590,7 +585,7 @@ func (s *Store) IsFeeCategory(ctx context.Context, userID, id uuid.UUID) (bool, 
 	return is, err
 }
 
-// ChildIDs returns the ids of every direct child (any status).
+// ChildIDs returns the ids of every direct child (all rows).
 func (s *Store) ChildIDs(ctx context.Context, userID, id uuid.UUID) ([]uuid.UUID, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT id FROM categories WHERE parent_id = $1 AND user_id = $2 ORDER BY sort_order, created_at`, id, userID)

@@ -137,10 +137,16 @@ const entryColumns = `id, user_id, group_id, kind, account_id, from_bucket, from
 	amount::float8, date, note, source, created_at`
 
 func scanEntry(row pgx.Row) (*entryRow, error) {
-	var e entryRow
-	if err := row.Scan(&e.ID, &e.UserID, &e.GroupID, &e.Kind, &e.AccountID, &e.FromBucket, &e.FromGoalID, &e.ToBucket,
+	var (
+		e   entryRow
+		acc *uuid.UUID
+	)
+	if err := row.Scan(&e.ID, &e.UserID, &e.GroupID, &e.Kind, &acc, &e.FromBucket, &e.FromGoalID, &e.ToBucket,
 		&e.ToGoalID, &e.Amount, &e.Date, &e.Note, &e.Source, &e.CreatedAt); err != nil {
 		return nil, err
+	}
+	if acc != nil {
+		e.AccountID = *acc
 	}
 	return &e, nil
 }
@@ -183,10 +189,14 @@ func (s *Store) insertEntry(ctx context.Context, q querier, e *entryRow) error {
 		e.ID, _ = uuid.NewV7()
 	}
 	e.CreatedAt = time.Now()
+	var acc *uuid.UUID // no wallet = NULL (unallocated)
+	if e.AccountID != uuid.Nil {
+		acc = &e.AccountID
+	}
 	_, err := q.Exec(ctx, `INSERT INTO saving_entries (id, user_id, group_id, kind, account_id, from_bucket, from_goal_id,
 		to_bucket, to_goal_id, amount, date, note, source)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-		e.ID, e.UserID, e.GroupID, e.Kind, e.AccountID, e.FromBucket, e.FromGoalID, e.ToBucket, e.ToGoalID,
+		e.ID, e.UserID, e.GroupID, e.Kind, acc, e.FromBucket, e.FromGoalID, e.ToBucket, e.ToGoalID,
 		e.Amount, e.Date, shared.CleanText(e.Note), e.Source)
 	if err != nil {
 		return fmt.Errorf("insert entry: %w", err)
@@ -222,9 +232,18 @@ func bucketBalances(ctx context.Context, q shared.Querier, userID uuid.UUID, goa
 	return out, nil
 }
 
-// checkNoNegative — no bucket of the wallet below 0 (after a write).
+// checkNoNegative — no bucket of the wallet below 0 (after a write);
+// uuid.Nil checks the buckets of the money that has no wallet.
 func checkNoNegative(ctx context.Context, q shared.Querier, userID, accountID uuid.UUID) error {
-	bals, err := shared.LoadSavingBalances(ctx, q, userID, `m.account_id = $2`, accountID)
+	var (
+		bals []shared.SavingBalance
+		err  error
+	)
+	if accountID == uuid.Nil {
+		bals, err = shared.LoadSavingBalances(ctx, q, userID, `m.account_id IS NULL`)
+	} else {
+		bals, err = shared.LoadSavingBalances(ctx, q, userID, `m.account_id = $2`, accountID)
+	}
 	if err != nil {
 		return err
 	}

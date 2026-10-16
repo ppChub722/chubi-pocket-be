@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -263,6 +264,13 @@ func checkRefsTx(ctx context.Context, q rowQuerier, userID uuid.UUID, typ string
 		}
 		if !ok {
 			return ErrAccountNotFound
+		}
+		var archived bool
+		if err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM accounts WHERE id = $1 AND status = 'archived')`, *acc).Scan(&archived); err != nil {
+			return err
+		}
+		if archived {
+			return transactions.ErrAccountArchived
 		}
 	}
 	if typ == "transfer" && (account == nil || toAccount == nil || *account == *toAccount) {

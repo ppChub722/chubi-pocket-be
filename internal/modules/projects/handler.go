@@ -625,6 +625,8 @@ func mapQuickCreateError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusUnprocessableEntity, "TX_NOT_BILLABLE", err.Error(), nil)
 	case errors.Is(err, ErrBillNotInProject):
 		response.NotFound(c, "TX_NOT_IN_PROJECT", "Transaction is not in this project")
+	case errors.Is(err, transactions.ErrAccountArchived):
+		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, transactions.ErrAccountForbidden):
 		response.NotFound(c, "ACCOUNT_NOT_FOUND", "Account not found")
 	case errors.Is(err, transactions.ErrCategoryForbidden):

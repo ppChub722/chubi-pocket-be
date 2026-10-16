@@ -125,7 +125,7 @@ type GoalView struct {
 
 // WalletShare — spec SavingWalletShare.
 type WalletShare struct {
-	Wallet   shared.AccountRef `json:"wallet"`
+	Wallet   *shared.AccountRef `json:"wallet"` // nil = money with no wallet
 	Amount   float64           `json:"amount"`
 	SharePct int               `json:"share_pct"`
 }
@@ -151,7 +151,7 @@ type Entry struct {
 	Kind      string                    `json:"kind"`
 	Date      string                    `json:"date"`
 	Note      *string                   `json:"note"`
-	Wallet    shared.AccountRef         `json:"wallet"`
+	Wallet    *shared.AccountRef        `json:"wallet"` // nil = no wallet (unallocated)
 	Amount    float64                   `json:"amount"`
 	From      BucketRef                 `json:"from"`
 	To        BucketRef                 `json:"to"`

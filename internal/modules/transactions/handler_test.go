@@ -575,19 +575,18 @@ func TestFormOptionsHandler(t *testing.T) {
 	f.exec(`UPDATE accounts SET status = 'archived' WHERE id = $1`, archived)
 
 	// Categories: Food (sort 1) > Lunch > Noodles; Home (sort 0); Salary
-	// (income); an archived one and a system one are left out.
-	cat := func(name, typ string, parent *uuid.UUID, sortOrder int, status string) uuid.UUID {
+	// (income); a system one is left out.
+	cat := func(name, typ string, parent *uuid.UUID, sortOrder int) uuid.UUID {
 		id, _ := uuid.NewV7()
-		f.exec(`INSERT INTO categories (id, user_id, name, type, is_system, parent_id, sort_order, status)
-			VALUES ($1, $2, $3, $4, FALSE, $5, $6, $7)`, id, f.me, name, typ, parent, sortOrder, status)
+		f.exec(`INSERT INTO categories (id, user_id, name, type, is_system, parent_id, sort_order)
+			VALUES ($1, $2, $3, $4, FALSE, $5, $6)`, id, f.me, name, typ, parent, sortOrder)
 		return id
 	}
 	f.exec(`UPDATE categories SET sort_order = 1 WHERE id = $1`, f.food)
-	home := cat("Home", "expense", nil, 0, "active")
-	lunch := cat("Lunch", "expense", &f.food, 0, "active")
-	noodles := cat("Noodles", "expense", &lunch, 0, "active")
-	salary := cat("Salary", "income", nil, 0, "active")
-	cat("Old", "expense", nil, 2, "archived")
+	home := cat("Home", "expense", nil, 0)
+	lunch := cat("Lunch", "expense", &f.food, 0)
+	noodles := cat("Noodles", "expense", &lunch, 0)
+	salary := cat("Salary", "income", nil, 0)
 	sysID, _ := uuid.NewV7()
 	f.exec(`INSERT INTO categories (id, user_id, name, type, is_system, system_kind)
 		VALUES ($1, $2, 'Adjust', 'income', TRUE, 'ADJUST_IN')`, sysID, f.me)
@@ -727,4 +726,115 @@ func TestSummaryHandler(t *testing.T) {
 
 	f.call("getTransactionSummary", "GET", "/api/v1/transactions/summary?from=2026-10-01&to=2026-10-31&group_by=year", nil, http.StatusBadRequest)
 	f.call("getTransactionSummary", "GET", "/api/v1/transactions/summary?to=2026-10-31", nil, http.StatusBadRequest)
+}
+
+// TestTransferWalletlessLeg — a transfer whose IN leg lost its wallet (the
+// wallet was deleted: the row keeps living with account_id NULL): the twin
+// shows account null, the OUT leg still edits / moves its own balance, the
+// empty leg can be given a wallet again but a leg with a wallet can't be
+// cleared, and the pair deletes cleanly.
+func TestTransferWalletlessLeg(t *testing.T) {
+	f := newHFix(t, true)
+	tr := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
+		"type": "transfer", "account_id": f.walletA, "transfer_to_account_id": f.walletB,
+		"amount": 100, "date": "2026-10-12",
+	}, http.StatusCreated))
+	outID, inID := tr.Rows[0].ID, tr.Rows[1].ID
+	outPath, inPath := "/api/v1/transactions/"+outID.String(), "/api/v1/transactions/"+inID.String()
+	// What deleting wallet B does to the leg.
+	f.exec(`UPDATE transactions SET account_id = NULL WHERE id = $1`, inID)
+
+	got := decode[transactions.TransactionDetail](t, f.call("getTransaction", "GET", outPath, nil, http.StatusOK))
+	if got.TransferPeer == nil || got.TransferPeer.ID != inID || got.TransferPeer.Account != nil {
+		t.Errorf("OUT row peer = %+v, want the IN row with no wallet", got.TransferPeer)
+	}
+	got = decode[transactions.TransactionDetail](t, f.call("getTransaction", "GET", inPath, nil, http.StatusOK))
+	if got.Account != nil || got.TransferPeer == nil || got.TransferPeer.Direction != "in" ||
+		got.TransferPeer.Account == nil || got.TransferPeer.Account.ID != f.walletA {
+		t.Errorf("IN row = account %v peer %+v", got.Account, got.TransferPeer)
+	}
+
+	// Amount edit moves only A (-100 → -60); B is untouched.
+	bBefore := f.balance(f.walletB)
+	res := decode[writeResult](t, f.call("updateTransaction", "PUT", inPath, map[string]any{"amount": 60}, http.StatusOK))
+	if a, _ := balanceOf(res.AccountBalances, f.walletA); a != -60 || f.balance(f.walletB) != bBefore {
+		t.Errorf("after amount edit: A %v B %v (was %v)", a, f.balance(f.walletB), bBefore)
+	}
+	// A leg with a wallet can't be cleared; the empty one can be filled.
+	f.call("updateTransaction", "PUT", outPath, map[string]any{"account_id": nil}, http.StatusBadRequest)
+	f.call("updateTransaction", "PUT", outPath, map[string]any{"transfer_to_account_id": f.walletA}, http.StatusBadRequest)
+	res = decode[writeResult](t, f.call("updateTransaction", "PUT", outPath,
+		map[string]any{"transfer_to_account_id": f.walletB}, http.StatusOK))
+	if b, _ := balanceOf(res.AccountBalances, f.walletB); b != bBefore+60 {
+		t.Errorf("re-filed B = %v, want %v", b, bBefore+60)
+	}
+	if res.Rows[1].Account == nil || res.Rows[1].Account.ID != f.walletB {
+		t.Errorf("IN row after re-file = %+v", res.Rows[1].Account)
+	}
+
+	// Delete a pair whose IN leg is wallet-less again.
+	f.exec(`UPDATE transactions SET account_id = NULL WHERE id = $1`, inID)
+	f.call("deleteTransaction", "DELETE", inPath, nil, http.StatusOK)
+	if f.balance(f.walletA) != 0 {
+		t.Errorf("A after delete = %v, want 0", f.balance(f.walletA))
+	}
+	f.call("getTransaction", "GET", outPath, nil, http.StatusNotFound)
+}
+
+// TestArchivedWalletIsIgnoredAndReadOnly — archiving a wallet takes its rows
+// out of every calculation and the default list, and refuses writes on it
+// (409 ACCOUNT_ARCHIVED) until it is restored.
+func TestArchivedWalletIsIgnoredAndReadOnly(t *testing.T) {
+	f := newHFix(t, true)
+	mk := func(acc uuid.UUID, amount float64) uuid.UUID {
+		res := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
+			"type": "expense", "account_id": acc, "amount": amount, "date": "2026-10-05",
+		}, http.StatusCreated))
+		return res.Rows[0].ID
+	}
+	rowA := mk(f.walletA, 100)
+	mk(f.walletB, 50)
+	summary := func() float64 {
+		return decode[transactions.SummaryResponse](t, f.call("getTransactionSummary", "GET",
+			"/api/v1/transactions/summary?from=2026-10-01&to=2026-10-31", nil, http.StatusOK)).TotalExpense
+	}
+	rows := func(q string) int {
+		return len(decode[transactions.ListResponse](t, f.call("listTransactions", "GET",
+			"/api/v1/transactions?from=2026-10-01&to=2026-10-31"+q, nil, http.StatusOK)).Data)
+	}
+	if summary() != 150 || rows("") != 2 {
+		t.Fatalf("before: summary %v rows %d", summary(), rows(""))
+	}
+
+	f.exec(`UPDATE accounts SET status = 'archived' WHERE id = $1`, f.walletA)
+	if got := summary(); got != 50 {
+		t.Errorf("summary with A archived = %v, want 50", got)
+	}
+	if n := rows(""); n != 1 {
+		t.Errorf("default list = %d rows, want 1", n)
+	}
+	if n := rows("&include_archived=true"); n != 2 {
+		t.Errorf("include_archived list = %d rows, want 2", n)
+	}
+	if n := rows("&account_id=" + f.walletA.String()); n != 1 {
+		t.Errorf("list of the archived wallet = %d rows, want its 1", n)
+	}
+
+	path := "/api/v1/transactions/" + rowA.String()
+	create := map[string]any{"type": "expense", "account_id": f.walletA, "amount": 10, "date": "2026-10-06"}
+	f.call("", "POST", "/api/v1/transactions", create, http.StatusConflict)
+	f.call("", "PUT", path, map[string]any{"amount": 90}, http.StatusConflict)
+	f.call("", "DELETE", path, nil, http.StatusConflict)
+	f.call("", "POST", "/api/v1/transactions", map[string]any{
+		"type": "transfer", "account_id": f.walletB, "transfer_to_account_id": f.walletA, "amount": 5, "date": "2026-10-06",
+	}, http.StatusConflict)
+	if f.balance(f.walletA) != -100 {
+		t.Errorf("archived wallet balance moved: %v", f.balance(f.walletA))
+	}
+
+	f.exec(`UPDATE accounts SET status = 'active' WHERE id = $1`, f.walletA)
+	if got := summary(); got != 150 {
+		t.Errorf("summary after restore = %v, want 150", got)
+	}
+	f.call("updateTransaction", "PUT", path, map[string]any{"amount": 90}, http.StatusOK)
 }

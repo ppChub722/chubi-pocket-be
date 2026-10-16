@@ -296,3 +296,62 @@ func TestSavingGoalFigures(t *testing.T) {
 		t.Errorf("history = %+v", d.History)
 	}
 }
+
+// TestSavingsWithoutWallet — goal money may have no wallet: a save with no
+// wallet_id stays wallet-less (the default wallet is NOT used);
+// wallet-less money counts for the goal and for no wallet; deleting
+// a wallet keeps its goal money, unlinked.
+func TestSavingsWithoutWallet(t *testing.T) {
+	f := newGoalFix(t)
+	goal := f.goal("Japan", 80000, nil)
+	post := func(body map[string]any) WriteResult {
+		var w WriteResult
+		f.call("POST", "/saving-entries", "createSavingEntry", body, http.StatusCreated, &w)
+		return w
+	}
+
+	// No wallet_id = NO wallet, even when the user has a default wallet.
+	f.exec(`INSERT INTO user_notification_settings (user_id, default_account_id) VALUES ($1, $2)
+		ON CONFLICT (user_id) DO UPDATE SET default_account_id = EXCLUDED.default_account_id`, f.me, f.kbank)
+	w := post(map[string]any{"kind": "save", "amount": 1000, "goal_id": goal})
+	if len(w.Entries) != 1 || w.Entries[0].Wallet != nil || w.Entries[0].From.Type != "wallet" || w.Entries[0].From.ID != nil {
+		t.Fatalf("wallet-less entry = %+v", w.Entries)
+	}
+	if len(w.Wallets) != 0 || w.Goals[0].SavedAmount != 1000 {
+		t.Errorf("wallets %v goals %+v", w.Wallets, w.Goals)
+	}
+	if w.GoalPage == nil || len(w.GoalPage.ByWallet) != 1 || w.GoalPage.ByWallet[0].Wallet != nil {
+		t.Errorf("by_wallet = %+v", w.GoalPage)
+	}
+
+	// An explicit wallet_id still puts the money in that wallet.
+	w = post(map[string]any{"kind": "save", "amount": 2000, "goal_id": goal, "wallet_id": f.kbank})
+	if w.Entries[0].Wallet == nil || w.Entries[0].Wallet.ID != f.kbank {
+		t.Fatalf("explicit-wallet entry = %+v", w.Entries[0].Wallet)
+	}
+	if kb := walletOf(w, f.kbank); kb == nil || kb.Saved != 2000 {
+		t.Errorf("kbank savings = %+v (the wallet-less 1000 must not count)", kb)
+	}
+	if w.Goals[0].SavedAmount != 3000 {
+		t.Errorf("goal saved = %v, want 3000", w.Goals[0].SavedAmount)
+	}
+
+	// Withdraw 2500: largest-first takes the wallet's 2000 and 500 of the
+	// wallet-less money; the wallet-less pool can't go below 0 on its own.
+	var out WriteResult
+	f.call("POST", "/saving-entries", "createSavingEntry", map[string]any{"kind": "withdraw", "amount": 2500, "goal_id": goal},
+		http.StatusCreated, &out)
+	if out.Goals[0].SavedAmount != 500 {
+		t.Errorf("after withdraw: saved = %v, want 500", out.Goals[0].SavedAmount)
+	}
+	raw := f.call("POST", "/saving-entries", "", map[string]any{"kind": "withdraw", "amount": 600, "goal_id": goal}, http.StatusConflict, nil)
+	_ = raw
+
+	// The wallet's deletion keeps goal money (FK SET NULL).
+	f.exec(`UPDATE saving_entries SET account_id = NULL WHERE account_id = $1`, f.kbank)
+	var g GoalDetail
+	f.call("GET", "/saving-goals/"+goal.String(), "getSavingGoal", nil, http.StatusOK, &g)
+	if g.Goal.SavedAmount != 500 {
+		t.Errorf("saved after unlinking = %v, want 500", g.Goal.SavedAmount)
+	}
+}

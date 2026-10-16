@@ -130,6 +130,9 @@ func (h *Handler) List(c *gin.Context) {
 			*p.dst = &v
 		}
 	}
+	if c.Query("include_archived") == "true" {
+		f.IncludeArchived = true
+	}
 	if c.Query("no_wallet") == "true" {
 		f.NoWallet = true
 	}
@@ -363,6 +366,8 @@ func mapServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrTxNotFound):
 		response.NotFound(c, "NOT_FOUND", "Transaction not found")
+	case errors.Is(err, ErrAccountArchived):
+		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, ErrAccountForbidden):
 		response.NotFound(c, "ACCOUNT_NOT_FOUND", "Account not found")
 	case errors.Is(err, ErrCategoryForbidden):
@@ -389,8 +394,7 @@ func mapServiceError(c *gin.Context, err error) {
 		errors.Is(err, ErrTransferFieldsOnNonTransfer),
 		errors.Is(err, ErrCategoryRequiredForTransfer),
 		errors.Is(err, ErrTransferCategoryEdit),
-		errors.Is(err, ErrTransferRequiresAccount),
-		errors.Is(err, ErrMoveTransferNeedsToAccount):
+		errors.Is(err, ErrTransferRequiresAccount):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, ErrSystemTransactionImmutable):
 		response.BadRequest(c, "SYSTEM_TRANSACTION_IMMUTABLE", err.Error(), nil)
@@ -412,8 +416,6 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "SPLITS_EXCEED_AMOUNT", err.Error(), nil)
 	case errors.Is(err, ErrSplitUnknownDebt), errors.Is(err, ErrSplitPersonRequired):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-	case errors.Is(err, ErrSplitContactArchived):
-		response.Fail(c, http.StatusConflict, "CONTACT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, ErrSplitsExceedShare):
 		response.BadRequest(c, "SPLITS_EXCEED_SHARE", err.Error(), nil)
 	case errors.Is(err, ErrAmountInvalid):

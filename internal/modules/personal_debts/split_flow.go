@@ -50,7 +50,8 @@ func (s *Service) createMirrorTx(ctx context.Context, tx pgx.Tx, splitter *Entry
 	var personName string
 	var pcID uuid.UUID
 	if err := tx.QueryRow(ctx,
-		`SELECT id, display_name FROM contacts WHERE user_id = $1 AND linked_user_id = $2 LIMIT 1`,
+		`SELECT id, display_name FROM contacts WHERE user_id = $1 AND linked_user_id = $2
+		 ORDER BY (status = 'active') DESC, created_at LIMIT 1`,
 		partnerUserID, splitter.UserID).Scan(&pcID, &personName); err == nil {
 		partnerContactID = &pcID
 	} else {

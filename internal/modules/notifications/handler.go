@@ -39,13 +39,14 @@ func (h *Handler) List(c *gin.Context) {
 		return
 	}
 	f := ListFilter{
-		Read:     c.Query("read"),
-		Actioned: c.Query("actioned"),
-		Type:     c.Query("type"),
-		Page:     atoiOr(c.Query("page"), 1),
-		PerPage:  atoiOr(c.Query("per_page"), 20),
+		Read:      c.Query("read"),
+		Actioned:  c.Query("actioned"),
+		Dismissed: c.Query("dismissed"),
+		Type:      c.Query("type"),
+		Page:      atoiOr(c.Query("page"), 1),
+		PerPage:   atoiOr(c.Query("per_page"), 20),
 	}
-	for name, v := range map[string]string{"read": f.Read, "actioned": f.Actioned} {
+	for name, v := range map[string]string{"read": f.Read, "actioned": f.Actioned, "dismissed": f.Dismissed} {
 		switch strings.ToLower(strings.TrimSpace(v)) {
 		case "", "true", "false", "all":
 		default:
@@ -252,4 +253,18 @@ func atoiOr(s string, dflt int) int {
 		return dflt
 	}
 	return n
+}
+
+// POST /v1/notifications/:id/restore — restoreNotification.
+func (h *Handler) Restore(c *gin.Context) {
+	userID, id, ok := h.bind(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.RestoreResult(c.Request.Context(), userID, id)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
 }

@@ -237,22 +237,16 @@ func (s *Service) applyIdentityEditTx(
 	return s.splitToPartnerTx(ctx, tx, d, *partner, parentTxID)
 }
 
-// assertSplitContactTx — a new split's contact must be the caller's own and
-// not archived.
+// assertSplitContactTx — a new split's contact must be the caller's own (an
+// archived contact is fine: archiving only hides it from lists and pickers).
 func assertSplitContactTx(ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID) error {
-	var status string
-	err := tx.QueryRow(ctx, `SELECT status FROM contacts WHERE id = $1 AND user_id = $2`,
-		contactID, userID).Scan(&status)
+	var one int
+	err := tx.QueryRow(ctx, `SELECT 1 FROM contacts WHERE id = $1 AND user_id = $2`,
+		contactID, userID).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return transactions.ErrSplitContactNotFound
 	}
-	if err != nil {
-		return err
-	}
-	if status == "archived" {
-		return transactions.ErrSplitContactArchived
-	}
-	return nil
+	return err
 }
 
 // linkedPartnerTx — the app user behind a splitter debt's contact (nil when
