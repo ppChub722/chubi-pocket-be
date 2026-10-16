@@ -41,7 +41,7 @@ func NewService(s *Store, txs *transactions.Service, cats *categories.Service) *
 // --- Reads ---
 
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Account, error) {
-	return s.store.GetByID(ctx, userID, id)
+	return s.getDecorated(ctx, userID, id, "")
 }
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID, status, accType string) ([]Account, error) {
@@ -53,9 +53,12 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, accType st
 
 // ListPage is the wallets page read: the list plus its totals and the
 // archived count (spec AccountList).
-func (s *Service) ListPage(ctx context.Context, userID uuid.UUID, status, accType string) (*AccountList, error) {
+func (s *Service) ListPage(ctx context.Context, userID uuid.UUID, status, accType, tz string) (*AccountList, error) {
 	accs, err := s.List(ctx, userID, status, accType)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.decorate(ctx, userID, accs, tz); err != nil {
 		return nil, err
 	}
 	currency, err := s.store.UserCurrency(ctx, userID)
@@ -122,6 +125,17 @@ func buildTotals(accs []Account, currency string) AccountTotals {
 	t.CreditUsed, t.CreditLimit = round2(t.CreditUsed), round2(t.CreditLimit)
 	t.SharedBalance = round2(t.SharedBalance)
 	t.Net = round2(t.Assets - t.Liabilities)
+	for _, a := range accs {
+		if a.Status != StatusArchived && a.TrackBalance {
+			t.SavedTotal += a.Savings.Saved
+		}
+	}
+	t.SavedTotal = round2(t.SavedTotal)
+	t.Total, t.CashTotal, t.CardDebt = round2(t.Assets-t.Liabilities), t.Assets, t.Liabilities
+	if t.CreditLimit > 0 {
+		t.CardUsedPct = int(math.Round(t.CreditUsed / t.CreditLimit * 100))
+	}
+	t.AvailableTotal = round2(t.CashTotal - t.SavedTotal)
 	return t
 }
 
@@ -130,7 +144,7 @@ func round2(v float64) float64 { return math.Round(v*100) / 100 }
 // GetDetail is the wallet page read: the wallet; include lists the optional
 // blocks ("summary" for from..to, default the current month; "members" for
 // the full membership history). Archived wallets work too.
-func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, include []string, from, to string) (*AccountDetail, error) {
+func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, include []string, from, to, tz string) (*AccountDetail, error) {
 	wantSummary, wantMembers := false, false
 	for _, inc := range include {
 		switch strings.TrimSpace(inc) {
@@ -151,7 +165,7 @@ func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, include [
 			return nil, ErrInvalidDate
 		}
 	}
-	a, err := s.store.GetByID(ctx, userID, id)
+	a, err := s.getDecorated(ctx, userID, id, tz)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +292,7 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 	// Re-fetch so the response carries members[] / my_report_scope /
 	// is_shared (pinned §14 shape) — same re-fetch pattern as
 	// projects.Create for members_count.
-	return s.store.GetByID(ctx, userID, created.ID)
+	return s.getDecorated(ctx, userID, created.ID, "")
 }
 
 // --- Update ---
@@ -346,7 +360,7 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		}
 	}
 	// Re-fetch for the members[] / my_report_scope / is_shared shape.
-	return s.store.GetByID(ctx, userID, id)
+	return s.getDecorated(ctx, userID, id, "")
 }
 
 // AddIdentifier appends one identifier to the wallet's list (spec 15 §8,
@@ -449,7 +463,7 @@ func (s *Service) Archive(ctx context.Context, userID, id uuid.UUID) (*Account, 
 	if err := s.store.Archive(ctx, userID, id); err != nil {
 		return nil, err
 	}
-	return s.store.GetByID(ctx, userID, id)
+	return s.getDecorated(ctx, userID, id, "")
 }
 
 // Restore brings an archived wallet back (owner only); an active one is
@@ -465,7 +479,7 @@ func (s *Service) Restore(ctx context.Context, userID, id uuid.UUID) (*Account, 
 	if err := s.store.Restore(ctx, userID, id); err != nil {
 		return nil, err
 	}
-	return s.store.GetByID(ctx, userID, id)
+	return s.getDecorated(ctx, userID, id, "")
 }
 
 // --- Validation ---

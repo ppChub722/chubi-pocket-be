@@ -6358,7 +6358,11 @@ components:
           "savings": {
             "$ref": "#/components/schemas/WalletSavings",
             "description": "The caller's saving buckets in this wallet (saved / available / the red over-balance flag)."
-          }
+          },
+          "month_in": { "$ref": "#/components/schemas/Money", "description": "This month's cash IN on the wallet (income rows of every author; transfers and opening / adjustment rows are not money in / out). Month = the user's timezone." },
+          "month_out": { "$ref": "#/components/schemas/Money", "description": "This month's cash OUT (expense rows)." },
+          "due_date_next": { "oneOf": [{ "$ref": "#/components/schemas/Date" }, { "type": "null" }], "description": "Credit card / pay-later with a payment_due_date: the next due date on or after today (day 31 = last day of a short month); else null." },
+          "days_until_due": { "type": ["integer", "null"], "description": "Days from today to due_date_next (0 = today)." }
         },
         "description": "A wallet, page-ready. `members` = active members only (incl. the caller). Replaces the old Account shape (members[].display_name → name, adds group / my_role / can_edit / is_me).",
         "required": [
@@ -6386,6 +6390,7 @@ components:
           "can_edit",
           "track_balance",
           "savings",
+          "month_in", "month_out", "due_date_next", "days_until_due",
           "created_at",
           "updated_at"
         ]
@@ -6485,7 +6490,8 @@ components:
               "credit_limit",
               "shared_count",
               "shared_balance",
-              "untracked_count"
+              "untracked_count",
+              "total", "cash_total", "card_debt", "card_used_pct", "saved_total", "available_total"
             ],
             "properties": {
               "assets": {
@@ -6549,7 +6555,13 @@ components:
               "untracked_count": {
                 "type": "integer",
                 "description": "Wallets with track_balance = false: listed, never summed in any total here."
-              }
+              },
+              "total": { "$ref": "#/components/schemas/Money", "description": "Every tracked wallet (= net)." },
+              "cash_total": { "$ref": "#/components/schemas/Money", "description": "The non-credit wallets (= assets)." },
+              "card_debt": { "$ref": "#/components/schemas/Money", "description": "What the credit cards / pay-later wallets owe (= liabilities)." },
+              "card_used_pct": { "type": "integer", "description": "card_debt / the cards' credit limits, rounded, 0 without a limit." },
+              "saved_total": { "$ref": "#/components/schemas/Money", "description": "Money set aside in these wallets (goal + spare buckets); unallocated goal money (no wallet) is not in it." },
+              "available_total": { "$ref": "#/components/schemas/Money", "description": "cash_total − saved_total." }
             }
           },
           "archived_count": {

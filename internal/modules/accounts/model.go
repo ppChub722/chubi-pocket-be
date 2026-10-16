@@ -80,6 +80,12 @@ type Account struct {
 	// Savings — the caller's saving buckets in this wallet: saved, spare,
 	// available (= balance − saved), the over-balance warning.
 	Savings shared.WalletSavings `json:"savings"`
+	// 0.4.0 page numbers (spec 03): this month's cash in / out on the wallet; a
+	// card with a due day also gets the next due date and the days until it.
+	MonthIn      float64 `json:"month_in"`
+	MonthOut     float64 `json:"month_out"`
+	DueDateNext  *string `json:"due_date_next"`
+	DaysUntilDue *int    `json:"days_until_due"`
 }
 
 // AccountMember is the account_members DB row. A pending invite has
@@ -276,6 +282,17 @@ type AccountTotals struct {
 	SharedBalance float64     `json:"shared_balance"`
 	// UntrackedCount — wallets with track_balance false (never summed).
 	UntrackedCount int `json:"untracked_count"`
+
+	// 0.4.0 summary card (spec 03): total = every tracked wallet, cash_total =
+	// the non-credit wallets, card_debt = what the cards owe, card_used_pct =
+	// card_debt / credit limit, saved_total = money set aside in the wallets
+	// (unallocated goal money not included), available_total = cash_total − saved_total.
+	Total          float64 `json:"total"`
+	CashTotal      float64 `json:"cash_total"`
+	CardDebt       float64 `json:"card_debt"`
+	CardUsedPct    int     `json:"card_used_pct"`
+	SavedTotal     float64 `json:"saved_total"`
+	AvailableTotal float64 `json:"available_total"`
 }
 
 // AccountList - spec AccountList.

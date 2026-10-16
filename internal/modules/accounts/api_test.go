@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -695,4 +696,77 @@ func TestAccountHardDelete(t *testing.T) {
 		t.Errorf("twin wallet balance = %v (%v), want 550 unchanged", bal, err)
 	}
 	e.call(r, "", "DELETE", "/api/v1/accounts/"+doomed.String(), nil, http.StatusNotFound)
+}
+
+// TestAccountPageNumbers — the wallets page numbers (0.4.0): this month's
+// in / out (transfers and the opening row don't count), a card's next due
+// date, and the summary totals.
+func TestAccountPageNumbers(t *testing.T) {
+	e := newAccEnv(t)
+	ctx := context.Background()
+	owner := testdb.User(t, e.pool)
+	e.seedCategories(owner)
+	r := e.as(owner)
+	txs := transactions.NewService(transactions.NewStore(e.pool), categories.NewService(categories.NewStore(e.pool)))
+
+	bank := dec[aJSON](t, e.call(r, "createAccount", "POST", "/api/v1/accounts",
+		map[string]any{"name": "Bank", "type": "bank", "balance": 1000}, http.StatusCreated)).ID
+	card := dec[aJSON](t, e.call(r, "createAccount", "POST", "/api/v1/accounts",
+		map[string]any{"name": "Card", "type": "credit_card", "credit_limit": 10000, "balance": -2500,
+			"statement_date": 5, "payment_due_date": 20}, http.StatusCreated)).ID
+	today := time.Now().UTC().Format("2006-01-02")
+	mk := func(typ transactions.TxType, acc uuid.UUID, amount float64) {
+		if _, err := txs.Create(ctx, owner, transactions.CreateRequest{Type: typ, AccountID: &acc, Amount: amount, Date: today}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk(transactions.TypeIncome, bank, 400)
+	mk(transactions.TypeExpense, bank, 150)
+	mk(transactions.TypeExpense, bank, 50)
+	if _, err := txs.Create(ctx, owner, transactions.CreateRequest{
+		Type: transactions.TypeTransfer, AccountID: &bank, TransferToAccountID: &card, Amount: 100, Date: today}); err != nil {
+		t.Fatal(err)
+	}
+
+	var list struct {
+		Data []struct {
+			ID           uuid.UUID `json:"id"`
+			MonthIn      float64   `json:"month_in"`
+			MonthOut     float64   `json:"month_out"`
+			DueDateNext  *string   `json:"due_date_next"`
+			DaysUntilDue *int      `json:"days_until_due"`
+		} `json:"data"`
+		Totals struct {
+			Total, CashTotal, CardDebt float64
+			CardUsedPct                int     `json:"card_used_pct"`
+			SavedTotal                 float64 `json:"saved_total"`
+			AvailableTotal             float64 `json:"available_total"`
+		} `json:"totals"`
+	}
+	raw := e.call(r, "listAccounts", "GET", "/api/v1/accounts", nil, http.StatusOK)
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatal(err)
+	}
+	var tot struct {
+		Totals map[string]float64 `json:"totals"`
+	}
+	_ = json.Unmarshal(raw, &tot)
+	for _, a := range list.Data {
+		switch a.ID {
+		case bank:
+			if a.MonthIn != 400 || a.MonthOut != 200 || a.DueDateNext != nil {
+				t.Errorf("bank = %+v, want in 400 out 200 (the transfer is neither), no due date", a)
+			}
+		case card:
+			if a.MonthIn != 0 || a.MonthOut != 0 || a.DueDateNext == nil || a.DaysUntilDue == nil || *a.DaysUntilDue < 0 || *a.DaysUntilDue > 31 {
+				t.Errorf("card = %+v", a)
+			}
+		}
+	}
+	// bank 1000 + 400 − 200 − 100 = 1100; card −2500 + 100 = −2400.
+	tt := tot.Totals
+	if tt["cash_total"] != 1100 || tt["card_debt"] != 2400 || tt["total"] != -1300 || tt["card_used_pct"] != 24 ||
+		tt["saved_total"] != 0 || tt["available_total"] != 1100 {
+		t.Errorf("totals = %v", tt)
+	}
 }

@@ -106,5 +106,5 @@ func (s *Service) ReorderPage(ctx context.Context, userID uuid.UUID, items []Reo
 	if err := s.store.ReorderTx(ctx, userID, items); err != nil {
 		return nil, err
 	}
-	return s.ListPage(ctx, userID, StatusActive, "")
+	return s.ListPage(ctx, userID, StatusActive, "", "")
 }

@@ -235,7 +235,7 @@ func (s *Service) UpdateReportScope(
 		return nil, err
 	}
 	if m.LeftAt == nil {
-		return s.store.GetByID(ctx, callerUserID, accountID)
+		return s.getDecorated(ctx, callerUserID, accountID, "")
 	}
 	// An ex-member still owns their scope toggle but no longer sees the wallet
 	// through the membership gate: read it directly, as a plain member.

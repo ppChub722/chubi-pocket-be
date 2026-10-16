@@ -60,7 +60,7 @@ func (h *Handler) List(c *gin.Context) {
 	}
 	accType := c.Query("type")
 
-	out, err := h.service.ListPage(c.Request.Context(), userID, status, accType)
+	out, err := h.service.ListPage(c.Request.Context(), userID, status, accType, c.GetHeader("X-Timezone"))
 	if err != nil {
 		response.InternalError(c, "Failed to list accounts", err.Error())
 		return
@@ -84,7 +84,7 @@ func (h *Handler) Get(c *gin.Context) {
 	for _, v := range c.QueryArray("include") {
 		include = append(include, strings.Split(v, ",")...)
 	}
-	a, err := h.service.GetDetail(c.Request.Context(), userID, id, include, c.Query("from"), c.Query("to"))
+	a, err := h.service.GetDetail(c.Request.Context(), userID, id, include, c.Query("from"), c.Query("to"), c.GetHeader("X-Timezone"))
 	if err != nil {
 		mapServiceError(c, err)
 		return

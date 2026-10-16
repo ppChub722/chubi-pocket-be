@@ -1,0 +1,102 @@
+package accounts
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
+)
+
+// decorate fills the page-ready numbers of each wallet (0.4.0): this month's
+// cash in / out (income and expense rows of any author; transfers and the
+// opening / adjustment rows are not money in / out) and, for a card with a
+// due day, the next due date. Month and today follow the user's timezone.
+func (s *Service) decorate(ctx context.Context, userID uuid.UUID, accs []Account, tz string) error {
+	if len(accs) == 0 {
+		return nil
+	}
+	today, err := shared.UserToday(ctx, s.store.Pool(), userID, tz)
+	if err != nil {
+		return err
+	}
+	first, last := shared.MonthBounds(today)
+	ids := make([]uuid.UUID, len(accs))
+	for i, a := range accs {
+		ids[i] = a.ID
+	}
+	rows, err := s.store.Pool().Query(ctx, `
+		SELECT t.account_id,
+		       COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'income'), 0)::float8,
+		       COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0)::float8
+		FROM transactions t
+		LEFT JOIN categories c ON c.id = t.category_id
+		WHERE t.account_id = ANY($1) AND t.type IN ('income', 'expense')
+		  AND t.date BETWEEN $2 AND $3
+		  AND COALESCE(c.system_kind NOT IN ('OPENING_IN', 'OPENING_OUT', 'ADJUST_IN', 'ADJUST_OUT'), TRUE)
+		GROUP BY t.account_id`, ids, first, last)
+	if err != nil {
+		return fmt.Errorf("wallet month flow: %w", err)
+	}
+	in, out := map[uuid.UUID]float64{}, map[uuid.UUID]float64{}
+	for rows.Next() {
+		var (
+			id   uuid.UUID
+			i, o float64
+		)
+		if err := rows.Scan(&id, &i, &o); err != nil {
+			rows.Close()
+			return err
+		}
+		in[id], out[id] = round2(i), round2(o)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range accs {
+		accs[i].MonthIn, accs[i].MonthOut = in[accs[i].ID], out[accs[i].ID]
+		if accs[i].PaymentDueDate != nil && IsCreditType(accs[i].Type) {
+			next := nextDayOfMonth(today, *accs[i].PaymentDueDate)
+			d := next.Format("2006-01-02")
+			days := int(math.Round(next.Sub(today).Hours() / 24))
+			accs[i].DueDateNext, accs[i].DaysUntilDue = &d, &days
+		}
+	}
+	return nil
+}
+
+// nextDayOfMonth — the first date on or after `today` whose day-of-month is
+// `day` (31 = the last day of a short month).
+func nextDayOfMonth(today time.Time, day int) time.Time {
+	pick := func(y int, m time.Month) time.Time {
+		last := time.Date(y, m+1, 0, 0, 0, 0, 0, time.UTC).Day()
+		d := day
+		if d > last {
+			d = last
+		}
+		return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	}
+	c := pick(today.Year(), today.Month())
+	if c.Before(today) {
+		nm := today.AddDate(0, 1, 0)
+		c = pick(nm.Year(), nm.Month())
+	}
+	return c
+}
+
+// getDecorated — one wallet with its page numbers.
+func (s *Service) getDecorated(ctx context.Context, userID, id uuid.UUID, tz string) (*Account, error) {
+	a, err := s.store.GetByID(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	one := []Account{*a}
+	if err := s.decorate(ctx, userID, one, tz); err != nil {
+		return nil, err
+	}
+	return &one[0], nil
+}
