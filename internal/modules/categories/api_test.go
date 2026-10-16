@@ -220,3 +220,46 @@ func TestCategoryAPI(t *testing.T) {
 		t.Errorf("delete system = %d, want 400", status)
 	}
 }
+
+// TestCategoryMonthNumbers — month_spent / month_count: a parent counts its
+// sub-categories' transactions too; last month and other types don't count.
+func TestCategoryMonthNumbers(t *testing.T) {
+	pool := testdb.Pool(t)
+	ctx := context.Background()
+	uid := testdb.User(t, pool)
+	r := newCatEngine(t, uid)
+	food := mkCat(t, r, map[string]any{"name": "Food", "type": "expense"})
+	lunch := mkCat(t, r, map[string]any{"name": "Lunch", "type": "expense", "parent_id": food.ID})
+	other := mkCat(t, r, map[string]any{"name": "Other", "type": "expense"})
+	ins := func(cat uuid.UUID, amount float64, daysAgo int) {
+		if _, err := pool.Exec(ctx, `INSERT INTO transactions (id, user_id, type, amount, date, category_id)
+			VALUES (gen_random_uuid(), $1, 'expense', $2, CURRENT_DATE - $3::int, $4)`, uid, amount, daysAgo, cat); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ins(food.ID, 100, 0)
+	ins(lunch.ID, 50, 0)
+	ins(lunch.ID, 25, 0)
+	ins(other.ID, 7, 0)
+	ins(lunch.ID, 999, 70) // two months back: never this month
+	status, raw := apitest.Do(t, r, "GET", "/api/v1/categories", nil)
+	apitest.Conform(t, "listCategories", status, raw)
+	var out struct {
+		Data []struct {
+			ID    uuid.UUID `json:"id"`
+			Spent float64   `json:"month_spent"`
+			Count int       `json:"month_count"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &out)
+	got := map[uuid.UUID][2]float64{}
+	for _, c := range out.Data {
+		got[c.ID] = [2]float64{c.Spent, float64(c.Count)}
+	}
+	if got[food.ID] != [2]float64{175, 3} || got[lunch.ID] != [2]float64{75, 2} || got[other.ID] != [2]float64{7, 1} {
+		t.Errorf("month numbers = %v (food %v lunch %v other %v)", got, food.ID, lunch.ID, other.ID)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM transactions WHERE user_id = $1`, uid); err != nil {
+		t.Fatal(err)
+	}
+}

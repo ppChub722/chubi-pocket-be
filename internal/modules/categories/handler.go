@@ -61,7 +61,7 @@ func (h *Handler) List(c *gin.Context) {
 		f.IncludeSystem = true
 	}
 
-	cats, err := h.service.List(c.Request.Context(), userID, f)
+	cats, err := h.service.ListMonth(c.Request.Context(), userID, f, c.GetHeader("X-Timezone"))
 	if err != nil {
 		response.InternalError(c, "Failed to list categories", err.Error())
 		return

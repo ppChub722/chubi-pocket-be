@@ -99,6 +99,11 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*CategoryDetai
 	if _, err := s.decorateOne(ctx, userID, c); err != nil {
 		return nil, err
 	}
+	one := []Category{*c}
+	if err := s.decorateMonth(ctx, userID, one, ""); err != nil {
+		return nil, err
+	}
+	c.MonthSpent, c.MonthCount = one[0].MonthSpent, one[0].MonthCount
 	childCount, err := s.store.CountChildren(ctx, c.ID)
 	if err != nil {
 		return nil, fmt.Errorf("count children: %w", err)
@@ -134,11 +139,20 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*CategoryDetai
 }
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Category, error) {
+	return s.ListMonth(ctx, userID, f, "")
+}
+
+// ListMonth — the categories list with the month numbers (tz = X-Timezone).
+func (s *Service) ListMonth(ctx context.Context, userID uuid.UUID, f ListFilter, tz string) ([]Category, error) {
 	cats, err := s.store.List(ctx, userID, f)
 	if err != nil {
 		return nil, err
 	}
-	return s.decorate(ctx, userID, cats)
+	cats, err = s.decorate(ctx, userID, cats)
+	if err != nil {
+		return nil, err
+	}
+	return cats, s.decorateMonth(ctx, userID, cats, tz)
 }
 
 func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCategoryRequest) (*CategoryDetail, error) {

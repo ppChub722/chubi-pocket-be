@@ -5489,6 +5489,8 @@ components:
           "description",
           "note",
           "created_at",
+          "month_spent",
+          "month_count",
           "updated_at"
         ],
         "properties": {
@@ -5580,6 +5582,14 @@ components:
           },
           "created_at": {
             "$ref": "#/components/schemas/DateTime"
+          },
+          "month_spent": {
+            "$ref": "#/components/schemas/Money",
+            "description": "This month (user timezone): the money in this category AND its sub-categories, my share (the reports rule); an income category sums income. Filled on the list and the detail; 0 in write answers."
+          },
+          "month_count": {
+            "type": "integer",
+            "description": "Transactions behind month_spent (sub-categories included)."
           },
           "updated_at": {
             "$ref": "#/components/schemas/DateTime"

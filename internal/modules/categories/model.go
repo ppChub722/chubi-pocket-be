@@ -51,6 +51,11 @@ type Category struct {
 	Note            *string          `json:"note"`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
+	// This month (spec 05): the money in the category incl. its sub-categories
+	// (my share; income categories sum income) and the number of transactions.
+	// Filled on the list and the detail.
+	MonthSpent float64 `json:"month_spent"`
+	MonthCount int     `json:"month_count"`
 }
 
 // CategoryDetail is the response shape for GET /v1/categories/:id —
