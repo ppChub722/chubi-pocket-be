@@ -4011,7 +4011,7 @@ paths:
         Paid = I paid them (net + amount); received = they paid me (net − amount). With `account_id` the BE also writes the LINKED wallet transaction (paid = expense, received = income, system category Debt Paid / Debt Received, description / note copied) and `tag_ids` go on that transaction; without it the entry is ledger-only and `tag_ids` must be empty (400 TAGS_NEED_WALLET).
         The person: a `c:` key = that contact (400 CONTACT_NOT_FOUND if not the caller's); an `n:` key = a typed name (`person_name` sets the shown spelling, default = the key's text as sent). `mark_paid_ids` labels those entries of the SAME person paid in the same call (400 ENTRY_NOT_FOUND if one is not).
         `date` default = today. Returns 201 with the entry, the person's new balance, the linked transaction (full row) and the touched wallet balances.
-        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAGS_NEED_WALLET / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND / ENTRY_NOT_FOUND, 409 CONTACT_ARCHIVED (the person is an archived contact: restore it first).
+        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAGS_NEED_WALLET / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND / ENTRY_NOT_FOUND.
       requestBody:
         required: true
         content:
@@ -4056,7 +4056,7 @@ paths:
       description: |
         Partial; a key present with `null` clears description / note, and `account_id: null` turns the entry ledger-only (its transaction is deleted, the wallet balance comes back). Setting `account_id` on a ledger-only entry creates the linked transaction; changing it moves the transaction. Amount / date / direction / description / note edits are written to the linked transaction too (one record). `tag_ids` replace the transaction's tags (needs a wallet: 400 TAGS_NEED_WALLET). `key` moves a manual entry to another person (`person_name` as in create); the response then also carries `previous_person_balance`.
         `paid` is the label only. A split-sourced entry (`entry.source` not null) accepts only description / note / paid: anything else → 409 ENTRY_MANAGED_BY_SOURCE.
-        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAGS_NEED_WALLET / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND, 404 NOT_FOUND, 409 ENTRY_MANAGED_BY_SOURCE / CONTACT_ARCHIVED.
+        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAGS_NEED_WALLET / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND, 404 NOT_FOUND, 409 ENTRY_MANAGED_BY_SOURCE.
       requestBody:
         required: true
         content:

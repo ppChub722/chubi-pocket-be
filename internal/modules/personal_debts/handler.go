@@ -228,8 +228,6 @@ func mapServiceError(c *gin.Context, err error) {
 		response.NotFound(c, "NOT_FOUND", err.Error())
 	case errors.Is(err, shared.ErrInvalidPersonKey):
 		response.BadRequest(c, "INVALID_PERSON_KEY", err.Error(), nil)
-	case errors.Is(err, ErrContactArchived):
-		response.Fail(c, http.StatusConflict, "CONTACT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, ErrContactNotFound):
 		response.BadRequest(c, "CONTACT_NOT_FOUND", "Contact not found", nil)
 	case errors.Is(err, ErrTagsNeedWallet):

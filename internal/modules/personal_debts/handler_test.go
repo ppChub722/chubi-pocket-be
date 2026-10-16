@@ -469,25 +469,53 @@ func TestTransactionFilters(t *testing.T) {
 	}
 }
 
-// TestArchivedContactRules — no new entries with an archived contact
-// (409 CONTACT_ARCHIVED, last_used_at untouched); its existing debts stay in
-// the ledger.
-func TestArchivedContactRules(t *testing.T) {
+// TestContactsAndDebtsAreIndependent — archiving a contact only hides it:
+// new entries (a debt and a repayment) with it still work and still bump
+// last_used_at; deleting the contact drops every record back to a typed
+// name (name kept, contact id NULL, amounts unchanged).
+func TestContactsAndDebtsAreIndependent(t *testing.T) {
 	f := newDebtHFix(t)
 	key := "c:" + f.contact.String()
 	f.call("POST", entriesPath(key), map[string]any{"direction": "paid", "amount": 100, "date": "2026-10-01"},
 		"createDebtEntry", http.StatusCreated)
 
 	f.exec(`UPDATE contacts SET status = 'archived', last_used_at = NULL WHERE id = $1`, f.contact)
-	f.code("POST", entriesPath(key), map[string]any{"direction": "paid", "amount": 50, "date": "2026-10-02"},
-		http.StatusConflict, "CONTACT_ARCHIVED")
+	f.call("POST", entriesPath(key), map[string]any{"direction": "paid", "amount": 50, "date": "2026-10-02"},
+		"createDebtEntry", http.StatusCreated)
+	f.call("POST", entriesPath(key), map[string]any{"direction": "received", "amount": 30, "date": "2026-10-03"},
+		"createDebtEntry", http.StatusCreated)
 	var used *time.Time
-	if err := f.pool.QueryRow(f.ctx, `SELECT last_used_at FROM contacts WHERE id = $1`, f.contact).Scan(&used); err != nil || used != nil {
-		t.Errorf("last_used_at = %v (%v), want untouched", used, err)
+	if err := f.pool.QueryRow(f.ctx, `SELECT last_used_at FROM contacts WHERE id = $1`, f.contact).Scan(&used); err != nil || used == nil {
+		t.Errorf("last_used_at = %v (%v), want bumped", used, err)
 	}
-	// The old debt still counts.
+
+	// Delete the contact (as the contacts module does: snapshot, then delete).
+	tx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.RestoreOnContactDeleteTx(f.ctx, tx, f.me, f.contact); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(f.ctx, `DELETE FROM contacts WHERE id = $1`, f.contact); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	var n, linked int
+	var sum float64
+	var names string
+	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*), COUNT(counterparty_contact_id), SUM(amount)::float8,
+		MIN(counterparty_person_name) || '/' || MAX(counterparty_person_name) FROM personal_debts WHERE user_id = $1`, f.me).
+		Scan(&n, &linked, &sum, &names); err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 || linked != 0 || sum != 180 || names != "Bee old/Bee old" {
+		t.Errorf("after contact delete: rows %d linked %d sum %v names %q", n, linked, sum, names)
+	}
 	people := f.call("GET", "/api/v1/personal-debts/people", nil, "listDebtPeople", http.StatusOK)
-	if len(people["data"].([]any)) != 1 {
-		t.Errorf("people = %v", people)
+	if d := people["data"].([]any); len(d) != 1 {
+		t.Errorf("people = %v, want one typed-name person", people)
 	}
 }

@@ -35,7 +35,6 @@ var (
 	ErrSplitsExceedAmount          = errors.New("splits add up to more than the transaction amount")
 	ErrSplitUnknownDebt            = errors.New("debt_id is not one of this transaction's splits (or is listed twice)")
 	ErrSplitPersonRequired         = errors.New("person_name is required for a new split")
-	ErrSplitContactArchived        = errors.New("split contact is archived")
 	ErrSplitsExceedShare           = errors.New("splits add up to more than your share of this event bill")
 	ErrCategoryRequiredForTransfer = errors.New("transfer category is auto-set; do not pass category_id")
 	ErrTransferRequiresAccount     = errors.New("account_id is required for type=transfer")

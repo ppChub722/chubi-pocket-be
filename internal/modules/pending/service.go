@@ -492,7 +492,6 @@ func toSubmitError(err error) SubmitError {
 		{transactions.ErrTransferRequiresAccount, "TRANSFER_NEEDS_WALLETS"},
 		{transactions.ErrSplitsOnTransfer, "SPLITS_ON_TRANSFER"},
 		{transactions.ErrSplitContactNotFound, "CONTACT_NOT_FOUND"},
-		{transactions.ErrSplitContactArchived, "CONTACT_ARCHIVED"},
 		{transactions.ErrSplitsExceedAmount, "SPLITS_EXCEED_AMOUNT"},
 		{projects.ErrSplitsExceedParent, "SPLITS_EXCEED_AMOUNT"},
 		{projects.ErrProjectNotFound, "PROJECT_NOT_FOUND"},

@@ -418,8 +418,6 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "SPLITS_EXCEED_AMOUNT", err.Error(), nil)
 	case errors.Is(err, ErrSplitUnknownDebt), errors.Is(err, ErrSplitPersonRequired):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-	case errors.Is(err, ErrSplitContactArchived):
-		response.Fail(c, http.StatusConflict, "CONTACT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, ErrSplitsExceedShare):
 		response.BadRequest(c, "SPLITS_EXCEED_SHARE", err.Error(), nil)
 	case errors.Is(err, ErrAmountInvalid):

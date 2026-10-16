@@ -343,15 +343,6 @@ func TestEditSplitsIdentity(t *testing.T) {
 		t.Errorf("rename notified the partner: %d -> %d", partnerNotifs, n)
 	}
 
-	// Link to an archived contact → refused, nothing changes.
-	archived := uuid.New()
-	if _, err := f.pool.Exec(f.ctx, `INSERT INTO contacts (id, user_id, display_name, status)
-		VALUES ($1, $2, 'Old', 'archived')`, archived, f.me); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.edit(t, ident(s["Bam"], "", &archived), keep(s["Partner"], 100)); !errors.Is(err, transactions.ErrSplitContactArchived) {
-		t.Errorf("link to archived contact: err = %v", err)
-	}
 
 	// Link to a contact with an app account: name from the contact, same
 	// row, paid label kept, split_created to them (auto → mirror at 100).

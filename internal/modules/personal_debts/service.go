@@ -145,17 +145,14 @@ func resolvePerson(ctx context.Context, q querier, userID uuid.UUID, rawKey stri
 		return nil, "", err
 	}
 	if k.ContactID != nil {
-		var name, status string
-		err := q.QueryRow(ctx, `SELECT display_name, status FROM contacts WHERE id = $1 AND user_id = $2`,
-			*k.ContactID, userID).Scan(&name, &status)
+		var name string
+		err := q.QueryRow(ctx, `SELECT display_name FROM contacts WHERE id = $1 AND user_id = $2`,
+			*k.ContactID, userID).Scan(&name)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, "", ErrContactNotFound
 		}
 		if err != nil {
 			return nil, "", fmt.Errorf("contact: %w", err)
-		}
-		if status == "archived" {
-			return nil, "", ErrContactArchived
 		}
 		return k.ContactID, name, nil
 	}
@@ -512,9 +509,6 @@ func (s *Service) CreateForTransactionTx(
 		if err := assertContactOwned(ctx, tx, userID, inputs[i].ContactID); err != nil {
 			if errors.Is(err, ErrContactNotFound) {
 				return transactions.ErrSplitContactNotFound
-			}
-			if errors.Is(err, ErrContactArchived) {
-				return transactions.ErrSplitContactArchived
 			}
 			return err
 		}
