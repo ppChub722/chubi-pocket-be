@@ -174,7 +174,8 @@ func mapServiceError(c *gin.Context, err error) {
 	case errors.Is(err, ErrCategoryNotFound):
 		response.NotFound(c, "NOT_FOUND", "Category not found")
 	case errors.Is(err, ErrDuplicateName):
-		response.BadRequest(c, "DUPLICATE_NAME", err.Error(), nil)
+		// 422 with the field, so a form shows it under the name input.
+		response.Fail(c, http.StatusUnprocessableEntity, "CATEGORY_NAME_DUPLICATE", err.Error(), map[string]string{"field": "name"})
 	case errors.Is(err, ErrInvalidParent):
 		response.BadRequest(c, "INVALID_PARENT", err.Error(), nil)
 	case errors.Is(err, ErrCycleDetected):

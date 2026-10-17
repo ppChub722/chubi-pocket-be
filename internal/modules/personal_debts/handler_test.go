@@ -68,7 +68,6 @@ func newDebtHFix(t *testing.T) *debtHFix {
 		g.GET("/personal-debts/people", h.People)
 		g.GET("/personal-debts/people/:key", h.Person)
 		g.GET("/personal-debts/people/:key/entries", h.Entries)
-		g.GET("/personal-debts/people/:key/summary-message", h.SummaryMessage)
 		g.POST("/personal-debts/people/:key/entries", h.CreateEntry)
 		g.GET("/personal-debts/:id", h.Get)
 		g.PUT("/personal-debts/:id", h.Update)
@@ -553,8 +552,12 @@ func TestDebtCyclesAndSummary(t *testing.T) {
 			cur++
 		}
 	}
-	if cur != 2 {
-		t.Errorf("items flagged current = %d, want 2", cur)
+	if cur != 2 || len(page["items"].([]any)) != 2 {
+		t.Errorf("person page items (default = current cycle) = %d, flagged %d, want 2 / 2", len(page["items"].([]any)), cur)
+	}
+	all := f.call("GET", "/api/v1/personal-debts/people/n:mom?cycle=all", nil, "getDebtPerson", http.StatusOK)
+	if len(all["items"].([]any)) != 4 {
+		t.Errorf("cycle=all items = %d, want 4", len(all["items"].([]any)))
 	}
 	el := f.call("GET", "/api/v1/personal-debts/people/n:mom/entries?cycle=earlier", nil, "listDebtEntries", http.StatusOK)
 	if len(el["data"].([]any)) != 2 {
@@ -567,7 +570,7 @@ func TestDebtCyclesAndSummary(t *testing.T) {
 		t.Errorf("totals = %v", people["totals"])
 	}
 
-	msg := f.call("GET", "/api/v1/personal-debts/people/n:mom/summary-message", nil, "getDebtSummaryMessage", http.StatusOK)
+	msg, _ := page["summary_message"].(map[string]any)
 	text, _ := msg["text"].(string)
 	if num(msg, "entries") != 2 || num(msg, "net") != 70 || !strings.Contains(text, "รวม Mom ค้างจ่ายฉัน 70 บาท") ||
 		!strings.Contains(text, "+50") || strings.Contains(text, "100") {

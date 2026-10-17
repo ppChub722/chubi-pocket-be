@@ -153,9 +153,11 @@ type EntryCounts struct {
 // PersonPage — spec schema DebtPersonPage.
 type PersonPage struct {
 	DebtPerson
-	Counts     EntryCounts `json:"counts"`
-	Items      []DebtEntry `json:"items"`
-	Pagination shared.Page `json:"pagination"`
+	Counts EntryCounts `json:"counts"`
+	Items  []DebtEntry `json:"items"`
+	// SummaryMessage — the text to send the person (current-cycle entries + total).
+	SummaryMessage *SummaryMessage `json:"summary_message"`
+	Pagination     shared.Page     `json:"pagination"`
 }
 
 // EntryList — spec schema DebtEntryList.

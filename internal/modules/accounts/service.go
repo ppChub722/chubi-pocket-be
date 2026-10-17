@@ -136,6 +136,19 @@ func buildTotals(accs []Account, currency string) AccountTotals {
 		t.CardUsedPct = int(math.Round(t.CreditUsed / t.CreditLimit * 100))
 	}
 	t.AvailableTotal = round2(t.CashTotal - t.SavedTotal)
+	t.CardRemaining = round2(math.Max(0, t.CreditLimit-t.CardDebt))
+	t.CashSplit = []CashShare{}
+	for _, typ := range []string{TypeBank, TypeCash, TypeEWallet} {
+		tt := byType[typ]
+		if tt == nil {
+			continue
+		}
+		pct := 0
+		if t.CashTotal > 0 {
+			pct = int(math.Round(tt.Balance / t.CashTotal * 100))
+		}
+		t.CashSplit = append(t.CashSplit, CashShare{Type: typ, Pct: pct})
+	}
 	return t
 }
 
@@ -145,13 +158,15 @@ func round2(v float64) float64 { return math.Round(v*100) / 100 }
 // blocks ("summary" for from..to, default the current month; "members" for
 // the full membership history). Archived wallets work too.
 func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, include []string, from, to, tz string) (*AccountDetail, error) {
-	wantSummary, wantMembers := false, false
+	wantSummary, wantMembers, wantDelete := false, false, false
 	for _, inc := range include {
 		switch strings.TrimSpace(inc) {
 		case "summary":
 			wantSummary = true
 		case "members":
 			wantMembers = true
+		case "delete_preview":
+			wantDelete = true
 		case "":
 		default:
 			return nil, ErrInvalidInclude
@@ -172,6 +187,13 @@ func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, include [
 	out := &AccountDetail{Account: *a}
 	if wantSummary {
 		if out.Summary, err = s.Summary(ctx, userID, id, from, to); err != nil {
+			return nil, err
+		}
+	}
+	if wantDelete {
+		if p, err := s.DeletePreview(ctx, userID, id); err == nil {
+			out.DeletePreview = p
+		} else if !errors.Is(err, ErrNotOwner) && !errors.Is(err, ErrAccountHasMembers) {
 			return nil, err
 		}
 	}

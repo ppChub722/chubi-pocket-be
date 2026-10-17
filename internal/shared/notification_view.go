@@ -43,7 +43,7 @@ func NotificationState(readAt, actionedAt, dismissedAt *time.Time) string {
 
 // AwaitsAnswer — the row still waits for the user (owner / FE rule): not
 // actioned, not dismissed, and its type asks something of the user:
-// contact_link_request / account_invite, or a one-tap action type —
+// contact_link_request / account_invite / project_invite / recurring_ending (ต่ออีก / ปล่อยให้จบ), or a one-tap action type —
 // split_created / split_changed (unless payload.superseded),
 // project_tx_recorded_for_you, project_tx_changed (only when
 // payload.personal_transaction_id AND payload.suggested are set).
@@ -58,7 +58,7 @@ func AwaitsAnswer(typ string, actionedAt, dismissedAt *time.Time, payload json.R
 		return ok && v != nil && v != false && v != ""
 	}
 	switch typ {
-	case "contact_link_request", "account_invite":
+	case "contact_link_request", "account_invite", "project_invite", "recurring_ending":
 		return true
 	case "split_created", "split_changed":
 		return !has("superseded")

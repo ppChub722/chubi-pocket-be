@@ -161,8 +161,9 @@ type ReorderEntry struct {
 
 // PathItem - one ancestor in Category.path.
 type PathItem struct {
-	ID   uuid.UUID `json:"id"`
-	Name string    `json:"name"`
+	ID       uuid.UUID        `json:"id"`
+	Name     string           `json:"name"`
+	IconCode *shared.IconCode `json:"icon_code"`
 }
 
 // DeleteCategoryResult - spec DeleteCategoryResult: the children shifted up

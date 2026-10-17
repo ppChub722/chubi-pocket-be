@@ -51,18 +51,7 @@ func thaiDate(d string) string {
 // SummaryMessage — GET /personal-debts/people/:key/summary-message. The
 // entries are the CURRENT cycle, oldest first, each signed (+ they owe me /
 // − I owe them); the total is the person's net. Thai, both directions.
-func (s *Service) SummaryMessage(ctx context.Context, userID uuid.UUID, rawKey string) (*SummaryMessage, error) {
-	k, err := shared.ParseDebtKey(rawKey)
-	if err != nil {
-		return nil, err
-	}
-	bal, found, err := s.store.personBalance(ctx, s.store.db, userID, k)
-	if err != nil {
-		return nil, err
-	}
-	if !found && (k.ContactID == nil || bal.Person.ContactID == nil) {
-		return nil, ErrPersonNotFound
-	}
+func (s *Service) summaryMessage(ctx context.Context, userID uuid.UUID, k shared.DebtPersonKey, bal DebtPerson) (*SummaryMessage, error) {
 	items, _, err := s.store.listEntries(ctx, userID, k.Key(), EntryFilter{Cycle: "current", Sort: "date_asc", Page: 1, PerPage: 200})
 	if err != nil {
 		return nil, err

@@ -638,7 +638,7 @@ func (s *Store) ByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([
 // TreeNames loads (id -> name, parent) of all the user's categories (any
 // status) in one query, for depth / path computation.
 func (s *Store) TreeNames(ctx context.Context, userID uuid.UUID) (map[uuid.UUID]TreeNode, error) {
-	rows, err := s.db.Query(ctx, `SELECT id, name, parent_id FROM categories WHERE user_id = $1`, userID)
+	rows, err := s.db.Query(ctx, `SELECT id, name, parent_id, icon_code FROM categories WHERE user_id = $1`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("tree: %w", err)
 	}
@@ -649,9 +649,11 @@ func (s *Store) TreeNames(ctx context.Context, userID uuid.UUID) (map[uuid.UUID]
 			id uuid.UUID
 			n  TreeNode
 		)
-		if err := rows.Scan(&id, &n.Name, &n.ParentID); err != nil {
+		var icon []byte
+		if err := rows.Scan(&id, &n.Name, &n.ParentID, &icon); err != nil {
 			return nil, err
 		}
+		n.IconCode = shared.IconFromJSON(icon)
 		out[id] = n
 	}
 	return out, rows.Err()
@@ -661,4 +663,5 @@ func (s *Store) TreeNames(ctx context.Context, userID uuid.UUID) (map[uuid.UUID]
 type TreeNode struct {
 	Name     string
 	ParentID *uuid.UUID
+	IconCode *shared.IconCode
 }

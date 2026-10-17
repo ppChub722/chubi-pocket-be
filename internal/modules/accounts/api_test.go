@@ -64,7 +64,6 @@ func (e *accEnv) as(uid uuid.UUID) *gin.Engine {
 		g.PUT("/accounts/:id", h.Update)
 		g.DELETE("/accounts/:id", h.Delete)
 		g.POST("/accounts/:id/archive", h.Archive)
-		g.GET("/accounts/:id/delete-preview", h.DeletePreview)
 		g.POST("/accounts/:id/restore", h.Restore)
 		g.POST("/accounts/:id/adjust-balance", h.AdjustBalance)
 		g.POST("/accounts/:id/identifiers", h.AddIdentifier)
@@ -642,23 +641,26 @@ func TestAccountHardDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	raw := e.call(r, "previewAccountDelete", "GET", "/api/v1/accounts/"+doomed.String()+"/delete-preview", nil, http.StatusOK)
-	var got struct {
-		Transactions      int `json:"transactions"`
-		Transfers         int `json:"transfers"`
-		SystemRowsDeleted int `json:"system_rows_deleted"`
-		Recurring         int `json:"recurring"`
-		SavingEntries     struct {
-			Count  int     `json:"count"`
-			Amount float64 `json:"amount"`
-		} `json:"saving_entries"`
+	var detail struct {
+		DeletePreview *struct {
+			Transactions      int `json:"transactions"`
+			Transfers         int `json:"transfers"`
+			SystemRowsDeleted int `json:"system_rows_deleted"`
+			Recurring         int `json:"recurring"`
+			SavingEntries     struct {
+				Count  int     `json:"count"`
+				Amount float64 `json:"amount"`
+			} `json:"saving_entries"`
+		} `json:"delete_preview"`
 	}
-	if err := json.Unmarshal(raw, &got); err != nil {
+	raw := e.call(r, "getAccount", "GET", "/api/v1/accounts/"+doomed.String()+"?include=delete_preview", nil, http.StatusOK)
+	if err := json.Unmarshal(raw, &detail); err != nil {
 		t.Fatal(err)
 	}
-	if got.Transactions != 1 || got.Transfers != 1 || got.SystemRowsDeleted != 1 || got.Recurring != 1 ||
+	got := detail.DeletePreview
+	if got == nil || got.Transactions != 1 || got.Transfers != 1 || got.SystemRowsDeleted != 1 || got.Recurring != 1 ||
 		got.SavingEntries.Count != 1 || got.SavingEntries.Amount != 70 {
-		t.Errorf("preview = %s", raw)
+		t.Errorf("delete_preview = %s", raw)
 	}
 
 	e.call(r, "deleteAccount", "DELETE", "/api/v1/accounts/"+doomed.String(), nil, http.StatusOK)
@@ -748,7 +750,7 @@ func TestAccountPageNumbers(t *testing.T) {
 		t.Fatal(err)
 	}
 	var tot struct {
-		Totals map[string]float64 `json:"totals"`
+		Totals map[string]any `json:"totals"`
 	}
 	_ = json.Unmarshal(raw, &tot)
 	for _, a := range list.Data {
@@ -765,8 +767,11 @@ func TestAccountPageNumbers(t *testing.T) {
 	}
 	// bank 1000 + 400 − 200 − 100 = 1100; card −2500 + 100 = −2400.
 	tt := tot.Totals
-	if tt["cash_total"] != 1100 || tt["card_debt"] != 2400 || tt["total"] != -1300 || tt["card_used_pct"] != 24 ||
-		tt["saved_total"] != 0 || tt["available_total"] != 1100 {
+	fv := func(k string) float64 { v, _ := tt[k].(float64); return v }
+	split, _ := tt["cash_split"].([]any)
+	if fv("cash_total") != 1100 || fv("card_debt") != 2400 || fv("total") != -1300 || fv("card_used_pct") != 24 ||
+		fv("saved_total") != 0 || fv("available_total") != 1100 || fv("card_remaining") != 7600 ||
+		len(split) != 1 || split[0].(map[string]any)["type"] != "bank" || split[0].(map[string]any)["pct"] != float64(100) {
 		t.Errorf("totals = %v", tt)
 	}
 }

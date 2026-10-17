@@ -393,6 +393,20 @@ paths:
         - { page: pending, calls: 1 }
 
   # ───────────────────────────── Me ─────────────────────────────
+  /me/archived:
+    get:
+      tags: [Me]
+      summary: The archived hub (ที่เก็บถาวร)
+      operationId: getMyArchived
+      description: 'Everything the user archived, by kind, in one call: counts and the rows (newest change first). Restore / delete use each entity''s own calls (POST /<kind>/{id}/restore, DELETE /<kind>/{id}). `total` = counts.archived of /me/counts.'
+      responses:
+        '200':
+          description: 'The hub.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ArchivedHub' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+      x-breaking: 'New (0.4.0).'
   /me/counts:
     get:
       tags: [Me]
@@ -994,7 +1008,7 @@ paths:
         ],
         "summary": "Wallet detail (page-ready)",
         "operationId": "getAccount",
-        "description": "One call renders the wallet page: the wallet incl. members; `include=summary` adds this month's income / expense; `include=members` adds the full members history (the members tab). Works for any status, archived included.",
+        "description": "One call renders the wallet page: the wallet incl. members; `include=summary` adds this month's income / expense; `include=members` adds the full members history (the members tab); `include=delete_preview` adds what a delete would do (the confirm dialog). Works for any status, archived included.",
         "parameters": [
           {
             "name": "include",
@@ -1006,7 +1020,8 @@ paths:
                 "type": "string",
                 "enum": [
                   "summary",
-                  "members"
+                  "members",
+                  "delete_preview"
                 ]
               }
             }
@@ -1123,28 +1138,6 @@ paths:
         },
         "x-breaking": "0.3.3: DELETE now deletes for real (was: archive). Response is AccountDeleteResult (was the Account). The old app build would hard-delete on its archive button: ships with MIN_APP_BUILD."
       }
-  /accounts/{id}/delete-preview:
-    parameters: [{ $ref: '#/components/parameters/IdPath' }]
-    get:
-      tags: [Accounts]
-      summary: What deleting a wallet would do
-      operationId: previewAccountDelete
-      description: 'Owner only, same guards as the delete (409 ACCOUNT_HAS_MEMBERS). Read-only; the page shows the counts in the confirm ("N รายการจะไม่ผูกกระเป๋า · รายการประจำ N · เงินเก็บ N บาทยังอยู่ แต่ไม่ผูกกระเป๋า").'
-      responses:
-        '200':
-          description: 'The counts.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AccountDeletePreview' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: 'ACCOUNT_HAS_MEMBERS.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-      x-breaking: 'New endpoint (0.3.3).'
   /accounts/{id}/adjust-balance:
     parameters: [{"$ref":"#/components/parameters/IdPath"}]
     post: {
@@ -4004,26 +3997,6 @@ paths:
       x-breaking: New (replaces the client-side grouping of /personal-debts).
       x-used-by:
         - { page: debt-person, calls: 1 }
-  /personal-debts/people/{key}/summary-message:
-    parameters:
-      - { $ref: '#/components/parameters/PersonKeyPath' }
-    get:
-      tags: [Debts]
-      summary: The summary text to send a person
-      operationId: getDebtSummaryMessage
-      description: 'Thai text generated from the CURRENT-cycle entries (oldest first, each signed) and the person''s net, both directions; the FE only shares it. A `c:` key of one of the caller''s contacts answers even with no entries; an `n:` key with no entries → 404 NOT_FOUND.'
-      responses:
-        '200':
-          description: The text.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/DebtSummaryMessage' }
-        '400': { $ref: '#/components/responses/ValidationError' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/NotFound' }
-      x-breaking: New (0.4.0).
-      x-used-by:
-        - { page: debt-person, calls: 1 }
   /personal-debts/people/{key}/entries:
     parameters:
       - { $ref: '#/components/parameters/PersonKeyPath' }
@@ -5400,6 +5373,7 @@ components:
               "budgets",
               "goals",
               "debts_summary",
+              "archived",
               "budgets_summary",
               "recurring"
             ],
@@ -5419,6 +5393,10 @@ components:
               "open_debts": {
                 "type": "integer",
                 "description": "People with something open (= debts_summary.open_count; the debts list default size)."
+              },
+              "archived": {
+                "type": "integer",
+                "description": "Archived things in total (wallets, budgets, goals, events, contacts, recurring): the archived row; lists in GET /me/archived."
               },
               "budgets": {
                 "type": "integer"
@@ -5592,7 +5570,8 @@ components:
               "type": "object",
               "required": [
                 "id",
-                "name"
+                "name",
+                "icon_code"
               ],
               "properties": {
                 "id": {
@@ -5600,6 +5579,9 @@ components:
                 },
                 "name": {
                   "type": "string"
+                },
+                "icon_code": {
+                  "oneOf": [{ "$ref": "#/components/schemas/IconCode" }, { "type": "null" }]
                 }
               }
             }
@@ -6637,15 +6619,23 @@ components:
                   "$ref": "#/components/schemas/AccountMemberHistory"
                 },
                 "description": "Only with ?include=members; null otherwise."
+              },
+              "delete_preview": {
+                "oneOf": [
+                  { "$ref": "#/components/schemas/AccountDeletePreview" },
+                  { "type": "null" }
+                ],
+                "description": "Only with ?include=delete_preview, and only when the caller can delete the wallet (owner, no other active member); null otherwise."
               }
             },
             "required": [
               "summary",
-              "members_history"
+              "members_history",
+              "delete_preview"
             ]
           }
         ],
-        "description": "GET /accounts/{id}: the wallet; `summary` with ?include=summary; `members_history` with ?include=members. One call renders the whole wallet page."
+        "description": "GET /accounts/{id}: the wallet; `summary` with ?include=summary; `members_history` with ?include=members; `delete_preview` with ?include=delete_preview (what deleting would do, for the confirm: owner with no other active members only, else null). One call renders the whole wallet page."
       }
     AccountList: {
         "type": "object",
@@ -6673,7 +6663,7 @@ components:
               "shared_count",
               "shared_balance",
               "untracked_count",
-              "total", "cash_total", "card_debt", "card_used_pct", "saved_total", "available_total"
+              "total", "cash_total", "card_debt", "card_used_pct", "saved_total", "available_total", "cash_split", "card_remaining"
             ],
             "properties": {
               "assets": {
@@ -6743,7 +6733,17 @@ components:
               "card_debt": { "$ref": "#/components/schemas/Money", "description": "What the credit cards / pay-later wallets owe (= liabilities)." },
               "card_used_pct": { "type": "integer", "description": "card_debt / the cards' credit limits, rounded, 0 without a limit." },
               "saved_total": { "$ref": "#/components/schemas/Money", "description": "Money set aside in these wallets (goal + spare buckets); unallocated goal money (no wallet) is not in it." },
-              "available_total": { "$ref": "#/components/schemas/Money", "description": "cash_total − saved_total." }
+              "available_total": { "$ref": "#/components/schemas/Money", "description": "cash_total − saved_total." },
+              "cash_split": {
+                "type": "array",
+                "description": "Share of cash_total by non-credit wallet type, integer percent; only the types that have wallets, in the order bank, cash, e_wallet (0 each when cash_total ≤ 0).",
+                "items": {
+                  "type": "object",
+                  "required": ["type", "pct"],
+                  "properties": { "type": { "type": "string", "enum": ["bank", "cash", "e_wallet"] }, "pct": { "type": "integer" } }
+                }
+              },
+              "card_remaining": { "$ref": "#/components/schemas/Money", "description": "The cards' total credit limit − card_debt, floored at 0." }
             }
           },
           "archived_count": {
@@ -7666,7 +7666,7 @@ components:
           },
           "awaits_answer": {
             "type": "boolean",
-            "description": "The row still waits for the user: actioned_at is null AND type is contact_link_request / account_invite, or a one-tap action type (split_created / split_changed unless payload.superseded, project_tx_recorded_for_you, project_tx_changed only when payload.personal_transaction_id and payload.suggested are set). Computed in the BE."
+            "description": "The row still waits for the user: actioned_at and dismissed_at are null AND type is contact_link_request / account_invite / project_invite / recurring_ending (ต่ออีก → POST /recurring/{id}/extend, ปล่อยให้จบ → mark actioned), or a one-tap action type (split_created / split_changed unless payload.superseded, project_tx_recorded_for_you, project_tx_changed only when payload.personal_transaction_id and payload.suggested are set). Computed in the BE."
           },
           "read_at": {
             "oneOf": [
@@ -7729,6 +7729,16 @@ components:
           "unread_count": {
             "type": "integer"
           },
+          "summary": {
+            "type": "object",
+            "description": "Over ALL the user's notifications, the same whatever the list filter: needs_answer = rows with awaits_answer, unread = unread and not dismissed, dismissed = the hidden ones.",
+            "required": ["needs_answer", "unread", "dismissed"],
+            "properties": {
+              "needs_answer": { "type": "integer" },
+              "unread": { "type": "integer" },
+              "dismissed": { "type": "integer" }
+            }
+          },
           "pagination": {
             "$ref": "#/components/schemas/Page"
           }
@@ -7736,6 +7746,7 @@ components:
         "required": [
           "data",
           "unread_count",
+          "summary",
           "pagination"
         ]
       }
@@ -7987,6 +7998,14 @@ components:
               "deactivated"
             ]
           },
+          "default_account": {
+            "oneOf": [{ "$ref": "#/components/schemas/AccountRef" }, { "type": "null" }],
+            "description": "The default wallet (null = none). Set with PUT default_account_id."
+          },
+          "auto_copy_own_event_bills": {
+            "type": "boolean",
+            "description": "A bill I record in an event also lands in my own book."
+          },
           "preferences": {
             "type": "object",
             "properties": {
@@ -8040,6 +8059,8 @@ components:
           "icon_code",
           "status",
           "preferences",
+          "default_account",
+          "auto_copy_own_event_bills",
           "created_at",
           "updated_at"
         ]
@@ -8063,6 +8084,14 @@ components:
           "email": {
             "type": "string",
             "format": "email"
+          },
+          "default_account_id": {
+            "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }],
+            "description": "The default wallet (auto-actions, quick create start here): an active wallet you are a member of; null clears it; absent leaves it. 400 VALIDATION_ERROR otherwise."
+          },
+          "auto_copy_own_event_bills": {
+            "type": "boolean",
+            "description": "A bill I record in an event also lands in my own book. (Moved here from the notification settings, which still accept auto_resolve_own_in_projects for now.)"
           },
           "preferences": {
             "type": "object",
@@ -8946,6 +8975,31 @@ components:
         text: { type: string, description: 'Multi-line: "สรุปยอดกับ <name>", one "• <date> <what> <±amount> <unit> (<description>)" line per CURRENT-cycle entry, oldest first (+ = I paid for them, − = they paid me), then the total: they owe me / I owe them / cleared.' }
         entries: { type: integer, description: 'Entries listed (the current cycle).' }
         net: { $ref: '#/components/schemas/Money' }
+    ArchivedItem:
+      type: object
+      required: [id, name, icon_code, archived_at]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        name: { type: string }
+        icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
+        archived_at: { $ref: '#/components/schemas/DateTime', description: 'The last change of the row (when it was archived).' }
+    ArchivedGroup:
+      type: object
+      required: [count, items]
+      properties:
+        count: { type: integer }
+        items: { type: array, items: { $ref: '#/components/schemas/ArchivedItem' } }
+    ArchivedHub:
+      type: object
+      required: [total, wallets, budgets, goals, events, contacts, recurring]
+      properties:
+        total: { type: integer }
+        wallets: { $ref: '#/components/schemas/ArchivedGroup' }
+        budgets: { $ref: '#/components/schemas/ArchivedGroup' }
+        goals: { $ref: '#/components/schemas/ArchivedGroup' }
+        events: { $ref: '#/components/schemas/ArchivedGroup' }
+        contacts: { $ref: '#/components/schemas/ArchivedGroup' }
+        recurring: { $ref: '#/components/schemas/ArchivedGroup' }
     DebtPeopleList:
       type: object
       required: [data, totals, pagination]
@@ -9009,11 +9063,11 @@ components:
         data: { type: array, items: { $ref: '#/components/schemas/DebtEntry' } }
         pagination: { $ref: '#/components/schemas/Page' }
     DebtPersonPage:
-      description: 'The person page in one call: the balance, counts, and the first page of entries.'
+      description: 'The person page in one call: the balance, counts, the CURRENT-cycle entries (first page; `?cycle=earlier` / `all` and the entries route page the rest) and the summary message to send.'
       allOf:
         - { $ref: '#/components/schemas/DebtPerson' }
         - type: object
-          required: [counts, items, pagination]
+          required: [counts, items, summary_message, pagination]
           properties:
             counts:
               type: object
@@ -9024,6 +9078,7 @@ components:
                 current: { type: integer, description: 'Entries of the CURRENT cycle (after the last time the balance hit 0).' }
                 earlier: { type: integer, description: 'Entries of earlier cycles (the ones a hidden "รอบก่อนหน้า" fold holds).' }
             items: { type: array, items: { $ref: '#/components/schemas/DebtEntry' } }
+            summary_message: { $ref: '#/components/schemas/DebtSummaryMessage' }
             pagination: { $ref: '#/components/schemas/Page' }
     DebtEntryDetail:
       type: object

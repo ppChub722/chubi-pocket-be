@@ -23,7 +23,7 @@ func TestMyCounts(t *testing.T) {
 	ctx := context.Background()
 	uid := testdb.User(t, pool)
 	h := NewHandler(NewService(pool))
-	r := apitest.Engine(uid, func(g *gin.RouterGroup) { g.GET("/me/counts", h.Counts) })
+	r := apitest.Engine(uid, func(g *gin.RouterGroup) { g.GET("/me/counts", h.Counts); g.GET("/me/archived", h.Archived) })
 
 	get := func() MeCounts {
 		t.Helper()
@@ -95,12 +95,21 @@ func TestMyCounts(t *testing.T) {
 
 	got := get()
 	want := Counts{Categories: 1, Tags: 2, Contacts: 1, ActiveEvents: 1, OpenDebts: 2, Budgets: 1,
-		Goals: shared.SavingTotals{Count: 2, Saved: 800, InGoals: 700, Spare: 100, Available: 200}}
+		Goals: shared.SavingTotals{Count: 2, Saved: 800, InGoals: 700, Spare: 100, Available: 200}, Archived: 3}
 	if got.Counts != want {
 		t.Errorf("counts = %+v, want %+v", got.Counts, want)
 	}
 	if got.Badges.UnreadNotifications != 1 || got.Badges.PendingDrafts != 1 {
 		t.Errorf("badges = %+v", got.Badges)
+	}
+
+	// The archived hub: the same 3, by kind, with names.
+	status, raw := apitest.Do(t, r, "GET", "/api/v1/me/archived", nil)
+	apitest.Conform(t, "getMyArchived", status, raw)
+	var hub ArchivedHub
+	_ = json.Unmarshal(raw, &hub)
+	if hub.Total != 3 || hub.Goals.Count != 1 || hub.Goals.Items[0].Name != "Old" || hub.Contacts.Count != 1 || hub.Budgets.Count != 1 || hub.Wallets.Count != 0 {
+		t.Errorf("archived hub = %s", raw)
 	}
 }
 
@@ -116,7 +125,7 @@ func TestMyCountsTileFigures(t *testing.T) {
 		WithBudgets(budgets.NewService(budgets.NewStore(pool))).
 		WithDebts(personal_debts.NewService(personal_debts.NewStore(pool), txs))
 	h := NewHandler(svc)
-	r := apitest.Engine(uid, func(g *gin.RouterGroup) { g.GET("/me/counts", h.Counts) })
+	r := apitest.Engine(uid, func(g *gin.RouterGroup) { g.GET("/me/counts", h.Counts); g.GET("/me/archived", h.Archived) })
 	exec := func(q string, args ...any) {
 		t.Helper()
 		if _, err := pool.Exec(ctx, q, args...); err != nil {

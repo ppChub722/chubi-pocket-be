@@ -1,6 +1,7 @@
 package users
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,8 +21,14 @@ type Profile struct {
 	IconCode        *shared.IconCode `json:"icon_code"`
 	Status          string           `json:"status"`
 	Preferences     Preferences      `json:"preferences"`
-	CreatedAt       time.Time        `json:"created_at"`
-	UpdatedAt       time.Time        `json:"updated_at"`
+	// DefaultAccount — the wallet auto-actions and quick create start from
+	// (user_notification_settings.default_account_id); null = none.
+	DefaultAccount *shared.AccountRef `json:"default_account"`
+	// AutoCopyOwnEventBills — a bill I record in an event also lands in my own
+	// book (the old notification setting auto_resolve_own_in_projects).
+	AutoCopyOwnEventBills bool      `json:"auto_copy_own_event_bills"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
 type UpdateProfileRequest struct {
@@ -37,6 +44,9 @@ type UpdateProfileRequest struct {
 	// NULL isn't supported through this endpoint.
 	Email       *string        `json:"email"        binding:"omitempty,email,max=255"`
 	Preferences map[string]any `json:"preferences"  binding:"omitempty"`
+	// DefaultAccountID — a wallet id sets it, null clears it, absent leaves it.
+	DefaultAccountID      json.RawMessage `json:"default_account_id"`
+	AutoCopyOwnEventBills *bool           `json:"auto_copy_own_event_bills"`
 }
 
 // Allowed preference keys for Phase 0/1. Unknown keys → VALIDATION_ERROR.

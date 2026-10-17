@@ -286,24 +286,6 @@ func (h *Handler) Delete(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// GET /v1/accounts/:id/delete-preview
-func (h *Handler) DeletePreview(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-	out, err := h.service.DeletePreview(c.Request.Context(), userID, id)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}
 
 // POST /v1/accounts/:id/archive (owner only) — hides the wallet, takes it
 // out of every calculation and makes it read-only until restored.

@@ -80,7 +80,7 @@ func (s *Service) DispatchProjectTxRecorded(
 	ctx context.Context, tx pgx.Tx,
 	recipientUserID uuid.UUID, actorUserID uuid.UUID, p ProjectTxRecordedPayload, actioned bool,
 ) error {
-	deepLink := fmt.Sprintf("/projects/%s/transactions/%s", p.ProjectID, p.ProjectTransactionID)
+	deepLink := fmt.Sprintf("/projects/%s", p.ProjectID) // the app has no per-bill route: open the event
 	return s.dispatchTx(ctx, tx, TypeProjectTxRecordedForYou, recipientUserID, &actorUserID, p, &deepLink, actioned)
 }
 
@@ -88,7 +88,7 @@ func (s *Service) DispatchProjectTxChanged(
 	ctx context.Context, tx pgx.Tx,
 	recipientUserID uuid.UUID, actorUserID uuid.UUID, p ProjectTxChangedPayload, actioned bool,
 ) error {
-	deepLink := fmt.Sprintf("/projects/%s/transactions/%s", p.ProjectID, p.ProjectTransactionID)
+	deepLink := fmt.Sprintf("/projects/%s", p.ProjectID) // the app has no per-bill route: open the event
 	if p.ChangeKind == "deleted" {
 		deepLink = fmt.Sprintf("/projects/%s", p.ProjectID)
 	}

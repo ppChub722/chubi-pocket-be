@@ -48,6 +48,9 @@ type Counts struct {
 	DebtsSummary   DebtsSummary   `json:"debts_summary"`
 	BudgetsSummary BudgetsSummary `json:"budgets_summary"`
 	Recurring      RecurringCount `json:"recurring"`
+	// Archived — how many archived things there are in total (the ที่เก็บถาวร row);
+	// the lists are GET /me/archived.
+	Archived int `json:"archived"`
 }
 
 // MeCounts is spec schema MeCounts.
@@ -116,6 +119,11 @@ func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string)
 	); err != nil {
 		return nil, fmt.Errorf("me counts: %w", err)
 	}
+	arch, err := s.Archived(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out.Counts.Archived = arch.Total
 	// Savings: the same numbers as the Home tile.
 	goals, err := shared.LoadSavingTotals(ctx, s.db, userID)
 	if err != nil {

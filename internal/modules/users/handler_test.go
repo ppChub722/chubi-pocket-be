@@ -153,3 +153,31 @@ func TestListMyPacks(t *testing.T) {
 		t.Errorf("packs = %v", out)
 	}
 }
+
+// TestMeSettings — default wallet and "copy my own event bills" live on /users/me.
+func TestMeSettings(t *testing.T) {
+	f := newFix(t)
+	acc := testdb.Account(t, f.pool, f.uid)
+	out := f.do(t, "GET", "/api/v1/users/me", nil, "getMe", http.StatusOK)
+	if out["default_account"] != nil || out["auto_copy_own_event_bills"] != false {
+		t.Errorf("defaults = %v / %v", out["default_account"], out["auto_copy_own_event_bills"])
+	}
+	out = f.do(t, "PUT", "/api/v1/users/me", map[string]any{"default_account_id": acc, "auto_copy_own_event_bills": true}, "updateMe", http.StatusOK)
+	da, _ := out["default_account"].(map[string]any)
+	if da == nil || da["id"] != acc.String() || out["auto_copy_own_event_bills"] != true {
+		t.Errorf("after set = %v", out)
+	}
+	// Someone else's wallet / an unknown id is refused.
+	other := testdb.User(t, f.pool)
+	foreign := testdb.Account(t, f.pool, other)
+	f.do(t, "PUT", "/api/v1/users/me", map[string]any{"default_account_id": foreign}, "", http.StatusBadRequest)
+	// Absent leaves it; null clears it.
+	out = f.do(t, "PUT", "/api/v1/users/me", map[string]any{"display_name": "X"}, "updateMe", http.StatusOK)
+	if out["default_account"] == nil {
+		t.Errorf("an absent key cleared the default wallet")
+	}
+	out = f.do(t, "PUT", "/api/v1/users/me", `{"default_account_id":null}`, "updateMe", http.StatusOK)
+	if out["default_account"] != nil || out["auto_copy_own_event_bills"] != true {
+		t.Errorf("after clear = %v / %v", out["default_account"], out["auto_copy_own_event_bills"])
+	}
+}

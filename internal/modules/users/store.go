@@ -67,6 +67,9 @@ func (s *Store) GetProfile(ctx context.Context, id uuid.UUID) (*Profile, error) 
 	}
 	prof.Preferences = prefsFromMap(prefs)
 	prof.Status = apiStatus(prof.Status)
+	if err := s.loadSettings(ctx, &prof); err != nil {
+		return nil, err
+	}
 	return &prof, nil
 }
 
@@ -124,6 +127,14 @@ func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfi
 				return fmt.Errorf("relabel currency: %w", err)
 			}
 		}
+	}
+
+	acc, accSet, err := req.defaultAccountChange()
+	if err != nil {
+		return err
+	}
+	if err := saveSettingsTx(ctx, tx, id, acc, accSet, req.AutoCopyOwnEventBills); err != nil {
+		return err
 	}
 
 	if len(req.Preferences) > 0 {

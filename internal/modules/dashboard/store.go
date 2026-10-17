@@ -67,7 +67,7 @@ func (s *Store) UpcomingItems(ctx context.Context, userID uuid.UUID, today, unti
 // attentionTypes — notification types that can still await an answer
 // (shared.AwaitsAnswer); a READ row of any other type has left the block.
 var attentionTypes = []string{
-	"contact_link_request", "account_invite", "split_created", "split_changed",
+	"contact_link_request", "account_invite", "project_invite", "recurring_ending", "split_created", "split_changed",
 	"project_tx_recorded_for_you", "project_tx_changed",
 }
 

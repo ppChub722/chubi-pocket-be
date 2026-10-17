@@ -81,7 +81,7 @@ func (h *Handler) Entries(c *gin.Context) {
 		Page:  atoiOr(c.Query("page"), 1), PerPage: atoiOr(c.Query("per_page"), 30),
 	}
 	switch f.Cycle {
-	case "", "current", "earlier":
+	case "", "current", "earlier", "all":
 	default:
 		response.BadRequest(c, "VALIDATION_ERROR", "cycle must be current or earlier", nil)
 		return
@@ -328,17 +328,3 @@ func (h *Handler) ApplySplitChange(c *gin.Context) {
 	}
 }
 
-// GET /v1/personal-debts/people/:key/summary-message — the text to send the
-// person ("สรุปยอด…"): their current-cycle entries and the total.
-func (h *Handler) SummaryMessage(c *gin.Context) {
-	userID, ok := caller(c)
-	if !ok {
-		return
-	}
-	out, err := h.service.SummaryMessage(c.Request.Context(), userID, c.Param("key"))
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}

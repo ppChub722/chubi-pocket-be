@@ -347,6 +347,7 @@ func main() {
 			protected.PUT("/auth/password", authHandler.ChangePassword)
 
 			protected.GET("/me/counts", meHandler.Counts)
+			protected.GET("/me/archived", meHandler.Archived)
 			protected.GET("/users/me", usersHandler.GetMe)
 			protected.PUT("/users/me", usersHandler.UpdateMe)
 			protected.POST("/users/me/deactivate", usersHandler.Deactivate)
@@ -376,7 +377,6 @@ func main() {
 			protected.POST("/accounts/invites/:notification_id/reject", accountsHandler.RejectInvite)
 			protected.GET("/accounts/:id", accountsHandler.Get)
 			protected.POST("/accounts/:id/archive", accountsHandler.Archive)
-			protected.GET("/accounts/:id/delete-preview", accountsHandler.DeletePreview)
 			protected.POST("/accounts/:id/restore", accountsHandler.Restore)
 			protected.PUT("/accounts/:id", accountsHandler.Update)
 			protected.DELETE("/accounts/:id", accountsHandler.Delete)
@@ -430,7 +430,6 @@ func main() {
 			protected.GET("/personal-debts/people", personalDebtsHandler.People)
 			protected.GET("/personal-debts/people/:key", personalDebtsHandler.Person)
 			protected.GET("/personal-debts/people/:key/entries", personalDebtsHandler.Entries)
-			protected.GET("/personal-debts/people/:key/summary-message", personalDebtsHandler.SummaryMessage)
 			protected.POST("/personal-debts/people/:key/entries", personalDebtsHandler.CreateEntry)
 			protected.POST("/personal-debts/split-requests/:notification_id/accept", personalDebtsHandler.AcceptSplitRequest)
 			protected.POST("/personal-debts/split-changes/:notification_id/apply", personalDebtsHandler.ApplySplitChange)

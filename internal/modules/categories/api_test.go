@@ -263,3 +263,47 @@ func TestCategoryMonthNumbers(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestCategoryDuplicateNameAndPath — a duplicate sibling name is a 422 with
+// the field; the detail's path carries the ancestors with their icons.
+func TestCategoryDuplicateNameAndPath(t *testing.T) {
+	pool := testdb.Pool(t)
+	uid := testdb.User(t, pool)
+	r := newCatEngine(t, uid)
+	root := mkCat(t, r, map[string]any{"name": "Home", "type": "expense",
+		"icon_code": map[string]any{"icon": "home", "iconColors": []string{"#FFFFFF"}, "background": "solid", "bgColors": []string{"#112233"}, "border": "none", "borderColors": []string{}, "shape": "circle"}})
+	child := mkCat(t, r, map[string]any{"name": "Rent", "type": "expense", "parent_id": root.ID})
+
+	for _, name := range []string{"Rent", "rent"} {
+		status, raw := apitest.Do(t, r, "POST", "/api/v1/categories", map[string]any{"name": name, "type": "expense", "parent_id": root.ID})
+		var e struct {
+			Error struct {
+				Code    string            `json:"code"`
+				Details map[string]string `json:"details"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &e)
+		if status != http.StatusUnprocessableEntity || e.Error.Code != "CATEGORY_NAME_DUPLICATE" || e.Error.Details["field"] != "name" {
+			t.Errorf("create %q: %d %s", name, status, raw)
+		}
+	}
+	other := mkCat(t, r, map[string]any{"name": "Other", "type": "expense", "parent_id": root.ID})
+	status, raw := apitest.Do(t, r, "PUT", "/api/v1/categories/"+other.ID.String(), map[string]any{"name": "RENT"})
+	if status != http.StatusUnprocessableEntity {
+		t.Errorf("rename onto a sibling: %d %s", status, raw)
+	}
+
+	status, raw = apitest.Do(t, r, "GET", "/api/v1/categories/"+child.ID.String(), nil)
+	apitest.Conform(t, "getCategory", status, raw)
+	var det struct {
+		Path []struct {
+			ID       uuid.UUID       `json:"id"`
+			Name     string          `json:"name"`
+			IconCode json.RawMessage `json:"icon_code"`
+		} `json:"path"`
+	}
+	_ = json.Unmarshal(raw, &det)
+	if len(det.Path) != 1 || det.Path[0].ID != root.ID || det.Path[0].Name != "Home" || string(det.Path[0].IconCode) == "null" || len(det.Path[0].IconCode) == 0 {
+		t.Errorf("path = %s", raw)
+	}
+}

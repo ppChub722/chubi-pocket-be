@@ -4,6 +4,7 @@ package notifications
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +16,7 @@ import (
 type ListView struct {
 	Data        []shared.NotificationView `json:"data"`
 	UnreadCount int                       `json:"unread_count"`
+	Summary     InboxSummary              `json:"summary"`
 	Pagination  shared.Page               `json:"pagination"`
 }
 
@@ -63,10 +65,15 @@ func (s *Service) ListViews(ctx context.Context, userID uuid.UUID, f ListFilter)
 	if err != nil {
 		return nil, err
 	}
+	sum, err := s.inboxSummary(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
 	return &ListView{
 		Data:        views,
 		UnreadCount: r.UnreadCount,
 		Pagination:  shared.Page(r.Pagination),
+		Summary:     sum,
 	}, nil
 }
 
@@ -148,4 +155,45 @@ func (s *Service) UpdateSettingsView(ctx context.Context, userID uuid.UUID, req 
 func (s *Service) RestoreResult(ctx context.Context, userID, id uuid.UUID) (*ActionResult, error) {
 	n, err := s.store.Restore(ctx, userID, id)
 	return s.actionResult(ctx, userID, n, err)
+}
+
+// InboxSummary — ListView.summary: over ALL the user's notifications, the
+// same whatever the list's filter. needs_answer = rows that still wait for an
+// answer (shared.AwaitsAnswer), unread = unread and not dismissed,
+// dismissed = the hidden ones ("ที่ซ่อนไว้").
+type InboxSummary struct {
+	NeedsAnswer int `json:"needs_answer"`
+	Unread      int `json:"unread"`
+	Dismissed   int `json:"dismissed"`
+}
+
+func (s *Service) inboxSummary(ctx context.Context, userID uuid.UUID) (InboxSummary, error) {
+	var out InboxSummary
+	rows, err := s.store.db.Query(ctx, `SELECT type, payload, read_at, actioned_at, dismissed_at
+		FROM notifications WHERE recipient_user_id = $1`, userID)
+	if err != nil {
+		return out, fmt.Errorf("inbox summary: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			typ                             string
+			payload                         []byte
+			readAt, actionedAt, dismissedAt *time.Time
+		)
+		if err := rows.Scan(&typ, &payload, &readAt, &actionedAt, &dismissedAt); err != nil {
+			return out, err
+		}
+		switch {
+		case dismissedAt != nil:
+			out.Dismissed++
+			continue
+		case readAt == nil:
+			out.Unread++
+		}
+		if shared.AwaitsAnswer(typ, actionedAt, dismissedAt, payload) {
+			out.NeedsAnswer++
+		}
+	}
+	return out, rows.Err()
 }

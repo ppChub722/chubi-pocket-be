@@ -321,3 +321,32 @@ func (f *nfix) status(t *testing.T, method, path string, body any, want int, cod
 		t.Errorf("code = %q, want %q", out.Error.Code, code)
 	}
 }
+
+// TestInboxSummaryAndAwaitsAnswer — the inbox summary counts and the new
+// awaiting types (project_invite, recurring_ending).
+func TestInboxSummaryAndAwaitsAnswer(t *testing.T) {
+	f := newFix(t)
+	f.add(t, TypeProjectInvite, nil, `{}`, time.Hour)
+	f.add(t, TypeRecurringEnding, nil, `{"left":2}`, 2*time.Hour)
+	info := f.add(t, TypeProjectAdded, nil, `{}`, 3*time.Hour)
+	hidden := f.add(t, TypeProjectAdded, nil, `{}`, 4*time.Hour)
+	f.do(t, "POST", "/api/v1/notifications/"+hidden.String()+"/dismiss", nil, "dismissNotification", http.StatusOK)
+	f.do(t, "POST", "/api/v1/notifications/"+info.String()+"/read", nil, "markNotificationRead", http.StatusOK)
+
+	out := f.do(t, "GET", "/api/v1/notifications?read=all", nil, "listNotifications", http.StatusOK)
+	if num(out, "summary", "needs_answer") != 2 || num(out, "summary", "unread") != 2 || num(out, "summary", "dismissed") != 1 {
+		t.Errorf("summary = %v", out["summary"])
+	}
+	// The summary does not follow the filter.
+	out = f.do(t, "GET", "/api/v1/notifications?type=project_added&read=all", nil, "listNotifications", http.StatusOK)
+	if num(out, "summary", "needs_answer") != 2 {
+		t.Errorf("filtered summary = %v", out["summary"])
+	}
+	for _, d := range f.do(t, "GET", "/api/v1/notifications?read=all", nil, "listNotifications", http.StatusOK)["data"].([]any) {
+		n := d.(map[string]any)
+		want := n["type"] == TypeProjectInvite || n["type"] == TypeRecurringEnding
+		if n["awaits_answer"] != want {
+			t.Errorf("%v awaits_answer = %v, want %v", n["type"], n["awaits_answer"], want)
+		}
+	}
+}

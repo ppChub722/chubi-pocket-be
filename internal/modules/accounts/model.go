@@ -260,6 +260,8 @@ type AccountDetail struct {
 	Account
 	Summary        *AccountSummary     `json:"summary"`
 	MembersHistory []MemberHistoryView `json:"members_history"`
+	// DeletePreview — with ?include=delete_preview: what a delete would do; null unless the caller can delete (owner, no other active member).
+	DeletePreview *DeletePreview `json:"delete_preview"`
 }
 
 // TypeTotal - one by_type row of AccountTotals.
@@ -293,6 +295,11 @@ type AccountTotals struct {
 	CardUsedPct    int     `json:"card_used_pct"`
 	SavedTotal     float64 `json:"saved_total"`
 	AvailableTotal float64 `json:"available_total"`
+	// CashSplit — the share of cash_total by non-credit wallet type (integer %,
+	// only the types that have wallets; bank, cash, e_wallet order); CardRemaining —
+	// the cards' credit limits − card_debt, floored at 0.
+	CashSplit     []CashShare `json:"cash_split"`
+	CardRemaining float64     `json:"card_remaining"`
 }
 
 // AccountList - spec AccountList.
@@ -321,4 +328,10 @@ type AcceptInviteResult struct {
 type NotificationActionResult struct {
 	Notification *shared.NotificationView `json:"notification"`
 	Badges       shared.Badges            `json:"badges"`
+}
+
+// CashShare — one cash_split entry.
+type CashShare struct {
+	Type string `json:"type"`
+	Pct  int    `json:"pct"`
 }

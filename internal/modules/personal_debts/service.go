@@ -75,6 +75,9 @@ func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey, cycle st
 		}
 	}
 	page, perPage = clampPage(page, perPage, 30)
+	if cycle == "" {
+		cycle = "current" // the page shows the current cycle; earlier ones are "load more"
+	}
 	items, total, err := s.store.listEntries(ctx, userID, k.Key(), EntryFilter{Page: page, PerPage: perPage, Cycle: cycle})
 	if err != nil {
 		return nil, err
@@ -83,7 +86,11 @@ func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey, cycle st
 	if err != nil {
 		return nil, err
 	}
-	return &PersonPage{DebtPerson: bal, Counts: counts, Items: items, Pagination: shared.NewPage(page, perPage, total)}, nil
+	msg, err := s.summaryMessage(ctx, userID, k, bal)
+	if err != nil {
+		return nil, err
+	}
+	return &PersonPage{DebtPerson: bal, Counts: counts, Items: items, SummaryMessage: msg, Pagination: shared.NewPage(page, perPage, total)}, nil
 }
 
 // Entries — GET /personal-debts/people/:key/entries.

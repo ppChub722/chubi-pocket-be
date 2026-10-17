@@ -471,7 +471,7 @@ func (s *Service) decorate(ctx context.Context, userID uuid.UUID, cats []Categor
 			if !ok {
 				break
 			}
-			path = append([]PathItem{{ID: *p, Name: n.Name}}, path...)
+			path = append([]PathItem{{ID: *p, Name: n.Name, IconCode: n.IconCode}}, path...)
 			p = n.ParentID
 		}
 		cats[i].Path = path
