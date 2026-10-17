@@ -55,6 +55,8 @@ func newAPIEnv(t *testing.T) *apiEnv {
 		g.GET("/pending-transactions", h.List)
 		g.POST("/pending-transactions", h.Create)
 		g.POST("/pending-transactions/submit", h.Submit)
+		g.POST("/pending-transactions/submit-ready", h.SubmitReady)
+		g.POST("/pending-transactions/:id/submit", h.SubmitOne)
 		g.POST("/pending-transactions/discard", h.Discard)
 		g.PUT("/pending-transactions/:id", h.Update)
 		g.DELETE("/pending-transactions/:id", h.Delete)
@@ -323,5 +325,55 @@ func TestSubmitUpdateTx(t *testing.T) {
 	}
 	if len(sub.AccountBalances) != 1 || sub.AccountBalances[0].AccountID != e.acct || sub.AccountBalances[0].Balance != 930 {
 		t.Fatalf("balances: %+v", sub.AccountBalances)
+	}
+}
+
+// TestNeedsInputSummaryAndSubmitReady — what a draft still misses, the list
+// summary, and the bulk / per-draft confirm: an amount-less เตือนจ่าย draft is
+// valid but can't be confirmed; submit-ready takes only the ready ones.
+func TestNeedsInputSummaryAndSubmitReady(t *testing.T) {
+	e := newAPIEnv(t)
+	ready := e.create(t, e.expense(100))[0]
+	reminder := e.create(t, draftBody{"type": "expense", "date": "2026-10-12", "account_id": e.acct})[0] // no amount, no category
+	noWallet := e.create(t, draftBody{"type": "expense", "date": "2026-10-12", "amount": 40, "category_id": e.cat})[0]
+	if len(ready.NeedsInput) != 0 || !ready.CanConfirm {
+		t.Errorf("ready draft = %v / %v", ready.NeedsInput, ready.CanConfirm)
+	}
+	if !has(reminder.NeedsInput, "amount") || !has(reminder.NeedsInput, "category") || reminder.CanConfirm {
+		t.Errorf("reminder draft = %v / %v", reminder.NeedsInput, reminder.CanConfirm)
+	}
+	if !has(noWallet.NeedsInput, "wallet") || has(noWallet.NeedsInput, "amount") || !noWallet.CanConfirm {
+		t.Errorf("wallet-less draft = %v / %v", noWallet.NeedsInput, noWallet.CanConfirm)
+	}
+
+	var list PendingList
+	e.call(t, "listPending", "GET", "/pending-transactions", nil, http.StatusOK, &list)
+	s := list.Summary
+	if s.Count != 3 || s.ExpenseTotal != 140 || s.IncomeTotal != 0 || s.NeedsInputCount != 2 || s.ReadyCount != 1 || s.BySource.Manual != 3 {
+		t.Errorf("summary = %+v", s)
+	}
+
+	// The amount-less one is refused (and stays), per-draft confirm.
+	var sub SubmitResponse
+	e.call(t, "submitOnePending", "POST", "/pending-transactions/"+reminder.ID.String()+"/submit", nil, http.StatusOK, &sub)
+	if len(sub.Failed) != 1 || sub.Failed[0].Error.Code != "MISSING_AMOUNT" || len(sub.Submitted) != 0 {
+		t.Fatalf("reminder confirm = %+v", sub)
+	}
+	// Bulk: only the ready one goes through.
+	e.call(t, "submitReadyPending", "POST", "/pending-transactions/submit-ready", nil, http.StatusOK, &sub)
+	if len(sub.Submitted) != 1 || sub.Submitted[0].ID != ready.ID || len(sub.Failed) != 0 {
+		t.Fatalf("submit-ready = %+v", sub)
+	}
+	// Fill the amount: now it is confirmable.
+	d := draftBody{"type": "expense", "date": "2026-10-12", "account_id": e.acct, "amount": 25, "category_id": e.cat}
+	e.call(t, "updatePending", "PUT", "/pending-transactions/"+reminder.ID.String(), map[string]any{"draft": d}, http.StatusOK, nil)
+	e.call(t, "submitOnePending", "POST", "/pending-transactions/"+reminder.ID.String()+"/submit", nil, http.StatusOK, &sub)
+	if len(sub.Submitted) != 1 || sub.Submitted[0].ID != reminder.ID {
+		t.Fatalf("confirm after amount = %+v", sub)
+	}
+	// Nothing ready left but the wallet-less one (needs input): submit-ready is a no-op.
+	e.call(t, "submitReadyPending", "POST", "/pending-transactions/submit-ready", nil, http.StatusOK, &sub)
+	if len(sub.Submitted) != 0 || len(sub.Failed) != 0 {
+		t.Errorf("empty submit-ready = %+v", sub)
 	}
 }

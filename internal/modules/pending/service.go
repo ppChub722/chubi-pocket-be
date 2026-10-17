@@ -56,7 +56,7 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID) (*ListResponse, er
 	if err := ResolveRows(ctx, s.store.Pool(), userID, rows); err != nil {
 		return nil, err
 	}
-	return &ListResponse{Data: rows, Count: len(rows)}, nil
+	return &ListResponse{Data: rows, Count: len(rows), Summary: summarize(rows)}, nil
 }
 
 // checkDraft — only shape errors; anything may still be missing.
@@ -523,3 +523,23 @@ func (s *Service) WithSubmitHook(fn SubmitHook) { s.onSubmit = fn }
 // Store — the drafts store (the recurring module writes drafts in its own
 // DB transactions).
 func (s *Service) Store() *Store { return s.store }
+
+// SubmitReady — POST /pending-transactions/submit-ready: confirms every draft
+// that needs no input (one call for the page's "ยืนยันทั้งหมดที่พร้อม"). The
+// answer is the normal submit answer; nothing ready = empty lists.
+func (s *Service) SubmitReady(ctx context.Context, userID uuid.UUID) (*SubmitResponse, error) {
+	lst, err := s.List(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	var ids []uuid.UUID
+	for i := range lst.Data {
+		if len(lst.Data[i].NeedsInput) == 0 {
+			ids = append(ids, lst.Data[i].ID)
+		}
+	}
+	if len(ids) == 0 {
+		return s.Submit(ctx, userID, SubmitRequest{})
+	}
+	return s.Submit(ctx, userID, SubmitRequest{IDs: ids})
+}

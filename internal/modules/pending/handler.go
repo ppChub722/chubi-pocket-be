@@ -156,3 +156,37 @@ func (h *Handler) Submit(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, out)
 }
+
+// POST /v1/pending-transactions/:id/submit — confirm one draft (same answer as
+// the bulk submit, with that one id).
+func (h *Handler) SubmitOne(c *gin.Context) {
+	userID, ok := bindUser(c)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid id", nil)
+		return
+	}
+	out, err := h.service.Submit(c.Request.Context(), userID, SubmitRequest{IDs: []uuid.UUID{id}})
+	if err != nil {
+		mapError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// POST /v1/pending-transactions/submit-ready — confirm every draft that needs no input.
+func (h *Handler) SubmitReady(c *gin.Context) {
+	userID, ok := bindUser(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.SubmitReady(c.Request.Context(), userID)
+	if err != nil {
+		mapError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}

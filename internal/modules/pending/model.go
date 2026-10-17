@@ -62,13 +62,19 @@ type PendingTransaction struct {
 	TargetTransactionID *uuid.UUID      `json:"target_transaction_id"`
 	SourceRef           json.RawMessage `json:"source_ref"`
 	LastError           *SubmitError    `json:"last_error"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
+	// NeedsInput — what the draft is still missing (amount, type, date, wallet,
+	// wallet_to, category; empty = ready). CanConfirm — false while a hard one
+	// (amount, type, date, a transfer's wallets) is missing: confirm is rejected.
+	NeedsInput []string  `json:"needs_input"`
+	CanConfirm bool      `json:"can_confirm"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type ListResponse struct {
-	Data  []PendingTransaction `json:"data"`
-	Count int                  `json:"count"`
+	Data    []PendingTransaction `json:"data"`
+	Count   int                  `json:"count"`
+	Summary ListSummary          `json:"summary"`
 }
 
 // CreateRequest — POST /pending-transactions: one or many manual drafts.
@@ -147,4 +153,23 @@ type SubmitResponse struct {
 	Failed          []Failed               `json:"failed"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
 	Badges          shared.Badges          `json:"badges"`
+}
+
+// SourceCounts — the pending page's source chips.
+type SourceCounts struct {
+	Recurring   int `json:"recurring"`    // recurring / upcoming items and goal auto-saving
+	Manual      int `json:"manual"`       // typed in (and chat)
+	OtherPeople int `json:"other_people"` // from another person (event bills, splits)
+	Slip        int `json:"slip"`         // scanned slips
+	Other       int `json:"other"`
+}
+
+// ListSummary — ListResponse.summary: over all the user's drafts.
+type ListSummary struct {
+	Count           int          `json:"count"`
+	ExpenseTotal    float64      `json:"expense_total"`
+	IncomeTotal     float64      `json:"income_total"`
+	NeedsInputCount int          `json:"needs_input_count"`
+	ReadyCount      int          `json:"ready_count"`
+	BySource        SourceCounts `json:"by_source"`
 }

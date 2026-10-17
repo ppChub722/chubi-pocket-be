@@ -154,6 +154,7 @@ func ResolveRows(ctx context.Context, q shared.Querier, userID uuid.UUID, rows [
 	}
 	for i := range rows {
 		rows[i].Resolved = res[i]
+		rows[i].NeedsInput, rows[i].CanConfirm = readiness(&rows[i])
 	}
 	return nil
 }

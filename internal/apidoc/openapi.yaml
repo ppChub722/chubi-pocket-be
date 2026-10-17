@@ -359,6 +359,38 @@ paths:
       x-breaking: "submitted[] items carry `rows` (full Transaction rows) instead of `transaction_id`; top-level `account_balances` added; failed[] items carry `pending` (the draft with last_error) next to `error`; `badges` added."
       x-used-by:
         - { page: pending, calls: 1 }
+  /pending-transactions/submit-ready:
+    post:
+      tags: [Pending]
+      summary: Confirm every draft that needs no input
+      description: 'One call for "ยืนยันทั้งหมดที่พร้อม": confirms the drafts whose `needs_input` is empty, each independently, and answers like `submitPending` (nothing ready = empty lists).'
+      operationId: submitReadyPending
+      responses:
+        '200':
+          description: 'Per-draft outcome.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubmitResult' }
+      x-breaking: 'New (0.4.0).'
+      x-used-by:
+        - { page: pending, calls: 1 }
+  /pending-transactions/{id}/submit:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Pending]
+      summary: Confirm one draft
+      description: 'Same answer as `submitPending` with this one id (the draft is in submitted[] or failed[]; an unknown id is a failed[] item).'
+      operationId: submitOnePending
+      responses:
+        '200':
+          description: 'The outcome.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubmitResult' }
+      x-breaking: 'New (0.4.0).'
+      x-used-by:
+        - { page: pending, calls: 1 }
 
   # ───────────────────────────── Me ─────────────────────────────
   /me/counts:
@@ -5230,7 +5262,7 @@ components:
         message: { type: string }
     PendingTransaction:
       type: object
-      required: [id, source, kind, draft, resolved, target_debt_id, target_transaction_id, source_ref, last_error, created_at, updated_at]
+      required: [id, source, kind, draft, resolved, target_debt_id, target_transaction_id, source_ref, last_error, needs_input, can_confirm, created_at, updated_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         source: { type: string, description: 'manual now; project_copy, project_update, ocr, chat later.' }
@@ -5241,6 +5273,8 @@ components:
         target_transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         source_ref: { type: [object, 'null'], description: 'What to show for a non-manual source ("Aom paid ฿300", a scanned slip …). `source` recurring | upcoming (a draft the recurring due check produced): `{item_id, recurring: {id, name, icon_code} | null, seq, total}` → the chip "🔁 Netflix · 3/12" / "ล่วงหน้า". Submitting it links the new transaction to the item; discarding it leaves the item "ยังไม่สร้าง".'}
         last_error: { oneOf: [{ $ref: '#/components/schemas/SubmitError' }, { type: 'null' }] }
+        needs_input: { type: array, items: { type: string, enum: [amount, type, date, wallet, wallet_to, category] }, description: 'What the draft still misses; empty = ready. amount / type / date / wallet_to (and a transfer''s wallet) are hard; wallet and category of an expense / income are soft (an uncategorized, wallet-less bill is valid). An amount-less เตือนจ่าย draft is valid: it just needs the amount.' }
+        can_confirm: { type: boolean, description: 'false while a hard key is missing: confirm answers it in failed[] (MISSING_AMOUNT …) and the draft stays.' }
         created_at: { $ref: '#/components/schemas/DateTime' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
       example:
@@ -5257,10 +5291,29 @@ components:
         updated_at: '2026-10-12T09:30:00Z'
     PendingList:
       type: object
-      required: [data, count]
+      required: [data, count, summary]
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/PendingTransaction' } }
         count: { type: integer }
+        summary:
+          type: object
+          description: 'Over ALL the user''s drafts: count; expense_total / income_total = Σ the amounts of the kind-create drafts that have one; needs_input_count = drafts missing something (incl. soft keys), ready_count = the rest (the ones submit-ready confirms); by_source = the source chips (recurring = recurring / upcoming / auto-saving, manual = typed / chat, other_people = from another person, slip = scanned).'
+          required: [count, expense_total, income_total, needs_input_count, ready_count, by_source]
+          properties:
+            count: { type: integer }
+            expense_total: { $ref: '#/components/schemas/Money' }
+            income_total: { $ref: '#/components/schemas/Money' }
+            needs_input_count: { type: integer }
+            ready_count: { type: integer }
+            by_source:
+              type: object
+              required: [recurring, manual, other_people, slip, other]
+              properties:
+                recurring: { type: integer }
+                manual: { type: integer }
+                other_people: { type: integer }
+                slip: { type: integer }
+                other: { type: integer }
     CreatePendingRequest:
       type: object
       required: [items]
