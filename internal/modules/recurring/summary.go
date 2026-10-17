@@ -15,7 +15,7 @@ type NextUp struct {
 	ID     uuid.UUID `json:"id"`
 	Name   string    `json:"name"`
 	Date   string    `json:"date"`
-	Amount float64   `json:"amount"`
+	Amount *float64  `json:"amount"` // null = a reminder with no amount yet
 	Type   string    `json:"type"`
 }
 
@@ -24,6 +24,10 @@ type ListSummary struct {
 	MonthPay     float64 `json:"month_pay"`
 	MonthReceive float64 `json:"month_receive"`
 	Next         *NextUp `json:"next"`
+	// 0.4.0: due_30d_total = what is still to pay in the next 30 days (expense items, known amounts); awaiting_amount_count = occurrences (not done, due within 30 days) with no amount yet; by_kind = per kind, over the active settings.
+	Due30dTotal         float64  `json:"due_30d_total"`
+	AwaitingAmountCount int      `json:"awaiting_amount_count"`
+	ByKind              KindsSum `json:"by_kind"`
 }
 
 const (
@@ -66,6 +70,10 @@ func monthlyCount(r *Rule, today time.Time) float64 {
 // summary — the list's summary card over the ACTIVE settings (see the spec).
 func (s *Service) summary(ctx context.Context, userID uuid.UUID, today time.Time) (ListSummary, error) {
 	out := ListSummary{}
+	var err error
+	if out.Due30dTotal, out.AwaitingAmountCount, err = s.dueWindow(ctx, userID, today); err != nil {
+		return out, err
+	}
 	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules r
 		WHERE user_id = $1 AND status = 'active'
 		  AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.status = 'archived'
@@ -138,11 +146,59 @@ func (s *Service) summary(ctx context.Context, userID uuid.UUID, today time.Time
 		case "income":
 			out.MonthReceive += r.Amount * monthlyCount(r, today)
 		}
+		k := out.ByKind.of(r.Kind)
+		k.Count++
+		k.Monthly += r.Amount * monthlyCount(r, today)
+		k.Yearly += yearlyCost(r, today)
 		if upcoming && out.Next == nil {
-			out.Next = &NextUp{ID: r.ID, Name: r.Name, Date: d.Format(dateLayout), Amount: r.Amount, Type: r.Type}
+			out.Next = &NextUp{ID: r.ID, Name: r.Name, Date: d.Format(dateLayout), Amount: amountPtr(r.Amount), Type: r.Type}
 		}
 	}
 	out.MonthPay = math.Round(out.MonthPay*100) / 100
 	out.MonthReceive = math.Round(out.MonthReceive*100) / 100
+	for _, k := range []*KindTotals{&out.ByKind.Subscription, &out.ByKind.Installment, &out.ByKind.Income, &out.ByKind.Reminder} {
+		k.Monthly, k.Yearly = math.Round(k.Monthly*100)/100, math.Round(k.Yearly*100)/100
+	}
 	return out, nil
+}
+
+// KindTotals — one kind's card: how many active settings, their per-month
+// equivalent and their yearly cost.
+type KindTotals struct {
+	Count   int     `json:"count"`
+	Monthly float64 `json:"monthly"`
+	Yearly  float64 `json:"yearly"`
+}
+
+// KindsSum — by_kind.
+type KindsSum struct {
+	Subscription KindTotals `json:"subscription"`
+	Installment  KindTotals `json:"installment"`
+	Income       KindTotals `json:"income"`
+	Reminder     KindTotals `json:"reminder"`
+}
+
+func (k *KindsSum) of(kind string) *KindTotals {
+	switch kind {
+	case KindInstallment:
+		return &k.Installment
+	case KindIncome:
+		return &k.Income
+	case KindReminder:
+		return &k.Reminder
+	}
+	return &k.Subscription
+}
+
+// dueWindow — the occurrences of the next 30 days that are still to happen.
+func (s *Service) dueWindow(ctx context.Context, userID uuid.UUID, today time.Time) (total float64, awaiting int, err error) {
+	err = s.db.QueryRow(ctx, `
+		SELECT COALESCE(SUM((i.draft->>'amount')::numeric) FILTER (WHERE i.draft->>'type' = 'expense'
+		                   AND COALESCE((i.draft->>'amount')::numeric, 0) > 0), 0)::float8,
+		       COUNT(*) FILTER (WHERE COALESCE((i.draft->>'amount')::numeric, 0) <= 0)
+		FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.rule_id
+		WHERE i.user_id = $1 AND i.transaction_id IS NULL AND i.saving_entry_id IS NULL AND NOT i.archived
+		  AND i.date <= $2 AND (i.rule_id IS NULL OR r.status = 'active')`, userID, today.AddDate(0, 0, 30)).Scan(&total, &awaiting)
+	total = math.Round(total*100) / 100
+	return
 }

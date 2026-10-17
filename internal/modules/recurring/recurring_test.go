@@ -184,7 +184,7 @@ func TestRecurringLifecycle(t *testing.T) {
 	// The summary card: per-month equivalent (100 every 7 days = 434.82) and
 	// the nearest upcoming date; q narrows the list, not the summary.
 	if sm := list.Summary; sm.MonthPay != 434.82 || sm.MonthReceive != 0 || sm.Next == nil ||
-		sm.Next.ID != id || sm.Next.Date != f.day(7) || sm.Next.Amount != 100 || sm.Next.Type != "expense" {
+		sm.Next.ID != id || sm.Next.Date != f.day(7) || av(sm.Next.Amount) != 100 || sm.Next.Type != "expense" {
 		t.Errorf("summary = %+v next %+v", sm, sm.Next)
 	}
 	var none RecurringList
@@ -561,4 +561,76 @@ func av(p *float64) float64 {
 		return 0
 	}
 	return *p
+}
+
+// TestRecurringKinds — the four kinds: validation, yearly cost, trial, the
+// amount-less reminder (its draft has no amount and can't be confirmed), and
+// the list summary by kind.
+func TestRecurringKinds(t *testing.T) {
+	f := newRecFix(t)
+	monthly := map[string]any{"freq": "monthly", "interval": 1}
+	mk := func(body map[string]any, want int) Detail {
+		t.Helper()
+		var d Detail
+		body["rule"], body["start_date"] = monthly, f.day(-1)
+		if _, ok := body["name"]; !ok {
+			body["name"] = "X"
+		}
+		f.call("POST", "/recurring", "createRecurring", body, want, &d)
+		return d
+	}
+
+	// Subscription: kind implies the expense type; yearly cost = 12 x amount; trial date.
+	sub := mk(map[string]any{"kind": "subscription", "amount": 100, "account_id": f.wallet, "trial_until": f.day(14)}, 201)
+	if sub.Recurring.Kind != "subscription" || sub.Recurring.Type != "expense" || sub.Recurring.YearlyCost != 1200 ||
+		sub.Recurring.TrialUntil == nil || *sub.Recurring.TrialUntil != f.day(14) {
+		t.Errorf("subscription = %+v", sub.Recurring)
+	}
+	// Installment: a count is required; paid / remaining ride on progress.
+	mk(map[string]any{"kind": "installment", "amount": 500}, 400)
+	inst := mk(map[string]any{"name": "Phone", "kind": "installment", "amount": 500, "account_id": f.wallet,
+		"end": map[string]any{"kind": "count", "count": 6}}, 201)
+	if inst.Recurring.Kind != "installment" || inst.Recurring.YearlyCost != 3000 || inst.Recurring.Progress.Total == nil ||
+		*inst.Recurring.Progress.Total != 6 {
+		t.Errorf("installment = %+v yearly %v", inst.Recurring.Progress, inst.Recurring.YearlyCost)
+	}
+	// Income.
+	inc := mk(map[string]any{"name": "Salary", "kind": "income", "amount": 30000, "account_id": f.wallet}, 201)
+	if inc.Recurring.Type != "income" || inc.Recurring.YearlyCost != 360000 {
+		t.Errorf("income = %+v", inc.Recurring)
+	}
+	mk(map[string]any{"kind": "income", "type": "expense", "amount": 5}, 400) // an income kind is an income
+	// Reminder: no amount is fine; the item draft has none either.
+	rem := mk(map[string]any{"name": "Electricity", "kind": "reminder", "account_id": f.wallet}, 201)
+	if rem.Recurring.Kind != "reminder" || rem.Recurring.Amount != nil || rem.Recurring.YearlyCost != 0 {
+		t.Errorf("reminder = %+v", rem.Recurring)
+	}
+	var pend int
+	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM pending_transactions WHERE user_id = $1 AND NOT (draft ? 'amount')`, f.me).Scan(&pend); err != nil || pend != 1 {
+		t.Fatalf("amount-less drafts = %d (%v), want 1 (the reminder's due item)", pend, err)
+	}
+	var draftID uuid.UUID
+	_ = f.pool.QueryRow(f.ctx, `SELECT id FROM pending_transactions WHERE user_id = $1 AND NOT (draft ? 'amount')`, f.me).Scan(&draftID)
+	res, err := f.pending.Submit(f.ctx, f.me, pending.SubmitRequest{IDs: []uuid.UUID{draftID}})
+	if err != nil || len(res.Failed) != 1 || res.Failed[0].Error.Code != "MISSING_AMOUNT" || len(res.Submitted) != 0 {
+		t.Errorf("confirm without amount = %+v (%v)", res, err)
+	}
+	// A transfer reminder (the old "โอน" type) is valid too.
+	other := testdb.Account(t, f.pool, f.me)
+	mk(map[string]any{"name": "Move", "kind": "reminder", "type": "transfer", "account_id": f.wallet, "to_account_id": other}, 201)
+	mk(map[string]any{"kind": "bogus", "amount": 5}, 400)
+
+	var list RecurringList
+	f.call("GET", "/recurring", "listRecurring", nil, 200, &list)
+	k := list.Summary.ByKind
+	if k.Subscription.Count != 1 || k.Subscription.Yearly != 1200 || k.Installment.Count != 1 || k.Income.Count != 1 ||
+		k.Income.Monthly != 30000 || k.Reminder.Count != 2 {
+		t.Errorf("by_kind = %+v", k)
+	}
+	if list.Summary.AwaitingAmountCount < 1 {
+		t.Errorf("awaiting_amount_count = %d, want the reminder's draft", list.Summary.AwaitingAmountCount)
+	}
+	if list.Summary.Due30dTotal <= 0 {
+		t.Errorf("due_30d_total = %v", list.Summary.Due30dTotal)
+	}
 }

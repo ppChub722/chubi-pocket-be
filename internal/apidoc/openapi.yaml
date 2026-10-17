@@ -9608,6 +9608,13 @@ components:
             extend: { type: boolean }
         created_at: { $ref: '#/components/schemas/DateTime' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
+    RecurringKindTotals:
+      type: object
+      required: [count, monthly, yearly]
+      properties:
+        count: { type: integer }
+        monthly: { $ref: '#/components/schemas/Money' }
+        yearly: { $ref: '#/components/schemas/Money' }
     RecurringList:
       type: object
       required: [data, counts, summary, pagination]
@@ -9623,7 +9630,7 @@ components:
         summary:
           type: object
           description: 'The list''s summary card; the same whatever the status / q / page of the list. month_pay / month_receive = the PER-MONTH EQUIVALENT of the ACTIVE settings (paused, archived and ended ones excluded, so are settings on an archived wallet; transfers and savings are not money in / out): daily = amount × 30.4375 / interval; weekly = amount × weekdays × 4.3481 / interval (no weekdays = 1); monthly = amount / interval; yearly = amount / (12 × interval); custom dates = amount × the dates that fall in the CURRENT month. 2 decimals. next = the nearest upcoming occurrence (today or later) of an active setting of ANY type, null when none; ties by name.'
-          required: [month_pay, month_receive, next]
+          required: [month_pay, month_receive, next, due_30d_total, awaiting_amount_count, by_kind]
           properties:
             month_pay: { $ref: '#/components/schemas/Money' }
             month_receive: { $ref: '#/components/schemas/Money' }
@@ -9635,9 +9642,20 @@ components:
                     id: { $ref: '#/components/schemas/Uuid' }
                     name: { type: string }
                     date: { $ref: '#/components/schemas/Date' }
-                    amount: { $ref: '#/components/schemas/Money' }
-                    type: { type: string, enum: [expense, income, transfer, saving] }
+                    amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
+                    type: { type: string, enum: [expense, income, transfer] }
                 - { type: 'null' }
+            due_30d_total: { $ref: '#/components/schemas/Money', description: 'What is still to pay in the next 30 days: expense occurrences not done / archived, due today or earlier (still waiting) up to 30 days ahead, KNOWN amounts only.' }
+            awaiting_amount_count: { type: integer, description: 'Occurrences in that window (and any overdue pending one) that have no amount yet (reminders waiting for the number).' }
+            by_kind:
+              type: object
+              description: 'Per kind, over the ACTIVE settings: how many, their per-month equivalent and yearly cost (same normalisation as month_pay).'
+              required: [subscription, installment, income, reminder]
+              properties:
+                subscription: { $ref: '#/components/schemas/RecurringKindTotals' }
+                installment: { $ref: '#/components/schemas/RecurringKindTotals' }
+                income: { $ref: '#/components/schemas/RecurringKindTotals' }
+                reminder: { $ref: '#/components/schemas/RecurringKindTotals' }
         pagination: { $ref: '#/components/schemas/Page' }
     RecurringItemLink:
       type: object
