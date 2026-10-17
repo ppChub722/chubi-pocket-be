@@ -357,7 +357,11 @@ func (s *Service) RejectInvite(ctx context.Context, userID, notificationID uuid.
 	if err != nil {
 		return nil, err
 	}
-	return &NotificationActionResult{Notification: nv, Badges: badges}, nil
+	sum, err := notifications.LoadInboxSummary(ctx, s.store.Pool(), userID)
+	if err != nil {
+		return nil, err
+	}
+	return &NotificationActionResult{Notification: nv, Badges: badges, Summary: sum}, nil
 }
 
 // --- Helpers ---
@@ -420,5 +424,9 @@ func (s *Service) inviteResult(
 	if err != nil {
 		return nil, err
 	}
-	return &AcceptInviteResult{Account: acc, Notification: nv, Badges: badges}, nil
+	sum, err := notifications.LoadInboxSummary(ctx, s.store.Pool(), userID)
+	if err != nil {
+		return nil, err
+	}
+	return &AcceptInviteResult{Account: acc, Notification: nv, Badges: badges, Summary: sum}, nil
 }

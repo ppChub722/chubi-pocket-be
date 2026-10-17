@@ -272,9 +272,10 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [data]
+                required: [data, summary]
                 properties:
                   data: { type: array, items: { $ref: '#/components/schemas/PendingTransaction' } }
+                  summary: { $ref: '#/components/schemas/PendingSummary' }
         '400': { $ref: '#/components/responses/ValidationError' }
       x-used-by:
         - { page: quick-create-sheet, calls: 1 }
@@ -296,7 +297,13 @@ paths:
           description: 'The draft, resolved.'
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/PendingTransaction' }
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/PendingTransaction' }
+                  - type: object
+                    required: [summary]
+                    properties:
+                      summary: { $ref: '#/components/schemas/PendingSummary' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
       x-used-by:
@@ -3591,6 +3598,8 @@ paths:
         - { name: q, in: query, description: 'Case-insensitive substring of the name.', schema: { type: string } }
         - { name: status, in: query, schema: { type: string, enum: [current, archived, all] } }
         - { name: for_type, in: query, description: 'THE PICKER: only ACTIVE settings of this money type (a transaction of that type can link to them); each row''s current_occurrence says which occurrence it would take (null = none now).', schema: { type: string, enum: [expense, income, transfer] } }
+        - { name: category_id, in: query, description: 'Picker hint (with for_type): the transaction''s category; settings with it are likely: true and first.', schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: amount, in: query, description: 'Picker hint (with for_type): the transaction''s amount; settings within ±5% are likely: true and first.', schema: { type: number, exclusiveMinimum: 0 } }
       responses:
         '200':
           description: One page of settings + the chip counts.
@@ -3969,6 +3978,27 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: 'New (0.4.0).'
+  /recurring-items/{id}/unlink:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    post:
+      tags: [Recurring]
+      summary: Remove a transaction's link to its occurrence
+      operationId: unlinkRecurringItem
+      description: 'The occurrence goes back to open (not done, no transaction; it takes the setting''s amount again; a due one gets its draft at the next due check). The transaction itself is untouched. 400 VALIDATION_ERROR when the item has no linked transaction, 404 (not yours).'
+      responses:
+        '200':
+          description: 'The occurrence, open again.'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item]
+                properties:
+                  item: { $ref: '#/components/schemas/RecurringItem' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
       x-breaking: 'New (0.4.0).'
   /recurring-items/{id}/create:
     parameters:
@@ -7265,6 +7295,7 @@ components:
     AcceptInviteResult: {
         "type": "object",
         "properties": {
+          "summary": { "$ref": "#/components/schemas/InboxSummary" },
           "account": {
             "$ref": "#/components/schemas/Account"
           },
@@ -7278,7 +7309,8 @@ components:
         "required": [
           "account",
           "notification",
-          "badges"
+          "badges",
+          "summary"
         ]
       }
     InboxSummary:
@@ -7731,6 +7763,7 @@ components:
     LinkRequestResult: {
         "type": "object",
         "properties": {
+          "summary": { "$ref": "#/components/schemas/InboxSummary" },
           "contact": {
             "oneOf": [
               {
@@ -7752,7 +7785,8 @@ components:
         "required": [
           "contact",
           "notification",
-          "badges"
+          "badges",
+          "summary"
         ]
       }
     NotificationType: {
@@ -9148,12 +9182,22 @@ components:
         net: { $ref: '#/components/schemas/Money' }
     ArchivedItem:
       type: object
-      required: [id, name, icon_code, archived_at]
+      required: [id, name, icon_code, archived_at, can_restore, secondary]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         name: { type: string }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
         archived_at: { $ref: '#/components/schemas/DateTime', description: 'The last change of the row (when it was archived).' }
+        can_restore: { type: boolean, description: 'Whether the caller may restore it (wallets and events: owner only).' }
+        secondary:
+          description: 'The row''s second line as data; null for contacts.'
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [kind, amount]
+              properties:
+                kind: { type: string, enum: [balance, limit, target, planned, amount], description: 'wallet balance / budget limit / goal target / event planned amount / recurring amount.' }
+                amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
     ArchivedGroup:
       type: object
       required: [count, items]
@@ -9725,8 +9769,9 @@ components:
     Recurring:
       type: object
       description: 'A recurring setting (the generator), page-ready.'
-      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, saved_count, pending_count, next_amount, current_occurrence, next_date, days_until, progress, ending_soon, counts, edited_any, actions, created_at, updated_at]
+      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, saved_count, pending_count, next_amount, current_occurrence, next_date, days_until, progress, ending_soon, counts, likely, edited_any, actions, created_at, updated_at]
       properties:
+        likely: { type: boolean, description: 'Only meaningful with the picker hints (for_type + category_id / amount): the setting matches the transaction by category or amount (±5%); such settings are listed first. false otherwise.' }
         id: { $ref: '#/components/schemas/Uuid' }
         name: { type: string, maxLength: 100 }
         description: { type: [string, 'null'], maxLength: 200 }

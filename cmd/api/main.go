@@ -539,6 +539,7 @@ func main() {
 			protected.DELETE("/recurring-items/:id", recurringHandler.DeleteItem)
 			protected.POST("/recurring-items/:id/create", recurringHandler.CreateNow)
 			protected.POST("/recurring-items/:id/link", recurringHandler.Link)
+			protected.POST("/recurring-items/:id/unlink", recurringHandler.Unlink)
 			protected.POST("/recurring-items/:id/archive", recurringHandler.ArchiveItem)
 			protected.POST("/recurring-items/:id/restore", recurringHandler.RestoreItem)
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -643,7 +644,7 @@ func (s *Service) ruleItems(ctx context.Context, userID, ruleID uuid.UUID, today
 
 // --- reads ---
 
-func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType string, page, perPage int, tz string) (*RecurringList, error) {
+func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType string, hint PickerHint, page, perPage int, tz string) (*RecurringList, error) {
 	if err := s.DueCheck(ctx, userID, tz); err != nil {
 		return nil, err
 	}
@@ -681,11 +682,26 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM recurring_rules WHERE user_id = $1 AND `+cond, args...).Scan(&total); err != nil {
 		return nil, err
 	}
+	qargs, likelyOrder := append([]any{}, args...), ""
+	if forType != "" {
+		var ors []string
+		if hint.CategoryID != nil {
+			qargs = append(qargs, *hint.CategoryID)
+			ors = append(ors, fmt.Sprintf(`r.category_id = $%d`, len(qargs)))
+		}
+		if hint.Amount != nil && *hint.Amount > 0 {
+			qargs = append(qargs, *hint.Amount)
+			ors = append(ors, fmt.Sprintf(`(r.amount > 0 AND ABS(r.amount - $%d::numeric) <= $%d::numeric * 0.05 + 0.004)`, len(qargs), len(qargs)))
+		}
+		if len(ors) > 0 {
+			likelyOrder = `(` + strings.Join(ors, ` OR `) + `) DESC, `
+		}
+	}
 	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules r WHERE user_id = $1 AND `+cond+`
-		ORDER BY (SELECT MIN(i.date) FROM recurring_items i WHERE i.rule_id = r.id AND i.produced_at IS NULL
+		ORDER BY `+likelyOrder+`(SELECT MIN(i.date) FROM recurring_items i WHERE i.rule_id = r.id AND i.produced_at IS NULL
 		          AND i.pending_id IS NULL AND i.transaction_id IS NULL AND NOT i.archived) ASC NULLS LAST,
 		         LOWER(name), id
-		LIMIT $`+fmt.Sprint(len(args)+1)+` OFFSET $`+fmt.Sprint(len(args)+2), append(args, perPage, (page-1)*perPage)...)
+		LIMIT $`+fmt.Sprint(len(qargs)+1)+` OFFSET $`+fmt.Sprint(len(qargs)+2), append(qargs, perPage, (page-1)*perPage)...)
 	if err != nil {
 		return nil, err
 	}
@@ -701,6 +717,12 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType
 	rows.Close()
 	if out.Data, err = s.recurringViews(ctx, userID, today, rules); err != nil {
 		return nil, err
+	}
+	if forType != "" {
+		for i := range out.Data {
+			amt := rules[i].Amount
+			out.Data[i].Likely = hint.likely(rules[i].CategoryID, &amt)
+		}
 	}
 	out.Pagination = shared.NewPage(page, perPage, total)
 	return out, nil
@@ -786,4 +808,17 @@ func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, mon
 
 func (s *Service) GetItem(ctx context.Context, userID, id uuid.UUID) (*Item, error) {
 	return s.itemView(ctx, userID, id)
+}
+
+// PickerHint — the transaction a recurring picker is for (all optional).
+type PickerHint struct {
+	CategoryID *uuid.UUID
+	Amount     *float64
+}
+
+func (h PickerHint) likely(catID *uuid.UUID, amount *float64) bool {
+	if h.CategoryID != nil && catID != nil && *h.CategoryID == *catID {
+		return true
+	}
+	return h.Amount != nil && *h.Amount > 0 && amount != nil && math.Abs(*amount-*h.Amount) <= *h.Amount*0.05+0.004
 }

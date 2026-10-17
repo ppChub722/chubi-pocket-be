@@ -75,7 +75,12 @@ func (h *Handler) Create(c *gin.Context) {
 		mapError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"data": out})
+	sum, err := h.service.freshSummary(c.Request.Context(), userID)
+	if err != nil {
+		mapError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": out, "summary": sum})
 }
 
 // PUT /v1/pending-transactions/:id — replace the draft.
@@ -98,7 +103,12 @@ func (h *Handler) Update(c *gin.Context) {
 		mapError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, out)
+	sum, err := h.service.freshSummary(c.Request.Context(), userID)
+	if err != nil {
+		mapError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, UpdateResponse{PendingTransaction: out, Summary: sum})
 }
 
 // DELETE /v1/pending-transactions/:id — discard.

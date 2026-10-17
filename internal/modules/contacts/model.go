@@ -1,6 +1,7 @@
 package contacts
 
 import (
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"time"
 
 	"github.com/google/uuid"
@@ -140,9 +141,10 @@ type DeleteContactResult struct {
 
 // LinkRequestResult - spec LinkRequestResult.
 type LinkRequestResult struct {
-	Contact      *Contact                 `json:"contact"`
-	Notification *shared.NotificationView `json:"notification"`
-	Badges       shared.Badges            `json:"badges"`
+	Contact      *Contact                   `json:"contact"`
+	Notification *shared.NotificationView   `json:"notification"`
+	Badges       shared.Badges              `json:"badges"`
+	Summary      notifications.InboxSummary `json:"summary"`
 }
 
 // UnlinkedNameList - spec UnlinkedNameList.

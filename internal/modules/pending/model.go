@@ -175,3 +175,9 @@ type ListSummary struct {
 	ReadyCount      int          `json:"ready_count"`
 	BySource        SourceCounts `json:"by_source"`
 }
+
+// UpdateResponse — PUT answer: the draft (flattened) + the page summary after the write.
+type UpdateResponse struct {
+	*PendingTransaction
+	Summary ListSummary `json:"summary"`
+}

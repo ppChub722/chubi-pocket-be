@@ -154,10 +154,12 @@ type Recurring struct {
 	Progress          Progress              `json:"progress"`
 	EndingSoon        bool                  `json:"ending_soon"`
 	Counts            StatusCounts          `json:"counts"`
-	EditedAny         bool                  `json:"edited_any"`
-	Actions           Actions               `json:"actions"`
-	CreatedAt         time.Time             `json:"created_at"`
-	UpdatedAt         time.Time             `json:"updated_at"`
+	// Likely — only with the picker hints (for_type + category_id / amount): the setting matches the transaction by category or amount (±5%); such settings come first.
+	Likely    bool      `json:"likely"`
+	EditedAny bool      `json:"edited_any"`
+	Actions   Actions   `json:"actions"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type ListCounts struct {

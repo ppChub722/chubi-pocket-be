@@ -154,7 +154,11 @@ func (s *Service) linkResult(ctx context.Context, userID, notificationID uuid.UU
 	if err != nil {
 		return nil, err
 	}
-	return &LinkRequestResult{Contact: c, Notification: nv, Badges: badges}, nil
+	sum, err := notifications.LoadInboxSummary(ctx, s.store.Pool(), userID)
+	if err != nil {
+		return nil, err
+	}
+	return &LinkRequestResult{Contact: c, Notification: nv, Badges: badges, Summary: sum}, nil
 }
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Contact, error) {

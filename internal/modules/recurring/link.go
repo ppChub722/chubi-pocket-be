@@ -143,3 +143,54 @@ func (h *Handler) Link(c *gin.Context) {
 	out, err := h.service.Link(c.Request.Context(), uid, id, req)
 	reply(c, http.StatusOK, out, err)
 }
+
+// UnlinkResult — spec RecurringUnlinkResult: the occurrence, open again.
+type UnlinkResult struct {
+	Item Item `json:"item"`
+}
+
+// Unlink removes a transaction's link to its occurrence: the item is open again
+// (not done, no transaction; a due one gets its draft at the next due check)
+// and takes the setting's amount back. The transaction itself is untouched.
+func (s *Service) Unlink(ctx context.Context, userID, itemID uuid.UUID) (*UnlinkResult, error) {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	it, err := getItem(ctx, tx, userID, itemID, true)
+	if err != nil {
+		return nil, err
+	}
+	if it.TransactionID == nil {
+		return nil, ErrValidation
+	}
+	it.TransactionID, it.ProducedAt = nil, nil
+	if it.RuleID != nil {
+		if r, err := getRule(ctx, tx, userID, *it.RuleID, false); err == nil && r.Amount > 0 {
+			a := r.Amount
+			it.Draft.Amount = &a
+		}
+	}
+	if err := saveItemTx(ctx, tx, it); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	v, err := s.itemView(ctx, userID, itemID)
+	if err != nil {
+		return nil, err
+	}
+	return &UnlinkResult{Item: *v}, nil
+}
+
+// POST /v1/recurring-items/:id/unlink
+func (h *Handler) Unlink(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.Unlink(c.Request.Context(), uid, id)
+	reply(c, http.StatusOK, out, err)
+}

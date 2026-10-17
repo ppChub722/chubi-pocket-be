@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"encoding/json"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"time"
 
 	"github.com/google/uuid"
@@ -322,15 +323,17 @@ type MembersResult struct {
 
 // AcceptInviteResult - spec AcceptInviteResult.
 type AcceptInviteResult struct {
-	Account      *Account                 `json:"account"`
-	Notification *shared.NotificationView `json:"notification"`
-	Badges       shared.Badges            `json:"badges"`
+	Account      *Account                   `json:"account"`
+	Notification *shared.NotificationView   `json:"notification"`
+	Badges       shared.Badges              `json:"badges"`
+	Summary      notifications.InboxSummary `json:"summary"`
 }
 
 // NotificationActionResult - spec NotificationActionResult.
 type NotificationActionResult struct {
-	Notification *shared.NotificationView `json:"notification"`
-	Badges       shared.Badges            `json:"badges"`
+	Notification *shared.NotificationView   `json:"notification"`
+	Badges       shared.Badges              `json:"badges"`
+	Summary      notifications.InboxSummary `json:"summary"`
 }
 
 // CashShare — one cash_split entry.

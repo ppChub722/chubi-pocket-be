@@ -154,7 +154,24 @@ func (h *Handler) List(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", "for_type must be expense, income or transfer", nil)
 		return
 	}
-	out, err := h.service.List(c.Request.Context(), uid, status, c.Query("q"), forType,
+	var hint PickerHint
+	if v := c.Query("category_id"); v != "" {
+		id, err := uuid.Parse(v)
+		if err != nil {
+			response.BadRequest(c, "VALIDATION_ERROR", "category_id must be a uuid", nil)
+			return
+		}
+		hint.CategoryID = &id
+	}
+	if v := c.Query("amount"); v != "" {
+		a, err := strconv.ParseFloat(v, 64)
+		if err != nil || a <= 0 {
+			response.BadRequest(c, "VALIDATION_ERROR", "amount must be a positive number", nil)
+			return
+		}
+		hint.Amount = &a
+	}
+	out, err := h.service.List(c.Request.Context(), uid, status, c.Query("q"), forType, hint,
 		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20), tz(c))
 	reply(c, http.StatusOK, out, err)
 }

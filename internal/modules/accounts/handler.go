@@ -185,7 +185,6 @@ func (h *Handler) AdjustBalance(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
-
 // POST /v1/accounts/:id/restore (owner only)
 func (h *Handler) Restore(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
@@ -285,7 +284,6 @@ func (h *Handler) Delete(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, out)
 }
-
 
 // POST /v1/accounts/:id/archive (owner only) — hides the wallet, takes it
 // out of every calculation and makes it read-only until restored.

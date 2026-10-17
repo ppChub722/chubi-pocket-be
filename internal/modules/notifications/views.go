@@ -181,8 +181,13 @@ type InboxSummary struct {
 }
 
 func (s *Service) inboxSummary(ctx context.Context, userID uuid.UUID) (InboxSummary, error) {
+	return LoadInboxSummary(ctx, s.store.db, userID)
+}
+
+// LoadInboxSummary — the inbox summary, for the answers of other modules' notification actions.
+func LoadInboxSummary(ctx context.Context, db shared.Querier, userID uuid.UUID) (InboxSummary, error) {
 	var out InboxSummary
-	rows, err := s.store.db.Query(ctx, `SELECT type, payload, read_at, actioned_at, dismissed_at
+	rows, err := db.Query(ctx, `SELECT type, payload, read_at, actioned_at, dismissed_at
 		FROM notifications WHERE recipient_user_id = $1`, userID)
 	if err != nil {
 		return out, fmt.Errorf("inbox summary: %w", err)
