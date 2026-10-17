@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -167,7 +168,7 @@ func (h *Handler) Get(c *gin.Context) {
 	if !ok {
 		return
 	}
-	out, err := h.service.Get(c.Request.Context(), uid, id, periodID, tz(c))
+	out, err := h.service.Get(c.Request.Context(), uid, id, periodID, tz(c), strings.Contains(","+c.Query("include")+",", ",delete_preview,"))
 	reply(c, http.StatusOK, out, err)
 }
 

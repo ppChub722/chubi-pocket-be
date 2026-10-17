@@ -147,6 +147,9 @@ type Period struct {
 	Status     string    `json:"status"`
 	Tone       string    `json:"tone"`
 	DaysLeft   *int      `json:"days_left"`
+	// PacePct — elapsed / total days of the current dated period (the pace tick);
+	// null for an open-ended or non-current period.
+	PacePct *int `json:"pace_pct"`
 	// OnPace — the forecast says this period will end over its amount (the
 	// "on pace to exceed" row badge); independent of status (a warn period can
 	// be on pace too).
@@ -285,6 +288,8 @@ type Detail struct {
 	ByCategory []CategoryRow `json:"by_category"`
 	Periods    RecentPeriods `json:"periods"`
 	Items      ItemList      `json:"items"`
+	// DeletePreview — only with ?include=delete_preview, else null.
+	DeletePreview *DeletePreview `json:"delete_preview"`
 }
 
 // Totals — the Home budgets tile / More budgets_summary: every active,
@@ -352,4 +357,12 @@ type HealthCounts struct {
 	OK   int `json:"ok"`
 	Near int `json:"near"`
 	Over int `json:"over"`
+}
+
+// DeletePreview — what deleting the budget removes. Transactions are never touched.
+type DeletePreview struct {
+	Periods           int `json:"periods"`
+	OverriddenPeriods int `json:"overridden_periods"` // periods with their own amount
+	Categories        int `json:"categories"`
+	Wallets           int `json:"wallets"`
 }

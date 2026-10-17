@@ -229,6 +229,8 @@ func periodView(b *Budget, r *periodRow, f figures, current bool, today time.Tim
 		p.Status, p.Tone = PeriodOK, "neutral"
 	}
 	if current && r.End != nil && !today.After(*r.End) && !today.Before(r.Start) {
+		total, elapsed := days(r.Start, *r.End)+1, days(r.Start, today)+1
+		p.PacePct = iptr(int(math.Round(math.Min(1, float64(elapsed)/float64(total)) * 100)))
 		p.DaysLeft = iptr(days(today, *r.End) + 1)
 	}
 	return p
@@ -741,7 +743,7 @@ func pageItems(rows []countRow, rf *refs, reason func(countRow) string, page, pe
 	return out
 }
 
-func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, periodID *uuid.UUID, tz string) (*Detail, error) {
+func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, periodID *uuid.UUID, tz string, withDeletePreview bool) (*Detail, error) {
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
 		return nil, err
@@ -750,7 +752,16 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, periodID *uuid.
 	if err != nil {
 		return nil, err
 	}
-	return s.detail(ctx, b, periodID, today)
+	d, err := s.detail(ctx, b, periodID, today)
+	if err != nil || !withDeletePreview {
+		return d, err
+	}
+	p := &DeletePreview{Categories: len(b.Categories), Wallets: len(b.Wallets)}
+	if err := s.store.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE overridden) FROM budget_periods WHERE budget_id = $1`, id).Scan(&p.Periods, &p.OverriddenPeriods); err != nil {
+		return nil, err
+	}
+	d.DeletePreview = p
+	return d, nil
 }
 
 func (s *Service) Periods(ctx context.Context, userID, id uuid.UUID, page, perPage int, tz string) (*PeriodList, error) {
@@ -1058,7 +1069,7 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, r *Request, tz s
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, userID, b.ID, nil, tz)
+	return s.Get(ctx, userID, b.ID, nil, tz, false)
 }
 
 // write — lock, change, save + sync periods, commit, the page.
@@ -1089,7 +1100,7 @@ func (s *Service) write(ctx context.Context, userID, id uuid.UUID, tz string, fn
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, userID, id, periodID, tz)
+	return s.Get(ctx, userID, id, periodID, tz, false)
 }
 
 // Update — PUT /budgets/:id (the setup).

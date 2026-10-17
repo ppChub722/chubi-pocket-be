@@ -4664,6 +4664,7 @@ paths:
       description: 'The budget + one period (`period_id`, default the current one; an ended budget: its last) with its dashboard, by-source and by-category breakdowns, the 6 newest periods and the first page of its items.'
       parameters:
         - { name: period_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: include, in: query, schema: { type: string, description: 'Comma list: delete_preview.', example: delete_preview } }
       responses:
         '200':
           description: The page.
@@ -8881,7 +8882,7 @@ components:
     BudgetPeriod:
       type: object
       description: 'One period (an instance). `pct` = used / amount (rounded, not clamped); `status` over > warn > pace > ok (pace only for the current period); `tone` danger / warning / neutral. Expected is the current period only.'
-      required: [id, seq, start, end, amount, base_amount, overridden, note, is_current, used, expected, remaining, over_by, pct, status, tone, days_left, on_pace_to_exceed]
+      required: [id, seq, start, end, amount, base_amount, overridden, note, is_current, used, expected, remaining, over_by, pct, status, tone, days_left, pace_pct, on_pace_to_exceed]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         seq: { type: integer, description: '1 = the first period.' }
@@ -8900,6 +8901,7 @@ components:
         status: { type: string, enum: [ok, pace, warn, over] }
         tone: { type: string, enum: [neutral, warning, danger] }
         days_left: { type: [integer, 'null'], description: 'Today included; null for past / open-ended periods.' }
+        pace_pct: { type: [integer, 'null'], description: 'Elapsed / total days of the current dated period (the pace tick); null for open-ended or non-current periods.' }
         on_pace_to_exceed: { type: boolean, description: 'The forecast says the CURRENT period of an active budget ends over its amount (the "on pace to exceed" row badge). Independent of status: a warn period can be on pace too. False for other periods.' }
     BudgetActions:
       type: object
@@ -9013,7 +9015,7 @@ components:
     BudgetDetail:
       type: object
       description: 'The budget page in one call, at one period (`budget.period`).'
-      required: [budget, forecast, by_source, by_category, periods, items]
+      required: [budget, forecast, by_source, by_category, periods, items, delete_preview]
       properties:
         budget: { $ref: '#/components/schemas/Budget' }
         forecast: { $ref: '#/components/schemas/BudgetForecast' }
@@ -9027,6 +9029,17 @@ components:
             data: { type: array, items: { $ref: '#/components/schemas/BudgetPeriod' } }
             has_more: { type: boolean }
         items: { $ref: '#/components/schemas/BudgetItemList' }
+        delete_preview:
+          description: 'Only with ?include=delete_preview, else null: what a delete removes (transactions are never touched).'
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [periods, overridden_periods, categories, wallets]
+              properties:
+                periods: { type: integer }
+                overridden_periods: { type: integer }
+                categories: { type: integer }
+                wallets: { type: integer }
     BudgetCreateRequest:
       type: object
       required: [name, amount, scope, start_date]
