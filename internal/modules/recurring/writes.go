@@ -30,12 +30,12 @@ func validateFields(f *Fields) error {
 			return ErrValidation
 		}
 		switch *f.Type {
-		case "expense", "income", "transfer", typeSaving:
+		case "expense", "income", "transfer":
 		default:
 			return ErrValidation
 		}
 	}
-	if f.has("amount") && (f.Amount == nil || *f.Amount <= 0) {
+	if f.has("amount") && (f.Amount == nil || *f.Amount < 0) { // 0 = no amount (a reminder); kinds that need one check it
 		return ErrValidation
 	}
 	if f.Description != nil && len([]rune(*f.Description)) > 200 {
@@ -61,7 +61,7 @@ func applyToDraft(d *pending.Draft, f *Fields) {
 		d.Type = f.Type
 	}
 	if f.has("amount") {
-		d.Amount = f.Amount
+		d.Amount = amountPtrFrom(f.Amount)
 	}
 	if f.has("account_id") {
 		d.AccountID = f.AccountID
@@ -286,8 +286,32 @@ func (s *Service) afterWrite(ctx context.Context, userID, id uuid.UUID, tz strin
 
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateRequest, tz string) (*Detail, error) {
 	name := strings.TrimSpace(req.Name)
-	if name == "" || len([]rune(name)) > 100 || req.Rule == nil || req.Type == nil || req.Amount == nil {
+	if name == "" || len([]rune(name)) > 100 || req.Rule == nil {
 		return nil, ErrValidation
+	}
+	kind := ""
+	if req.Kind != nil {
+		if !validKind(*req.Kind) {
+			return nil, ErrValidation
+		}
+		kind = *req.Kind
+	}
+	if req.present == nil {
+		req.present = map[string]bool{}
+	}
+	if req.Type == nil { // the kind implies the money type
+		if kind == "" {
+			return nil, ErrValidation
+		}
+		t := typeForKind(kind)
+		req.Type, req.present["type"] = &t, true
+	}
+	if req.Amount == nil { // only a reminder may start without an amount
+		if kind != KindReminder && !(kind == "" && *req.Type == "transfer") {
+			return nil, ErrValidation
+		}
+		zero := 0.0
+		req.Amount, req.present["amount"] = &zero, true
 	}
 	if err := validateFields(&req.Fields); err != nil {
 		return nil, err
@@ -306,6 +330,12 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 		return nil, err
 	}
 	if err := r.applyEnd(req.End); err != nil {
+		return nil, err
+	}
+	if err := r.setTrial(req.TrialUntil); err != nil {
+		return nil, err
+	}
+	if err := r.finishKind(req.Kind); err != nil {
 		return nil, err
 	}
 	if err := r.limits(today); err != nil {
@@ -391,6 +421,14 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 			return nil, err
 		}
 		rebuild = true
+	}
+	if req.TrialUntil != nil {
+		if err := r.setTrial(req.TrialUntil); err != nil {
+			return nil, err
+		}
+	}
+	if err := r.finishKind(req.Kind); err != nil {
+		return nil, err
 	}
 	if rebuild {
 		r.GeneratedUntil, r.EndingNotified = nil, false

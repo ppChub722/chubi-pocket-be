@@ -67,6 +67,8 @@ type Rule struct {
 	EndDate        *time.Time
 	EndCount       *int
 	TotalCount     *int
+	Kind           string     // subscription | installment | income | reminder
+	TrialUntil     *time.Time // subscription: the free trial runs until
 	GeneratedUntil *time.Time
 	Status         string
 	EndingNotified bool
@@ -122,31 +124,38 @@ type Actions struct {
 
 // Recurring — spec schema Recurring.
 type Recurring struct {
-	ID          uuid.UUID             `json:"id"`
-	Name        string                `json:"name"`
-	Description *string               `json:"description"`
-	Note        *string               `json:"note"`
-	IconCode    *shared.IconCode      `json:"icon_code"`
-	Type        string                `json:"type"`
-	Amount      float64               `json:"amount"`
-	Account     *shared.AccountRef    `json:"account"`
-	ToAccount   *shared.AccountRef    `json:"to_account"`
-	Category    *shared.CategoryRef   `json:"category"`
-	Goal        *shared.SavingGoalRef `json:"goal"`
-	Tags        []shared.TagRef       `json:"tags"`
-	Rule        RecurrenceRule        `json:"rule"`
-	StartDate   string                `json:"start_date"`
-	End         RecurrenceEnd         `json:"end"`
-	Status      string                `json:"status"`
-	NextDate    *string               `json:"next_date"`
-	DaysUntil   *int                  `json:"days_until"`
-	Progress    Progress              `json:"progress"`
-	EndingSoon  bool                  `json:"ending_soon"`
-	Counts      StatusCounts          `json:"counts"`
-	EditedAny   bool                  `json:"edited_any"`
-	Actions     Actions               `json:"actions"`
-	CreatedAt   time.Time             `json:"created_at"`
-	UpdatedAt   time.Time             `json:"updated_at"`
+	ID          uuid.UUID          `json:"id"`
+	Name        string             `json:"name"`
+	Description *string            `json:"description"`
+	Note        *string            `json:"note"`
+	IconCode    *shared.IconCode   `json:"icon_code"`
+	Type        string             `json:"type"`
+	Amount      *float64           `json:"amount"` // null = a reminder with no amount yet
+	Account     *shared.AccountRef `json:"account"`
+	// 0.4.0 (spec 11): kind, trial_until, yearly_cost, and the detail numbers.
+	Kind         string                `json:"kind"`
+	TrialUntil   *string               `json:"trial_until"`
+	YearlyCost   float64               `json:"yearly_cost"`
+	SavedCount   int                   `json:"saved_count"`
+	PendingCount int                   `json:"pending_count"`
+	NextAmount   *float64              `json:"next_amount"`
+	ToAccount    *shared.AccountRef    `json:"to_account"`
+	Category     *shared.CategoryRef   `json:"category"`
+	Goal         *shared.SavingGoalRef `json:"goal"`
+	Tags         []shared.TagRef       `json:"tags"`
+	Rule         RecurrenceRule        `json:"rule"`
+	StartDate    string                `json:"start_date"`
+	End          RecurrenceEnd         `json:"end"`
+	Status       string                `json:"status"`
+	NextDate     *string               `json:"next_date"`
+	DaysUntil    *int                  `json:"days_until"`
+	Progress     Progress              `json:"progress"`
+	EndingSoon   bool                  `json:"ending_soon"`
+	Counts       StatusCounts          `json:"counts"`
+	EditedAny    bool                  `json:"edited_any"`
+	Actions      Actions               `json:"actions"`
+	CreatedAt    time.Time             `json:"created_at"`
+	UpdatedAt    time.Time             `json:"updated_at"`
 }
 
 type ListCounts struct {
@@ -182,7 +191,7 @@ type Item struct {
 	Edited        bool                    `json:"edited"`
 	Manual        bool                    `json:"manual"`
 	Type          string                  `json:"type"`
-	Amount        float64                 `json:"amount"`
+	Amount        *float64                `json:"amount"` // null = not known yet (a reminder)
 	Account       *shared.AccountRef      `json:"account"`
 	ToAccount     *shared.AccountRef      `json:"to_account"`
 	Category      *shared.CategoryRef     `json:"category"`
@@ -280,17 +289,23 @@ func (f *Fields) values() bool {
 // CreateRequest — spec schema RecurringCreateRequest.
 type CreateRequest struct {
 	Fields
-	Name      string           `json:"name"`
-	IconCode  *shared.IconCode `json:"icon_code"`
-	Rule      *RecurrenceRule  `json:"rule"`
-	StartDate string           `json:"start_date"`
-	End       *RecurrenceEnd   `json:"end"`
+	Name string `json:"name"`
+	// Kind — subscription / installment / income / reminder; omitted = derived from type (+ end).
+	Kind       *string          `json:"kind"`
+	TrialUntil *string          `json:"trial_until"`
+	IconCode   *shared.IconCode `json:"icon_code"`
+	Rule       *RecurrenceRule  `json:"rule"`
+	StartDate  string           `json:"start_date"`
+	End        *RecurrenceEnd   `json:"end"`
 }
 
 // UpdateRequest — spec schema RecurringUpdateRequest.
 type UpdateRequest struct {
 	Fields
-	Name           *string          `json:"name"`
+	Name *string `json:"name"`
+	Kind *string `json:"kind"`
+	// TrialUntil — a date sets it, "" clears it, absent leaves it.
+	TrialUntil     *string          `json:"trial_until"`
 	IconCode       *shared.IconCode `json:"icon_code"`
 	Rule           *RecurrenceRule  `json:"rule"`
 	StartDate      *string          `json:"start_date"`

@@ -9554,15 +9554,21 @@ components:
     Recurring:
       type: object
       description: 'A recurring setting (the generator), page-ready.'
-      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal, tags, rule, start_date, end, status, next_date, days_until, progress, ending_soon, counts, edited_any, actions, created_at, updated_at]
+      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, saved_count, pending_count, next_amount, next_date, days_until, progress, ending_soon, counts, edited_any, actions, created_at, updated_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         name: { type: string, maxLength: 100 }
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
-        type: { type: string, enum: [expense, income, transfer, saving], description: 'saving = ออม: each item becomes a pending saving draft (🐷) that saves `amount` from the wallet into `goal` (null = spare).' }
-        amount: { $ref: '#/components/schemas/Money' }
+        type: { type: string, enum: [expense, income, transfer], description: 'The money direction; the user-facing choice is kind.' }
+        amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'null = a reminder with no amount yet.' }
+        kind: { type: string, enum: [subscription, installment, income, reminder] }
+        trial_until: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'Subscription: the free trial runs until this date.' }
+        yearly_cost: { $ref: '#/components/schemas/Money', description: 'Amount x the times it happens in an average month x 12 (custom dates: x the number of dates); an installment counts at most amount x count. 0 with no amount.' }
+        saved_count: { type: integer, description: 'Occurrences that became a transaction (status done).' }
+        pending_count: { type: integer, description: 'Occurrences waiting in pending.' }
+        next_amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'The amount of the next upcoming occurrence (null = not known / none).' }
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
         to_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'Transfers only.' }
         category: { oneOf: [{ $ref: '#/components/schemas/CategoryRef' }, { type: 'null' }] }
@@ -9664,8 +9670,8 @@ components:
         status: { type: string, enum: [upcoming, not_created, pending, done, archived] }
         edited: { type: boolean }
         manual: { type: boolean }
-        type: { type: string, enum: [expense, income, transfer, saving] }
-        amount: { $ref: '#/components/schemas/Money' }
+        type: { type: string, enum: [expense, income, transfer] }
+        amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'null = not known yet (a reminder: the draft made on the day has no amount, confirm is refused until it has one).' }
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
         to_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
         category: { oneOf: [{ $ref: '#/components/schemas/CategoryRef' }, { type: 'null' }] }
@@ -9705,21 +9711,22 @@ components:
       type: object
       description: 'Value fields; partial (absent = unchanged, null clears a nullable one).'
       properties:
-        type: { type: string, enum: [expense, income, transfer, saving] }
-        amount: { type: number, exclusiveMinimum: 0 }
+        type: { type: string, enum: [expense, income, transfer], description: 'Optional when kind is sent (the kind implies it).' }
+        amount: { type: number, minimum: 0, description: 'Required (> 0) except for a reminder, where 0 / absent = no amount yet.' }
         account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         to_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         category_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
         tag_ids: { $ref: '#/components/schemas/Ids' }
-        goal_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'type saving: the goal (null = spare); wallet = account_id.' }
     RecurringCreateRequest:
       allOf:
         - { $ref: '#/components/schemas/RecurringFields' }
         - type: object
-          required: [name, type, amount, rule, start_date]
+          required: [name, rule, start_date]
           properties:
+            kind: { type: string, enum: [subscription, installment, income, reminder], description: 'subscription = an expense that repeats; installment = an expense with a COUNT of payments (end.kind count required); income = an income that repeats; reminder = เตือนจ่าย (expense or transfer, the amount is optional: omit it or send 0). Omitted = derived from type (+ end). The kind implies the type when type is omitted.' }
+            trial_until: { type: string, description: 'Subscription only: the free trial runs until this date (yyyy-mm-dd).' }
             name: { type: string, minLength: 1, maxLength: 100 }
             icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
             rule: { $ref: '#/components/schemas/RecurrenceRuleInput' }
@@ -9731,6 +9738,8 @@ components:
         - type: object
           properties:
             name: { type: string, minLength: 1, maxLength: 100 }
+            kind: { type: string, enum: [subscription, installment, income, reminder], description: 'Change the kind (re-validated: installment needs an end count, income is an income, subscription / installment are expenses).' }
+            trial_until: { type: string, description: 'Subscription: a date sets the free-trial end, "" clears it, absent leaves it.' }
             icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
             rule: { $ref: '#/components/schemas/RecurrenceRuleInput' }
             start_date: { $ref: '#/components/schemas/Date' }

@@ -256,7 +256,7 @@ func TestRecurringLifecycle(t *testing.T) {
 	apitest.ConformRequest(t, "updateRecurringItem", upd)
 	var ws ItemsWriteResult
 	f.call("PUT", "/recurring-items/"+newest.ID.String(), "updateRecurringItem", upd, 200, &ws)
-	if len(ws.Items) != 1 || ws.Items[0].Amount != 150 || !ws.Items[0].Edited || f.balance() != 730 {
+	if len(ws.Items) != 1 || av(ws.Items[0].Amount) != 150 || !ws.Items[0].Edited || f.balance() != 730 {
 		t.Fatalf("edit + link: %+v balance %v", ws, f.balance())
 	}
 	// Without also_update_link the transaction stays.
@@ -267,7 +267,7 @@ func TestRecurringLifecycle(t *testing.T) {
 	// Edit the tx with also_update_link → the item follows.
 	f.call("PUT", "/transactions/"+txID.String(), "", map[string]any{"amount": 60, "also_update_link": true}, 200, nil)
 	f.call("GET", "/recurring-items/"+newest.ID.String(), "", nil, 200, &it)
-	if it.Amount != 60 {
+	if av(it.Amount) != 60 {
 		t.Errorf("item after tx edit = %v, want 60", it.Amount)
 	}
 
@@ -287,11 +287,11 @@ func TestRecurringLifecycle(t *testing.T) {
 	put := map[string]any{"name": "Netflix HD", "amount": 200}
 	apitest.ConformRequest(t, "updateRecurring", put)
 	f.call("PUT", "/recurring/"+id.String(), "updateRecurring", put, 200, &d)
-	if d.Recurring.Name != "Netflix HD" || d.Recurring.Amount != 200 {
+	if d.Recurring.Name != "Netflix HD" || av(d.Recurring.Amount) != 200 {
 		t.Fatalf("update = %+v", d.Recurring)
 	}
 	up := f.items(id, "upcoming")
-	if len(up) != 3 || up[0].Amount != 200 || up[0].Description == nil || *up[0].Description != "Netflix HD" {
+	if len(up) != 3 || av(up[0].Amount) != 200 || up[0].Description == nil || *up[0].Description != "Netflix HD" {
 		t.Fatalf("upcoming after update = %+v", up)
 	}
 
@@ -420,7 +420,7 @@ func TestRecurringItemsAndOneOffs(t *testing.T) {
 	f.call("POST", "/recurring-items/batch", "batchRecurringItems", b, 409, nil)
 	f.call("POST", "/recurring-items/batch", "batchRecurringItems",
 		map[string]any{"ids": []uuid.UUID{wr.Upcoming.ID}, "action": "edit", "fields": map[string]any{"amount": 30}}, 200, &br)
-	if br.Items[0].Amount != 30 || !br.Items[0].Edited {
+	if av(br.Items[0].Amount) != 30 || !br.Items[0].Edited {
 		t.Errorf("batch edit = %+v", br.Items[0])
 	}
 	f.call("POST", "/recurring-items/batch", "batchRecurringItems",
@@ -491,53 +491,6 @@ func TestRecurringValidation(t *testing.T) {
 
 func contains(b []byte, s string) bool { return strings.Contains(string(b), s) }
 
-// A recurring ออม: each due item becomes a pending SAVING draft; confirming
-// it makes a saving entry linked to the item (never a transaction).
-func TestRecurringSaving(t *testing.T) {
-	f := newRecFix(t)
-	goal := uuid.New()
-	f.exec(`INSERT INTO saving_goals (id, user_id, name, target_amount) VALUES ($1, $2, 'Japan', 80000)`, goal, f.me)
-	body := map[string]any{
-		"name": "Save for Japan", "type": "saving", "amount": 4000, "account_id": f.wallet, "goal_id": goal,
-		"rule": map[string]any{"freq": "daily", "interval": 7}, "start_date": f.day(-7),
-		"end": map[string]any{"kind": "count", "count": 3},
-	}
-	apitest.ConformRequest(t, "createRecurring", body)
-	var d Detail
-	f.call("POST", "/recurring", "createRecurring", body, 201, &d)
-	if d.Recurring.Type != "saving" || d.Recurring.Goal == nil || d.Recurring.Goal.ID != goal || d.Recurring.Counts.Pending != 2 {
-		t.Fatalf("saving setting = %+v", d.Recurring)
-	}
-	produced := f.items(d.Recurring.ID, "produced")
-	var kind string
-	if err := f.pool.QueryRow(f.ctx, `SELECT kind FROM pending_transactions WHERE id = $1`, *produced[0].PendingID).Scan(&kind); err != nil || kind != "saving" {
-		t.Fatalf("draft kind = %q %v", kind, err)
-	}
-	res, err := f.pending.Submit(f.ctx, f.me, pending.SubmitRequest{IDs: []uuid.UUID{*produced[0].PendingID}})
-	if err != nil || len(res.Submitted) != 1 || res.Submitted[0].SavingEntryID == nil || len(res.Submitted[0].Rows) != 0 {
-		t.Fatalf("submit = %+v %v", res, err)
-	}
-	var it Item
-	f.call("GET", "/recurring-items/"+produced[0].ID.String(), "getRecurringItem", nil, 200, &it)
-	if it.Status != StatusDone || it.SavingEntryID == nil || it.Goal == nil || it.Transaction != nil {
-		t.Errorf("item = %+v", it)
-	}
-	if f.balance() != 1000 {
-		t.Errorf("a saving moved money: %v", f.balance())
-	}
-	page, err := f.savings.Get(f.ctx, f.me, goal, 20)
-	if err != nil || page.Goal.SavedAmount != 4000 || page.Entries.Data[0].Source != "recurring" ||
-		page.Entries.Data[0].Recurring == nil {
-		t.Errorf("goal page = %+v %v", page, err)
-	}
-	// Deleting the item with its linked record removes the saving entry.
-	var del ItemDeleteResult
-	f.call("DELETE", "/recurring-items/"+produced[0].ID.String()+"?delete_linked_tx=true", "deleteRecurringItem", nil, 200, &del)
-	if page, _ = f.savings.Get(f.ctx, f.me, goal, 20); page.Goal.SavedAmount != 0 {
-		t.Errorf("after delete: saved %v", page.Goal.SavedAmount)
-	}
-}
-
 // Goal auto-saving: the due check makes ONE saving draft a month, on the
 // setting's day, from its wallet or with none; it does not repeat in the month.
 func TestGoalAutoSaveDraft(t *testing.T) {
@@ -600,4 +553,12 @@ func TestGoalAutoSaveDraft(t *testing.T) {
 		page.Goal.AutoSave.NextDate == nil || *page.Goal.AutoSave.NextDate <= f.day(0) {
 		t.Errorf("goal auto_save = %+v (%v)", page.Goal.AutoSave, err)
 	}
+}
+
+// av — a nullable amount as a number (0 = unknown).
+func av(p *float64) float64 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }

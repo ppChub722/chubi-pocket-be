@@ -34,7 +34,7 @@ const ruleColumns = `id, user_id, name, description, note, icon_code, type, amou
 	account_id, to_account_id, category_id, tag_ids, freq, interval_n, weekdays,
 	monthly_mode, month_day, month_nth, month_weekday, dates, start_date, end_kind,
 	end_date, end_count, total_count, generated_until, status, ending_notified,
-	created_at, updated_at, goal_id`
+	created_at, updated_at, goal_id, kind, trial_until`
 
 func scanRule(row pgx.Row) (*Rule, error) {
 	var (
@@ -49,7 +49,7 @@ func scanRule(row pgx.Row) (*Rule, error) {
 		&r.AccountID, &r.ToAccountID, &r.CategoryID, &r.TagIDs, &r.Freq, &interval, &weekdays,
 		&r.MonthlyMode, &monthDay, &monthNth, &monthWD, &r.Dates, &r.StartDate, &r.EndKind,
 		&r.EndDate, &count, &total, &r.GeneratedUntil, &r.Status, &r.EndingNotified,
-		&r.CreatedAt, &r.UpdatedAt, &r.GoalID); err != nil {
+		&r.CreatedAt, &r.UpdatedAt, &r.GoalID, &r.Kind, &r.TrialUntil); err != nil {
 		return nil, err
 	}
 	r.IconCode = shared.IconFromJSON(icon)
@@ -107,22 +107,22 @@ func saveRuleTx(ctx context.Context, tx pgx.Tx, r *Rule) error {
 	args := []any{r.ID, r.UserID, r.Name, shared.CleanText(r.Description), shared.CleanText(r.Note), icon, r.Type, r.Amount,
 		r.AccountID, r.ToAccountID, r.CategoryID, tags, r.Freq, r.Interval, weekdays,
 		r.MonthlyMode, r.MonthDay, r.MonthNth, r.MonthWeekday, dates, r.StartDate, r.EndKind,
-		r.EndDate, r.EndCount, r.TotalCount, r.GeneratedUntil, r.Status, r.EndingNotified, r.GoalID}
+		r.EndDate, r.EndCount, r.TotalCount, r.GeneratedUntil, r.Status, r.EndingNotified, r.GoalID, r.Kind, r.TrialUntil}
 	if r.ID == uuid.Nil {
 		r.ID, _ = uuid.NewV7()
 		args[0] = r.ID
 		_, err = tx.Exec(ctx, `INSERT INTO recurring_rules (id, user_id, name, description, note, icon_code, type, amount,
 			account_id, to_account_id, category_id, tag_ids, freq, interval_n, weekdays,
 			monthly_mode, month_day, month_nth, month_weekday, dates, start_date, end_kind,
-			end_date, end_count, total_count, generated_until, status, ending_notified, goal_id)
+			end_date, end_count, total_count, generated_until, status, ending_notified, goal_id, kind, trial_until)
 			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-			        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)`, args...)
+			        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)`, args...)
 	} else {
 		_, err = tx.Exec(ctx, `UPDATE recurring_rules SET name = $3, description = $4, note = $5, icon_code = $6::jsonb,
 			type = $7, amount = $8, account_id = $9, to_account_id = $10, category_id = $11, tag_ids = $12,
 			freq = $13, interval_n = $14, weekdays = $15, monthly_mode = $16, month_day = $17, month_nth = $18,
 			month_weekday = $19, dates = $20, start_date = $21, end_kind = $22, end_date = $23, end_count = $24,
-			total_count = $25, generated_until = $26, status = $27, ending_notified = $28, goal_id = $29
+			total_count = $25, generated_until = $26, status = $27, ending_notified = $28, goal_id = $29, kind = $30, trial_until = $31
 			WHERE id = $1 AND user_id = $2`, args...)
 	}
 	if err != nil {

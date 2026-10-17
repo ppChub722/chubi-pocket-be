@@ -73,7 +73,7 @@ func (s *Service) Today(ctx context.Context, userID uuid.UUID) (string, error) {
 // draftFromRule — the values an item of r starts with.
 func draftFromRule(r *Rule) pending.Draft {
 	d := pending.Draft{
-		Type: ptr(r.Type), Amount: ptr(r.Amount), AccountID: r.AccountID, CategoryID: r.CategoryID,
+		Type: ptr(r.Type), Amount: amountPtr(r.Amount), AccountID: r.AccountID, CategoryID: r.CategoryID,
 		Description: r.Description, Note: r.Note, TagIDs: append([]uuid.UUID(nil), r.TagIDs...),
 	}
 	if d.Description == nil || strings.TrimSpace(*d.Description) == "" {
@@ -338,7 +338,7 @@ func (s *Service) itemViews(ctx context.Context, q shared.Querier, userID uuid.U
 			it.Type = *d.Type
 		}
 		if d.Amount != nil {
-			it.Amount = *d.Amount
+			it.Amount = d.Amount
 		}
 		it.Description, it.Note = d.Description, d.Note
 		if txID != nil {
@@ -479,6 +479,30 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// The next occurrence's amount (the earliest upcoming item that has one).
+	nextAmt := map[uuid.UUID]*float64{}
+	nrows, err := s.db.Query(ctx, `SELECT DISTINCT ON (i.rule_id) i.rule_id, NULLIF((i.draft->>'amount')::numeric, 0)::float8
+		FROM recurring_items i
+		WHERE i.rule_id = ANY($1) AND `+statusSQL+` = 'upcoming'
+		ORDER BY i.rule_id, i.date, i.id`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("next amounts: %w", err)
+	}
+	for nrows.Next() {
+		var (
+			id  uuid.UUID
+			amt *float64
+		)
+		if err := nrows.Scan(&id, &amt); err != nil {
+			nrows.Close()
+			return nil, err
+		}
+		nextAmt[id] = amt
+	}
+	nrows.Close()
+	if err := nrows.Err(); err != nil {
+		return nil, err
+	}
 	accs, err := shared.LoadAccountRefs(ctx, s.db, accIDs)
 	if err != nil {
 		return nil, err
@@ -508,7 +532,9 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 		}
 		v := Recurring{
 			ID: r.ID, Name: r.Name, Description: r.Description, Note: r.Note, IconCode: r.IconCode,
-			Type: r.Type, Amount: r.Amount, Tags: []shared.TagRef{}, Rule: r.apiRule(),
+			Type: r.Type, Amount: amountPtr(r.Amount), Tags: []shared.TagRef{}, Rule: r.apiRule(),
+			Kind: r.Kind, TrialUntil: dstr(r.TrialUntil), YearlyCost: yearlyCost(r, today),
+			SavedCount: a.counts.Done, PendingCount: a.counts.Pending, NextAmount: nextAmt[r.ID],
 			StartDate: r.StartDate.Format(dateLayout), End: r.apiEnd(), Status: r.Status,
 			Progress: Progress{Done: a.done, Total: r.TotalCount}, Counts: a.counts, EditedAny: a.edited,
 			CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
