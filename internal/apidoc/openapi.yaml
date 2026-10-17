@@ -8236,6 +8236,11 @@ components:
                     "type": "null"
                   }
                 ]
+              },
+              "money_style": {
+                "type": ["string", "null"],
+                "enum": ["plus_minus", "plus_minus_plain", "parentheses", "parentheses_plain", "color_only", null],
+                "description": "How amounts show income / expense: plus_minus (+฿1,000 / −฿540, coloured), plus_minus_plain (signs, no colour), parentheses (฿1,000 / (฿540), coloured), parentheses_plain, color_only (no sign, colour only). New users get color_only; null (users from before it) = plus_minus."
               }
             },
             "description": "Known keys only.",
@@ -8324,6 +8329,11 @@ components:
                     "type": "null"
                   }
                 ]
+              },
+              "money_style": {
+                "type": ["string", "null"],
+                "enum": ["plus_minus", "plus_minus_plain", "parentheses", "parentheses_plain", "color_only", null],
+                "description": "How amounts show income / expense: plus_minus (+฿1,000 / −฿540, coloured), plus_minus_plain (signs, no colour), parentheses (฿1,000 / (฿540), coloured), parentheses_plain, color_only (no sign, colour only). New users get color_only; null (users from before it) = plus_minus."
               }
             },
             "required": []

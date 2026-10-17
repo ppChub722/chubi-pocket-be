@@ -60,10 +60,25 @@ var allowedPreferenceKeys = map[string]bool{
 	// "ใช้เป็นหมวดค่าธรรมเนียม" switch on a category. UUID string, or null
 	// to clear. Checked by Service.UpdateProfile.
 	PrefFeeCategoryID: true,
+	PrefMoneyStyle:    true,
 }
 
 // PrefFeeCategoryID — preference key of the fee category.
 const PrefFeeCategoryID = "fee_category_id"
+
+// PrefMoneyStyle — how amounts show income / expense (owner 2026-10-17):
+// plus_minus (+฿1,000 / −฿540, coloured), plus_minus_plain (signs, no
+// colour), parentheses (฿1,000 / (฿540), coloured), parentheses_plain, or
+// color_only (no sign, colour only). New users get color_only; unset (users
+// from before it) reads as plus_minus — what they always saw.
+const PrefMoneyStyle = "money_style"
+
+// MoneyStyles — the values money_style takes.
+var MoneyStyles = map[string]bool{
+	"plus_minus": true, "plus_minus_plain": true,
+	"parentheses": true, "parentheses_plain": true,
+	"color_only": true,
+}
 
 func ValidatePreferenceKeys(prefs map[string]any) (string, bool) {
 	for k := range prefs {
@@ -81,6 +96,7 @@ type Preferences struct {
 	Theme         *string `json:"theme"`
 	Language      *string `json:"language"`
 	FeeCategoryID *string `json:"fee_category_id"`
+	MoneyStyle    *string `json:"money_style"`
 }
 
 func prefsFromMap(m map[string]any) Preferences {
@@ -92,7 +108,7 @@ func prefsFromMap(m map[string]any) Preferences {
 	}
 	return Preferences{
 		Timezone: str("timezone"), Theme: str("theme"), Language: str("language"),
-		FeeCategoryID: str(PrefFeeCategoryID),
+		FeeCategoryID: str(PrefFeeCategoryID), MoneyStyle: str(PrefMoneyStyle),
 	}
 }
 

@@ -79,9 +79,10 @@ func TestGetMe(t *testing.T) {
 		t.Errorf("me = %v", out)
 	}
 	prefs := out["preferences"].(map[string]any)
-	if len(prefs) != 4 || prefs["timezone"] != "Asia/Bangkok" || prefs["theme"] != "system" ||
-		prefs["language"] != "th" || prefs["fee_category_id"] != nil {
-		t.Errorf("preferences = %v (all four keys must be present)", prefs)
+	// money_style null = a user from before it (reads as plus_minus).
+	if len(prefs) != 5 || prefs["timezone"] != "Asia/Bangkok" || prefs["theme"] != "system" ||
+		prefs["language"] != "th" || prefs["fee_category_id"] != nil || prefs["money_style"] != nil {
+		t.Errorf("preferences = %v (all five keys must be present)", prefs)
 	}
 	if out["email_verified_at"] != nil || out["icon_code"] != nil {
 		t.Errorf("nullable keys = %v", out)
@@ -119,6 +120,13 @@ func TestUpdateMe(t *testing.T) {
 	if out["preferences"].(map[string]any)["fee_category_id"] != nil {
 		t.Errorf("fee_category_id not cleared: %v", out["preferences"])
 	}
+
+	// The money style (owner 2026-10-17): one of five.
+	out = f.do(t, "PUT", "/api/v1/users/me", `{"preferences":{"money_style":"parentheses_plain"}}`, "updateMe", http.StatusOK)
+	if out["preferences"].(map[string]any)["money_style"] != "parentheses_plain" {
+		t.Errorf("money_style = %v", out["preferences"])
+	}
+	f.do(t, "PUT", "/api/v1/users/me", map[string]any{"preferences": map[string]any{"money_style": "rainbow"}}, "updateMe", http.StatusBadRequest)
 
 	// Errors.
 	f.do(t, "PUT", "/api/v1/users/me", map[string]any{"display_name": ""}, "updateMe", http.StatusBadRequest)

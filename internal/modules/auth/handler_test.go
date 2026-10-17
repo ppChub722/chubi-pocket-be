@@ -73,6 +73,12 @@ func TestRegisterLogin(t *testing.T) {
 	if _, ok := user["password_hash"]; ok {
 		t.Error("password hash leaked")
 	}
+	// A new user sees amounts in colour only (owner 2026-10-17).
+	var style string
+	if err := testdb.Pool(t).QueryRow(context.Background(),
+		`SELECT preferences->>'money_style' FROM user_preferences WHERE user_id = $1`, user["id"]).Scan(&style); err != nil || style != "color_only" {
+		t.Errorf("new user's money_style = %q (%v)", style, err)
+	}
 	tok := out["token"].(map[string]any)
 	if tok["access_token"] == "" || tok["expires_in"].(float64) != 3600 {
 		t.Errorf("token = %v", tok)

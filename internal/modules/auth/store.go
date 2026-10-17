@@ -81,7 +81,8 @@ func (s *Store) InsertUserTx(ctx context.Context, tx pgx.Tx, u *User) (*User, er
 // InsertPreferencesTx inserts the user_preferences row inside caller's tx
 // with Phase 0 defaults. created_by_user_id is left NULL (system-created).
 func (s *Store) InsertPreferencesTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
-	const defaults = `{"timezone":"Asia/Bangkok","theme":"system","language":"th"}`
+	// money_style: new users see colour only (owner 2026-10-17).
+	const defaults = `{"timezone":"Asia/Bangkok","theme":"system","language":"th","money_style":"color_only"}`
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO user_preferences (user_id, preferences) VALUES ($1, $2::jsonb)`,
 		userID, defaults); err != nil {
