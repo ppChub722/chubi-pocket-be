@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -171,7 +172,12 @@ func (h *Handler) List(c *gin.Context) {
 		}
 		hint.Amount = &a
 	}
-	out, err := h.service.List(c.Request.Context(), uid, status, c.Query("q"), forType, hint,
+	kind := c.Query("kind")
+	if kind != "" && kind != KindSubscription && kind != KindInstallment && kind != KindIncome && kind != KindReminder {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid kind", nil)
+		return
+	}
+	out, err := h.service.List(c.Request.Context(), uid, status, c.Query("q"), forType, hint, kind,
 		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20), tz(c))
 	reply(c, http.StatusOK, out, err)
 }
@@ -199,7 +205,7 @@ func (h *Handler) Get(c *gin.Context) {
 		return
 	}
 	out, err := h.service.Get(c.Request.Context(), uid, id,
-		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20), tz(c))
+		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20), tz(c), strings.Contains(","+c.Query("include")+",", ",delete_preview,"))
 	reply(c, http.StatusOK, out, err)
 }
 

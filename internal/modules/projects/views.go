@@ -403,6 +403,9 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 		if qs := strings.TrimSpace(f.Q); qs != "" {
 			add("(pt.description ILIKE $%[1]d OR pt.note ILIKE $%[1]d)", "%"+shared.EscapeLike(qs)+"%")
 		}
+		if f.PayerMemberID != nil {
+			add("pt.transaction_member_id = $%d", *f.PayerMemberID)
+		}
 		if f.TagID != nil {
 			add(`EXISTS (SELECT 1 FROM project_transaction_tags ptt
 				WHERE ptt.project_transaction_id = pt.id AND ptt.event_tag_id = $%d)`, *f.TagID)

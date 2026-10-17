@@ -271,6 +271,8 @@ type EventDetail struct {
 	Members []EventMember `json:"members"`
 	Tags    []EventTag    `json:"tags"`
 	Board   BoardRowList  `json:"board"`
+	// DeletePreview — only with ?include=delete_preview, else null.
+	DeletePreview *DeletePreview `json:"delete_preview"`
 }
 
 // EventPatch — spec schema EventPatch: every event write's final state.
@@ -513,6 +515,8 @@ type BoardFilter struct {
 	Mine    bool
 	Q       string
 	TagID   *uuid.UUID
+	// PayerMemberID — only bills this member paid.
+	PayerMemberID *uuid.UUID
 	Sort    string
 	Page    int
 	PerPage int
@@ -525,4 +529,12 @@ var _ json.Unmarshaler = (*UpdateProjectRequest)(nil)
 type InviteAcceptResult struct {
 	*EventDetail
 	InboxSummary notifications.InboxSummary `json:"inbox_summary"`
+}
+
+// DeletePreview — what deleting the event removes (owner delete; the members' own
+// book copies stay as ordinary records, detached).
+type DeletePreview struct {
+	Bills         int `json:"bills"`           // bill rows of the board
+	Members       int `json:"members"`         // active members
+	LinkedTxCount int `json:"linked_tx_count"` // my own book records linked to it
 }

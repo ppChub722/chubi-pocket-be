@@ -144,3 +144,13 @@ func dstr(t *time.Time) *string {
 	s := t.Format(dateLayout)
 	return &s
 }
+
+// monthlyAmount — amount × the times it happens in an average month (what the
+// hero shows as "ต่อเดือน"); nil without an amount.
+func monthlyAmount(r *Rule, today time.Time) *float64 {
+	if r.Amount <= 0 {
+		return nil
+	}
+	v := math.Round(r.Amount*monthlyCount(r, today)*100) / 100
+	return &v
+}

@@ -2833,7 +2833,7 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
-        - { name: status, in: query, schema: { type: string, enum: [active, completed, cancelled, archived, all] } }
+        - { name: status, in: query, description: 'Stored: active (default) | completed | cancelled | archived | all. Derived (never archived): unsettled = I still owe or am owed, receivable = someone owes me, ended = completed or cancelled (the same numbers as the list summary counts).', schema: { type: string, enum: [active, completed, cancelled, archived, all, unsettled, receivable, ended] } }
         - { name: q, in: query, schema: { type: string } }
         - { name: tag_id, in: query, schema: { type: array, items: { $ref: '#/components/schemas/Uuid' } }, style: form, explode: true }
         - { name: sort, in: query, schema: { type: string, enum: [updated_desc, start_date_desc, name_asc] } }
@@ -3051,6 +3051,7 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
+        - { name: include, in: query, schema: { type: string, description: 'Comma list: delete_preview.', example: delete_preview } }
       responses:
         '200':
           description: The page.
@@ -3075,6 +3076,7 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
+        - { name: payer_member_id, in: query, description: 'Only the bills this member paid (the คนจ่าย filter).', schema: { $ref: '#/components/schemas/Uuid' } }
         - { name: type, in: query, schema: { type: string, enum: [expense, income] } }
         - { name: mine, in: query, schema: { type: boolean } }
         - { name: q, in: query, schema: { type: string } }
@@ -3598,6 +3600,7 @@ paths:
         - { name: q, in: query, description: 'Case-insensitive substring of the name.', schema: { type: string } }
         - { name: status, in: query, schema: { type: string, enum: [current, archived, all] } }
         - { name: for_type, in: query, description: 'THE PICKER: only ACTIVE settings of this money type (a transaction of that type can link to them); each row''s current_occurrence says which occurrence it would take (null = none now).', schema: { type: string, enum: [expense, income, transfer] } }
+        - { name: kind, in: query, description: 'Only settings of this kind.', schema: { type: string, enum: [subscription, installment, income, reminder] } }
         - { name: category_id, in: query, description: 'Picker hint (with for_type): the transaction''s category; settings with it are likely: true and first.', schema: { $ref: '#/components/schemas/Uuid' } }
         - { name: amount, in: query, description: 'Picker hint (with for_type): the transaction''s amount; settings within ±5% are likely: true and first.', schema: { type: number, exclusiveMinimum: 0 } }
       responses:
@@ -3640,10 +3643,11 @@ paths:
       tags: [Recurring]
       summary: Recurring setting page (one call)
       operationId: getRecurring
-      description: 'Runs the due check first. The setting + the first page of its PRODUCED items (status ≠ upcoming, newest first). Upcoming items: listRecurringRuleItems?tab=upcoming.'
+      description: 'Runs the due check first. The setting + the first page of its PRODUCED items (status ≠ upcoming, newest first). The first page of the UPCOMING items rides along (upcoming); more: listRecurringRuleItems?tab=upcoming.'
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
+        - { name: include, in: query, schema: { type: string, description: 'Comma list: delete_preview.', example: delete_preview } }
       responses:
         '200':
           description: The page.
@@ -3993,9 +3997,10 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [item]
+                required: [item, setting]
                 properties:
                   item: { $ref: '#/components/schemas/RecurringItem' }
+                  setting: { oneOf: [{ $ref: '#/components/schemas/Recurring' }, { type: 'null' }] }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -9555,13 +9560,23 @@ components:
     EventDetail:
       type: object
       description: 'The detail page in one call.'
-      required: [event, summary, members, tags, board]
+      required: [event, summary, members, tags, board, delete_preview]
       properties:
         event: { $ref: '#/components/schemas/Event' }
         summary: { $ref: '#/components/schemas/EventSummary' }
         members: { type: array, items: { $ref: '#/components/schemas/EventMember' } }
         tags: { type: array, items: { $ref: '#/components/schemas/EventTag' } }
         board: { $ref: '#/components/schemas/BoardRowList' }
+        delete_preview:
+          description: 'Only with ?include=delete_preview, else null: what deleting the event removes.'
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [bills, members, linked_tx_count]
+              properties:
+                bills: { type: integer }
+                members: { type: integer }
+                linked_tx_count: { type: integer, description: 'My own book records linked to it (delete_linked_txs).' }
     EventPatch:
       type: object
       description: 'What every event write returns: the final state to patch from (no re-fetch). Every key is always present.'
@@ -9784,7 +9799,7 @@ components:
     Recurring:
       type: object
       description: 'A recurring setting (the generator), page-ready.'
-      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, saved_count, pending_count, next_amount, current_occurrence, next_date, days_until, progress, ending_soon, counts, likely, edited_any, actions, created_at, updated_at]
+      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, monthly_amount, saved_count, pending_count, next_amount, current_occurrence, next_date, days_until, progress, ending_soon, counts, likely, edited_any, actions, created_at, updated_at]
       properties:
         likely: { type: boolean, description: 'Only meaningful with the picker hints (for_type + category_id / amount): the setting matches the transaction by category or amount (±5%); such settings are listed first. false otherwise.' }
         id: { $ref: '#/components/schemas/Uuid' }
@@ -9797,6 +9812,7 @@ components:
         kind: { type: string, enum: [subscription, installment, income, reminder] }
         trial_until: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'Subscription: the free trial runs until this date.' }
         yearly_cost: { $ref: '#/components/schemas/Money', description: 'Amount x the times it happens in an average month x 12 (custom dates: x the number of dates); an installment counts at most amount x count. 0 with no amount.' }
+        monthly_amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'Amount x the times it happens in an average month (the hero''s ต่อเดือน); null with no amount.' }
         saved_count: { type: integer, description: 'Occurrences that became a transaction (status done).' }
         pending_count: { type: integer, description: 'Occurrences waiting in pending.' }
         next_amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'The amount of the next upcoming occurrence (null = not known / none).' }
@@ -9857,8 +9873,9 @@ components:
         transaction_id: { $ref: '#/components/schemas/Uuid' }
     RecurringLinkResult:
       type: object
-      required: [item, transaction, amount_differs, rule_amount, transaction_amount, account_balances]
+      required: [item, transaction, amount_differs, rule_amount, transaction_amount, account_balances, setting]
       properties:
+        setting: { oneOf: [{ $ref: '#/components/schemas/Recurring' }, { type: 'null' }], description: 'The owning setting after the write (no re-fetch); null when the items belong to no / several settings.' }
         item: { $ref: '#/components/schemas/RecurringItem' }
         transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }] }
         amount_differs: { type: boolean, description: 'The setting has an amount and the transaction''s differs.' }
@@ -9977,10 +9994,21 @@ components:
         pagination: { $ref: '#/components/schemas/Page' }
     RecurringDetail:
       type: object
-      required: [recurring, items, account_balances]
+      required: [recurring, items, upcoming, account_balances, delete_preview]
       properties:
         recurring: { $ref: '#/components/schemas/Recurring' }
         items: { $ref: '#/components/schemas/RecurringItemList', description: 'The produced items (status ≠ upcoming), newest first.' }
+        upcoming: { $ref: '#/components/schemas/RecurringItemList', description: 'The first page of the upcoming items (soonest first); more: listRecurringRuleItems?tab=upcoming.' }
+        delete_preview:
+          description: 'Only with ?include=delete_preview, else null: what a delete touches.'
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [items, linked_transactions, pending_drafts]
+              properties:
+                items: { type: integer }
+                linked_transactions: { type: integer, description: 'Saved records that go with delete_linked.' }
+                pending_drafts: { type: integer }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
     RecurringFields:
       type: object
@@ -10061,21 +10089,24 @@ components:
                 date: { $ref: '#/components/schemas/Date' }
     RecurringItemWriteResult:
       type: object
-      required: [item, transaction, account_balances]
+      required: [item, transaction, account_balances, setting]
       properties:
+        setting: { oneOf: [{ $ref: '#/components/schemas/Recurring' }, { type: 'null' }], description: 'The owning setting after the write (no re-fetch); null when the items belong to no / several settings.' }
         item: { $ref: '#/components/schemas/RecurringItem' }
         transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }], description: 'The real transaction the write made (create with target transaction).' }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
     RecurringItemsWriteResult:
       type: object
-      required: [items, account_balances]
+      required: [items, account_balances, setting]
       properties:
+        setting: { oneOf: [{ $ref: '#/components/schemas/Recurring' }, { type: 'null' }], description: 'The owning setting after the write (no re-fetch); null when the items belong to no / several settings.' }
         items: { type: array, items: { $ref: '#/components/schemas/RecurringItem' } }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
     RecurringItemDeleteResult:
       type: object
-      required: [id, transaction_id, account_balances]
+      required: [id, transaction_id, account_balances, setting]
       properties:
+        setting: { oneOf: [{ $ref: '#/components/schemas/Recurring' }, { type: 'null' }], description: 'The owning setting after the write (no re-fetch); null when the items belong to no / several settings.' }
         id: { $ref: '#/components/schemas/Uuid' }
         transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The linked transaction deleted with it.' }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
@@ -10091,8 +10122,9 @@ components:
         delete_linked_tx: { type: boolean }
     RecurringItemBatchResult:
       type: object
-      required: [items, deleted_ids, account_balances]
+      required: [items, deleted_ids, account_balances, setting]
       properties:
+        setting: { oneOf: [{ $ref: '#/components/schemas/Recurring' }, { type: 'null' }], description: 'The owning setting after the write (no re-fetch); null when the items belong to no / several settings.' }
         items: { type: array, items: { $ref: '#/components/schemas/RecurringItem' } }
         deleted_ids: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }

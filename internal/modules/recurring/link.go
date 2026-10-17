@@ -34,6 +34,7 @@ type LinkResult struct {
 	RuleAmount        *float64               `json:"rule_amount"`
 	TransactionAmount float64                `json:"transaction_amount"`
 	AccountBalances   []shared.WalletBalance `json:"account_balances"`
+	Setting *Recurring `json:"setting"`
 }
 
 // Link ties an existing transaction to an occurrence (normally the current
@@ -113,6 +114,7 @@ func (s *Service) Link(ctx context.Context, userID, itemID uuid.UUID, req LinkRe
 		return nil, err
 	}
 	out.Item = *v
+	out.Setting = s.settingOf(ctx, userID, ruleOf(v))
 	if s.txs != nil {
 		if row, err := s.txs.Get(ctx, userID, req.TransactionID); err == nil {
 			out.Transaction = row
@@ -147,6 +149,7 @@ func (h *Handler) Link(c *gin.Context) {
 // UnlinkResult — spec RecurringUnlinkResult: the occurrence, open again.
 type UnlinkResult struct {
 	Item Item `json:"item"`
+	Setting *Recurring `json:"setting"`
 }
 
 // Unlink removes a transaction's link to its occurrence: the item is open again
@@ -182,7 +185,7 @@ func (s *Service) Unlink(ctx context.Context, userID, itemID uuid.UUID) (*Unlink
 	if err != nil {
 		return nil, err
 	}
-	return &UnlinkResult{Item: *v}, nil
+	return &UnlinkResult{Item: *v, Setting: s.settingOf(ctx, userID, ruleOf(v))}, nil
 }
 
 // POST /v1/recurring-items/:id/unlink

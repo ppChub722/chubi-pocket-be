@@ -543,7 +543,7 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 		v := Recurring{
 			ID: r.ID, Name: r.Name, Description: r.Description, Note: r.Note, IconCode: r.IconCode,
 			Type: r.Type, Amount: amountPtr(r.Amount), Tags: []shared.TagRef{}, Rule: r.apiRule(),
-			Kind: r.Kind, TrialUntil: dstr(r.TrialUntil), YearlyCost: yearlyCost(r, today),
+			Kind: r.Kind, TrialUntil: dstr(r.TrialUntil), YearlyCost: yearlyCost(r, today), MonthlyAmount: monthlyAmount(r, today),
 			SavedCount: a.counts.Done, PendingCount: a.counts.Pending, NextAmount: nextAmt[r.ID], CurrentOccurrence: occ[r.ID],
 			StartDate: r.StartDate.Format(dateLayout), End: r.apiEnd(), Status: r.Status,
 			Progress: Progress{Done: a.done, Total: r.TotalCount}, Counts: a.counts, EditedAny: a.edited,
@@ -603,7 +603,11 @@ func (s *Service) detail(ctx context.Context, userID, id uuid.UUID, today time.T
 	if err != nil {
 		return nil, err
 	}
-	out := &Detail{Recurring: views[0], Items: *items}
+	up, err := s.ruleItems(ctx, userID, id, today, "upcoming", 1, perPage)
+	if err != nil {
+		return nil, err
+	}
+	out := &Detail{Recurring: views[0], Items: *items, Upcoming: *up}
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
 		return nil, err
 	}
@@ -644,7 +648,7 @@ func (s *Service) ruleItems(ctx context.Context, userID, ruleID uuid.UUID, today
 
 // --- reads ---
 
-func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType string, hint PickerHint, page, perPage int, tz string) (*RecurringList, error) {
+func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType string, hint PickerHint, kind string, page, perPage int, tz string) (*RecurringList, error) {
 	if err := s.DueCheck(ctx, userID, tz); err != nil {
 		return nil, err
 	}
@@ -664,6 +668,10 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType
 	if forType != "" { // the picker: ACTIVE settings that can take a transaction of this type
 		args = append(args, forType)
 		cond = fmt.Sprintf(`status = 'active' AND type = $%d`, len(args))
+	}
+	if kind != "" {
+		args = append(args, kind)
+		cond += fmt.Sprintf(` AND kind = $%d`, len(args))
 	}
 	if q = strings.TrimSpace(q); q != "" {
 		args = append(args, "%"+shared.EscapeLike(q)+"%")
@@ -728,7 +736,7 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType
 	return out, nil
 }
 
-func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, page, perPage int, tz string) (*Detail, error) {
+func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, page, perPage int, tz string, withDeletePreview bool) (*Detail, error) {
 	if err := s.DueCheck(ctx, userID, tz); err != nil {
 		return nil, err
 	}
@@ -736,7 +744,17 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, page, perPage i
 	if err != nil {
 		return nil, err
 	}
-	return s.detail(ctx, userID, id, today, page, perPage, nil)
+	d, err := s.detail(ctx, userID, id, today, page, perPage, nil)
+	if err != nil || !withDeletePreview {
+		return d, err
+	}
+	p := &DeletePreview{}
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE transaction_id IS NOT NULL), COUNT(*) FILTER (WHERE pending_id IS NOT NULL)
+		FROM recurring_items WHERE rule_id = $1 AND user_id = $2`, id, userID).Scan(&p.Items, &p.LinkedTransactions, &p.PendingDrafts); err != nil {
+		return nil, err
+	}
+	d.DeletePreview = p
+	return d, nil
 }
 
 func (s *Service) RuleItems(ctx context.Context, userID, id uuid.UUID, tab string, page, perPage int, tz string) (*ItemList, error) {
@@ -821,4 +839,39 @@ func (h PickerHint) likely(catID *uuid.UUID, amount *float64) bool {
 		return true
 	}
 	return h.Amount != nil && *h.Amount > 0 && amount != nil && math.Abs(*amount-*h.Amount) <= *h.Amount*0.05+0.004
+}
+
+// settingOf — the setting view the items of a write belong to (no re-fetch after
+// a write): nil unless every given rule id is the same one.
+func (s *Service) settingOf(ctx context.Context, userID uuid.UUID, ruleIDs ...*uuid.UUID) *Recurring {
+	var id *uuid.UUID
+	for _, r := range ruleIDs {
+		if r == nil || (id != nil && *id != *r) {
+			return nil
+		}
+		id = r
+	}
+	if id == nil {
+		return nil
+	}
+	today, err := s.today(ctx, userID, "")
+	if err != nil {
+		return nil
+	}
+	r, err := getRule(ctx, s.db, userID, *id, false)
+	if err != nil {
+		return nil
+	}
+	views, err := s.recurringViews(ctx, userID, today, []*Rule{r})
+	if err != nil || len(views) == 0 {
+		return nil
+	}
+	return &views[0]
+}
+
+func ruleOf(it *Item) *uuid.UUID {
+	if it.Recurring == nil {
+		return nil
+	}
+	return &it.Recurring.ID
 }

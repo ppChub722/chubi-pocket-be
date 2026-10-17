@@ -697,6 +697,11 @@ func (s *Service) itemsResult(ctx context.Context, userID uuid.UUID, ids, touche
 		return nil, err
 	}
 	out := &ItemsWriteResult{Items: items}
+	var rs []*uuid.UUID
+	for i := range items {
+		rs = append(rs, ruleOf(&items[i]))
+	}
+	out.Setting = s.settingOf(ctx, userID, rs...)
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
 		return nil, err
 	}
@@ -709,6 +714,7 @@ func (s *Service) itemResult(ctx context.Context, userID, id uuid.UUID, txRow an
 		return nil, err
 	}
 	out := &ItemWriteResult{Item: *it, Transaction: txRow}
+	out.Setting = s.settingOf(ctx, userID, ruleOf(it))
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
 		return nil, err
 	}
@@ -882,6 +888,7 @@ func (s *Service) DeleteItem(ctx context.Context, userID, id uuid.UUID, deleteLi
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
 		return nil, err
 	}
+	out.Setting = s.settingOf(ctx, userID, it.RuleID)
 	return out, nil
 }
 
@@ -952,7 +959,7 @@ func (s *Service) CreateNow(ctx context.Context, userID, id uuid.UUID, req Creat
 	if err != nil {
 		return nil, err
 	}
-	return &ItemWriteResult{Item: *it2, Transaction: row, AccountBalances: res.AccountBalances}, nil
+	return &ItemWriteResult{Item: *it2, Transaction: row, AccountBalances: res.AccountBalances, Setting: s.settingOf(ctx, userID, ruleOf(it2))}, nil
 }
 
 func (s *Service) setArchived(ctx context.Context, userID, id uuid.UUID, archived bool) (*ItemWriteResult, error) {
@@ -1090,6 +1097,11 @@ func (s *Service) Batch(ctx context.Context, userID uuid.UUID, req BatchRequest,
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
 		return nil, err
 	}
+	var rs []*uuid.UUID
+	for _, it := range items {
+		rs = append(rs, it.RuleID)
+	}
+	out.Setting = s.settingOf(ctx, userID, rs...)
 	return out, nil
 }
 

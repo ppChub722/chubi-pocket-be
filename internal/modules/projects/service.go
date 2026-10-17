@@ -77,6 +77,9 @@ func (s *Service) createTx(ctx context.Context, tx pgx.Tx, ownerUserID uuid.UUID
 // List — GET /projects.
 func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*EventList, error) {
 	f.Page, f.PerPage = clampPage(f.Page, f.PerPage)
+	if derived := derivedStatus[f.Status]; derived != nil {
+		return s.listDerived(ctx, userID, f, derived)
+	}
 	ids, total, err := s.store.ListIDs(ctx, userID, f)
 	if err != nil {
 		return nil, err
@@ -105,8 +108,17 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Event, error)
 }
 
 // Detail — GET /projects/:id/detail.
-func (s *Service) Detail(ctx context.Context, userID, id uuid.UUID, page, perPage int) (*EventDetail, error) {
-	return s.detail(ctx, userID, id, page, perPage)
+func (s *Service) Detail(ctx context.Context, userID, id uuid.UUID, page, perPage int, withDeletePreview bool) (*EventDetail, error) {
+	d, err := s.detail(ctx, userID, id, page, perPage)
+	if err != nil || !withDeletePreview {
+		return d, err
+	}
+	p := &DeletePreview{Members: d.Event.MembersCount, LinkedTxCount: d.Event.LinkedTxCount}
+	if err := s.store.db.QueryRow(ctx, `SELECT COUNT(*) FROM project_transactions WHERE project_id = $1 AND parent_project_transaction_id IS NULL`, id).Scan(&p.Bills); err != nil {
+		return nil, err
+	}
+	d.DeletePreview = p
+	return d, nil
 }
 
 // Summary — GET /projects/:id/summary.
@@ -544,4 +556,47 @@ func userDisplayOrEmpty(ctx context.Context, tx pgx.Tx, userID uuid.UUID) string
 	var name string
 	_ = tx.QueryRow(ctx, `SELECT display_name FROM users WHERE id = $1`, userID).Scan(&name)
 	return name
+}
+
+// Derived list statuses (computed from the numbers, not stored): unsettled = I
+// still owe or am owed, receivable = someone owes me, ended = completed or
+// cancelled. Archived events never match.
+var derivedStatus = map[string]func(e *Event) bool{
+	"unsettled":  func(e *Event) bool { return e.MyReceivable > 0 || e.MyPayable > 0 },
+	"receivable": func(e *Event) bool { return e.MyReceivable > 0 },
+	"ended":      func(e *Event) bool { return e.Status == StatusCompleted || e.Status == StatusCancelled },
+}
+
+func (s *Service) listDerived(ctx context.Context, userID uuid.UUID, f ListFilter, match func(e *Event) bool) (*EventList, error) {
+	page, perPage := f.Page, f.PerPage
+	f.Status, f.Page, f.PerPage = "all", 1, 100000
+	ids, _, err := s.store.ListIDs(ctx, userID, f)
+	if err != nil {
+		return nil, err
+	}
+	events, err := loadEvents(ctx, s.store.db, userID, ids)
+	if err != nil {
+		return nil, err
+	}
+	var hit []uuid.UUID
+	for _, id := range ids {
+		if e := events[id]; e.Status != StatusArchived && match(&e) {
+			hit = append(hit, id)
+		}
+	}
+	out := &EventList{Data: []Event{}, Pagination: shared.NewPage(page, perPage, len(hit))}
+	if out.Summary, err = s.listSummary(ctx, userID); err != nil {
+		return nil, err
+	}
+	lo, hi := (page-1)*perPage, page*perPage
+	if lo > len(hit) {
+		lo = len(hit)
+	}
+	if hi > len(hit) {
+		hi = len(hit)
+	}
+	for _, id := range hit[lo:hi] {
+		out.Data = append(out.Data, events[id])
+	}
+	return out, nil
 }

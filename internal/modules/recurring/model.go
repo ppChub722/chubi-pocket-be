@@ -133,12 +133,14 @@ type Recurring struct {
 	Amount      *float64           `json:"amount"` // null = a reminder with no amount yet
 	Account     *shared.AccountRef `json:"account"`
 	// 0.4.0 (spec 11): kind, trial_until, yearly_cost, and the detail numbers.
-	Kind         string   `json:"kind"`
-	TrialUntil   *string  `json:"trial_until"`
-	YearlyCost   float64  `json:"yearly_cost"`
-	SavedCount   int      `json:"saved_count"`
-	PendingCount int      `json:"pending_count"`
-	NextAmount   *float64 `json:"next_amount"`
+	Kind       string  `json:"kind"`
+	TrialUntil *string `json:"trial_until"`
+	YearlyCost float64 `json:"yearly_cost"`
+	// MonthlyAmount — what it costs (or brings) in an average month: amount × times per month; null without an amount.
+	MonthlyAmount *float64 `json:"monthly_amount"`
+	SavedCount    int      `json:"saved_count"`
+	PendingCount  int      `json:"pending_count"`
+	NextAmount    *float64 `json:"next_amount"`
 	// CurrentOccurrence — the present period's occurrence (not done / skipped): what a transaction links to. null = none.
 	CurrentOccurrence *Occurrence           `json:"current_occurrence"`
 	ToAccount         *shared.AccountRef    `json:"to_account"`
@@ -220,8 +222,12 @@ type ItemList struct {
 
 // Detail — spec schema RecurringDetail.
 type Detail struct {
-	Recurring       Recurring              `json:"recurring"`
-	Items           ItemList               `json:"items"`
+	Recurring Recurring `json:"recurring"`
+	Items     ItemList  `json:"items"`
+	// Upcoming — the first page of the upcoming items (the detail page is one call).
+	Upcoming ItemList `json:"upcoming"`
+	// DeletePreview — only with ?include=delete_preview, else null.
+	DeletePreview   *DeletePreview         `json:"delete_preview"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
 }
 
@@ -237,12 +243,16 @@ type ItemWriteResult struct {
 	Item            Item                   `json:"item"`
 	Transaction     any                    `json:"transaction"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
+	// Setting — the owning setting after the write (null when the items belong to no / several settings).
+	Setting *Recurring `json:"setting"`
 }
 
 // ItemsWriteResult — spec schema RecurringItemsWriteResult.
 type ItemsWriteResult struct {
 	Items           []Item                 `json:"items"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
+	// Setting — the owning setting after the write (null when the items belong to no / several settings).
+	Setting *Recurring `json:"setting"`
 }
 
 // ItemDeleteResult — spec schema RecurringItemDeleteResult.
@@ -250,6 +260,8 @@ type ItemDeleteResult struct {
 	ID              uuid.UUID              `json:"id"`
 	TransactionID   *uuid.UUID             `json:"transaction_id"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
+	// Setting — the owning setting after the write (null when the items belong to no / several settings).
+	Setting *Recurring `json:"setting"`
 }
 
 // BatchResult — spec schema RecurringItemBatchResult.
@@ -257,6 +269,8 @@ type BatchResult struct {
 	Items           []Item                 `json:"items"`
 	DeletedIDs      []uuid.UUID            `json:"deleted_ids"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
+	// Setting — the owning setting after the write (null when the items belong to no / several settings).
+	Setting *Recurring `json:"setting"`
 }
 
 // --- requests ---
@@ -358,4 +372,12 @@ type sourceRef struct {
 	Recurring *shared.RecurringRef `json:"recurring"`
 	Seq       *int                 `json:"seq"`
 	Total     *int                 `json:"total"`
+}
+
+// DeletePreview — what deleting the setting touches. Linked records stay
+// unless the delete asks for them to go too (delete_linked).
+type DeletePreview struct {
+	Items              int `json:"items"`               // all occurrences
+	LinkedTransactions int `json:"linked_transactions"` // saved records that would go with delete_linked
+	PendingDrafts      int `json:"pending_drafts"`      // drafts waiting in pending
 }

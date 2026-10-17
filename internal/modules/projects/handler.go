@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"strings"
 	"errors"
 	"net/http"
 	"strconv"
@@ -97,7 +98,7 @@ func (h *Handler) List(c *gin.Context) {
 		Page: atoiOr(c.Query("page"), 1), PerPage: atoiOr(c.Query("per_page"), 20),
 	}
 	switch f.Status {
-	case "", StatusActive, StatusCompleted, StatusCancelled, StatusArchived, "all":
+	case "", StatusActive, StatusCompleted, StatusCancelled, StatusArchived, "all", "unsettled", "receivable", "ended":
 	default:
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
 		return
@@ -137,7 +138,8 @@ func (h *Handler) Detail(c *gin.Context) {
 		return
 	}
 	out, err := h.service.Detail(c.Request.Context(), userID, id,
-		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20))
+		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20),
+		strings.Contains(","+c.Query("include")+",", ",delete_preview,"))
 	reply(c, http.StatusOK, out, err)
 }
 
@@ -400,6 +402,14 @@ func (h *Handler) ListPT(c *gin.Context) {
 			return
 		}
 		f.TagID = &tid
+	}
+	if v := c.Query("payer_member_id"); v != "" {
+		pid, err := uuid.Parse(v)
+		if err != nil {
+			response.BadRequest(c, "VALIDATION_ERROR", "Invalid payer_member_id", nil)
+			return
+		}
+		f.PayerMemberID = &pid
 	}
 	out, err := h.service.ListPT(c.Request.Context(), userID, id, f)
 	reply(c, http.StatusOK, out, err)
