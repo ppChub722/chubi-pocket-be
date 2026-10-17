@@ -300,6 +300,10 @@ func main() {
 			"X-Request-ID",
 			// The app's build number — the version check (modules/appversion).
 			appversion.Header,
+			// The device timezone (accounts / budgets month windows). Without
+			// it here the browser's preflight fails and the web app reaches
+			// nothing ("can't reach the server"); phones don't preflight.
+			"X-Timezone",
 		},
 		// Echo X-Request-ID back so the FE can read it from the response
 		// (ApiException pulls it from this header for error UIs).
