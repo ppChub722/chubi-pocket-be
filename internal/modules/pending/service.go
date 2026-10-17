@@ -116,7 +116,7 @@ func (s *Service) resolveOne(ctx context.Context, userID uuid.UUID, p *PendingTr
 	if err := ResolveRows(ctx, s.store.Pool(), userID, rows); err != nil {
 		return err
 	}
-	p.Resolved = rows[0].Resolved
+	p.Resolved, p.NeedsInput, p.CanConfirm = rows[0].Resolved, rows[0].NeedsInput, rows[0].CanConfirm
 	return nil
 }
 

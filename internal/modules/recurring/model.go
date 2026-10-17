@@ -133,29 +133,31 @@ type Recurring struct {
 	Amount      *float64           `json:"amount"` // null = a reminder with no amount yet
 	Account     *shared.AccountRef `json:"account"`
 	// 0.4.0 (spec 11): kind, trial_until, yearly_cost, and the detail numbers.
-	Kind         string                `json:"kind"`
-	TrialUntil   *string               `json:"trial_until"`
-	YearlyCost   float64               `json:"yearly_cost"`
-	SavedCount   int                   `json:"saved_count"`
-	PendingCount int                   `json:"pending_count"`
-	NextAmount   *float64              `json:"next_amount"`
-	ToAccount    *shared.AccountRef    `json:"to_account"`
-	Category     *shared.CategoryRef   `json:"category"`
-	Goal         *shared.SavingGoalRef `json:"goal"`
-	Tags         []shared.TagRef       `json:"tags"`
-	Rule         RecurrenceRule        `json:"rule"`
-	StartDate    string                `json:"start_date"`
-	End          RecurrenceEnd         `json:"end"`
-	Status       string                `json:"status"`
-	NextDate     *string               `json:"next_date"`
-	DaysUntil    *int                  `json:"days_until"`
-	Progress     Progress              `json:"progress"`
-	EndingSoon   bool                  `json:"ending_soon"`
-	Counts       StatusCounts          `json:"counts"`
-	EditedAny    bool                  `json:"edited_any"`
-	Actions      Actions               `json:"actions"`
-	CreatedAt    time.Time             `json:"created_at"`
-	UpdatedAt    time.Time             `json:"updated_at"`
+	Kind         string   `json:"kind"`
+	TrialUntil   *string  `json:"trial_until"`
+	YearlyCost   float64  `json:"yearly_cost"`
+	SavedCount   int      `json:"saved_count"`
+	PendingCount int      `json:"pending_count"`
+	NextAmount   *float64 `json:"next_amount"`
+	// CurrentOccurrence — the present period's occurrence (not done / skipped): what a transaction links to. null = none.
+	CurrentOccurrence *Occurrence           `json:"current_occurrence"`
+	ToAccount         *shared.AccountRef    `json:"to_account"`
+	Category          *shared.CategoryRef   `json:"category"`
+	Goal              *shared.SavingGoalRef `json:"goal"`
+	Tags              []shared.TagRef       `json:"tags"`
+	Rule              RecurrenceRule        `json:"rule"`
+	StartDate         string                `json:"start_date"`
+	End               RecurrenceEnd         `json:"end"`
+	Status            string                `json:"status"`
+	NextDate          *string               `json:"next_date"`
+	DaysUntil         *int                  `json:"days_until"`
+	Progress          Progress              `json:"progress"`
+	EndingSoon        bool                  `json:"ending_soon"`
+	Counts            StatusCounts          `json:"counts"`
+	EditedAny         bool                  `json:"edited_any"`
+	Actions           Actions               `json:"actions"`
+	CreatedAt         time.Time             `json:"created_at"`
+	UpdatedAt         time.Time             `json:"updated_at"`
 }
 
 type ListCounts struct {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -102,6 +103,8 @@ func mapError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusConflict, "ITEM_ALREADY_LINKED", "Some items can't take this action", gin.H{"ids": conflict.IDs})
 	case errors.Is(err, ErrNotFound):
 		response.NotFound(c, "NOT_FOUND", "Recurring setting not found")
+	case errors.Is(err, ErrTxNotFound):
+		response.NotFound(c, "NOT_FOUND", "Transaction not found")
 	case errors.Is(err, ErrItemNotFound):
 		response.NotFound(c, "NOT_FOUND", "Recurring item not found")
 	case errors.Is(err, ErrValidation):
@@ -146,7 +149,12 @@ func (h *Handler) List(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
 		return
 	}
-	out, err := h.service.List(c.Request.Context(), uid, status, c.Query("q"),
+	forType := c.Query("for_type")
+	if forType != "" && forType != "expense" && forType != "income" && forType != "transfer" {
+		response.BadRequest(c, "VALIDATION_ERROR", "for_type must be expense, income or transfer", nil)
+		return
+	}
+	out, err := h.service.List(c.Request.Context(), uid, status, c.Query("q"), forType,
 		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20), tz(c))
 	reply(c, http.StatusOK, out, err)
 }
@@ -278,7 +286,18 @@ func (h *Handler) Items(c *gin.Context) {
 	if !ok {
 		return
 	}
-	status := c.DefaultQuery("status", StatusUpcoming)
+	month := c.Query("month") // calendar: the items of one month (YYYY-MM), every status, oldest first
+	if month != "" {
+		if _, err := time.Parse("2006-01", month); err != nil {
+			response.BadRequest(c, "VALIDATION_ERROR", "month must be YYYY-MM", nil)
+			return
+		}
+	}
+	defStatus := StatusUpcoming
+	if month != "" {
+		defStatus = "all"
+	}
+	status := c.DefaultQuery("status", defStatus)
 	switch status {
 	case StatusUpcoming, StatusNotCreated, StatusPending, StatusDone, StatusArchived, "all":
 	default:
@@ -290,7 +309,7 @@ func (h *Handler) Items(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid kind", nil)
 		return
 	}
-	out, err := h.service.Items(c.Request.Context(), uid, status, kind,
+	out, err := h.service.Items(c.Request.Context(), uid, status, kind, month,
 		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20), tz(c))
 	reply(c, http.StatusOK, out, err)
 }

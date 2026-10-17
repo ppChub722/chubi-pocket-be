@@ -3547,6 +3547,7 @@ paths:
         - { $ref: '#/components/parameters/PerPage' }
         - { name: q, in: query, description: 'Case-insensitive substring of the name.', schema: { type: string } }
         - { name: status, in: query, schema: { type: string, enum: [current, archived, all] } }
+        - { name: for_type, in: query, description: 'THE PICKER: only ACTIVE settings of this money type (a transaction of that type can link to them); each row''s current_occurrence says which occurrence it would take (null = none now).', schema: { type: string, enum: [expense, income, transfer] } }
       responses:
         '200':
           description: One page of settings + the chip counts.
@@ -3731,6 +3732,23 @@ paths:
       x-breaking: New.
       x-used-by:
         - { page: recurring-detail, calls: 1 }
+  /recurring/{id}/duplicate:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    post:
+      tags: [Recurring]
+      summary: Duplicate a recurring
+      operationId: duplicateRecurring
+      description: 'A new ACTIVE setting with the same values (name + " (สำเนา)"), starting today, the same end (an installment keeps its whole count; custom dates keep the dates still to come; 400 when none are left). Its items are generated like a new setting''s. Answers 201 with the new setting''s page.'
+      responses:
+        '201':
+          description: 'The new setting.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecurringDetail' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-breaking: 'New (0.4.0).'
   /recurring/{id}/extend:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
@@ -3763,6 +3781,7 @@ paths:
         - { $ref: '#/components/parameters/PerPage' }
         - { name: status, in: query, schema: { type: string, enum: [upcoming, not_created, pending, done, archived, all] } }
         - { name: kind, in: query, schema: { type: string, enum: [all, recurring, one_off] } }
+        - { name: month, in: query, description: 'CALENDAR: the items dated in that month (YYYY-MM) of active settings and one-offs, every status unless status is given, oldest first; per_page defaults to 100 for it. Group by date on the client.', schema: { type: string, example: '2026-10' } }
       responses:
         '200':
           description: One page of items.
@@ -3881,6 +3900,33 @@ paths:
       x-breaking: New.
       x-used-by:
         - { page: recurring-item, calls: 1 }
+  /recurring-items/{id}/link:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    post:
+      tags: [Recurring]
+      summary: Link an existing transaction to an occurrence
+      operationId: linkRecurringItem
+      description: 'The recurring picker''s action: the transaction becomes this occurrence''s saved record (item status done with the transaction; its pending draft is removed; the item takes the real amount, so a reminder''s period gets its amount). The occurrence comes from `current_occurrence` of GET /recurring?for_type=. 409 ITEM_ALREADY_LINKED (done / skipped / the transaction is already linked), 400 VALIDATION_ERROR (the type differs), 404 (not yours). `amount_differs` = the transaction''s amount ≠ the setting''s (when it has one): the app asks "อัปเดตยอดรายการประจำด้วยไหม?" and, on yes, calls `PUT /recurring/{id}` `{amount}` (scope upcoming) — there is no separate amount route.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecurringLinkRequest' }
+      responses:
+        '200':
+          description: 'The linked item and the amount question.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecurringLinkResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'ITEM_ALREADY_LINKED.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: 'New (0.4.0).'
   /recurring-items/{id}/create:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
@@ -9554,7 +9600,7 @@ components:
     Recurring:
       type: object
       description: 'A recurring setting (the generator), page-ready.'
-      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, saved_count, pending_count, next_amount, next_date, days_until, progress, ending_soon, counts, edited_any, actions, created_at, updated_at]
+      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, saved_count, pending_count, next_amount, current_occurrence, next_date, days_until, progress, ending_soon, counts, edited_any, actions, created_at, updated_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         name: { type: string, maxLength: 100 }
@@ -9569,6 +9615,7 @@ components:
         saved_count: { type: integer, description: 'Occurrences that became a transaction (status done).' }
         pending_count: { type: integer, description: 'Occurrences waiting in pending.' }
         next_amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'The amount of the next upcoming occurrence (null = not known / none).' }
+        current_occurrence: { oneOf: [{ $ref: '#/components/schemas/RecurringOccurrence' }, { type: 'null' }], description: 'The present period''s occurrence (not done / skipped): what a transaction links to; null = none within one cycle.' }
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
         to_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'Transfers only.' }
         category: { oneOf: [{ $ref: '#/components/schemas/CategoryRef' }, { type: 'null' }] }
@@ -9608,6 +9655,31 @@ components:
             extend: { type: boolean }
         created_at: { $ref: '#/components/schemas/DateTime' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
+    RecurringOccurrence:
+      type: object
+      description: 'The present period''s occurrence of a setting that is not done and not skipped (the earliest one within one cycle of today): what a transaction links to.'
+      required: [item_id, date, days_until, amount, status]
+      properties:
+        item_id: { $ref: '#/components/schemas/Uuid' }
+        date: { $ref: '#/components/schemas/Date' }
+        days_until: { type: integer, description: 'Negative = overdue.' }
+        amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'null = not known yet (a reminder).' }
+        status: { type: string, enum: [upcoming, pending, not_created] }
+    RecurringLinkRequest:
+      type: object
+      required: [transaction_id]
+      properties:
+        transaction_id: { $ref: '#/components/schemas/Uuid' }
+    RecurringLinkResult:
+      type: object
+      required: [item, transaction, amount_differs, rule_amount, transaction_amount, account_balances]
+      properties:
+        item: { $ref: '#/components/schemas/RecurringItem' }
+        transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }] }
+        amount_differs: { type: boolean, description: 'The setting has an amount and the transaction''s differs.' }
+        rule_amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
+        transaction_amount: { $ref: '#/components/schemas/Money' }
+        account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
     RecurringKindTotals:
       type: object
       required: [count, monthly, yearly]

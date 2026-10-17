@@ -528,6 +528,7 @@ func main() {
 			protected.POST("/recurring/:id/archive", recurringHandler.Archive)
 			protected.POST("/recurring/:id/restore", recurringHandler.Restore)
 			protected.POST("/recurring/:id/extend", recurringHandler.Extend)
+			protected.POST("/recurring/:id/duplicate", recurringHandler.Duplicate)
 			protected.GET("/recurring-items", recurringHandler.Items)
 			protected.POST("/recurring-items", recurringHandler.CreateItem)
 			protected.POST("/recurring-items/batch", recurringHandler.Batch)
@@ -535,6 +536,7 @@ func main() {
 			protected.PUT("/recurring-items/:id", recurringHandler.UpdateItem)
 			protected.DELETE("/recurring-items/:id", recurringHandler.DeleteItem)
 			protected.POST("/recurring-items/:id/create", recurringHandler.CreateNow)
+			protected.POST("/recurring-items/:id/link", recurringHandler.Link)
 			protected.POST("/recurring-items/:id/archive", recurringHandler.ArchiveItem)
 			protected.POST("/recurring-items/:id/restore", recurringHandler.RestoreItem)
 

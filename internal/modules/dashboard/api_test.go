@@ -185,11 +185,11 @@ func TestDashboardAttentionRule(t *testing.T) {
 	read, actioned, dismissed := ago(1), ago(1), ago(1)
 	empty := `{}`
 
-	unreadInfo := e.notif(t, "project_invite", nil, nil, nil, ago(5), empty)                    // IN: unread
-	readInfo := e.notif(t, "project_invite", &read, nil, nil, ago(6), empty)                    // OUT: read, plain info
+	unreadInfo := e.notif(t, "project_added", nil, nil, nil, ago(5), empty)                    // IN: unread
+	readInfo := e.notif(t, "project_added", &read, nil, nil, ago(6), empty)                    // OUT: read, plain info
 	readAwaiting := e.notif(t, "split_created", &read, nil, nil, ago(7), empty)                 // IN: read but awaits answer
 	actionedRead := e.notif(t, "split_created", &read, &actioned, nil, ago(8), empty)           // OUT: actioned + read
-	dismissedUnread := e.notif(t, "project_invite", nil, nil, &dismissed, ago(9), empty)        // OUT: dismissed
+	dismissedUnread := e.notif(t, "project_added", nil, nil, &dismissed, ago(9), empty)        // OUT: dismissed
 	dismissedAwaiting := e.notif(t, "split_created", &read, nil, &dismissed, ago(10), empty)    // OUT: dismissed
 	supersededRead := e.notif(t, "split_created", &read, nil, nil, ago(11), `{"superseded":1}`) // OUT: no longer awaits
 
@@ -218,7 +218,7 @@ func TestDashboardAttentionTotalAndCap(t *testing.T) {
 	e := newDashEnv(t)
 	now := time.Now()
 	for i := 0; i < 12; i++ {
-		e.notif(t, "project_invite", nil, nil, nil, now.Add(-time.Duration(i)*time.Minute), `{}`)
+		e.notif(t, "project_added", nil, nil, nil, now.Add(-time.Duration(i)*time.Minute), `{}`)
 	}
 	blk := e.attention(t)
 	if blk.Total != 12 || len(blk.Items) != 10 {
@@ -229,7 +229,7 @@ func TestDashboardAttentionTotalAndCap(t *testing.T) {
 	// are not rows of the block: total follows the larger number.
 	dismissed := now
 	for i := 0; i < 3; i++ {
-		e.notif(t, "project_invite", nil, nil, &dismissed, now.Add(-time.Hour), `{}`)
+		e.notif(t, "project_added", nil, nil, &dismissed, now.Add(-time.Hour), `{}`)
 	}
 	blk = e.attention(t)
 	if blk.Total != 15 || len(blk.Items) != 10 {

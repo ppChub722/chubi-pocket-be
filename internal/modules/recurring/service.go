@@ -479,6 +479,10 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	occ, err := s.currentOccurrences(ctx, userID, today, rules)
+	if err != nil {
+		return nil, err
+	}
 	// The next occurrence's amount (the earliest upcoming item that has one).
 	nextAmt := map[uuid.UUID]*float64{}
 	nrows, err := s.db.Query(ctx, `SELECT DISTINCT ON (i.rule_id) i.rule_id, NULLIF((i.draft->>'amount')::numeric, 0)::float8
@@ -534,7 +538,7 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 			ID: r.ID, Name: r.Name, Description: r.Description, Note: r.Note, IconCode: r.IconCode,
 			Type: r.Type, Amount: amountPtr(r.Amount), Tags: []shared.TagRef{}, Rule: r.apiRule(),
 			Kind: r.Kind, TrialUntil: dstr(r.TrialUntil), YearlyCost: yearlyCost(r, today),
-			SavedCount: a.counts.Done, PendingCount: a.counts.Pending, NextAmount: nextAmt[r.ID],
+			SavedCount: a.counts.Done, PendingCount: a.counts.Pending, NextAmount: nextAmt[r.ID], CurrentOccurrence: occ[r.ID],
 			StartDate: r.StartDate.Format(dateLayout), End: r.apiEnd(), Status: r.Status,
 			Progress: Progress{Done: a.done, Total: r.TotalCount}, Counts: a.counts, EditedAny: a.edited,
 			CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
@@ -634,7 +638,7 @@ func (s *Service) ruleItems(ctx context.Context, userID, ruleID uuid.UUID, today
 
 // --- reads ---
 
-func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q string, page, perPage int, tz string) (*RecurringList, error) {
+func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType string, page, perPage int, tz string) (*RecurringList, error) {
 	if err := s.DueCheck(ctx, userID, tz); err != nil {
 		return nil, err
 	}
@@ -651,9 +655,13 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q string, 
 		cond = `TRUE`
 	}
 	args := []any{userID}
+	if forType != "" { // the picker: ACTIVE settings that can take a transaction of this type
+		args = append(args, forType)
+		cond = fmt.Sprintf(`status = 'active' AND type = $%d`, len(args))
+	}
 	if q = strings.TrimSpace(q); q != "" {
 		args = append(args, "%"+shared.EscapeLike(q)+"%")
-		cond += ` AND name ILIKE $2`
+		cond += fmt.Sprintf(` AND name ILIKE $%d`, len(args))
 	}
 	out := &RecurringList{Data: []Recurring{}}
 	if out.Summary, err = s.summary(ctx, userID, today); err != nil {
@@ -719,7 +727,7 @@ func (s *Service) RuleItems(ctx context.Context, userID, id uuid.UUID, tab strin
 }
 
 // Items — GET /recurring-items.
-func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind string, page, perPage int, tz string) (*ItemList, error) {
+func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, month string, page, perPage int, tz string) (*ItemList, error) {
 	if err := s.DueCheck(ctx, userID, tz); err != nil {
 		return nil, err
 	}
@@ -731,6 +739,18 @@ func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind stri
 	where := `WHERE i.user_id = $1`
 	args := []any{userID}
 	order := `i.date DESC, i.id`
+	if month != "" {
+		first, err := time.Parse("2006-01", month)
+		if err != nil {
+			return nil, ErrValidation
+		}
+		args = append(args, first, first.AddDate(0, 1, -1))
+		where += fmt.Sprintf(` AND i.date BETWEEN $%d AND $%d AND (i.rule_id IS NULL OR r.status = 'active')`, len(args)-1, len(args))
+		order = `i.date ASC, i.id`
+		if perPage < 100 && perPage == 20 {
+			perPage = 100
+		}
+	}
 	switch status {
 	case "", StatusUpcoming:
 		where += ` AND ` + statusSQL + ` = 'upcoming' AND (i.rule_id IS NULL OR r.status = 'active')`

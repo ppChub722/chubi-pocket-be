@@ -74,6 +74,7 @@ func newRecFix(t *testing.T) *recFix {
 		g.POST("/recurring/:id/archive", h.Archive)
 		g.POST("/recurring/:id/restore", h.Restore)
 		g.POST("/recurring/:id/extend", h.Extend)
+		g.POST("/recurring/:id/duplicate", h.Duplicate)
 		g.GET("/recurring-items", h.Items)
 		g.POST("/recurring-items", h.CreateItem)
 		g.POST("/recurring-items/batch", h.Batch)
@@ -81,6 +82,7 @@ func newRecFix(t *testing.T) *recFix {
 		g.PUT("/recurring-items/:id", h.UpdateItem)
 		g.DELETE("/recurring-items/:id", h.DeleteItem)
 		g.POST("/recurring-items/:id/create", h.CreateNow)
+		g.POST("/recurring-items/:id/link", h.Link)
 		g.POST("/recurring-items/:id/archive", h.ArchiveItem)
 		g.POST("/recurring-items/:id/restore", h.RestoreItem)
 		g.POST("/transactions", th.Create)
@@ -633,4 +635,113 @@ func TestRecurringKinds(t *testing.T) {
 	if list.Summary.Due30dTotal <= 0 {
 		t.Errorf("due_30d_total = %v", list.Summary.Due30dTotal)
 	}
+}
+
+// The calendar: items of one month, every status, oldest first.
+func TestRecurringCalendarMonth(t *testing.T) {
+	f := newRecFix(t)
+	f.createWeekly(6) // every 7 days, started 14 days ago
+	month := f.today.Format("2006-01")
+	var l ItemList
+	f.call("GET", "/recurring-items?month="+month, "listRecurringItems", nil, 200, &l)
+	first, last := f.today.AddDate(0, 0, -f.today.Day()+1), f.today.AddDate(0, 1, -f.today.Day())
+	for i, it := range l.Data {
+		if it.Date < first.Format("2006-01-02") || it.Date > last.Format("2006-01-02") {
+			t.Errorf("item %s outside %s", it.Date, month)
+		}
+		if i > 0 && l.Data[i-1].Date > it.Date {
+			t.Errorf("not oldest first: %s before %s", l.Data[i-1].Date, it.Date)
+		}
+	}
+	if l.Pagination.PerPage != 100 {
+		t.Errorf("per_page = %d, want 100 for a month", l.Pagination.PerPage)
+	}
+	f.call("GET", "/recurring-items?month=2026-13", "", nil, 400, nil)
+}
+
+// Duplicate: a copy of a setting, starting today, with its end.
+func TestRecurringDuplicate(t *testing.T) {
+	f := newRecFix(t)
+	src := f.createWeekly(6)
+	var cp Detail
+	f.call("POST", "/recurring/"+src.Recurring.ID.String()+"/duplicate", "duplicateRecurring", nil, 201, &cp)
+	if cp.Recurring.ID == src.Recurring.ID || cp.Recurring.Name != "Netflix (สำเนา)" || cp.Recurring.Status != "active" ||
+		cp.Recurring.StartDate != f.day(0) || cp.Recurring.Progress.Total == nil || *cp.Recurring.Progress.Total != 6 ||
+		cp.Recurring.Kind != KindInstallment || av(cp.Recurring.Amount) != 100 {
+		t.Errorf("copy = %+v", cp.Recurring)
+	}
+	f.call("POST", "/recurring/"+uuid.NewString()+"/duplicate", "", nil, 404, nil)
+}
+
+// The picker + link: the current occurrence, linking a transaction to it, the
+// amount question, a reminder taking the real amount.
+func TestRecurringPickerAndLink(t *testing.T) {
+	f := newRecFix(t)
+	mkRule := func(body map[string]any) Detail {
+		t.Helper()
+		var d Detail
+		body["rule"], body["start_date"] = map[string]any{"freq": "monthly", "interval": 1}, f.day(-1)
+		f.call("POST", "/recurring", "createRecurring", body, 201, &d)
+		return d
+	}
+	sub := mkRule(map[string]any{"name": "Netflix", "kind": "subscription", "amount": 100, "account_id": f.wallet})
+	rem := mkRule(map[string]any{"name": "Water", "kind": "reminder", "account_id": f.wallet})
+	mkRule(map[string]any{"name": "Salary", "kind": "income", "amount": 900, "account_id": f.wallet})
+
+	var pick RecurringList
+	f.call("GET", "/recurring?for_type=expense", "listRecurring", nil, 200, &pick)
+	if len(pick.Data) != 2 {
+		t.Fatalf("expense picker = %d rows, want 2 (Netflix, Water)", len(pick.Data))
+	}
+	occ := map[string]*Occurrence{}
+	for _, r := range pick.Data {
+		occ[r.Name] = r.CurrentOccurrence
+	}
+	if occ["Netflix"] == nil || occ["Netflix"].Status != "pending" || av(occ["Netflix"].Amount) != 100 ||
+		occ["Water"] == nil || occ["Water"].Amount != nil {
+		t.Fatalf("current occurrences = %+v / %+v", occ["Netflix"], occ["Water"])
+	}
+	f.call("GET", "/recurring?for_type=nope", "", nil, 400, nil)
+
+	mk := func(amount float64) uuid.UUID {
+		res, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
+			Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: amount, Date: f.day(0)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.(*transactions.TransactionDetail).ID
+	}
+	tx1 := mk(120)
+	var link LinkResult
+	f.call("POST", "/recurring-items/"+occ["Netflix"].ItemID.String()+"/link", "linkRecurringItem",
+		map[string]any{"transaction_id": tx1}, 200, &link)
+	if link.Item.Status != StatusDone || link.Item.Transaction == nil || link.Item.Transaction.ID != tx1 ||
+		!link.AmountDiffers || av(link.RuleAmount) != 100 || link.TransactionAmount != 120 || av(link.Item.Amount) != 120 {
+		t.Errorf("link = %+v", link)
+	}
+	var left int
+	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM pending_transactions WHERE id = $1`, occ["Netflix"].ItemID).Scan(&left)
+	var pend int
+	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM pending_transactions p JOIN recurring_items i ON i.pending_id = p.id WHERE i.id = $1`, occ["Netflix"].ItemID).Scan(&pend)
+	if pend != 0 {
+		t.Errorf("the occurrence's pending draft survived")
+	}
+	// The same transaction / item can't be linked twice.
+	f.call("POST", "/recurring-items/"+occ["Netflix"].ItemID.String()+"/link", "", map[string]any{"transaction_id": mk(5)}, 409, nil)
+	f.call("POST", "/recurring-items/"+occ["Water"].ItemID.String()+"/link", "", map[string]any{"transaction_id": tx1}, 409, nil)
+	f.call("POST", "/recurring-items/"+occ["Water"].ItemID.String()+"/link", "", map[string]any{"transaction_id": uuid.New()}, 404, nil)
+
+	// A reminder takes the real amount; the setting stays without one.
+	tx2 := mk(333)
+	f.call("POST", "/recurring-items/"+occ["Water"].ItemID.String()+"/link", "linkRecurringItem",
+		map[string]any{"transaction_id": tx2}, 200, &link)
+	if link.AmountDiffers || link.RuleAmount != nil || av(link.Item.Amount) != 333 || link.Item.Status != StatusDone {
+		t.Errorf("reminder link = %+v", link)
+	}
+	var det Detail
+	f.call("GET", "/recurring/"+rem.Recurring.ID.String(), "getRecurring", nil, 200, &det)
+	if det.Recurring.Amount != nil || det.Recurring.SavedCount != 1 {
+		t.Errorf("reminder after link: amount %v saved %d", det.Recurring.Amount, det.Recurring.SavedCount)
+	}
+	_ = sub
 }
