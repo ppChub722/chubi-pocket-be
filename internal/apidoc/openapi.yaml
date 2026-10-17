@@ -4084,7 +4084,6 @@ paths:
     get:
       tags: [Debts]
       summary: A person's entries (filter / sort / page)
-        - { name: cycle, in: query, description: 'current = entries after the last time the balance with the person hit 0; earlier = the entries before it (older cycles). Omitted = all.', schema: { type: string, enum: [current, earlier] } }
       operationId: listDebtEntries
       description: |
         `q` matches description / note (case-insensitive). `direction` paid | received. `paid` true | false (the label). `money=true` = only entries with a wallet transaction (the "ประวัติการจ่าย" tab); `account_id` = only entries whose transaction sits on that wallet. `from` / `to` = entry date range (inclusive). `sort`: date_desc (default) | date_asc | amount_desc | amount_asc (ties: newest created first).
