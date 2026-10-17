@@ -107,7 +107,7 @@ func (s *Service) Archived(ctx context.Context, userID uuid.UUID) (*ArchivedHub,
 		WHERE user_id = $1 AND status = 'archived' ORDER BY updated_at DESC, id`, userID); err != nil {
 		return nil, err
 	}
-	if out.Goals, err = s.archivedGroup(ctx, `SELECT id, name, icon_code, updated_at, TRUE, 'target', target_amount::float8 FROM saving_goals
+	if out.Goals, err = s.archivedGroup(ctx, `SELECT id, name, icon_code, updated_at, TRUE, CASE WHEN target_amount IS NULL THEN NULL ELSE 'target' END, target_amount::float8 FROM saving_goals
 		WHERE user_id = $1 AND status = 'archived' ORDER BY updated_at DESC, id`, userID); err != nil {
 		return nil, err
 	}

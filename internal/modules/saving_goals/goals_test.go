@@ -144,7 +144,7 @@ func TestSavingsNotebook(t *testing.T) {
 	if w.GoalPage == nil || w.GoalPage.Goal.ID != trip || len(w.GoalPage.ByWallet) != 2 || w.SparePage != nil {
 		t.Errorf("goal_page = %+v", w.GoalPage)
 	}
-	if len(w.Goals) != 1 || w.Goals[0].SavedAmount != 52000 || w.Goals[0].ProgressPct != 65 {
+	if len(w.Goals) != 1 || w.Goals[0].SavedAmount != 52000 || w.Goals[0].ProgressPct == nil || *w.Goals[0].ProgressPct != 65 {
 		t.Fatalf("trip after saves = %+v", w.Goals)
 	}
 	f.save(f.kbank, &car, 60000)
@@ -234,11 +234,41 @@ func TestSavingsNotebook(t *testing.T) {
 		t.Errorf("edit = %+v", w.Entries)
 	}
 
-	// Delete / archive while it holds money → close first.
+	// Delete while it holds money → close first.
 	if raw := f.call("DELETE", "/saving-goals/"+car.String(), "", nil, http.StatusConflict, nil); errCode(raw) != "GOAL_HAS_SAVINGS" {
 		t.Errorf("delete car = %s", raw)
 	}
-	f.call("POST", "/saving-goals/"+car.String()+"/archive", "archiveSavingGoal", nil, http.StatusConflict, nil)
+	// Archive while it holds money is fine (0.4.0-1): the goal keeps its money,
+	// which counts in no total (savings, wallets' saved / available) until it
+	// is restored.
+	var before, after GoalList
+	f.call("GET", "/saving-goals", "listSavingGoals", nil, http.StatusOK, &before)
+	walletsBefore, _ := shared.LoadWalletSavings(f.ctx, f.pool, f.me, []uuid.UUID{f.kbank, f.scb})
+	f.call("POST", "/saving-goals/"+car.String()+"/archive", "archiveSavingGoal", nil, http.StatusOK, &d)
+	held := d.Goal.SavedAmount
+	if d.Goal.State != StateArchived || held <= 0 || !d.Goal.Actions.Restore || d.Goal.Actions.Archive {
+		t.Fatalf("archived with money = %+v", d.Goal)
+	}
+	f.call("GET", "/saving-goals", "listSavingGoals", nil, http.StatusOK, &after)
+	walletsAfter, _ := shared.LoadWalletSavings(f.ctx, f.pool, f.me, []uuid.UUID{f.kbank, f.scb})
+	if after.Summary.Saved != round2(before.Summary.Saved-held) || after.Summary.InGoals != round2(before.Summary.InGoals-held) {
+		t.Errorf("totals with car archived = %+v (before %+v, car %v)", after.Summary, before.Summary, held)
+	}
+	var freed float64
+	for _, w := range []uuid.UUID{f.kbank, f.scb} {
+		freed += walletsBefore[w].Saved - walletsAfter[w].Saved
+		if *walletsAfter[w].Available-*walletsBefore[w].Available != walletsBefore[w].Saved-walletsAfter[w].Saved {
+			t.Errorf("wallet %v available = %v → %v", w, *walletsBefore[w].Available, *walletsAfter[w].Available)
+		}
+	}
+	if round2(freed) != held {
+		t.Errorf("wallets' saved dropped by %v, want %v", freed, held)
+	}
+	f.call("POST", "/saving-goals/"+car.String()+"/restore", "restoreSavingGoal", nil, http.StatusOK, &d)
+	f.call("GET", "/saving-goals", "listSavingGoals", nil, http.StatusOK, &after)
+	if d.Goal.State != StateActive || after.Summary.Saved != before.Summary.Saved {
+		t.Errorf("restored: %s, saved %v (want %v)", d.Goal.State, after.Summary.Saved, before.Summary.Saved)
+	}
 	// Close the car back to the wallets: each part to its own wallet.
 	f.call("POST", "/saving-goals/"+car.String()+"/close", "closeSavingGoal", map[string]any{"to": "wallets"}, http.StatusOK, &w)
 	if len(w.Entries) != 2 || len(w.Goals) != 1 || w.Goals[0].State != StateCompleted || w.Goals[0].SavedAmount != 0 {
@@ -401,4 +431,54 @@ func TestGoalMonthNumbersAndAutoSave(t *testing.T) {
 	if sp.AutoSave != nil || d.Goal.AutoSave != nil {
 		t.Errorf("cleared: spare %+v goal %+v", sp.AutoSave, d.Goal.AutoSave)
 	}
+}
+
+// A goal with no target (open-ended, 0.4.0-1): no %, remaining, milestones,
+// ETA or status; its plan comes only from auto-saving and it is never short.
+func TestOpenEndedGoal(t *testing.T) {
+	f := newGoalFix(t)
+	var d GoalDetail
+	f.call("POST", "/saving-goals", "createSavingGoal", map[string]any{"name": "For the kid"}, http.StatusCreated, &d)
+	kid := d.Goal.ID
+	g := d.Goal
+	if g.TargetAmount != nil || g.ProgressPct != nil || g.RemainingAmount != nil || len(g.Milestones) != 0 ||
+		g.Group == nil || *g.Group != GroupOngoing || g.Status != "none" || g.MonthPlan != nil || g.MonthShort != nil {
+		t.Fatalf("open-ended = %+v", g)
+	}
+	f.save(f.kbank, &kid, 2000)
+	f.call("PUT", "/saving-goals/"+kid.String()+"/auto-save", "setGoalAutoSave",
+		map[string]any{"amount": 3000, "day": 31, "account_id": f.kbank}, http.StatusOK, &d)
+	g = d.Goal
+	if g.SavedAmount != 2000 || g.MonthSaved != 2000 || g.MonthPlan == nil || *g.MonthPlan != 3000 ||
+		g.MonthShort != nil || g.EtaDate != nil || g.NeededMonthly != nil || g.Status != "none" {
+		t.Fatalf("open-ended with auto-save = %+v", g)
+	}
+	for _, p := range d.History {
+		if p.Plan != nil {
+			t.Errorf("history plan line = %+v", p)
+		}
+	}
+	// A goal with a target next to it: only that one counts in the month card.
+	dl := f.today.AddDate(0, 5, 0).Format(dateLayout)
+	trip := f.goal("Trip", 50000, &dl)
+	var l GoalList
+	f.call("GET", "/saving-goals?sort=progress", "listSavingGoals", nil, http.StatusOK, &l)
+	if len(l.Data) != 2 || l.Data[1].ID != kid {
+		t.Fatalf("progress sort puts open-ended last = %+v", l.Data)
+	}
+	if l.Summary.SavedTotal != 2000 || l.Summary.MonthSavedTotal != 0 || l.Summary.MonthPlanTotal != *l.Data[0].MonthPlan ||
+		l.Summary.MonthShortTotal != *l.Data[0].MonthShort {
+		t.Errorf("summary leaves open-ended out = %+v", l.Summary)
+	}
+	_ = trip
+	// A target turns it into a normal goal; null clears it again.
+	f.call("PUT", "/saving-goals/"+kid.String(), "updateSavingGoal", map[string]any{"target_amount": 10000}, http.StatusOK, &d)
+	if d.Goal.TargetAmount == nil || *d.Goal.ProgressPct != 20 || d.Goal.Group != nil || d.Goal.MonthShort == nil {
+		t.Errorf("with a target = %+v", d.Goal)
+	}
+	f.call("PUT", "/saving-goals/"+kid.String(), "updateSavingGoal", map[string]any{"target_amount": nil}, http.StatusOK, &d)
+	if d.Goal.TargetAmount != nil || d.Goal.Group == nil {
+		t.Errorf("target cleared = %+v", d.Goal)
+	}
+	f.call("POST", "/saving-goals", "", map[string]any{"name": "Bad", "target_amount": 0}, http.StatusBadRequest, nil)
 }

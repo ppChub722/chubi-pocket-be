@@ -75,6 +75,11 @@ func SavingBalancesSQL(where string) string {
 	GROUP BY 1, 2, 3 HAVING ABS(SUM(m.amount)) > 0.004`
 }
 
+// CountedSavings — the SavingBalancesSQL filter that leaves out the money of
+// archived goals (0.4.0-1): an archived goal keeps its money, but it counts
+// in no total (savings, wallets' saved / available) until it is restored.
+const CountedSavings = `NOT EXISTS (SELECT 1 FROM saving_goals sg WHERE sg.id = m.goal_id AND sg.status = 'archived')`
+
 // LoadSavingBalances runs SavingBalancesSQL.
 func LoadSavingBalances(ctx context.Context, q Querier, userID uuid.UUID, where string, args ...any) ([]SavingBalance, error) {
 	rows, err := q.Query(ctx, SavingBalancesSQL(where), append([]any{userID}, args...)...)
@@ -125,7 +130,7 @@ func LoadSavingGoalRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uu
 }
 
 // LoadWalletSavings — userID's savings in each of the wallets (every id
-// gets an entry, zeros included).
+// gets an entry, zeros included). Archived goals' money is left out.
 func LoadWalletSavings(ctx context.Context, q Querier, userID uuid.UUID, accountIDs []uuid.UUID) (map[uuid.UUID]WalletSavings, error) {
 	out := map[uuid.UUID]WalletSavings{}
 	accountIDs = uniqueIDs(accountIDs)
@@ -153,7 +158,7 @@ func LoadWalletSavings(ctx context.Context, q Querier, userID uuid.UUID, account
 		accts[id] = a
 	}
 	rows.Close()
-	bals, err := LoadSavingBalances(ctx, q, userID, `m.account_id = ANY($2)`, accountIDs)
+	bals, err := LoadSavingBalances(ctx, q, userID, `m.account_id = ANY($2) AND `+CountedSavings, accountIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -212,11 +217,11 @@ func LoadWalletSavings(ctx context.Context, q Querier, userID uuid.UUID, account
 }
 
 // LoadSavingTotals — the Home / More numbers: active goals, everything
-// saved (goals + spare) and the money left available in the wallets that
+// saved (goals + spare; archived goals' money left out) and the money left available in the wallets that
 // track their balance (the caller's active ones).
 func LoadSavingTotals(ctx context.Context, q Querier, userID uuid.UUID) (*SavingTotals, error) {
 	out := &SavingTotals{}
-	bals, err := LoadSavingBalances(ctx, q, userID, "")
+	bals, err := LoadSavingBalances(ctx, q, userID, CountedSavings)
 	if err != nil {
 		return nil, err
 	}

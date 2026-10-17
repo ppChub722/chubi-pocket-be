@@ -4534,12 +4534,12 @@ paths:
       tags: [Saving goals]
       summary: Archive (เก็บถาวร)
       operationId: archiveSavingGoal
-      description: '409 GOAL_HAS_SAVINGS while it holds money; 409 INVALID_TRANSITION when already archived.'
+      description: 'Also while it holds money (0.4.0-1): the goal keeps it, but it counts in no total (savings, wallets'' saved / available) until restored. 409 INVALID_TRANSITION when already archived.'
       responses:
         '200': { description: The goal page., content: { application/json: { schema: { $ref: '#/components/schemas/SavingGoalDetail' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409': { description: '409 GOAL_HAS_SAVINGS / INVALID_TRANSITION.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '409': { description: '409 INVALID_TRANSITION.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
       x-breaking: Returns the goal page.
       x-used-by:
         - { page: goal-detail, calls: 1 }
@@ -6058,23 +6058,25 @@ components:
       description: |
         A goal, page-ready. state: active | completed (closed with ปิดเป้าหมาย) | archived. Figures (user timezone, today included):
         - progress_pct = saved / target × 100 (rounded, not capped); remaining_amount = max(0, target − saved).
+        - No target (target_amount null, 0.4.0-1: an open-ended goal, group = ongoing): progress_pct, remaining_amount, needed_monthly, eta_date and month_short are null, milestones empty, pace / status none; month_plan comes only from auto-saving.
+        - An archived goal keeps its money, but it counts in no total (list summary, Home / More, wallets' saved / available) until restored.
         - needed_monthly = remaining / months left (days to the deadline / 30.44, at least 1), rounded up to the baht; null without a deadline, past it, or when reached.
         - pace_monthly = the net saved into the goal over the last 3 months, this month included (fewer when the goal is younger), per month; null when nothing was saved.
         - eta_date = today + ⌈remaining / pace_monthly⌉ months; null when reached or no pace.
         - pace: reached (saved ≥ target) · on_track (eta ≤ deadline) · late (eta after the deadline, or no pace with a deadline; late_months = whole months past it, null without an eta) · none (no deadline, or not active).
-      required: [id, name, description, note, icon_code, target_amount, deadline, state, saved_amount, progress_pct, remaining_amount, days_remaining, needed_monthly, pace_monthly, eta_date, pace, late_months, milestones, currency, closed_at, actions, month_plan, month_saved, month_short, status, behind_months, auto_save, created_at, updated_at]
+      required: [id, name, description, note, icon_code, target_amount, deadline, state, saved_amount, progress_pct, remaining_amount, days_remaining, needed_monthly, pace_monthly, eta_date, pace, late_months, milestones, currency, closed_at, actions, month_plan, month_saved, month_short, status, behind_months, auto_save, group, created_at, updated_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         name: { type: string, maxLength: 100 }
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
-        target_amount: { $ref: '#/components/schemas/Money' }
+        target_amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'null = no target (an open-ended goal).' }
         deadline: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }] }
         state: { type: string, enum: [active, completed, archived] }
         saved_amount: { $ref: '#/components/schemas/Money' }
-        progress_pct: { type: integer }
-        remaining_amount: { $ref: '#/components/schemas/Money' }
+        progress_pct: { type: [integer, 'null'], description: 'null without a target.' }
+        remaining_amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'null without a target.' }
         days_remaining: { type: [integer, 'null'] }
         needed_monthly: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
         pace_monthly: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
@@ -6105,10 +6107,11 @@ components:
             delete: { type: boolean }
         month_plan: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'What the goal should get THIS month: its auto-saving amount, else needed_monthly; null for a closed goal or when there is neither.' }
         month_saved: { $ref: '#/components/schemas/Money', description: 'Net saved into the goal so far this month (user timezone).' }
-        month_short: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'max(0, month_plan − month_saved); null with no plan.' }
+        month_short: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'max(0, month_plan − month_saved); null with no plan or no target (an open-ended goal is never short).' }
         status: { type: string, enum: [reached, on_track, behind, none], description: 'reached = saved ≥ target; on_track = the pace gets there by the deadline; behind = it does not (behind_months); none = no deadline / closed.' }
         behind_months: { type: [integer, 'null'], description: 'With status behind: how many months late.' }
         auto_save: { oneOf: [{ $ref: '#/components/schemas/SavingAutoSave' }, { type: 'null' }], description: 'The goal''s auto-saving (null = none).' }
+        group: { type: [string, 'null'], enum: [ongoing, null], description: 'The list group the goal always sits in: ongoing (ออมต่อเนื่อง) for a goal with no target; null = grouped by this month (short / done / no plan).' }
         created_at: { $ref: '#/components/schemas/DateTime' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
     AccountDeletePreview:
@@ -6328,13 +6331,13 @@ components:
         note: { type: [string, 'null'], maxLength: 500 }
     SavingGoalCreateRequest:
       type: object
-      required: [name, target_amount]
+      required: [name]
       properties:
         name: { type: string, minLength: 1, maxLength: 100 }
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
-        target_amount: { type: number, exclusiveMinimum: 0 }
+        target_amount: { oneOf: [{ type: number, exclusiveMinimum: 0 }, { type: 'null' }], description: 'Missing / null = no target (an open-ended goal, 0.4.0-1).' }
         deadline: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }] }
         milestones: { type: array, items: { type: integer, minimum: 1, maximum: 100 }, description: 'Default [25, 50, 75, 100].' }
     SavingGoalUpdateRequest:
@@ -6344,7 +6347,7 @@ components:
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
-        target_amount: { type: number, exclusiveMinimum: 0 }
+        target_amount: { oneOf: [{ type: number, exclusiveMinimum: 0 }, { type: 'null' }], description: 'null clears the target (the goal becomes open-ended).' }
         deadline: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }] }
         milestones: { type: array, items: { type: integer, minimum: 1, maximum: 100 } }
     SavingGoalCloseRequest:

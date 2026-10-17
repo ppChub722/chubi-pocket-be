@@ -19,6 +19,9 @@ import (
 
 const dateLayout = "2006-01-02"
 
+// GroupOngoing — GoalView.group of a goal with no target (ออมต่อเนื่อง).
+const GroupOngoing = "ongoing"
+
 // Goal states.
 const (
 	StateActive    = "active"
@@ -51,7 +54,7 @@ type Goal struct {
 	Description  *string
 	Note         *string
 	IconCode     *shared.IconCode
-	TargetAmount float64
+	TargetAmount *float64 // nil = no target (open-ended, 0.4.0-1)
 	Deadline     *time.Time
 	Milestones   []int
 	Status       string
@@ -103,12 +106,12 @@ type GoalView struct {
 	Description     *string          `json:"description"`
 	Note            *string          `json:"note"`
 	IconCode        *shared.IconCode `json:"icon_code"`
-	TargetAmount    float64          `json:"target_amount"`
+	TargetAmount    *float64         `json:"target_amount"` // null = no target (open-ended)
 	Deadline        *string          `json:"deadline"`
 	State           string           `json:"state"`
 	SavedAmount     float64          `json:"saved_amount"`
-	ProgressPct     int              `json:"progress_pct"`
-	RemainingAmount float64          `json:"remaining_amount"`
+	ProgressPct     *int             `json:"progress_pct"`     // null without a target
+	RemainingAmount *float64         `json:"remaining_amount"` // null without a target
 	DaysRemaining   *int             `json:"days_remaining"`
 	NeededMonthly   *float64         `json:"needed_monthly"`
 	PaceMonthly     *float64         `json:"pace_monthly"`
@@ -129,6 +132,9 @@ type GoalView struct {
 	Status       string    `json:"status"`
 	BehindMonths *int      `json:"behind_months"`
 	AutoSave     *AutoSave `json:"auto_save"`
+	// Group — the list group the goal always sits in, whatever this month:
+	// "ongoing" (ออมต่อเนื่อง) for a goal with no target, else null (0.4.0-1).
+	Group        *string   `json:"group"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

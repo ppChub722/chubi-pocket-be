@@ -157,40 +157,50 @@ func monthsBetween(a, b time.Time) int {
 	return (b.Year()-a.Year())*12 + int(b.Month()) - int(a.Month())
 }
 
-// goalView — the page-ready goal.
+// goalView — the page-ready goal. A goal with no target (open-ended) has
+// no %, remaining, milestones, needed monthly, ETA or pace (0.4.0-1).
 func goalView(g *Goal, saved float64, nets map[string]float64, today time.Time, currency string) GoalView {
 	v := GoalView{
 		ID: g.ID, Name: g.Name, Description: g.Description, Note: g.Note, IconCode: g.IconCode,
 		TargetAmount: g.TargetAmount, Deadline: dstr(g.Deadline), State: g.Status, SavedAmount: round2(saved),
-		RemainingAmount: round2(math.Max(0, g.TargetAmount-saved)), Milestones: []Milestone{}, Currency: currency,
+		Milestones: []Milestone{}, Currency: currency,
 		ClosedAt: g.ClosedAt, CreatedAt: g.CreatedAt, UpdatedAt: g.UpdatedAt, Pace: "none",
 	}
-	if g.TargetAmount > 0 {
-		v.ProgressPct = int(math.Round(saved / g.TargetAmount * 100))
-	}
-	for _, p := range g.Milestones {
-		amt := round2(g.TargetAmount * float64(p) / 100)
-		v.Milestones = append(v.Milestones, Milestone{Pct: p, Amount: amt, Reached: saved >= amt-0.004})
+	if g.TargetAmount == nil {
+		group := GroupOngoing
+		v.Group = &group
+	} else {
+		target := *g.TargetAmount
+		v.RemainingAmount = fptr(round2(math.Max(0, target-saved)))
+		if target > 0 {
+			pct := int(math.Round(saved / target * 100))
+			v.ProgressPct = &pct
+		}
+		for _, p := range g.Milestones {
+			amt := round2(target * float64(p) / 100)
+			v.Milestones = append(v.Milestones, Milestone{Pct: p, Amount: amt, Reached: saved >= amt-0.004})
+		}
 	}
 	if g.Deadline != nil {
 		d := days(today, *g.Deadline)
 		v.DaysRemaining = &d
 	}
 	active := g.Status == StateActive
-	reached := saved >= g.TargetAmount-0.004
-	if active && !reached {
+	hasTarget := g.TargetAmount != nil
+	reached := hasTarget && saved >= *g.TargetAmount-0.004
+	if active && hasTarget && !reached {
 		v.PaceMonthly = paceOf(nets, g.CreatedAt, today)
 		if g.Deadline != nil && !g.Deadline.Before(today) {
 			months := math.Max(1, float64(days(today, *g.Deadline))/daysPerMonth)
-			v.NeededMonthly = fptr(math.Ceil(v.RemainingAmount / months))
+			v.NeededMonthly = fptr(math.Ceil(*v.RemainingAmount / months))
 		}
 		if v.PaceMonthly != nil {
-			eta := today.AddDate(0, int(math.Ceil(v.RemainingAmount / *v.PaceMonthly)), 0)
+			eta := today.AddDate(0, int(math.Ceil(*v.RemainingAmount / *v.PaceMonthly)), 0)
 			v.EtaDate = dstr(&eta)
 		}
 	}
 	switch {
-	case !active:
+	case !active, !hasTarget:
 	case reached:
 		v.Pace = "reached"
 	case g.Deadline == nil:
@@ -212,7 +222,9 @@ func goalView(g *Goal, saved float64, nets map[string]float64, today time.Time, 
 	empty := saved < 0.005
 	v.Actions = Actions{
 		Save: active, Withdraw: active && !empty, Move: active && !empty, Close: active,
-		Archive: g.Status != StateArchived && empty, Restore: g.Status != StateActive, Delete: empty,
+		// Archive with money is fine (0.4.0-1): an archived goal's money is left
+		// out of every total until it is restored.
+		Archive: g.Status != StateArchived, Restore: g.Status != StateActive, Delete: empty,
 	}
 	return v
 }
@@ -311,7 +323,8 @@ func (s *Service) goalViews(ctx context.Context, userID uuid.UUID, goals []*Goal
 		case v.NeededMonthly != nil:
 			v.MonthPlan = v.NeededMonthly
 		}
-		if v.MonthPlan != nil {
+		// An open-ended goal is never short this month (no month_short).
+		if v.MonthPlan != nil && v.TargetAmount != nil {
 			v.MonthShort = fptr(round2(math.Max(0, *v.MonthPlan-v.MonthSaved)))
 		}
 		switch v.Pace {
@@ -522,6 +535,11 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy str
 	out.Summary.Saved, out.Summary.InGoals, out.Summary.Spare = t.Saved, t.InGoals, t.Spare
 	out.Summary.SavedTotal, out.Summary.Unallocated = t.Saved, t.Spare
 	for _, v := range out.Data {
+		// Open-ended goals stay out of the card's month numbers ("เดือนนี้ขาด"
+		// and its bar): they have no plan to fall short of (0.4.0-1).
+		if v.TargetAmount == nil {
+			continue
+		}
 		out.Summary.MonthSavedTotal += v.MonthSaved
 		if v.MonthPlan != nil {
 			out.Summary.MonthPlanTotal += *v.MonthPlan
@@ -561,7 +579,14 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int, wi
 	if err != nil {
 		return nil, err
 	}
-	out.History = history(nets[g.ID], g.CreatedAt, today, out.Goal.MonthPlan, g.TargetAmount)
+	// The plan line climbs to the target; an open-ended goal has none.
+	plan, target := out.Goal.MonthPlan, 0.0
+	if g.TargetAmount != nil {
+		target = *g.TargetAmount
+	} else {
+		plan = nil
+	}
+	out.History = history(nets[g.ID], g.CreatedAt, today, plan, target)
 	if out.Entries, err = s.entryPage(ctx, userID, whereGoal, 1, perPage, g.ID); err != nil {
 		return nil, err
 	}
@@ -626,8 +651,19 @@ func sortGoals(v []GoalView, by string) {
 			}
 			return a.Deadline != nil && *a.Deadline < *b.Deadline
 		},
-		"progress":  func(a, b *GoalView) bool { return a.ProgressPct > b.ProgressPct },
-		"remaining": func(a, b *GoalView) bool { return a.RemainingAmount < b.RemainingAmount },
+		// Open-ended goals (no % / remaining) go last.
+		"progress": func(a, b *GoalView) bool {
+			if (a.ProgressPct == nil) != (b.ProgressPct == nil) {
+				return a.ProgressPct != nil
+			}
+			return a.ProgressPct != nil && *a.ProgressPct > *b.ProgressPct
+		},
+		"remaining": func(a, b *GoalView) bool {
+			if (a.RemainingAmount == nil) != (b.RemainingAmount == nil) {
+				return a.RemainingAmount != nil
+			}
+			return a.RemainingAmount != nil && *a.RemainingAmount < *b.RemainingAmount
+		},
 		"name":      func(a, b *GoalView) bool { return strings.ToLower(a.Name) < strings.ToLower(b.Name) },
 	}[by]
 	if less == nil {

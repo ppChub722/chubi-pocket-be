@@ -42,11 +42,13 @@ func applyGoal(g *Goal, r *GoalRequest, creating bool) error {
 	if has("icon_code") {
 		g.IconCode = r.IconCode
 	}
-	if creating || has("target_amount") {
-		if r.TargetAmount == nil || *r.TargetAmount <= 0 {
+	// The target is optional (0.4.0-1): missing / null = an open-ended goal;
+	// a given target must be > 0. On update, null clears it.
+	if has("target_amount") {
+		if r.TargetAmount != nil && *r.TargetAmount <= 0 {
 			return ErrValidation
 		}
-		g.TargetAmount = *r.TargetAmount
+		g.TargetAmount = r.TargetAmount
 	}
 	if has("deadline") {
 		g.Deadline = nil
@@ -172,13 +174,13 @@ func (s *Service) setStatus(ctx context.Context, userID, id uuid.UUID, check fun
 	return s.Get(ctx, userID, id, entriesPerPage, false)
 }
 
+// Archive — เก็บถาวร, also while the goal holds money (0.4.0-1): the money
+// stays in the goal but is left out of every total (savings, wallets'
+// saved / available) until the goal is restored.
 func (s *Service) Archive(ctx context.Context, userID, id uuid.UUID) (*GoalDetail, error) {
-	return s.setStatus(ctx, userID, id, func(g *Goal, saved float64) error {
+	return s.setStatus(ctx, userID, id, func(g *Goal, _ float64) error {
 		if g.Status == StateArchived {
 			return ErrInvalidTransition
-		}
-		if saved > 0.004 {
-			return ErrGoalHasSavings
 		}
 		return nil
 	}, StateArchived)
