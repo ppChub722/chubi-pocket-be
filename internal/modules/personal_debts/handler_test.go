@@ -577,3 +577,33 @@ func TestDebtCyclesAndSummary(t *testing.T) {
 		t.Errorf("message = %q", text)
 	}
 }
+
+// TestPeopleSort — oldest (default) / amount / recent; the totals never follow the filter.
+func TestPeopleSort(t *testing.T) {
+	f := newDebtHFix(t)
+	day := func(n int) string { return time.Now().AddDate(0, 0, -n).Format("2006-01-02") }
+	add := func(key string, amount float64, ago int) {
+		f.call("POST", entriesPath(key), map[string]any{"direction": "paid", "amount": amount, "date": day(ago)}, "createDebtEntry", http.StatusCreated)
+	}
+	add("n:Old", 10, 40)  // oldest, small
+	add("n:Big", 500, 3)  // biggest
+	add("n:Fresh", 20, 1) // most recent
+	first := func(q string) string {
+		out := f.call("GET", "/api/v1/personal-debts/people"+q, nil, "listDebtPeople", http.StatusOK)
+		return out["data"].([]any)[0].(map[string]any)["key"].(string)
+	}
+	if got := first(""); got != "n:old" {
+		t.Errorf("default (oldest) first = %s", got)
+	}
+	if got := first("?sort=amount"); got != "n:big" {
+		t.Errorf("amount first = %s", got)
+	}
+	if got := first("?sort=recent"); got != "n:fresh" {
+		t.Errorf("recent first = %s", got)
+	}
+	f.call("GET", "/api/v1/personal-debts/people?sort=nope", nil, "", http.StatusBadRequest)
+	out := f.call("GET", "/api/v1/personal-debts/people?q=big", nil, "listDebtPeople", http.StatusOK)
+	if num(out, "totals", "owed_to_me_people") != 3 || len(out["data"].([]any)) != 1 {
+		t.Errorf("filtered: rows %d totals %v (totals must cover all 3 people)", len(out["data"].([]any)), out["totals"])
+	}
+}

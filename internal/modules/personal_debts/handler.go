@@ -39,8 +39,14 @@ func (h *Handler) People(c *gin.Context) {
 		return
 	}
 	f := PeopleFilter{
-		Q: c.Query("q"), All: c.Query("all") == "true", Side: c.Query("side"),
+		Q: c.Query("q"), All: c.Query("all") == "true", Side: c.Query("side"), Sort: c.Query("sort"),
 		Page: atoiOr(c.Query("page"), 1), PerPage: atoiOr(c.Query("per_page"), 30),
+	}
+	switch f.Sort {
+	case "", "oldest", "amount", "recent":
+	default:
+		response.BadRequest(c, "VALIDATION_ERROR", "sort must be oldest, amount or recent", nil)
+		return
 	}
 	if f.Side != "" && f.Side != "owed_to_me" && f.Side != "i_owe" {
 		response.BadRequest(c, "VALIDATION_ERROR", "side must be owed_to_me or i_owe", nil)

@@ -253,6 +253,7 @@ type PeopleFilter struct {
 	Q       string
 	All     bool
 	Side    string // owed_to_me | i_owe
+	Sort    string // oldest (default) | amount | recent
 	Page    int
 	PerPage int
 }

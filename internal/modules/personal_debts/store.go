@@ -235,7 +235,7 @@ func (s *Store) listPeople(ctx context.Context, userID uuid.UUID, f PeopleFilter
 		return nil, 0, fmt.Errorf("people count: %w", err)
 	}
 	args = append(args, f.PerPage, (f.Page-1)*f.PerPage)
-	rows, err := s.db.Query(ctx, base+fmt.Sprintf(` ORDER BY ABS(p.net) DESC, p.last DESC NULLS LAST, p.key
+	rows, err := s.db.Query(ctx, base+fmt.Sprintf(` ORDER BY `+peopleOrder(f.Sort)+`, p.key
 		LIMIT $%d OFFSET $%d`, len(args)-1, len(args)), args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("people: %w", err)
@@ -630,4 +630,17 @@ func round2(f float64) float64 {
 		return -float64(int64(-f*100+0.5)) / 100
 	}
 	return float64(int64(f*100+0.5)) / 100
+}
+
+// peopleOrder — the people list order: oldest = the oldest open entry first
+// (days_outstanding desc, none last, then |net|); amount = |net| desc; recent
+// = the latest activity first.
+func peopleOrder(sort string) string {
+	switch sort {
+	case "amount":
+		return `ABS(p.net) DESC, p.last DESC NULLS LAST`
+	case "recent":
+		return `p.last DESC NULLS LAST, ABS(p.net) DESC`
+	}
+	return `p.days_out DESC NULLS LAST, ABS(p.net) DESC, p.last DESC NULLS LAST`
 }

@@ -4029,7 +4029,7 @@ paths:
       summary: People list (one list, owed-to-me and I-owe together)
       operationId: listDebtPeople
       description: |
-        One row per person (key `c:<contact_id>` or `n:<lower(name)>`), sorted by |net| desc, then the latest entry date desc.
+        One row per person (key `c:<contact_id>` or `n:<lower(name)>`). `sort`: `oldest` (default: days_outstanding desc, none last, then |net| desc), `amount` (|net| desc, then the latest entry), `recent` (the latest entry first).
         Default: only people with something OPEN (net ≠ 0 OR an entry not labelled paid); `all=true` shows everyone.
         `q` matches the resolved person name (case-insensitive substring). `side=owed_to_me` keeps net > 0, `side=i_owe` net < 0.
         `totals` cover every person (they ignore q / side / all / paging), so the header boxes stay put while the list filters.
@@ -4039,6 +4039,7 @@ paths:
         - { name: q, in: query, schema: { type: string } }
         - { name: all, in: query, schema: { type: boolean }, description: 'true = include people with nothing open.' }
         - { name: side, in: query, schema: { type: string, enum: [owed_to_me, i_owe] } }
+        - { name: sort, in: query, schema: { type: string, enum: [oldest, amount, recent], default: oldest } }
       responses:
         '200':
           description: 'One page of people + the header totals.'
