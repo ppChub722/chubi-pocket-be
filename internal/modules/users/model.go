@@ -26,9 +26,11 @@ type Profile struct {
 	DefaultAccount *shared.AccountRef `json:"default_account"`
 	// AutoCopyOwnEventBills — a bill I record in an event also lands in my own
 	// book (the old notification setting auto_resolve_own_in_projects).
-	AutoCopyOwnEventBills bool      `json:"auto_copy_own_event_bills"`
-	CreatedAt             time.Time `json:"created_at"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	AutoCopyOwnEventBills bool `json:"auto_copy_own_event_bills"`
+	// NotificationSummary — the settings tile: types on / running automatically.
+	NotificationSummary NotificationSummary `json:"notification_summary"`
+	CreatedAt           time.Time           `json:"created_at"`
+	UpdatedAt           time.Time           `json:"updated_at"`
 }
 
 type UpdateProfileRequest struct {
@@ -100,4 +102,10 @@ func apiStatus(stored string) string {
 		return "active"
 	}
 	return "deactivated"
+}
+
+// NotificationSummary — counts shown on the notification-settings entry.
+type NotificationSummary struct {
+	On   int `json:"on"`
+	Auto int `json:"auto"`
 }

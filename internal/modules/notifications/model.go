@@ -50,12 +50,10 @@ type Settings struct {
 	MutedTypes []string  `json:"muted_types"`
 	AutoTypes  []string  `json:"auto_types"`
 	// Wallet the auto-actions record into; nil = no wallet.
-	DefaultAccountID *uuid.UUID `json:"default_account_id"`
-	// Rows I record myself in a project → my personal copy too. No
-	// notification involved (I did it), so it's a plain switch.
-	AutoResolveOwnInProjects bool      `json:"auto_resolve_own_in_projects"`
-	CreatedAt                time.Time `json:"created_at"`
-	UpdatedAt                time.Time `json:"updated_at"`
+	DefaultAccountID         *uuid.UUID `json:"default_account_id"`
+	AutoResolveOwnInProjects bool       `json:"-"` // read by projects; set via /users/me
+	CreatedAt                time.Time  `json:"created_at"`
+	UpdatedAt                time.Time  `json:"updated_at"`
 }
 
 // Deliver — the type isn't muted.
@@ -77,23 +75,24 @@ func contains(list []string, v string) bool {
 
 type UpdateSettingsRequest struct {
 	// Each list replaces the stored one when present; [] clears it.
-	MutedTypes               *[]string  `json:"muted_types"`
-	AutoTypes                *[]string  `json:"auto_types"`
-	DefaultAccountID         *uuid.UUID `json:"default_account_id"`
-	AutoResolveOwnInProjects *bool      `json:"auto_resolve_own_in_projects"`
+	MutedTypes       *[]string  `json:"muted_types"`
+	AutoTypes        *[]string  `json:"auto_types"`
+	DefaultAccountID *uuid.UUID `json:"default_account_id"`
 	// Set by the handler on an explicit `"default_account_id": null`.
 	ClearDefaultAccount bool `json:"-"`
 }
 
 type ListFilter struct {
-	Read      string // "true" | "false" | "all"
-	Actioned  string
-	Dismissed string // "" / "false" = visible only (default); "true" = hidden only; "all"
-	Type      string
-	From      *string
-	To        *string
-	Page      int
-	PerPage   int
+	Read         string // "true" | "false" | "all"
+	Actioned     string
+	Dismissed    string      // "" / "false" = visible only (default); "true" = hidden only; "all"
+	AwaitsAnswer bool        // only the rows that still wait for an answer
+	IDs          []uuid.UUID // set by the service for AwaitsAnswer
+	Type         string
+	From         *string
+	To           *string
+	Page         int
+	PerPage      int
 }
 
 type Pagination struct {

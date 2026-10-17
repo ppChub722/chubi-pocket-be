@@ -202,3 +202,23 @@ func (s *Service) MarkActionedTx(ctx context.Context, tx pgx.Tx, userID, id uuid
 func (s *Service) MarkDismissedTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) (*Notification, error) {
 	return s.store.MarkDismissedTx(ctx, tx, userID, id)
 }
+
+// SettingsCounts — the settings tile: how many of the mutable types are on
+// (not muted) and how many run automatically.
+func SettingsCounts(muted, auto []string) (on, autoN int) {
+	m := map[string]bool{}
+	for _, t := range muted {
+		m[t] = true
+	}
+	for t := range mutableTypes {
+		if !m[t] {
+			on++
+		}
+	}
+	for _, t := range auto {
+		if autoableTypes[t] {
+			autoN++
+		}
+	}
+	return on, autoN
+}

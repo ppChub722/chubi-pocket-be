@@ -201,7 +201,7 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 	}
 
 	// Ending soon: 2 or fewer upcoming left, told once (extend re-arms it).
-	rows, err = tx.Query(ctx, `SELECT r.id, r.name, (SELECT COUNT(*) FROM recurring_items i
+	rows, err = tx.Query(ctx, `SELECT r.id, r.name, to_char(r.start_date, 'YYYY-MM-DD'), r.end_kind, to_char(r.end_date, 'YYYY-MM-DD'), r.end_count, (SELECT COUNT(*) FROM recurring_items i
 			WHERE i.rule_id = r.id AND i.produced_at IS NULL AND i.pending_id IS NULL
 			  AND i.transaction_id IS NULL AND NOT i.archived)
 		FROM recurring_rules r
@@ -210,14 +210,18 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 		return fmt.Errorf("ending: %w", err)
 	}
 	type ending struct {
-		id   uuid.UUID
-		name string
-		left int
+		id       uuid.UUID
+		name     string
+		left     int
+		start    string
+		endKind  string
+		endDate  *string
+		endCount *int
 	}
 	var ends []ending
 	for rows.Next() {
 		var e ending
-		if err := rows.Scan(&e.id, &e.name, &e.left); err != nil {
+		if err := rows.Scan(&e.id, &e.name, &e.start, &e.endKind, &e.endDate, &e.endCount, &e.left); err != nil {
 			rows.Close()
 			return err
 		}
@@ -229,7 +233,8 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 	for _, e := range ends {
 		if s.notifs != nil {
 			if err := s.notifs.RecurringEndingTx(ctx, tx, userID, notifications.RecurringEndingPayload{
-				RecurringID: e.id, Name: e.name, Left: e.left,
+				RecurringID: e.id, Name: e.name, Left: e.left, StartDate: e.start,
+				End: notifications.RecurringEnd{Kind: e.endKind, Date: e.endDate, Count: e.endCount},
 			}); err != nil {
 				return err
 			}

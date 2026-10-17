@@ -107,6 +107,7 @@ type DiscardResult struct {
 	Discarded      []uuid.UUID `json:"discarded"`
 	Skipped        []uuid.UUID `json:"skipped"`
 	RemainingCount int         `json:"remaining_count"`
+	Summary        ListSummary `json:"summary"`
 }
 
 // ResolvedSplit — one draft split, its person resolved by the one name rule.
@@ -153,6 +154,7 @@ type SubmitResponse struct {
 	Failed          []Failed               `json:"failed"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
 	Badges          shared.Badges          `json:"badges"`
+	Summary         ListSummary            `json:"summary"`
 }
 
 // SourceCounts — the pending page's source chips.

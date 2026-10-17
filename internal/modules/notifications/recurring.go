@@ -18,9 +18,11 @@ import (
 
 // RecurringEndingPayload — payload of recurring_ending.
 type RecurringEndingPayload struct {
-	RecurringID uuid.UUID `json:"recurring_id"`
-	Name        string    `json:"name"`
-	Left        int       `json:"left"`
+	RecurringID uuid.UUID    `json:"recurring_id"`
+	Name        string       `json:"name"`
+	Left        int          `json:"left"`
+	StartDate   string       `json:"start_date"`
+	End         RecurringEnd `json:"end"`
 }
 
 // WithDueCheck runs the recurring due check before the inbox / badge reads.
@@ -73,4 +75,11 @@ func (s *Service) RecurringEndingTx(ctx context.Context, tx pgx.Tx, userID uuid.
 	link := fmt.Sprintf("/recurring/%s", p.RecurringID)
 	_, err = s.store.InsertTx(ctx, tx, userID, TypeRecurringEnding, nil, payload, &link, false)
 	return err
+}
+
+// RecurringEnd — the rule's end, same shape as RecurrenceEnd.
+type RecurringEnd struct {
+	Kind  string  `json:"kind"`
+	Date  *string `json:"date,omitempty"`
+	Count *int    `json:"count,omitempty"`
 }

@@ -24,27 +24,29 @@ type ListView struct {
 type ActionResult struct {
 	Notification shared.NotificationView `json:"notification"`
 	Badges       shared.Badges           `json:"badges"`
+	Summary      InboxSummary            `json:"summary"`
 }
 
 // ReadAllResult is the spec schema ReadAllResult.
 type ReadAllResult struct {
 	MarkedRead int           `json:"marked_read"`
+	Summary    InboxSummary  `json:"summary"`
 	Badges     shared.Badges `json:"badges"`
 }
 
 // DeleteResult is the spec schema DeleteNotificationResult.
 type DeleteResult struct {
-	ID     uuid.UUID     `json:"id"`
-	Badges shared.Badges `json:"badges"`
+	ID      uuid.UUID     `json:"id"`
+	Summary InboxSummary  `json:"summary"`
+	Badges  shared.Badges `json:"badges"`
 }
 
 // SettingsView is the spec schema NotificationSettings.
 type SettingsView struct {
-	MutedTypes               []string           `json:"muted_types"`
-	AutoTypes                []string           `json:"auto_types"`
-	DefaultAccount           *shared.AccountRef `json:"default_account"`
-	AutoResolveOwnInProjects bool               `json:"auto_resolve_own_in_projects"`
-	UpdatedAt                time.Time          `json:"updated_at"`
+	MutedTypes     []string           `json:"muted_types"`
+	AutoTypes      []string           `json:"auto_types"`
+	DefaultAccount *shared.AccountRef `json:"default_account"`
+	UpdatedAt      time.Time          `json:"updated_at"`
 }
 
 func (s *Service) Badges(ctx context.Context, userID uuid.UUID) (shared.Badges, error) {
@@ -53,6 +55,13 @@ func (s *Service) Badges(ctx context.Context, userID uuid.UUID) (shared.Badges, 
 
 // ListViews is the inbox: items built by shared.LoadNotificationViews in list order.
 func (s *Service) ListViews(ctx context.Context, userID uuid.UUID, f ListFilter) (*ListView, error) {
+	if f.AwaitsAnswer {
+		ids, err := s.awaitingIDs(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		f.IDs = ids
+	}
 	r, err := s.List(ctx, userID, f)
 	if err != nil {
 		return nil, err
@@ -92,7 +101,11 @@ func (s *Service) actionResult(ctx context.Context, userID uuid.UUID, n *Notific
 	if err != nil {
 		return nil, err
 	}
-	return &ActionResult{Notification: *v, Badges: b}, nil
+	sum, err := s.inboxSummary(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return &ActionResult{Notification: *v, Badges: b, Summary: sum}, nil
 }
 
 func (s *Service) MarkReadResult(ctx context.Context, userID, id uuid.UUID) (*ActionResult, error) {
@@ -112,10 +125,9 @@ func (s *Service) MarkDismissedResult(ctx context.Context, userID, id uuid.UUID)
 
 func (s *Service) settingsView(ctx context.Context, st *Settings) (*SettingsView, error) {
 	v := &SettingsView{
-		MutedTypes:               st.MutedTypes,
-		AutoTypes:                st.AutoTypes,
-		AutoResolveOwnInProjects: st.AutoResolveOwnInProjects,
-		UpdatedAt:                st.UpdatedAt,
+		MutedTypes: st.MutedTypes,
+		AutoTypes:  st.AutoTypes,
+		UpdatedAt:  st.UpdatedAt,
 	}
 	if v.MutedTypes == nil {
 		v.MutedTypes = []string{}
@@ -162,6 +174,7 @@ func (s *Service) RestoreResult(ctx context.Context, userID, id uuid.UUID) (*Act
 // answer (shared.AwaitsAnswer), unread = unread and not dismissed,
 // dismissed = the hidden ones ("ที่ซ่อนไว้").
 type InboxSummary struct {
+	All         int `json:"all"` // everything not dismissed (the ทั้งหมด tile)
 	NeedsAnswer int `json:"needs_answer"`
 	Unread      int `json:"unread"`
 	Dismissed   int `json:"dismissed"`
@@ -191,9 +204,36 @@ func (s *Service) inboxSummary(ctx context.Context, userID uuid.UUID) (InboxSumm
 		case readAt == nil:
 			out.Unread++
 		}
+		out.All++
 		if shared.AwaitsAnswer(typ, actionedAt, dismissedAt, payload) {
 			out.NeedsAnswer++
 		}
 	}
 	return out, rows.Err()
+}
+
+// awaitingIDs — the ids of the rows that still wait for an answer (never nil).
+func (s *Service) awaitingIDs(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := s.store.db.Query(ctx, `SELECT id, type, payload, actioned_at, dismissed_at FROM notifications
+		WHERE recipient_user_id = $1 AND actioned_at IS NULL AND dismissed_at IS NULL`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("awaiting: %w", err)
+	}
+	defer rows.Close()
+	ids := []uuid.UUID{}
+	for rows.Next() {
+		var (
+			id                      uuid.UUID
+			typ                     string
+			payload                 []byte
+			actionedAt, dismissedAt *time.Time
+		)
+		if err := rows.Scan(&id, &typ, &payload, &actionedAt, &dismissedAt); err != nil {
+			return nil, err
+		}
+		if shared.AwaitsAnswer(typ, actionedAt, dismissedAt, payload) {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
 }

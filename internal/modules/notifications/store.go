@@ -130,6 +130,10 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Not
 	case "false":
 		whereClauses = append(whereClauses, "n.actioned_at IS NULL")
 	}
+	if f.IDs != nil {
+		args = append(args, f.IDs)
+		whereClauses = append(whereClauses, fmt.Sprintf("n.id = ANY($%d)", len(args)))
+	}
 	if f.Type != "" {
 		args = append(args, f.Type)
 		whereClauses = append(whereClauses, fmt.Sprintf("n.type = $%d", len(args)))
@@ -373,10 +377,6 @@ func (s *Store) UpdateSettings(ctx context.Context, userID uuid.UUID, req Update
 	if req.AutoTypes != nil {
 		args = append(args, *req.AutoTypes)
 		q += fmt.Sprintf(", auto_types = $%d", len(args))
-	}
-	if req.AutoResolveOwnInProjects != nil {
-		args = append(args, *req.AutoResolveOwnInProjects)
-		q += fmt.Sprintf(", auto_resolve_own_in_projects = $%d", len(args))
 	}
 	if req.ClearDefaultAccount {
 		q += ", default_account_id = NULL"

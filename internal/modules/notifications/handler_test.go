@@ -271,15 +271,14 @@ func TestNotificationSettings(t *testing.T) {
 	}
 
 	body := map[string]any{
-		"muted_types":                  []string{TypeProjectAdded},
-		"auto_types":                   []string{TypeProjectTxRecordedForYou},
-		"default_account_id":           acc.String(),
-		"auto_resolve_own_in_projects": true,
+		"muted_types":        []string{TypeProjectAdded},
+		"auto_types":         []string{TypeProjectTxRecordedForYou},
+		"default_account_id": acc.String(),
 	}
 	apitest.ConformRequest(t, "updateNotificationSettings", body)
 	out = f.do(t, "PUT", "/api/v1/notifications/settings", body, "updateNotificationSettings", http.StatusOK)
 	ref := out["default_account"].(map[string]any)
-	if ref["id"] != acc.String() || ref["name"] != "Test wallet" || out["auto_resolve_own_in_projects"] != true {
+	if ref["id"] != acc.String() || ref["name"] != "Test wallet" {
 		t.Errorf("updated = %v", out)
 	}
 	if got := out["muted_types"].([]any); len(got) != 1 || got[0] != TypeProjectAdded {

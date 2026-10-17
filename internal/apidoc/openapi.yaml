@@ -2014,6 +2014,15 @@ paths:
             }
           },
           {
+            "name": "awaits_answer",
+            "in": "query",
+            "description": "true = only the rows that still wait for an answer (the same rows summary.needs_answer counts), whatever their read state.",
+            "schema": {
+              "type": "string",
+              "enum": ["true"]
+            }
+          },
+          {
             "name": "dismissed",
             "in": "query",
             "description": "Dismissed (hidden) rows are excluded by default. true = only the hidden ones (the \"ที่ซ่อนไว้\" page); all = both.",
@@ -5348,25 +5357,26 @@ components:
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/PendingTransaction' } }
         count: { type: integer }
-        summary:
+        summary: { $ref: '#/components/schemas/PendingSummary' }
+    PendingSummary:
+      type: object
+      description: 'Over ALL the user''s drafts: count; expense_total / income_total = Σ the amounts of the kind-create drafts that have one; needs_input_count = drafts missing something (incl. soft keys), ready_count = the rest (the ones submit-ready confirms); by_source = the source chips (recurring = recurring / upcoming / auto-saving, manual = typed / chat, other_people = from another person, slip = scanned).'
+      required: [count, expense_total, income_total, needs_input_count, ready_count, by_source]
+      properties:
+        count: { type: integer }
+        expense_total: { $ref: '#/components/schemas/Money' }
+        income_total: { $ref: '#/components/schemas/Money' }
+        needs_input_count: { type: integer }
+        ready_count: { type: integer }
+        by_source:
           type: object
-          description: 'Over ALL the user''s drafts: count; expense_total / income_total = Σ the amounts of the kind-create drafts that have one; needs_input_count = drafts missing something (incl. soft keys), ready_count = the rest (the ones submit-ready confirms); by_source = the source chips (recurring = recurring / upcoming / auto-saving, manual = typed / chat, other_people = from another person, slip = scanned).'
-          required: [count, expense_total, income_total, needs_input_count, ready_count, by_source]
+          required: [recurring, manual, other_people, slip, other]
           properties:
-            count: { type: integer }
-            expense_total: { $ref: '#/components/schemas/Money' }
-            income_total: { $ref: '#/components/schemas/Money' }
-            needs_input_count: { type: integer }
-            ready_count: { type: integer }
-            by_source:
-              type: object
-              required: [recurring, manual, other_people, slip, other]
-              properties:
-                recurring: { type: integer }
-                manual: { type: integer }
-                other_people: { type: integer }
-                slip: { type: integer }
-                other: { type: integer }
+            recurring: { type: integer }
+            manual: { type: integer }
+            other_people: { type: integer }
+            slip: { type: integer }
+            other: { type: integer }
     CreatePendingRequest:
       type: object
       required: [items]
@@ -5392,14 +5402,15 @@ components:
         ids: { type: array, minItems: 1, maxItems: 100, items: { $ref: '#/components/schemas/Uuid' } }
     DiscardResult:
       type: object
-      required: [discarded, skipped, remaining_count]
+      required: [discarded, skipped, remaining_count, summary]
       properties:
         discarded: { $ref: '#/components/schemas/Ids' }
         skipped: { $ref: '#/components/schemas/Ids' }
         remaining_count: { type: integer, description: 'Drafts left after the discard. '}
+        summary: { $ref: '#/components/schemas/PendingSummary' }
     SubmitResult:
       type: object
-      required: [submitted, failed, account_balances, badges]
+      required: [submitted, failed, account_balances, badges, summary]
       properties:
         account_balances:
           type: array
@@ -5424,6 +5435,7 @@ components:
               error: { $ref: '#/components/schemas/SubmitError' }
               pending: { oneOf: [{ $ref: '#/components/schemas/PendingTransaction' }, { type: 'null' }], description: 'The draft with last_error set; null when the draft no longer exists. '}
         badges: { $ref: '#/components/schemas/Badges' }
+        summary: { $ref: '#/components/schemas/PendingSummary' }
 
     # ───────── counts ─────────
     Badges:
@@ -5576,12 +5588,11 @@ components:
     # ───────── notifications ─────────
     NotificationSettings:
       type: object
-      required: [muted_types, auto_types, default_account, auto_resolve_own_in_projects, updated_at]
+      required: [muted_types, auto_types, default_account, updated_at]
       properties:
         muted_types: { type: array, items: { type: string } }
         auto_types: { type: array, items: { type: string } }
         default_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'The wallet auto-actions record into; null = no wallet. '}
-        auto_resolve_own_in_projects: { type: boolean }
         updated_at: { $ref: '#/components/schemas/DateTime' }
     UpdateNotificationSettingsRequest:
       type: object
@@ -5589,7 +5600,6 @@ components:
         muted_types: { type: array, items: { type: string } }
         auto_types: { type: array, items: { type: string } }
         default_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'A key present with null clears it. '}
-        auto_resolve_own_in_projects: { type: boolean }
 
     # ───────── categories ─────────
     Category: {
@@ -7227,9 +7237,19 @@ components:
           "badges"
         ]
       }
+    InboxSummary:
+      type: object
+      description: 'Over ALL the user''s notifications, the same whatever the list filter (and fresh on every write answer): all = not dismissed, needs_answer = rows with awaits_answer, unread = unread and not dismissed, dismissed = the hidden ones.'
+      required: [all, needs_answer, unread, dismissed]
+      properties:
+        all: { type: integer }
+        needs_answer: { type: integer }
+        unread: { type: integer }
+        dismissed: { type: integer }
     NotificationActionResult: {
         "type": "object",
         "properties": {
+          "summary": { "$ref": "#/components/schemas/InboxSummary" },
           "notification": {
             "$ref": "#/components/schemas/Notification"
           },
@@ -7240,7 +7260,8 @@ components:
         "description": "The notification in its new state + the fresh badges.",
         "required": [
           "notification",
-          "badges"
+          "badges",
+          "summary"
         ]
       }
     CreateCategoryRequest: {
@@ -7692,7 +7713,7 @@ components:
       }
     NotificationType: {
         "type": "string",
-        "description": "recurring_due: ONE grouped notice while unread, payload {count}, deep_link /pending. recurring_ending: payload {recurring_id, name, left}, deep_link /recurring/{id}. Both are written by the recurring due check, which runs inside GET /me/counts, GET /notifications/unread-count, GET /notifications, GET /dashboard and every recurring read (pull-to-refresh = recheck).",
+        "description": "recurring_due: ONE grouped notice while unread, payload {count}, deep_link /pending. recurring_ending: payload {recurring_id, name, left, start_date, end {kind: none|date|count, date?, count?}} (what ต่ออีก extends by), deep_link /recurring/{id}. Both are written by the recurring due check, which runs inside GET /me/counts, GET /notifications/unread-count, GET /notifications, GET /dashboard and every recurring read (pull-to-refresh = recheck).",
         "enum": [
           "split_created",
           "split_changed",
@@ -7814,8 +7835,9 @@ components:
           "summary": {
             "type": "object",
             "description": "Over ALL the user's notifications, the same whatever the list filter: needs_answer = rows with awaits_answer, unread = unread and not dismissed, dismissed = the hidden ones.",
-            "required": ["needs_answer", "unread", "dismissed"],
+            "required": ["all", "needs_answer", "unread", "dismissed"],
             "properties": {
+              "all": { "type": "integer", "description": "Everything not dismissed (the ทั้งหมด tile)." },
               "needs_answer": { "type": "integer" },
               "unread": { "type": "integer" },
               "dismissed": { "type": "integer" }
@@ -7835,6 +7857,7 @@ components:
     ReadAllResult: {
         "type": "object",
         "properties": {
+          "summary": { "$ref": "#/components/schemas/InboxSummary" },
           "marked_read": {
             "type": "integer"
           },
@@ -7844,12 +7867,14 @@ components:
         },
         "required": [
           "marked_read",
-          "badges"
+          "badges",
+          "summary"
         ]
       }
     DeleteNotificationResult: {
         "type": "object",
         "properties": {
+          "summary": { "$ref": "#/components/schemas/InboxSummary" },
           "id": {
             "$ref": "#/components/schemas/Uuid"
           },
@@ -7859,7 +7884,8 @@ components:
         },
         "required": [
           "id",
-          "badges"
+          "badges",
+          "summary"
         ]
       }
     AuthUser: {
@@ -8084,6 +8110,12 @@ components:
             "oneOf": [{ "$ref": "#/components/schemas/AccountRef" }, { "type": "null" }],
             "description": "The default wallet (null = none). Set with PUT default_account_id."
           },
+          "notification_summary": {
+            "type": "object",
+            "description": "The settings tile: on = mutable notification types not muted, auto = types running automatically.",
+            "required": ["on", "auto"],
+            "properties": { "on": { "type": "integer" }, "auto": { "type": "integer" } }
+          },
           "auto_copy_own_event_bills": {
             "type": "boolean",
             "description": "A bill I record in an event also lands in my own book."
@@ -8143,6 +8175,7 @@ components:
           "preferences",
           "default_account",
           "auto_copy_own_event_bills",
+          "notification_summary",
           "created_at",
           "updated_at"
         ]
@@ -8173,7 +8206,7 @@ components:
           },
           "auto_copy_own_event_bills": {
             "type": "boolean",
-            "description": "A bill I record in an event also lands in my own book. (Moved here from the notification settings, which still accept auto_resolve_own_in_projects for now.)"
+            "description": "A bill I record in an event also lands in my own book."
           },
           "preferences": {
             "type": "object",

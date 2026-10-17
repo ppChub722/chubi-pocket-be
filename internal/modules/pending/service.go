@@ -129,7 +129,11 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (*DiscardRes
 	if err != nil {
 		return nil, err
 	}
-	return &DiscardResult{Discarded: []uuid.UUID{id}, Skipped: []uuid.UUID{}, RemainingCount: n}, nil
+	sum, err := s.freshSummary(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return &DiscardResult{Discarded: []uuid.UUID{id}, Skipped: []uuid.UUID{}, RemainingCount: n, Summary: sum}, nil
 }
 
 // Discard removes many drafts; unknown / foreign ids are skipped.
@@ -156,6 +160,9 @@ func (s *Service) Discard(ctx context.Context, userID uuid.UUID, ids []uuid.UUID
 		}
 	}
 	if out.RemainingCount, err = s.store.Count(ctx, userID); err != nil {
+		return nil, err
+	}
+	if out.Summary, err = s.freshSummary(ctx, userID); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -215,6 +222,9 @@ func (s *Service) Submit(ctx context.Context, userID uuid.UUID, req SubmitReques
 		return nil, err
 	}
 	if out.Badges, err = shared.LoadBadges(ctx, s.store.Pool(), userID); err != nil {
+		return nil, err
+	}
+	if out.Summary, err = s.freshSummary(ctx, userID); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -542,4 +552,16 @@ func (s *Service) SubmitReady(ctx context.Context, userID uuid.UUID) (*SubmitRes
 		return s.Submit(ctx, userID, SubmitRequest{})
 	}
 	return s.Submit(ctx, userID, SubmitRequest{IDs: ids})
+}
+
+// freshSummary — the page's summary after a write (FE never re-fetches).
+func (s *Service) freshSummary(ctx context.Context, userID uuid.UUID) (ListSummary, error) {
+	rows, err := s.store.List(ctx, userID)
+	if err != nil {
+		return ListSummary{}, err
+	}
+	if err := ResolveRows(ctx, s.store.Pool(), userID, rows); err != nil {
+		return ListSummary{}, err
+	}
+	return summarize(rows), nil
 }

@@ -39,12 +39,13 @@ func (h *Handler) List(c *gin.Context) {
 		return
 	}
 	f := ListFilter{
-		Read:      c.Query("read"),
-		Actioned:  c.Query("actioned"),
-		Dismissed: c.Query("dismissed"),
-		Type:      c.Query("type"),
-		Page:      atoiOr(c.Query("page"), 1),
-		PerPage:   atoiOr(c.Query("per_page"), 20),
+		Read:         c.Query("read"),
+		Actioned:     c.Query("actioned"),
+		Dismissed:    c.Query("dismissed"),
+		AwaitsAnswer: c.Query("awaits_answer") == "true",
+		Type:         c.Query("type"),
+		Page:         atoiOr(c.Query("page"), 1),
+		PerPage:      atoiOr(c.Query("per_page"), 20),
 	}
 	for name, v := range map[string]string{"read": f.Read, "actioned": f.Actioned, "dismissed": f.Dismissed} {
 		switch strings.ToLower(strings.TrimSpace(v)) {
@@ -104,7 +105,12 @@ func (h *Handler) ReadAll(c *gin.Context) {
 		response.InternalError(c, "Mark all read failed", err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, ReadAllResult{MarkedRead: n, Badges: badges})
+	sum, err := h.service.inboxSummary(c.Request.Context(), userID)
+	if err != nil {
+		response.InternalError(c, "Mark all read failed", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, ReadAllResult{MarkedRead: n, Badges: badges, Summary: sum})
 }
 
 // POST /v1/notifications/:id/read — markNotificationRead.
@@ -164,7 +170,12 @@ func (h *Handler) Delete(c *gin.Context) {
 		response.InternalError(c, "Notification operation failed", err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, DeleteResult{ID: id, Badges: badges})
+	sum, err := h.service.inboxSummary(c.Request.Context(), userID)
+	if err != nil {
+		response.InternalError(c, "Notification operation failed", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, DeleteResult{ID: id, Badges: badges, Summary: sum})
 }
 
 // GET /v1/notifications/settings — getNotificationSettings.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -36,15 +37,17 @@ func (r *UpdateProfileRequest) defaultAccountChange() (*uuid.UUID, bool, error) 
 // loadSettings fills DefaultAccount and AutoCopyOwnEventBills of the profile.
 func (s *Store) loadSettings(ctx context.Context, p *Profile) error {
 	var (
-		acc  *uuid.UUID
-		auto bool
+		acc              *uuid.UUID
+		auto             bool
+		muted, autoTypes []string
 	)
-	err := s.db.QueryRow(ctx, `SELECT default_account_id, auto_resolve_own_in_projects
-		FROM user_notification_settings WHERE user_id = $1`, p.ID).Scan(&acc, &auto)
+	err := s.db.QueryRow(ctx, `SELECT default_account_id, auto_resolve_own_in_projects, muted_types, auto_types
+		FROM user_notification_settings WHERE user_id = $1`, p.ID).Scan(&acc, &auto, &muted, &autoTypes)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("settings: %w", err)
 	}
 	p.AutoCopyOwnEventBills = auto
+	p.NotificationSummary.On, p.NotificationSummary.Auto = notifications.SettingsCounts(muted, autoTypes)
 	if acc != nil {
 		refs, err := shared.LoadAccountRefs(ctx, s.db, []uuid.UUID{*acc})
 		if err != nil {

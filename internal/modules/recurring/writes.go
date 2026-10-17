@@ -671,6 +671,12 @@ func (s *Service) Extend(ctx context.Context, userID, id uuid.UUID, req ExtendRe
 			}
 		}
 		r.EndingNotified = false
+		// ต่ออีก answers the "ending soon" notice of this setting.
+		if _, err := tx.Exec(ctx, `UPDATE notifications SET actioned_at = NOW(), read_at = COALESCE(read_at, NOW())
+			WHERE recipient_user_id = $1 AND type = 'recurring_ending' AND actioned_at IS NULL AND dismissed_at IS NULL
+			  AND payload->>'recurring_id' = $2`, userID, r.ID.String()); err != nil {
+			return err
+		}
 		if r.Status != "active" {
 			return nil
 		}
