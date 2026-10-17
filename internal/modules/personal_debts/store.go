@@ -33,6 +33,9 @@ var (
 	ErrContactNotFound = errors.New("contact not found")
 	// ErrTagsNeedWallet — tags belong to the wallet transaction.
 	ErrTagsNeedWallet = errors.New("tags go on the wallet transaction: pick a wallet first")
+	// ErrLedgerOnlyNoWallet — a ledger-only entry (create_transaction false)
+	// has no wallet or tags: they belong to the transaction.
+	ErrLedgerOnlyNoWallet = errors.New("a ledger-only entry has no wallet or tags: turn create_transaction on to use them")
 	// ErrMarkPaidNotFound — a mark_paid_ids entry isn't this person's.
 	ErrMarkPaidNotFound = errors.New("an entry to mark paid is not one of this person's")
 	// ErrManagedBySource — a split-sourced entry edits only description /

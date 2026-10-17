@@ -244,6 +244,8 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "CONTACT_NOT_FOUND", "Contact not found", nil)
 	case errors.Is(err, ErrTagsNeedWallet):
 		response.BadRequest(c, "TAGS_NEED_WALLET", err.Error(), nil)
+	case errors.Is(err, ErrLedgerOnlyNoWallet):
+		response.BadRequest(c, "LEDGER_ONLY_NO_WALLET", err.Error(), nil)
 	case errors.Is(err, ErrMarkPaidNotFound):
 		response.BadRequest(c, "ENTRY_NOT_FOUND", err.Error(), nil)
 	case errors.Is(err, ErrManagedBySource):

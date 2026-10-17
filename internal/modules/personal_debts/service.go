@@ -172,8 +172,17 @@ func resolvePerson(ctx context.Context, q querier, userID uuid.UUID, rawKey stri
 
 // CreateEntry — POST /personal-debts/people/:key/entries.
 func (s *Service) CreateEntry(ctx context.Context, userID uuid.UUID, rawKey string, req CreateEntryRequest) (*WriteResult, error) {
-	if len(req.TagIDs) > 0 && req.AccountID == nil {
-		return nil, ErrTagsNeedWallet
+	// A transaction is written when asked (create_transaction), else when a
+	// wallet is given (the old rule). A wallet is optional on a transaction.
+	createTx := req.AccountID != nil
+	if req.CreateTransaction != nil {
+		createTx = *req.CreateTransaction
+	}
+	if req.CreateTransaction == nil && req.AccountID == nil && len(req.TagIDs) > 0 {
+		return nil, ErrTagsNeedWallet // the old contract, for clients that don't send create_transaction
+	}
+	if !createTx && (req.AccountID != nil || len(req.TagIDs) > 0) {
+		return nil, ErrLedgerOnlyNoWallet
 	}
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -199,14 +208,16 @@ func (s *Service) CreateEntry(ctx context.Context, userID uuid.UUID, rawKey stri
 		return nil, err
 	}
 	var touched []uuid.UUID
-	if req.AccountID != nil {
+	if createTx {
 		if _, err := s.txs.CreateDebtTxInTx(ctx, tx, userID, e.ID, transactions.DebtTxInput{
-			Direction: e.Direction, AccountID: *req.AccountID, Amount: e.Amount, Date: e.Date,
+			Direction: e.Direction, AccountID: req.AccountID, Amount: e.Amount, Date: e.Date,
 			Description: e.Description, Note: e.Note, TagIDs: req.TagIDs,
 		}); err != nil {
 			return nil, err
 		}
-		touched = append(touched, *req.AccountID)
+		if req.AccountID != nil {
+			touched = append(touched, *req.AccountID)
+		}
 	}
 	if err := markPaidTx(ctx, tx, userID, e.Key(), req.MarkPaidIDs); err != nil {
 		return nil, err
@@ -333,8 +344,24 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 	if walletChange {
 		wallet = req.AccountID
 	}
-	if req.has("tag_ids") && len(req.TagIDs) > 0 && wallet == nil {
-		return nil, ErrTagsNeedWallet
+	if req.CreateTransaction == nil && req.has("tag_ids") && len(req.TagIDs) > 0 && wallet == nil {
+		return nil, ErrTagsNeedWallet // the old contract
+	}
+	// Is there to be a transaction after this write? create_transaction says
+	// so; without it, the old rule: account_id null drops it, a value makes
+	// one, and an untouched wallet keeps things as they are.
+	wantTx := txID != nil
+	switch {
+	case req.CreateTransaction != nil:
+		wantTx = *req.CreateTransaction
+	case walletChange:
+		wantTx = req.AccountID != nil
+	}
+	if !wantTx {
+		wallet = nil
+	}
+	if !wantTx && ((walletChange && req.AccountID != nil) || (req.has("tag_ids") && len(req.TagIDs) > 0)) {
+		return nil, ErrLedgerOnlyNoWallet
 	}
 
 	if _, err := tx.Exec(ctx, `UPDATE personal_debts
@@ -350,24 +377,23 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 		Direction: next.Direction, Amount: next.Amount, Date: next.Date,
 		Description: next.Description, Note: next.Note, TagIDs: req.TagIDs, TagsSet: req.has("tag_ids"),
 	}
+	in.AccountID = wallet
 	switch {
-	case txID != nil && wallet == nil:
+	case txID != nil && !wantTx:
 		acc, err := s.txs.DeleteDebtTxInTx(ctx, tx, userID, *txID)
 		if err != nil {
 			return nil, err
 		}
 		touched = nonNil(acc)
 	case txID != nil && e.SourceKind == nil:
-		in.AccountID = *wallet
 		if touched, err = s.txs.SyncDebtTxInTx(ctx, tx, userID, *txID, in); err != nil {
 			return nil, err
 		}
-	case txID == nil && wallet != nil:
-		in.AccountID = *wallet
+	case txID == nil && wantTx:
 		if _, err := s.txs.CreateDebtTxInTx(ctx, tx, userID, e.ID, in); err != nil {
 			return nil, err
 		}
-		touched = []uuid.UUID{*wallet}
+		touched = nonNil(wallet)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)

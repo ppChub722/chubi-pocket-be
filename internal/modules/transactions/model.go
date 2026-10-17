@@ -361,7 +361,16 @@ type ListFilter struct {
 	Type       *TxType
 	From       *string // YYYY-MM-DD
 	To         *string
-	NoWallet   bool // true → only rows with account_id IS NULL
+	NoWallet   bool // true → rows with account_id IS NULL (OR-ed with AccountID / AccountIDs)
+
+	// The multi-select filters (owner 2026-10-17): inside one group the values
+	// are OR-ed (wallet KBank OR cash OR no wallet), the groups are AND-ed
+	// (wallet AND category AND tag AND type). The single fields above still
+	// work and simply join the same group.
+	AccountIDs  []uuid.UUID // rows on ANY of these wallets
+	CategoryIDs []uuid.UUID // rows in ANY of these categories
+	Types       []TxType    // rows of ANY of these types
+	NoTags      bool        // rows with no tag (OR-ed with TagIDs)
 	// TZ — the X-Timezone header (the month of the daily series); RangeFrom / RangeTo
 	// — set by the service: the days the series covers.
 	TZ                 string

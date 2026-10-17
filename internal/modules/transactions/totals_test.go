@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
@@ -54,6 +56,11 @@ func TestListTotals(t *testing.T) {
 		{"no wallet", ListFilter{NoWallet: true}, Totals{0, 100, -100, 1}, 1},
 		{"search description", ListFilter{Q: "lunch"}, Totals{0, 400, -400, 2}, 2},
 		{"category", ListFilter{CategoryID: &food}, Totals{0, 300, -300, 1}, 1},
+		{"two wallets (OR)", ListFilter{AccountIDs: []uuid.UUID{a, b}}, Totals{1000, 500, 500, 3}, 5},
+		{"a wallet OR no wallet", ListFilter{AccountIDs: []uuid.UUID{a}, NoWallet: true}, Totals{1000, 400, 600, 3}, 4},
+		{"two types (OR)", ListFilter{Types: []TxType{TypeIncome, TypeTransfer}}, Totals{1000, 0, 1000, 1}, 3},
+		{"a category OR no category", ListFilter{CategoryIDs: []uuid.UUID{food}, Uncategorized: true}, Totals{1000, 600, 400, 4}, 4},
+		{"groups are AND-ed: wallet b AND no category", ListFilter{AccountIDs: []uuid.UUID{b}, Uncategorized: true}, Totals{0, 200, -200, 1}, 1},
 		{"from date", ListFilter{From: &from}, Totals{1000, 500, 500, 3}, 5},
 		{"nothing matches", ListFilter{Q: "zzz-none"}, Totals{}, 0},
 	}

@@ -61,14 +61,15 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
-        - { name: account_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
-        - { name: category_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: account_id, in: query, description: 'Repeatable; rows on ANY of these wallets (OR-ed with no_wallet). Groups are AND-ed: wallet AND category AND tag AND type.', schema: { type: array, items: { $ref: '#/components/schemas/Uuid' } }, style: form, explode: true }
+        - { name: category_id, in: query, description: 'Repeatable; rows in ANY of these categories (OR-ed with uncategorized).', schema: { type: array, items: { $ref: '#/components/schemas/Uuid' } }, style: form, explode: true }
         - { name: include_children, in: query, description: 'With category_id, also its sub-categories.', schema: { type: boolean } }
         - { name: uncategorized, in: query, schema: { type: boolean } }
-        - { name: type, in: query, schema: { type: string, enum: [expense, income, transfer] } }
+        - { name: type, in: query, description: 'Repeatable; rows of ANY of these types.', schema: { type: array, items: { type: string, enum: [expense, income, transfer] } }, style: form, explode: true }
         - { name: from, in: query, schema: { $ref: '#/components/schemas/Date' } }
         - { name: to, in: query, schema: { $ref: '#/components/schemas/Date' } }
-        - { name: no_wallet, in: query, description: 'Only rows without a wallet.', schema: { type: boolean } }
+        - { name: no_wallet, in: query, description: 'Rows without a wallet (OR-ed with account_id).', schema: { type: boolean } }
+        - { name: no_tags, in: query, description: 'Rows without any tag (OR-ed with tag_id).', schema: { type: boolean } }
         - { name: include_archived, in: query, description: 'Rows on archived wallets are hidden by default; true shows them (listing that wallet by account_id always does).', schema: { type: boolean } }
         - { name: q, in: query, description: 'Substring over description, note, category (incl. parent) and wallet names (max 100).', schema: { type: string, maxLength: 100 } }
         - { name: tag_id, in: query, description: 'Repeatable; rows having ANY of these tags.', schema: { type: array, items: { $ref: '#/components/schemas/Uuid' } }, style: form, explode: true }
@@ -9356,10 +9357,11 @@ components:
         direction: { type: string, enum: [paid, received] }
         amount: { type: number, exclusiveMinimum: 0 }
         date: { $ref: '#/components/schemas/Date' }
-        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Null / absent = ledger-only.' }
+        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The wallet of the transaction. Null / absent with no create_transaction = ledger-only.' }
+        create_transaction: { type: boolean, description: 'true = also write a transaction (it counts in income / expense; the wallet is optional, no wallet = no balance moves). false = ledger-only (no account_id, no tags). Absent = the old rule: a transaction exactly when account_id is given.' }
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
-        tag_ids: { $ref: '#/components/schemas/Ids', description: 'Only with account_id (the tags go on the wallet transaction).' }
+        tag_ids: { $ref: '#/components/schemas/Ids', description: 'Go on the transaction: needs create_transaction true, or an account_id.' }
         mark_paid_ids: { $ref: '#/components/schemas/Ids', description: 'Entries of the same person to label paid in the same call.' }
         person_name: { type: string, minLength: 1, maxLength: 100, description: '`n:` keys only: the shown spelling of a typed name.' }
     DebtEntryUpdateRequest:
@@ -9369,7 +9371,8 @@ components:
         direction: { type: string, enum: [paid, received] }
         amount: { type: number, exclusiveMinimum: 0 }
         date: { $ref: '#/components/schemas/Date' }
-        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'null = ledger-only (deletes the transaction); a value = create / move it.' }
+        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Without create_transaction: null = ledger-only (deletes the transaction); a value = create / move it. With create_transaction true: null = the transaction has no wallet.' }
+        create_transaction: { type: boolean, description: 'true = there is a transaction after this write (made if missing); false = ledger-only (deletes it).' }
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
         paid: { type: boolean }

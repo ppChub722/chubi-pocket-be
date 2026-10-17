@@ -143,6 +143,76 @@ func entriesPath(key string) string {
 	return "/api/v1/personal-debts/people/" + url.PathEscape(key) + "/entries"
 }
 
+// TestDebtCreateTransactionWithoutWallet — a debt entry can be a transaction
+// with no wallet (create_transaction): it counts as income / expense, takes
+// tags, and moves no wallet balance; switching it off removes the transaction.
+func TestDebtCreateTransactionWithoutWallet(t *testing.T) {
+	f := newDebtHFix(t)
+
+	// A transaction with no wallet, tagged.
+	made := f.call("POST", entriesPath("n:Mom"), map[string]any{
+		"direction": "paid", "amount": 120, "date": "2026-10-04", "create_transaction": true,
+		"tag_ids": []uuid.UUID{f.tag},
+	}, "", http.StatusCreated)
+	entryID := obj(made, "entry")["id"].(string)
+	tx := obj(made, "transaction")
+	if tx == nil || tx["type"] != "expense" || obj(tx, "category")["system_kind"] != "DEBT_PAID" {
+		t.Fatalf("transaction = %v", tx)
+	}
+	if tx["account"] != nil {
+		t.Errorf("account = %v, want none", tx["account"])
+	}
+	if tags, _ := tx["tags"].([]any); len(tags) != 1 {
+		t.Errorf("tags = %v, want one", tx["tags"])
+	}
+	if f.balance() != 1000 {
+		t.Errorf("wallet = %v, want 1000 (no wallet moved)", f.balance())
+	}
+
+	// Ledger-only takes neither a wallet nor tags.
+	f.code("POST", entriesPath("n:Mom"), map[string]any{
+		"direction": "paid", "amount": 5, "create_transaction": false, "account_id": f.wallet,
+	}, http.StatusBadRequest, "LEDGER_ONLY_NO_WALLET")
+	f.code("POST", entriesPath("n:Mom"), map[string]any{
+		"direction": "paid", "amount": 5, "create_transaction": false, "tag_ids": []uuid.UUID{f.tag},
+	}, http.StatusBadRequest, "LEDGER_ONLY_NO_WALLET")
+	ledger := f.call("POST", entriesPath("n:Mom"), map[string]any{
+		"direction": "received", "amount": 20, "create_transaction": false,
+	}, "", http.StatusCreated)
+	if ledger["transaction"] != nil {
+		t.Errorf("ledger-only transaction = %v", ledger["transaction"])
+	}
+
+	// Give the wallet-less transaction a wallet, then take the wallet off again.
+	moved := f.call("PUT", "/api/v1/personal-debts/"+entryID, map[string]any{
+		"create_transaction": true, "account_id": f.wallet,
+	}, "", http.StatusOK)
+	if obj(moved, "transaction") == nil || f.balance() != 880 {
+		t.Errorf("after wallet: tx = %v, wallet = %v, want 880", moved["transaction"], f.balance())
+	}
+	unwalleted := f.call("PUT", "/api/v1/personal-debts/"+entryID, map[string]any{
+		"create_transaction": true, "account_id": nil,
+	}, "", http.StatusOK)
+	if obj(unwalleted, "transaction") == nil || f.balance() != 1000 {
+		t.Errorf("after un-wallet: tx = %v, wallet = %v, want 1000", unwalleted["transaction"], f.balance())
+	}
+
+	// create_transaction false removes the transaction, the entry stays.
+	gone := f.call("PUT", "/api/v1/personal-debts/"+entryID, map[string]any{
+		"create_transaction": false,
+	}, "", http.StatusOK)
+	if gone["transaction"] != nil || obj(gone, "entry")["id"] != entryID {
+		t.Errorf("after create_transaction false: %v", gone)
+	}
+	// ...and true makes one again, with no wallet.
+	again := f.call("PUT", "/api/v1/personal-debts/"+entryID, map[string]any{
+		"create_transaction": true,
+	}, "", http.StatusOK)
+	if obj(again, "transaction") == nil || f.balance() != 1000 {
+		t.Errorf("after create_transaction true: tx = %v, wallet = %v", again["transaction"], f.balance())
+	}
+}
+
 // TestDebtLedgerFlow — the person ledger end to end: entries with and
 // without a wallet, the people list, the person page, edits and deletes
 // keeping the entry and its wallet transaction one record.

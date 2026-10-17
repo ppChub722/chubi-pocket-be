@@ -65,7 +65,7 @@ func (s *Service) today(ctx context.Context, userID uuid.UUID, headerTZ string) 
 
 // Today — transactions.RecurringLinks.
 func (s *Service) Today(ctx context.Context, userID uuid.UUID) (string, error) {
-	t, err := s.today(ctx, userID, "")
+	t, err := s.today(ctx, userID, shared.HeaderTZ(ctx))
 	return t.Format(dateLayout), err
 }
 

@@ -205,10 +205,15 @@ type CreateEntryRequest struct {
 	Amount      float64     `json:"amount"       binding:"required,gt=0"`
 	Date        *string     `json:"date"         binding:"omitempty,datetime=2006-01-02"`
 	AccountID   *uuid.UUID  `json:"account_id"`
-	Description *string     `json:"description"  binding:"omitempty,max=200"`
-	Note        *string     `json:"note"         binding:"omitempty,max=500"`
-	TagIDs      []uuid.UUID `json:"tag_ids"`
-	MarkPaidIDs []uuid.UUID `json:"mark_paid_ids"`
+	// CreateTransaction - write the entry as a transaction too (it counts in
+	// income / expense; a wallet is optional). Absent = the old rule: a
+	// transaction exactly when account_id is given. false = ledger-only:
+	// no wallet, no tags.
+	CreateTransaction *bool       `json:"create_transaction"`
+	Description       *string     `json:"description"  binding:"omitempty,max=200"`
+	Note              *string     `json:"note"         binding:"omitempty,max=500"`
+	TagIDs            []uuid.UUID `json:"tag_ids"`
+	MarkPaidIDs       []uuid.UUID `json:"mark_paid_ids"`
 	PersonName  *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
 }
 
@@ -218,9 +223,12 @@ type UpdateEntryRequest struct {
 	Amount      *float64    `json:"amount"       binding:"omitempty,gt=0"`
 	Date        *string     `json:"date"         binding:"omitempty,datetime=2006-01-02"`
 	AccountID   *uuid.UUID  `json:"account_id"`
-	Description *string     `json:"description"  binding:"omitempty,max=200"`
-	Note        *string     `json:"note"         binding:"omitempty,max=500"`
-	Paid        *bool       `json:"paid"`
+	// CreateTransaction - see CreateEntryRequest. Absent: the old rule
+	// (account_id null = ledger-only, a value = a transaction in it).
+	CreateTransaction *bool   `json:"create_transaction"`
+	Description       *string `json:"description"  binding:"omitempty,max=200"`
+	Note              *string `json:"note"         binding:"omitempty,max=500"`
+	Paid              *bool   `json:"paid"`
 	TagIDs      []uuid.UUID `json:"tag_ids"`
 	Key         *string     `json:"key"`
 	PersonName  *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
@@ -240,7 +248,7 @@ func (r *UpdateEntryRequest) has(k string) bool { return r.present[k] }
 // moneyChange — the request touches something a split-sourced entry can't
 // change (only description / note / paid are its own).
 func (r *UpdateEntryRequest) moneyChange() bool {
-	for _, k := range []string{"direction", "amount", "date", "account_id", "tag_ids", "key", "person_name"} {
+	for _, k := range []string{"direction", "amount", "date", "account_id", "create_transaction", "tag_ids", "key", "person_name"} {
 		if r.has(k) {
 			return true
 		}

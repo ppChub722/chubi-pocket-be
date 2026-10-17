@@ -22,9 +22,11 @@ var (
 	// ErrDebtTxAuthorOnly — a debt entry's wallet side belongs to its
 	// author's ledger; a co-member of the wallet may not edit / delete it.
 	ErrDebtTxAuthorOnly = errors.New("only its author can change a debt entry's transaction")
-	// ErrDebtTxNeedsWallet — the transaction side can't drop its wallet;
-	// making the entry ledger-only is an edit of the entry (PUT /personal-debts/:id).
-	ErrDebtTxNeedsWallet = errors.New("a debt entry's transaction keeps a wallet; edit the entry to make it ledger-only")
+	// ErrDebtTxNeedsWallet — the transaction side can't drop a wallet it has;
+	// to stop counting it, edit the entry (PUT /personal-debts/:id). A debt
+	// transaction may also have NO wallet from the start (create_transaction
+	// without account_id): that one just stays without.
+	ErrDebtTxNeedsWallet = errors.New("a debt entry's transaction keeps its wallet; edit the entry to change it")
 )
 
 // DebtLinks — personal_debts' side of the link, wired in main.go.
@@ -44,8 +46,10 @@ func (s *Service) WithDebtLinks(l DebtLinks) { s.debtLinks = l }
 
 // DebtTxInput — the wallet side of an entry.
 type DebtTxInput struct {
-	Direction   string // paid | received
-	AccountID   uuid.UUID
+	Direction string // paid | received
+	// AccountID nil = a transaction with no wallet (it counts in reports,
+	// no wallet balance moves).
+	AccountID   *uuid.UUID
 	Amount      float64
 	Date        string
 	Description *string
@@ -77,27 +81,30 @@ func (s *Service) debtCategory(ctx context.Context, userID uuid.UUID, t TxType) 
 // CreateDebtTxInTx writes entryID's wallet transaction and moves the
 // wallet. The caller must be an active member of the wallet.
 func (s *Service) CreateDebtTxInTx(ctx context.Context, tx pgx.Tx, userID, entryID uuid.UUID, in DebtTxInput) (*Transaction, error) {
-	if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{in.AccountID}); err != nil {
-		return nil, err
-	}
-	if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, in.AccountID); err != nil {
-		return nil, err
+	if in.AccountID != nil {
+		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*in.AccountID}); err != nil {
+			return nil, err
+		}
+		if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *in.AccountID); err != nil {
+			return nil, err
+		}
 	}
 	t := in.txType()
 	catID, err := s.debtCategory(ctx, userID, t)
 	if err != nil {
 		return nil, err
 	}
-	acc := in.AccountID
 	created, err := s.store.InsertRowTx(ctx, tx, &Transaction{
-		UserID: userID, AccountID: &acc, Type: t, Amount: in.Amount, CategoryID: &catID,
+		UserID: userID, AccountID: in.AccountID, Type: t, Amount: in.Amount, CategoryID: &catID,
 		Date: in.Date, Description: in.Description, Note: in.Note, SourcePersonalDebtID: &entryID,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, acc, signedDelta(t, in.Amount, false)); err != nil {
-		return nil, err
+	if in.AccountID != nil {
+		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *in.AccountID, signedDelta(t, in.Amount, false)); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.store.AttachTagsTx(ctx, tx, userID, created.ID, in.TagIDs); err != nil {
 		return nil, err
@@ -116,13 +123,15 @@ func (s *Service) SyncDebtTxInTx(ctx context.Context, tx pgx.Tx, userID, txID uu
 	if err != nil {
 		return nil, err
 	}
-	touched := nonNilIDs(current.AccountID, &in.AccountID)
+	touched := nonNilIDs(current.AccountID, in.AccountID)
 	lockIDs := uniqueUUIDs(touched)
 	if err := s.store.LockAccountsForUpdate(ctx, tx, sortedUUIDs(lockIDs)); err != nil {
 		return nil, err
 	}
-	if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, in.AccountID); err != nil {
-		return nil, err
+	if in.AccountID != nil {
+		if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *in.AccountID); err != nil {
+			return nil, err
+		}
 	}
 	if current.AccountID != nil {
 		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *current.AccountID,
@@ -131,8 +140,10 @@ func (s *Service) SyncDebtTxInTx(ctx context.Context, tx pgx.Tx, userID, txID uu
 		}
 	}
 	t := in.txType()
-	if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, in.AccountID, signedDelta(t, in.Amount, false)); err != nil {
-		return nil, err
+	if in.AccountID != nil {
+		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *in.AccountID, signedDelta(t, in.Amount, false)); err != nil {
+			return nil, err
+		}
 	}
 	catID, err := s.debtCategory(ctx, userID, t)
 	if err != nil {
@@ -181,7 +192,9 @@ func checkDebtTxEdit(userID uuid.UUID, current *Transaction, req UpdateRequest, 
 	if _, ok := req.CategoryIDChange(); ok {
 		return ErrSystemTransactionImmutable
 	}
-	if acc, ok := req.AccountIDChange(); ok && acc == nil {
+	// Dropping a wallet it has is an edit of the entry; a transaction that
+	// never had one can be saved as it is.
+	if acc, ok := req.AccountIDChange(); ok && acc == nil && current.AccountID != nil {
 		return ErrDebtTxNeedsWallet
 	}
 	return nil

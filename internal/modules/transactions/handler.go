@@ -40,7 +40,7 @@ func (h *Handler) Create(c *gin.Context) {
 		return
 	}
 
-	res, err := h.service.CreateWrite(c.Request.Context(), userID, req)
+	res, err := h.service.CreateWrite(shared.WithHeaderTZ(c.Request.Context(), c.GetHeader("X-Timezone")), userID, req)
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -77,22 +77,25 @@ func (h *Handler) List(c *gin.Context) {
 			f.PerPage = n
 		}
 	}
-	if v := c.Query("account_id"); v != "" {
+	// account_id / category_id / type may repeat (multi-select; OR inside the
+	// group, AND between groups).
+	for _, v := range c.QueryArray("account_id") {
 		id, err := uuid.Parse(v)
 		if err != nil {
 			response.BadRequest(c, "VALIDATION_ERROR", "Invalid account_id", nil)
 			return
 		}
-		f.AccountID = &id
+		f.AccountIDs = append(f.AccountIDs, id)
 	}
-	if v := c.Query("category_id"); v != "" {
+	for _, v := range c.QueryArray("category_id") {
 		id, err := uuid.Parse(v)
 		if err != nil {
 			response.BadRequest(c, "VALIDATION_ERROR", "Invalid category_id", nil)
 			return
 		}
-		f.CategoryID = &id
+		f.CategoryIDs = append(f.CategoryIDs, id)
 	}
+	f.NoTags = c.Query("no_tags") == "true"
 	f.IncludeChildren = c.Query("include_children") == "true"
 	f.Uncategorized = c.Query("uncategorized") == "true"
 	if v := strings.TrimSpace(c.Query("q")); v != "" {
@@ -110,13 +113,12 @@ func (h *Handler) List(c *gin.Context) {
 		}
 		f.TagIDs = append(f.TagIDs, id)
 	}
-	if v := c.Query("type"); v != "" {
+	for _, v := range c.QueryArray("type") {
 		if v != "expense" && v != "income" && v != "transfer" {
 			response.BadRequest(c, "VALIDATION_ERROR", "type must be 'expense', 'income', or 'transfer'", nil)
 			return
 		}
-		t := TxType(v)
-		f.Type = &t
+		f.Types = append(f.Types, TxType(v))
 	}
 	for _, p := range []struct {
 		key string
@@ -194,7 +196,7 @@ func (h *Handler) Update(c *gin.Context) {
 		return
 	}
 
-	res, err := h.service.UpdateWrite(c.Request.Context(), userID, id, req)
+	res, err := h.service.UpdateWrite(shared.WithHeaderTZ(c.Request.Context(), c.GetHeader("X-Timezone")), userID, id, req)
 	if err != nil {
 		mapServiceError(c, err)
 		return

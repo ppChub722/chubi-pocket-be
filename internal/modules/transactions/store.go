@@ -163,25 +163,47 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	whereClauses := []string{txVisible("t", "$1")}
 	args := []any{userID}
 
+	// Wallet group: any of the wallets, or no wallet.
+	walletIDs := append([]uuid.UUID(nil), f.AccountIDs...)
 	if f.AccountID != nil {
-		args = append(args, *f.AccountID)
-		whereClauses = append(whereClauses, fmt.Sprintf("t.account_id = $%d", len(args)))
+		walletIDs = append(walletIDs, *f.AccountID)
 	}
-	if f.AccountID == nil && !f.IncludeArchived {
+	var walletOr []string
+	if len(walletIDs) > 0 {
+		args = append(args, walletIDs)
+		walletOr = append(walletOr, fmt.Sprintf("t.account_id = ANY($%d)", len(args)))
+	}
+	if f.NoWallet {
+		walletOr = append(walletOr, "t.account_id IS NULL")
+	}
+	if len(walletOr) > 0 {
+		whereClauses = append(whereClauses, "("+strings.Join(walletOr, " OR ")+")")
+	}
+	if len(walletIDs) == 0 && !f.IncludeArchived {
 		whereClauses = append(whereClauses,
 			"NOT EXISTS (SELECT 1 FROM accounts xa WHERE xa.id = t.account_id AND xa.status = 'archived')")
 	}
+	// Category group: any of the categories (with their sub-categories when
+	// asked), or no category.
+	categoryIDs := append([]uuid.UUID(nil), f.CategoryIDs...)
 	if f.CategoryID != nil {
-		args = append(args, *f.CategoryID)
+		categoryIDs = append(categoryIDs, *f.CategoryID)
+	}
+	var categoryOr []string
+	if len(categoryIDs) > 0 {
+		args = append(args, categoryIDs)
 		if f.IncludeChildren {
-			whereClauses = append(whereClauses, fmt.Sprintf(
-				"t.category_id IN (SELECT id FROM categories WHERE id = $%[1]d OR parent_id = $%[1]d)", len(args)))
+			categoryOr = append(categoryOr, fmt.Sprintf(
+				"t.category_id IN (SELECT id FROM categories WHERE id = ANY($%[1]d) OR parent_id = ANY($%[1]d))", len(args)))
 		} else {
-			whereClauses = append(whereClauses, fmt.Sprintf("t.category_id = $%d", len(args)))
+			categoryOr = append(categoryOr, fmt.Sprintf("t.category_id = ANY($%d)", len(args)))
 		}
 	}
 	if f.Uncategorized {
-		whereClauses = append(whereClauses, "t.category_id IS NULL")
+		categoryOr = append(categoryOr, "t.category_id IS NULL")
+	}
+	if len(categoryOr) > 0 {
+		whereClauses = append(whereClauses, "("+strings.Join(categoryOr, " OR ")+")")
 	}
 	// Search + tags use subqueries, not joins, so the COUNT query below can
 	// share the same WHERE.
@@ -192,14 +214,30 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 			           WHERE qc.id = t.category_id AND (qc.name ILIKE $%[1]d OR qp.name ILIKE $%[1]d))
 			OR EXISTS (SELECT 1 FROM accounts qa WHERE qa.id = t.account_id AND qa.name ILIKE $%[1]d))`, len(args)))
 	}
+	// Tag group: any of the tags, or no tag at all.
+	var tagOr []string
 	if len(f.TagIDs) > 0 {
 		args = append(args, f.TagIDs)
-		whereClauses = append(whereClauses, fmt.Sprintf(
+		tagOr = append(tagOr, fmt.Sprintf(
 			"EXISTS (SELECT 1 FROM transaction_tags tt WHERE tt.transaction_id = t.id AND tt.tag_id = ANY($%d))", len(args)))
 	}
+	if f.NoTags {
+		tagOr = append(tagOr, "NOT EXISTS (SELECT 1 FROM transaction_tags nt WHERE nt.transaction_id = t.id)")
+	}
+	if len(tagOr) > 0 {
+		whereClauses = append(whereClauses, "("+strings.Join(tagOr, " OR ")+")")
+	}
+	// Type group: any of the types.
+	var typeNames []string
 	if f.Type != nil {
-		args = append(args, string(*f.Type))
-		whereClauses = append(whereClauses, fmt.Sprintf("t.type = $%d", len(args)))
+		typeNames = append(typeNames, string(*f.Type))
+	}
+	for _, ty := range f.Types {
+		typeNames = append(typeNames, string(ty))
+	}
+	if len(typeNames) > 0 {
+		args = append(args, typeNames)
+		whereClauses = append(whereClauses, fmt.Sprintf("t.type = ANY($%d)", len(args)))
 	}
 	if f.From != nil {
 		args = append(args, *f.From)
@@ -208,9 +246,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	if f.To != nil {
 		args = append(args, *f.To)
 		whereClauses = append(whereClauses, fmt.Sprintf("t.date <= $%d::date", len(args)))
-	}
-	if f.NoWallet {
-		whereClauses = append(whereClauses, "t.account_id IS NULL")
 	}
 	if f.CanJoinEvent {
 		// What the event "add existing bills" picker may pull (the can_join_event

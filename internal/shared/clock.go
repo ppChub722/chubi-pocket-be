@@ -11,6 +11,20 @@ import (
 // DefaultTimezone — the last fallback of every "today" / "this month".
 const DefaultTimezone = "Asia/Bangkok"
 
+type tzKey struct{}
+
+// WithHeaderTZ carries the request's X-Timezone down to code that only has
+// a ctx (the transactions → recurring "today" check).
+func WithHeaderTZ(ctx context.Context, tz string) context.Context {
+	return context.WithValue(ctx, tzKey{}, tz)
+}
+
+// HeaderTZ — the X-Timezone [WithHeaderTZ] stored ("" when none).
+func HeaderTZ(ctx context.Context) string {
+	tz, _ := ctx.Value(tzKey{}).(string)
+	return tz
+}
+
 // UserLocation — X-Timezone header → user_preferences.timezone →
 // Asia/Bangkok → UTC. One rule for every "today" and "this month".
 func UserLocation(ctx context.Context, q Querier, userID uuid.UUID, headerTZ string) (*time.Location, error) {
