@@ -2,6 +2,7 @@ package projects
 
 import (
 	"encoding/json"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"time"
 
 	"github.com/google/uuid"
@@ -518,3 +519,10 @@ type BoardFilter struct {
 }
 
 var _ json.Unmarshaler = (*UpdateProjectRequest)(nil)
+
+// InviteAcceptResult — the event detail (flattened) + the inbox summary after the
+// accept (named inbox_summary: the event detail already has its own `summary`).
+type InviteAcceptResult struct {
+	*EventDetail
+	InboxSummary notifications.InboxSummary `json:"inbox_summary"`
+}

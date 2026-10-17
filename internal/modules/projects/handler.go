@@ -288,7 +288,16 @@ func (h *Handler) AcceptLinkRequest(c *gin.Context) {
 		return
 	}
 	out, err := h.service.AcceptLinkRequest(c.Request.Context(), userID, notifID)
-	reply(c, http.StatusOK, out, err)
+	if err != nil {
+		reply(c, http.StatusOK, out, err)
+		return
+	}
+	sum, err := notifications.LoadInboxSummary(c.Request.Context(), h.service.store.Pool(), userID)
+	if err != nil {
+		reply(c, http.StatusOK, out, err)
+		return
+	}
+	reply(c, http.StatusOK, &InviteAcceptResult{EventDetail: out, InboxSummary: sum}, nil)
 }
 
 // POST /v1/projects/link-requests/:notification_id/reject
@@ -306,7 +315,12 @@ func (h *Handler) RejectLinkRequest(c *gin.Context) {
 		mapServiceError(c, err)
 		return
 	}
-	response.OK(c, "Project link request rejected", nil)
+	sum, err := notifications.LoadInboxSummary(c.Request.Context(), h.service.store.Pool(), userID)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Project link request rejected", "inbox_summary": sum})
 }
 
 // --- Bills (board rows) ---

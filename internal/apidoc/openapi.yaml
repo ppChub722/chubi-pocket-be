@@ -2917,7 +2917,7 @@ paths:
           description: The event, page-ready.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/EventDetail' }
+              schema: { $ref: '#/components/schemas/ProjectInviteAcceptResult' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -2936,7 +2936,7 @@ paths:
           description: Done.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Ack' }
+              schema: { $ref: '#/components/schemas/ProjectInviteRejectResult' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -9537,6 +9537,21 @@ components:
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/BoardRow' } }
         pagination: { $ref: '#/components/schemas/Page' }
+    ProjectInviteAcceptResult:
+      description: 'The event detail plus `inbox_summary` (the inbox numbers after the accept; named so because the event detail has its own `summary`).'
+      allOf:
+        - { $ref: '#/components/schemas/EventDetail' }
+        - type: object
+          required: [inbox_summary]
+          properties:
+            inbox_summary: { $ref: '#/components/schemas/InboxSummary' }
+    ProjectInviteRejectResult:
+      type: object
+      required: [success, inbox_summary]
+      properties:
+        success: { type: boolean, const: true }
+        message: { type: string }
+        inbox_summary: { $ref: '#/components/schemas/InboxSummary' }
     EventDetail:
       type: object
       description: 'The detail page in one call.'
