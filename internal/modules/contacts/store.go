@@ -52,7 +52,7 @@ var contactSelect = `SELECT c.id, c.user_id,
 	CASE WHEN lu.id IS NOT NULL THEN lu.email ELSE c.email END,
 	c.phone, c.description, c.note, ` + shared.PersonIconSQL("c", "lu") + `,
 	c.linked_user_id, c.status, c.last_used_at, c.created_at, c.updated_at,
-	lu.id, lu.display_name, lu.email, lu.icon_code
+	lu.id, lu.display_name, lu.email, lu.icon_code, lu.username
 	FROM contacts c LEFT JOIN users lu ON lu.id = c.linked_user_id`
 
 func scanContact(row pgx.Row) (*Contact, error) {
@@ -63,12 +63,13 @@ func scanContact(row pgx.Row) (*Contact, error) {
 		luName    *string
 		luEmail   *string
 		luIcon    []byte
+		luUser    *string
 	)
 	err := row.Scan(
 		&c.ID, &c.UserID, &c.Name, &c.Nickname, &c.ShowNickname, &c.DisplayName,
 		&c.Email, &c.Phone, &c.Description, &c.Note, &iconBytes,
 		&c.LinkedUserID, &c.Status, &c.LastUsedAt, &c.CreatedAt, &c.UpdatedAt,
-		&luID, &luName, &luEmail, &luIcon,
+		&luID, &luName, &luEmail, &luIcon, &luUser,
 	)
 	if err != nil {
 		return nil, err
@@ -78,6 +79,9 @@ func scanContact(row pgx.Row) (*Contact, error) {
 		lu := &LinkedUser{ID: *luID, Email: luEmail, IconCode: shared.IconFromJSON(luIcon)}
 		if luName != nil {
 			lu.DisplayName = *luName
+		}
+		if luUser != nil {
+			lu.Username = *luUser
 		}
 		c.LinkedUser = lu
 	}
@@ -407,4 +411,16 @@ func onlyDigits(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// DeletePreview counts what a hard delete of the contact would touch.
+func (s *Store) DeletePreview(ctx context.Context, userID uuid.UUID, c *Contact) (*DeletePreview, error) {
+	p := &DeletePreview{Linked: c.LinkedUserID != nil}
+	if err := s.db.QueryRow(ctx, `SELECT
+		(SELECT COUNT(*) FROM personal_debts WHERE user_id = $1 AND counterparty_contact_id = $2),
+		(SELECT COUNT(*) FROM project_members WHERE contact_id = $2)`, userID, c.ID).
+		Scan(&p.DebtRecords, &p.EventMembers); err != nil {
+		return nil, fmt.Errorf("delete preview: %w", err)
+	}
+	return p, nil
 }

@@ -85,7 +85,7 @@ func (h *Handler) Get(c *gin.Context) {
 	if !ok {
 		return
 	}
-	out, err := h.service.GetDetail(c.Request.Context(), userID, id, includes(c, "unlinked_names"))
+	out, err := h.service.GetDetail(c.Request.Context(), userID, id, includes(c, "unlinked_names"), includes(c, "delete_preview"))
 	if err != nil {
 		mapServiceError(c, err)
 		return

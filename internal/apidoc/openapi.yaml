@@ -681,7 +681,7 @@ paths:
       description: 'With `include=unlinked_names` the free-text names that could be absorbed come in the same call (replaces `GET /contacts/unlinked-names`).'
       operationId: getContact
       parameters:
-        - { name: include, in: query, schema: { type: string, enum: [unlinked_names] } }
+        - { name: include, in: query, schema: { type: string, description: 'Comma list: unlinked_names, delete_preview.', example: 'unlinked_names,delete_preview' } }
       responses:
         '200':
           description: 'The contact (+ `unlinked_names` when asked).'
@@ -5774,9 +5774,10 @@ components:
     # ───────── contacts ─────────
     LinkedUser:
       type: object
-      required: [id, display_name, email, icon_code]
+      required: [id, username, display_name, email, icon_code]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
+        username: { type: string, description: 'The user''s @username.' }
         display_name: { type: string, description: 'The user''s profile name (live). '}
         email: { type: [string, 'null'] }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
@@ -5907,12 +5908,29 @@ components:
       allOf:
         - { $ref: '#/components/schemas/Contact' }
         - type: object
-          required: [unlinked_names]
+          required: [unlinked_names, unlinked_total, delete_preview]
           properties:
             unlinked_names:
               type: [array, 'null']
               items: { $ref: '#/components/schemas/UnlinkedName' }
               description: 'Present (array) only with ?include=unlinked_names; null otherwise.'
+            unlinked_total:
+              type: object
+              required: [names, records]
+              description: 'Always present: the badge of "จับคู่ชื่อในรายการหาร" — absorbable free-text names and the records carrying them.'
+              properties:
+                names: { type: integer }
+                records: { type: integer }
+            delete_preview:
+              description: 'Only with ?include=delete_preview, else null: what a delete touches (records keep the name as text).'
+              oneOf:
+                - type: 'null'
+                - type: object
+                  required: [debt_records, event_members, linked]
+                  properties:
+                    debt_records: { type: integer }
+                    event_members: { type: integer }
+                    linked: { type: boolean }
     CreateContactRequest:
       type: object
       required: [display_name]

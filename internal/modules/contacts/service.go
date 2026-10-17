@@ -112,21 +112,30 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Contact, erro
 // GetDetail is the contact page's read: the contact, plus the absorbable
 // free-text names when withUnlinkedNames (else UnlinkedNames stays nil =
 // JSON null).
-func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, withUnlinkedNames bool) (*ContactDetail, error) {
+func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, withUnlinkedNames, withDeletePreview bool) (*ContactDetail, error) {
 	c, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
 		return nil, err
 	}
 	d := &ContactDetail{Contact: *c}
+	names, err := s.UnlinkedNames(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range names {
+		d.UnlinkedTotal.Names++
+		d.UnlinkedTotal.Records += n.Count
+	}
 	if withUnlinkedNames {
-		names, err := s.UnlinkedNames(ctx, userID)
-		if err != nil {
-			return nil, err
-		}
 		if names == nil {
 			names = []UnlinkedName{}
 		}
 		d.UnlinkedNames = names
+	}
+	if withDeletePreview {
+		if d.DeletePreview, err = s.store.DeletePreview(ctx, userID, c); err != nil {
+			return nil, err
+		}
 	}
 	return d, nil
 }

@@ -18,6 +18,7 @@ const (
 type LinkedUser struct {
 	ID          uuid.UUID        `json:"id"`
 	DisplayName string           `json:"display_name"`
+	Username    string           `json:"username"`
 	Email       *string          `json:"email"`
 	IconCode    *shared.IconCode `json:"icon_code"`
 }
@@ -53,6 +54,10 @@ type Contact struct {
 type ContactDetail struct {
 	Contact
 	UnlinkedNames []UnlinkedName `json:"unlinked_names"`
+	// UnlinkedTotal — always present: the wizard badge (names + records).
+	UnlinkedTotal UnlinkedTotal `json:"unlinked_total"`
+	// DeletePreview — only with ?include=delete_preview, else null.
+	DeletePreview *DeletePreview `json:"delete_preview"`
 }
 
 type CreateContactRequest struct {
@@ -175,4 +180,19 @@ type CreateLinkedContactRequest struct {
 	Description *string          `json:"description" binding:"omitempty,max=200"`
 	Note        *string          `json:"note"        binding:"omitempty,max=500"`
 	IconCode    *shared.IconCode `json:"icon_code" binding:"omitempty"`
+}
+
+// UnlinkedTotal — the badge of "จับคู่ชื่อในรายการหาร": how many absorbable
+// free-text names and how many records carry them.
+type UnlinkedTotal struct {
+	Names   int `json:"names"`
+	Records int `json:"records"`
+}
+
+// DeletePreview — with ?include=delete_preview: what a delete would touch.
+// Nothing is removed from the records: they keep the contact's name as text.
+type DeletePreview struct {
+	DebtRecords  int  `json:"debt_records"`  // debts / splits with this person
+	EventMembers int  `json:"event_members"` // event members pointing at this contact
+	Linked       bool `json:"linked"`        // a linked contact: the link ends too
 }
