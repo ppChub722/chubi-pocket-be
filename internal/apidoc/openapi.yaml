@@ -6607,7 +6607,9 @@ components:
           "month_in": { "$ref": "#/components/schemas/Money", "description": "This month's cash IN on the wallet (income rows of every author; transfers and opening / adjustment rows are not money in / out). Month = the user's timezone." },
           "month_out": { "$ref": "#/components/schemas/Money", "description": "This month's cash OUT (expense rows)." },
           "due_date_next": { "oneOf": [{ "$ref": "#/components/schemas/Date" }, { "type": "null" }], "description": "Credit card / pay-later with a payment_due_date: the next due date on or after today (day 31 = last day of a short month); else null." },
-          "days_until_due": { "type": ["integer", "null"], "description": "Days from today to due_date_next (0 = today)." }
+          "days_until_due": { "type": ["integer", "null"], "description": "Days from today to due_date_next (0 = today)." },
+          "credit_used_pct": { "type": ["integer", "null"], "description": "Credit card / pay-later with a credit_limit: what is owed / the limit, rounded, not clamped; null otherwise." },
+          "credit_available": { "oneOf": [{ "$ref": "#/components/schemas/Money" }, { "type": "null" }], "description": "limit − owed, floored at 0; null without a limit." }
         },
         "description": "A wallet, page-ready. `members` = active members only (incl. the caller). Replaces the old Account shape (members[].display_name → name, adds group / my_role / can_edit / is_me).",
         "required": [
@@ -6635,7 +6637,7 @@ components:
           "can_edit",
           "track_balance",
           "savings",
-          "month_in", "month_out", "due_date_next", "days_until_due",
+          "month_in", "month_out", "due_date_next", "days_until_due", "credit_used_pct", "credit_available",
           "created_at",
           "updated_at"
         ]

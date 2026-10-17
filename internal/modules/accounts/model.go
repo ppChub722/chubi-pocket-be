@@ -86,6 +86,9 @@ type Account struct {
 	MonthOut     float64 `json:"month_out"`
 	DueDateNext  *string `json:"due_date_next"`
 	DaysUntilDue *int    `json:"days_until_due"`
+	// Credit wallets with a limit: credit_used_pct = what is owed / the limit (rounded, not clamped); credit_available = limit − owed, ≥ 0. null otherwise.
+	CreditUsedPct   *int     `json:"credit_used_pct"`
+	CreditAvailable *float64 `json:"credit_available"`
 }
 
 // AccountMember is the account_members DB row. A pending invite has

@@ -732,11 +732,13 @@ func TestAccountPageNumbers(t *testing.T) {
 
 	var list struct {
 		Data []struct {
-			ID           uuid.UUID `json:"id"`
-			MonthIn      float64   `json:"month_in"`
-			MonthOut     float64   `json:"month_out"`
-			DueDateNext  *string   `json:"due_date_next"`
-			DaysUntilDue *int      `json:"days_until_due"`
+			ID              uuid.UUID `json:"id"`
+			MonthIn         float64   `json:"month_in"`
+			MonthOut        float64   `json:"month_out"`
+			DueDateNext     *string   `json:"due_date_next"`
+			DaysUntilDue    *int      `json:"days_until_due"`
+			CreditUsedPct   *int      `json:"credit_used_pct"`
+			CreditAvailable *float64  `json:"credit_available"`
 		} `json:"data"`
 		Totals struct {
 			Total, CashTotal, CardDebt float64
@@ -760,7 +762,7 @@ func TestAccountPageNumbers(t *testing.T) {
 				t.Errorf("bank = %+v, want in 400 out 200 (the transfer is neither), no due date", a)
 			}
 		case card:
-			if a.MonthIn != 0 || a.MonthOut != 0 || a.DueDateNext == nil || a.DaysUntilDue == nil || *a.DaysUntilDue < 0 || *a.DaysUntilDue > 31 {
+			if a.CreditUsedPct == nil || *a.CreditUsedPct != 24 || a.CreditAvailable == nil || *a.CreditAvailable != 7600 || a.MonthIn != 0 || a.MonthOut != 0 || a.DueDateNext == nil || a.DaysUntilDue == nil || *a.DaysUntilDue < 0 || *a.DaysUntilDue > 31 {
 				t.Errorf("card = %+v", a)
 			}
 		}

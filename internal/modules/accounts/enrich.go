@@ -59,6 +59,12 @@ func (s *Service) decorate(ctx context.Context, userID uuid.UUID, accs []Account
 	}
 	for i := range accs {
 		accs[i].MonthIn, accs[i].MonthOut = in[accs[i].ID], out[accs[i].ID]
+		if IsCreditType(accs[i].Type) && accs[i].CreditLimit != nil && *accs[i].CreditLimit > 0 {
+			used := math.Max(0, -accs[i].Balance)
+			pct := int(math.Round(used / *accs[i].CreditLimit * 100))
+			avail := round2(math.Max(0, *accs[i].CreditLimit-used))
+			accs[i].CreditUsedPct, accs[i].CreditAvailable = &pct, &avail
+		}
 		if accs[i].PaymentDueDate != nil && IsCreditType(accs[i].Type) {
 			next := nextDayOfMonth(today, *accs[i].PaymentDueDate)
 			d := next.Format("2006-01-02")
