@@ -460,6 +460,8 @@ func main() {
 			protected.GET("/projects/:id/detail", projectsHandler.Detail)
 			protected.PUT("/projects/:id", projectsHandler.Update)
 			protected.DELETE("/projects/:id", projectsHandler.Delete)
+			protected.POST("/projects/:id/archive", projectsHandler.Archive)
+			protected.POST("/projects/:id/restore", projectsHandler.Restore)
 			protected.GET("/projects/:id/members", projectsHandler.ListMembers)
 			protected.POST("/projects/:id/members", projectsHandler.AddMember)
 			protected.PUT("/projects/:id/members/:member_id", projectsHandler.UpdateMember)

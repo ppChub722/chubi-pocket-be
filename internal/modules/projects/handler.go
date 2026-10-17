@@ -653,3 +653,21 @@ func atoiOr(s string, dflt int) int {
 	}
 	return n
 }
+
+// setStatus — archive / restore: the owner's status change (same rules and
+// answer as PUT /projects/:id {status}).
+func (h *Handler) setStatus(c *gin.Context, status string) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	req := UpdateProjectRequest{Status: &status, present: map[string]bool{"status": true}}
+	out, err := h.service.Update(c.Request.Context(), userID, id, req)
+	reply(c, http.StatusOK, out, err)
+}
+
+// POST /v1/projects/:id/archive — hide the event (not counted anywhere, read-only).
+func (h *Handler) Archive(c *gin.Context) { h.setStatus(c, StatusArchived) }
+
+// POST /v1/projects/:id/restore — an archived event is active again.
+func (h *Handler) Restore(c *gin.Context) { h.setStatus(c, StatusActive) }

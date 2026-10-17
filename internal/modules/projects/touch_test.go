@@ -26,6 +26,8 @@ func eventsEngine(f *qcFixture, as uuid.UUID) http.Handler {
 		g.GET("/projects/:id/detail", h.Detail)
 		g.PUT("/projects/:id", h.Update)
 		g.DELETE("/projects/:id", h.Delete)
+		g.POST("/projects/:id/archive", h.Archive)
+		g.POST("/projects/:id/restore", h.Restore)
 		g.GET("/projects/:id/members", h.ListMembers)
 		g.POST("/projects/:id/members", h.AddMember)
 		g.PUT("/projects/:id/members/:member_id", h.UpdateMember)
@@ -500,5 +502,31 @@ func TestDeleteTxWithLinkedBill(t *testing.T) {
 	res, err = f.txs.DeleteWrite(context.Background(), f.owner, tx, true)
 	if err != nil || res.BillID == nil || bills(drop) != 0 {
 		t.Fatalf("also_delete_link: %v %+v bills %d", err, res, bills(drop))
+	}
+}
+
+// TestEventArchiveRestore — archive hides the event (default list), restore
+// brings it back; only the owner may.
+func TestEventArchiveRestore(t *testing.T) {
+	f := newQCFixture(t)
+	me := evClient{t, eventsEngine(f, f.owner)}
+	bee := evClient{t, eventsEngine(f, f.friend)}
+	created := me.do("POST", "/projects", map[string]any{"name": "Old trip"}, "createProject", http.StatusCreated)
+	id := m(created, "event")["id"].(string)
+
+	bee.code("POST", "/projects/"+id+"/archive", nil, http.StatusNotFound, "NOT_FOUND") // not a member
+	got := me.do("POST", "/projects/"+id+"/archive", nil, "archiveProject", http.StatusOK)
+	if m(got, "event")["status"] != "archived" {
+		t.Fatalf("archive = %v", m(got, "event"))
+	}
+	if l := me.do("GET", "/projects", nil, "listProjects", http.StatusOK); len(list(l, "data")) != 0 {
+		t.Errorf("default list after archive = %v", l["data"])
+	}
+	if l := me.do("GET", "/projects?status=archived", nil, "listProjects", http.StatusOK); len(list(l, "data")) != 1 {
+		t.Errorf("archived list = %v", l["data"])
+	}
+	got = me.do("POST", "/projects/"+id+"/restore", nil, "restoreProject", http.StatusOK)
+	if m(got, "event")["status"] != "active" {
+		t.Errorf("restore = %v", m(got, "event"))
 	}
 }

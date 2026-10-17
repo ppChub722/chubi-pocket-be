@@ -2990,6 +2990,40 @@ paths:
       x-breaking: Returns EventDeleteResult {id, deleted_transaction_count, account_balances} (was Ack).
       x-used-by:
         - { page: event-detail, calls: 1 }
+  /projects/{id}/archive:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    post:
+      tags: [Events]
+      summary: Archive an event (owner)
+      operationId: archiveProject
+      description: 'Same as PUT with status archived: hidden from the default list, not counted, read-only; restorable. Owner only (403 FORBIDDEN_ROLE). Answers the patch.'
+      responses:
+        '200':
+          description: The patch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventPatch' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-breaking: 'New (0.4.0).'
+  /projects/{id}/restore:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    post:
+      tags: [Events]
+      summary: Restore an archived event (owner)
+      operationId: restoreProject
+      description: 'Same as PUT with status active. Owner only. Answers the patch.'
+      responses:
+        '200':
+          description: The patch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventPatch' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-breaking: 'New (0.4.0).'
   /projects/{id}/detail:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
