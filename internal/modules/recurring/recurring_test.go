@@ -550,7 +550,7 @@ func TestGoalAutoSaveDraft(t *testing.T) {
 		t.Fatalf("drafts = %+v", got)
 	}
 	// The goal page shows the setting and the next date moved to next month.
-	page, err := f.savings.Get(f.ctx, f.me, goal, 20)
+	page, err := f.savings.Get(f.ctx, f.me, goal, 20, false)
 	if err != nil || page.Goal.AutoSave == nil || page.Goal.AutoSave.Amount != 500 || page.Goal.AutoSave.Wallet == nil ||
 		page.Goal.AutoSave.NextDate == nil || *page.Goal.AutoSave.NextDate <= f.day(0) {
 		t.Errorf("goal auto_save = %+v (%v)", page.Goal.AutoSave, err)

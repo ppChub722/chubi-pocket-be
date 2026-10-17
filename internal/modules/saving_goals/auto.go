@@ -166,7 +166,7 @@ func (s *Service) PutAutoSaveGoal(ctx context.Context, userID, goalID uuid.UUID,
 	if err := s.SetAutoSave(ctx, userID, &goalID, r); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, userID, goalID, entriesPerPage)
+	return s.Get(ctx, userID, goalID, entriesPerPage, false)
 }
 
 func (s *Service) DeleteAutoSaveGoal(ctx context.Context, userID, goalID uuid.UUID) (*GoalDetail, error) {
@@ -176,7 +176,7 @@ func (s *Service) DeleteAutoSaveGoal(ctx context.Context, userID, goalID uuid.UU
 	if err := s.ClearAutoSave(ctx, userID, &goalID); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, userID, goalID, entriesPerPage)
+	return s.Get(ctx, userID, goalID, entriesPerPage, false)
 }
 
 func (s *Service) PutAutoSaveSpare(ctx context.Context, userID uuid.UUID, r AutoSaveRequest) (*SpareDetail, error) {

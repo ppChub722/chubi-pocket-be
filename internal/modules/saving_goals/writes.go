@@ -85,7 +85,7 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, r *GoalRequest) 
 	if err := s.store.saveGoal(ctx, s.store.db, g); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, userID, g.ID, entriesPerPage)
+	return s.Get(ctx, userID, g.ID, entriesPerPage, false)
 }
 
 func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, r *GoalRequest) (*GoalDetail, error) {
@@ -99,7 +99,7 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, r *GoalReque
 	if err := s.store.saveGoal(ctx, s.store.db, g); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, userID, id, entriesPerPage)
+	return s.Get(ctx, userID, id, entriesPerPage, false)
 }
 
 func (s *Service) goalSaved(ctx context.Context, q shared.Querier, userID, id uuid.UUID) (float64, map[uuid.UUID]float64, error) {
@@ -169,7 +169,7 @@ func (s *Service) setStatus(ctx context.Context, userID, id uuid.UUID, check fun
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, userID, id, entriesPerPage)
+	return s.Get(ctx, userID, id, entriesPerPage, false)
 }
 
 func (s *Service) Archive(ctx context.Context, userID, id uuid.UUID) (*GoalDetail, error) {
@@ -619,7 +619,7 @@ func (s *Service) writeResult(ctx context.Context, userID uuid.UUID, entryIDs, g
 	}
 	switch {
 	case page.goal != nil:
-		if out.GoalPage, err = s.Get(ctx, userID, *page.goal, entriesPerPage); err != nil {
+		if out.GoalPage, err = s.Get(ctx, userID, *page.goal, entriesPerPage, false); err != nil {
 			return nil, err
 		}
 	case page.spare:

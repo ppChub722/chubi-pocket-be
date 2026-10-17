@@ -4286,6 +4286,7 @@ paths:
       description: '`status`: active (default) | completed | archived.'
       parameters:
         - { name: status, in: query, schema: { type: string, enum: [active, completed, archived] } }
+        - { name: sort, in: query, description: 'created (default) | deadline (nearest first, none last) | progress (most done first) | remaining (least left first) | name.', schema: { type: string, enum: [created, deadline, progress, remaining, name] } }
       responses:
         '200':
           description: The page.
@@ -4412,6 +4413,7 @@ paths:
       operationId: getSavingGoal
       parameters:
         - { $ref: '#/components/parameters/PerPage' }
+        - { name: include, in: query, schema: { type: string, description: 'Comma list: delete_preview.', example: delete_preview } }
       responses:
         '200':
           description: The page.
@@ -6144,10 +6146,11 @@ components:
         pagination: { $ref: '#/components/schemas/Page' }
     SavingHistoryPoint:
       type: object
-      required: [month, cumulative]
+      required: [month, cumulative, plan]
       properties:
         month: { type: string, description: 'YYYY-MM.' }
         cumulative: { $ref: '#/components/schemas/Money', description: 'The balance at the end of that month (this month: today).' }
+        plan: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'The cumulative plan line: min(target, k × the goal''s month_plan), k = months since the first point; null without a plan (and on the spare).' }
     SavingAutoSave:
       type: object
       description: 'Auto-saving of a goal (or of unallocated money): on `day` of each month a pending saving draft (🐷) of `amount` is made (from `wallet`, or no wallet); the user confirms it.'
@@ -6171,7 +6174,7 @@ components:
         summary:
           type: object
           description: 'saved = in_goals + spare (active goals and spare; the same numbers as Home / More).'
-          required: [saved, in_goals, spare, currency, saved_total, month_short_total, unallocated]
+          required: [saved, in_goals, spare, currency, saved_total, month_short_total, month_plan_total, month_saved_total, unallocated]
           properties:
             saved: { $ref: '#/components/schemas/Money' }
             in_goals: { $ref: '#/components/schemas/Money' }
@@ -6179,18 +6182,30 @@ components:
             currency: { $ref: '#/components/schemas/CurrencyCode' }
             saved_total: { $ref: '#/components/schemas/Money', description: 'Every saving: goals + unallocated, wallet-less money included (= saved).' }
             month_short_total: { $ref: '#/components/schemas/Money', description: 'Σ the active goals'' month_short.' }
+            month_plan_total: { $ref: '#/components/schemas/Money', description: 'Σ the listed goals'' month_plan (the card bar''s whole).' }
+            month_saved_total: { $ref: '#/components/schemas/Money', description: 'Σ the listed goals'' month_saved (the card bar''s part: "ออมแล้ว X / Y").' }
             unallocated: { $ref: '#/components/schemas/Money', description: 'The spare bucket (saved money with no goal).' }
         spare: { $ref: '#/components/schemas/SavingSpare' }
         data: { type: array, items: { $ref: '#/components/schemas/SavingGoal' } }
     SavingGoalDetail:
       type: object
       description: 'The goal page in one call.'
-      required: [goal, by_wallet, history, entries]
+      required: [goal, by_wallet, history, entries, delete_preview]
       properties:
         goal: { $ref: '#/components/schemas/SavingGoal' }
         by_wallet: { type: array, items: { $ref: '#/components/schemas/SavingWalletShare' } }
         history: { type: array, items: { $ref: '#/components/schemas/SavingHistoryPoint' }, description: 'Month by month from the first entry (or creation) to this month.' }
         entries: { $ref: '#/components/schemas/SavingEntryList' }
+        delete_preview:
+          description: 'Only with ?include=delete_preview, else null: a goal can be deleted only while it holds no money (else 409 GOAL_HAS_SAVINGS: close it first).'
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [entries, saved_amount, can_delete]
+              properties:
+                entries: { type: integer, description: 'Saving entries that point at the goal (they stay, detached).' }
+                saved_amount: { $ref: '#/components/schemas/Money' }
+                can_delete: { type: boolean }
     SavingSpareDetail:
       type: object
       required: [spare, history, auto_save, entries]
@@ -6199,6 +6214,16 @@ components:
         history: { type: array, items: { $ref: '#/components/schemas/SavingHistoryPoint' } }
         auto_save: { oneOf: [{ $ref: '#/components/schemas/SavingAutoSave' }, { type: 'null' }], description: 'The auto-saving of unallocated money (null = none).' }
         entries: { $ref: '#/components/schemas/SavingEntryList' }
+        delete_preview:
+          description: 'Only with ?include=delete_preview, else null: a goal can be deleted only while it holds no money (else 409 GOAL_HAS_SAVINGS: close it first).'
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [entries, saved_amount, can_delete]
+              properties:
+                entries: { type: integer, description: 'Saving entries that point at the goal (they stay, detached).' }
+                saved_amount: { $ref: '#/components/schemas/Money' }
+                can_delete: { type: boolean }
     WalletSavings:
       type: object
       description: 'A wallet''s savings (the caller''s): saved = spare + Σ goals in it; available = balance − saved (null when the wallet doesn''t track its balance); saved_exceeds_balance = saved > balance (a red warning, nothing is blocked; over_by = how much).'
@@ -6258,7 +6283,7 @@ components:
             type: object
             required: [wallet_id, amount]
             properties:
-              wallet_id: { $ref: '#/components/schemas/Uuid' }
+              wallet_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'null (or omitted) = the part that sits in NO wallet.' }
               amount: { type: number, exclusiveMinimum: 0 }
     SavingEntryUpdateRequest:
       type: object

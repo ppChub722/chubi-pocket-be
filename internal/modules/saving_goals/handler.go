@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -131,7 +132,12 @@ func (h *Handler) List(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
 		return
 	}
-	out, err := h.service.List(c.Request.Context(), uid, status)
+	sortBy := c.Query("sort")
+	if !goalSorts[sortBy] {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid sort", nil)
+		return
+	}
+	out, err := h.service.List(c.Request.Context(), uid, status, sortBy)
 	reply(c, http.StatusOK, out, err)
 }
 
@@ -167,7 +173,7 @@ func (h *Handler) Get(c *gin.Context) {
 	if !ok {
 		return
 	}
-	out, err := h.service.Get(c.Request.Context(), uid, id, atoiOr(c.Query("per_page"), entriesPerPage))
+	out, err := h.service.Get(c.Request.Context(), uid, id, atoiOr(c.Query("per_page"), entriesPerPage), strings.Contains(","+c.Query("include")+",", ",delete_preview,"))
 	reply(c, http.StatusOK, out, err)
 }
 

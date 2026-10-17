@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -114,13 +115,17 @@ func firstMonth(nets map[string]float64, fallback time.Time) time.Time {
 
 // history — month by month from the first entry (or `since`) to today's
 // month: the balance at each month's end.
-func history(nets map[string]float64, since, today time.Time) []HistoryPoint {
+func history(nets map[string]float64, since, today time.Time, plan *float64, target float64) []HistoryPoint {
 	out := []HistoryPoint{}
 	cur := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
 	var cum float64
 	for m := firstMonth(nets, since); !m.After(cur) && len(out) < 600; m = m.AddDate(0, 1, 0) {
 		cum += nets[monthKey(m)]
-		out = append(out, HistoryPoint{Month: monthKey(m), Cumulative: round2(cum)})
+		p := HistoryPoint{Month: monthKey(m), Cumulative: round2(cum)}
+		if plan != nil {
+			p.Plan = fptr(round2(math.Min(target, *plan*float64(len(out)+1))))
+		}
+		out = append(out, p)
 	}
 	return out
 }
@@ -484,7 +489,7 @@ func (s *Service) Entries(ctx context.Context, userID uuid.UUID, goalID *uuid.UU
 
 // --- reads ---
 
-func (s *Service) List(ctx context.Context, userID uuid.UUID, status string) (*GoalList, error) {
+func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy string) (*GoalList, error) {
 	today, err := s.today(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -517,15 +522,21 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status string) (*G
 	out.Summary.Saved, out.Summary.InGoals, out.Summary.Spare = t.Saved, t.InGoals, t.Spare
 	out.Summary.SavedTotal, out.Summary.Unallocated = t.Saved, t.Spare
 	for _, v := range out.Data {
+		out.Summary.MonthSavedTotal += v.MonthSaved
+		if v.MonthPlan != nil {
+			out.Summary.MonthPlanTotal += *v.MonthPlan
+		}
 		if v.MonthShort != nil {
 			out.Summary.MonthShortTotal += *v.MonthShort
 		}
 	}
 	out.Summary.MonthShortTotal = round2(out.Summary.MonthShortTotal)
+	out.Summary.MonthPlanTotal, out.Summary.MonthSavedTotal = round2(out.Summary.MonthPlanTotal), round2(out.Summary.MonthSavedTotal)
+	sortGoals(out.Data, sortBy)
 	return out, nil
 }
 
-func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int) (*GoalDetail, error) {
+func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int, withDeletePreview bool) (*GoalDetail, error) {
 	today, err := s.today(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -550,9 +561,16 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int) (*
 	if err != nil {
 		return nil, err
 	}
-	out.History = history(nets[g.ID], g.CreatedAt, today)
+	out.History = history(nets[g.ID], g.CreatedAt, today, out.Goal.MonthPlan, g.TargetAmount)
 	if out.Entries, err = s.entryPage(ctx, userID, whereGoal, 1, perPage, g.ID); err != nil {
 		return nil, err
+	}
+	if withDeletePreview {
+		p := &DeletePreview{SavedAmount: out.Goal.SavedAmount, CanDelete: out.Goal.SavedAmount <= 0.004}
+		if err := s.store.db.QueryRow(ctx, `SELECT COUNT(*) FROM saving_entries WHERE user_id = $1 AND (from_goal_id = $2 OR to_goal_id = $2)`, userID, id).Scan(&p.Entries); err != nil {
+			return nil, err
+		}
+		out.DeletePreview = p
 	}
 	return out, nil
 }
@@ -576,7 +594,7 @@ func (s *Service) Spare(ctx context.Context, userID uuid.UUID, perPage int) (*Sp
 	if err != nil {
 		return nil, err
 	}
-	out.History = history(nets[uuid.Nil], today, today)
+	out.History = history(nets[uuid.Nil], today, today, nil, 0)
 	if out.Entries, err = s.entryPage(ctx, userID, whereSpare, 1, perPage); err != nil {
 		return nil, err
 	}
@@ -594,4 +612,26 @@ func walletKey(w WalletShare) string {
 		return ""
 	}
 	return w.Wallet.ID.String()
+}
+
+// Goal list sorts: created (default, as stored), deadline (nearest first, none
+// last), progress (most done first), remaining (least left first), name.
+var goalSorts = map[string]bool{"": true, "created": true, "deadline": true, "progress": true, "remaining": true, "name": true}
+
+func sortGoals(v []GoalView, by string) {
+	less := map[string]func(a, b *GoalView) bool{
+		"deadline": func(a, b *GoalView) bool {
+			if (a.Deadline == nil) != (b.Deadline == nil) {
+				return a.Deadline != nil
+			}
+			return a.Deadline != nil && *a.Deadline < *b.Deadline
+		},
+		"progress":  func(a, b *GoalView) bool { return a.ProgressPct > b.ProgressPct },
+		"remaining": func(a, b *GoalView) bool { return a.RemainingAmount < b.RemainingAmount },
+		"name":      func(a, b *GoalView) bool { return strings.ToLower(a.Name) < strings.ToLower(b.Name) },
+	}[by]
+	if less == nil {
+		return
+	}
+	sort.SliceStable(v, func(i, j int) bool { return less(&v[i], &v[j]) })
 }

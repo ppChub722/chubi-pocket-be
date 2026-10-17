@@ -179,6 +179,8 @@ type EntryList struct {
 type HistoryPoint struct {
 	Month      string  `json:"month"`
 	Cumulative float64 `json:"cumulative"`
+	// Plan — the cumulative plan line: min(target, k × month_plan) k months after the first point; null without a plan.
+	Plan *float64 `json:"plan"`
 }
 
 type ListSummary struct {
@@ -189,6 +191,10 @@ type ListSummary struct {
 	// month_short_total = Σ the goals' month_short, unallocated = the spare bucket.
 	SavedTotal      float64 `json:"saved_total"`
 	MonthShortTotal float64 `json:"month_short_total"`
+	// month_plan_total = Σ the active goals' month_plan, month_saved_total = Σ their month_saved
+	// (the card bar "ออมแล้ว X / Y").
+	MonthPlanTotal  float64 `json:"month_plan_total"`
+	MonthSavedTotal float64 `json:"month_saved_total"`
 	Unallocated     float64 `json:"unallocated"`
 	Currency        string  `json:"currency"`
 }
@@ -206,6 +212,8 @@ type GoalDetail struct {
 	ByWallet []WalletShare  `json:"by_wallet"`
 	History  []HistoryPoint `json:"history"`
 	Entries  EntryList      `json:"entries"`
+	// DeletePreview — only with ?include=delete_preview, else null.
+	DeletePreview *DeletePreview `json:"delete_preview"`
 }
 
 // SpareDetail — spec SavingSpareDetail.
@@ -281,4 +289,12 @@ type EntryUpdateRequest struct {
 
 type CloseRequest struct {
 	To string `json:"to"`
+}
+
+// DeletePreview — what deleting the goal does: it is only allowed while the
+// goal holds no money (else 409 GOAL_HAS_SAVINGS: close it first).
+type DeletePreview struct {
+	Entries     int     `json:"entries"`      // saving entries of the goal that go with it
+	SavedAmount float64 `json:"saved_amount"` // money it still holds
+	CanDelete   bool    `json:"can_delete"`   // false while saved_amount > 0
 }
