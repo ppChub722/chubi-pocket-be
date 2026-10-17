@@ -8241,6 +8241,11 @@ components:
                 "type": ["string", "null"],
                 "enum": ["plus_minus", "plus_minus_plain", "parentheses", "parentheses_plain", "color_only", null],
                 "description": "How amounts show income / expense: plus_minus (+฿1,000 / −฿540, coloured), plus_minus_plain (signs, no colour), parentheses (฿1,000 / (฿540), coloured), parentheses_plain, color_only (no sign, colour only). New users get color_only; null (users from before it) = plus_minus."
+              },
+              "money_decimals": {
+                "type": ["string", "null"],
+                "enum": ["always", "never", "auto", null],
+                "description": "The satang / cents of amounts: always (฿1,000.00), never (rounded: ฿1,000; ฿99.50 → ฿100), auto (no .00; ฿99.50 stays). null = auto."
               }
             },
             "description": "Known keys only.",
@@ -8334,6 +8339,11 @@ components:
                 "type": ["string", "null"],
                 "enum": ["plus_minus", "plus_minus_plain", "parentheses", "parentheses_plain", "color_only", null],
                 "description": "How amounts show income / expense: plus_minus (+฿1,000 / −฿540, coloured), plus_minus_plain (signs, no colour), parentheses (฿1,000 / (฿540), coloured), parentheses_plain, color_only (no sign, colour only). New users get color_only; null (users from before it) = plus_minus."
+              },
+              "money_decimals": {
+                "type": ["string", "null"],
+                "enum": ["always", "never", "auto", null],
+                "description": "The satang / cents of amounts: always (฿1,000.00), never (rounded: ฿1,000; ฿99.50 → ฿100), auto (no .00; ฿99.50 stays). null = auto."
               }
             },
             "required": []

@@ -70,6 +70,11 @@ func (s *Service) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdatePro
 				return nil, fmt.Errorf("%w: %q is not a money style", ErrUnknownPreferenceKey, str)
 			}
 		}
+		if v, ok := req.Preferences[PrefMoneyDecimals]; ok && v != nil {
+			if str, _ := v.(string); !MoneyDecimals[str] {
+				return nil, fmt.Errorf("%w: %q is not a decimals mode", ErrUnknownPreferenceKey, str)
+			}
+		}
 		if v, ok := req.Preferences[PrefFeeCategoryID]; ok && v != nil {
 			str, _ := v.(string)
 			catID, err := uuid.Parse(str)

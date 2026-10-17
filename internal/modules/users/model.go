@@ -61,6 +61,7 @@ var allowedPreferenceKeys = map[string]bool{
 	// to clear. Checked by Service.UpdateProfile.
 	PrefFeeCategoryID: true,
 	PrefMoneyStyle:    true,
+	PrefMoneyDecimals: true,
 }
 
 // PrefFeeCategoryID — preference key of the fee category.
@@ -72,6 +73,14 @@ const PrefFeeCategoryID = "fee_category_id"
 // color_only (no sign, colour only). New users get color_only; unset (users
 // from before it) reads as plus_minus — what they always saw.
 const PrefMoneyStyle = "money_style"
+
+// PrefMoneyDecimals — the satang / cents of amounts (owner 2026-10-17):
+// always (฿1,000.00), never (rounded: ฿1,000, ฿99.50 → ฿100) or auto (no
+// .00, ฿99.50 stays). Unset = auto.
+const PrefMoneyDecimals = "money_decimals"
+
+// MoneyDecimals — the values money_decimals takes.
+var MoneyDecimals = map[string]bool{"always": true, "never": true, "auto": true}
 
 // MoneyStyles — the values money_style takes.
 var MoneyStyles = map[string]bool{
@@ -97,6 +106,7 @@ type Preferences struct {
 	Language      *string `json:"language"`
 	FeeCategoryID *string `json:"fee_category_id"`
 	MoneyStyle    *string `json:"money_style"`
+	MoneyDecimals *string `json:"money_decimals"`
 }
 
 func prefsFromMap(m map[string]any) Preferences {
@@ -109,6 +119,7 @@ func prefsFromMap(m map[string]any) Preferences {
 	return Preferences{
 		Timezone: str("timezone"), Theme: str("theme"), Language: str("language"),
 		FeeCategoryID: str(PrefFeeCategoryID), MoneyStyle: str(PrefMoneyStyle),
+		MoneyDecimals: str(PrefMoneyDecimals),
 	}
 }
 
