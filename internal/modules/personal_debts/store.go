@@ -190,6 +190,9 @@ const todayInUserTZ = `(NOW() AT TIME ZONE COALESCE(
 	(SELECT z.name FROM pg_timezone_names z JOIN user_preferences up ON up.preferences->>'timezone' = z.name
 	 WHERE up.user_id = $1 LIMIT 1), 'Asia/Bangkok'))::date`
 
+// TodayInUserTZSQL is todayInUserTZ for packages that fingerprint days_outstanding.
+const TodayInUserTZSQL = todayInUserTZ
+
 // openSQL — the person has something open: net ≠ 0 or an entry not labelled paid.
 const openSQL = `(ABS(p.net) > 0.005 OR p.open_count > 0)`
 

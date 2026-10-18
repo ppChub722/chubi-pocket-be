@@ -76,7 +76,20 @@ func (s *Service) createTx(ctx context.Context, tx pgx.Tx, ownerUserID uuid.UUID
 
 // List — GET /projects.
 func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*EventList, error) {
-	f.Page, f.PerPage = clampPage(f.Page, f.PerPage)
+	return s.list(ctx, userID, f, false)
+}
+
+// ListAll — every event in one page (the sync dataset); no 100-row cap.
+func (s *Service) ListAll(ctx context.Context, userID uuid.UUID, f ListFilter) (*EventList, error) {
+	return s.list(ctx, userID, f, true)
+}
+
+func (s *Service) list(ctx context.Context, userID uuid.UUID, f ListFilter, unlimited bool) (*EventList, error) {
+	if unlimited {
+		f.Page, f.PerPage = 1, unlimitedPerPage
+	} else {
+		f.Page, f.PerPage = clampPage(f.Page, f.PerPage)
+	}
 	if derived := derivedStatus[f.Status]; derived != nil {
 		return s.listDerived(ctx, userID, f, derived)
 	}

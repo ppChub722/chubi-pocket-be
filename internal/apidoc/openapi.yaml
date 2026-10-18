@@ -44,6 +44,8 @@ tags:
     description: 'Events (code name projects, 0.3.1-10).'
   - name: Recurring
     description: 'Recurring settings + the items they produce (0.3.1-10, replaces scheduled).'
+  - name: Sync
+    description: 'Shared datasets kept on the device, fetched in one call (migration 66).'
   - name: Touch-point
     description: 'Pages not redesigned yet; only the shared-shape change is listed.'
 security:
@@ -768,6 +770,28 @@ paths:
       x-used-by:
         - { page: home, calls: 1 }
 
+  # ───────────────────────────── Sync ─────────────────────────────
+  /sync:
+    post:
+      tags: [Sync]
+      summary: The shared datasets that changed since the app last looked
+      operationId: postSync
+      description: |
+        The app sends the fingerprints it holds (`have`); the server answers with only the datasets whose fingerprint differs, each whole, in the body of its existing endpoint (see SyncDatasets). `want` limits which datasets are considered (omitted = every dataset). A dataset whose `have` matches goes into `unchanged` with no data. `versions` always carries the current fingerprint of every dataset and of the page-data keys (`transactions`, `budgets`, `saving_goals`, `pending`), so the app knows which pages to reload.
+        A dataset that fails or times out is listed in `errors`; the others still answer. The `X-Sync-Versions` header on every successful write carries the same fingerprints. A fingerprint is compared, never parsed.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SyncRequest' }
+      responses:
+        '200':
+          description: The changed datasets.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   # ───────────────────────────── v2: reached pages (target shapes) ─────────────────────────────
   /transactions/form-options:
     get: {
@@ -776,6 +800,7 @@ paths:
         ],
         "summary": "Everything the transaction form needs (one call)",
         "operationId": "getTransactionFormOptions",
+        "deprecated": true,
         "description": "Replaces loading accounts + categories + tags (+ events) separately when a form / draft editor opens. Active records only; sorted for display.",
         "responses": {
           "200": {
@@ -4921,6 +4946,12 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
 
+  headers:
+    SyncVersions:
+      description: |
+        Sent on every non-GET operation that answers 2xx (except the upload parsers and `postSync` itself, which answers with `versions`): the caller's fingerprints after the write, `name=fingerprint` pairs joined by `;`, covering every dataset and page-data key of `SyncVersions`. The app compares them with what it holds and re-syncs what changed.
+      schema: { type: string }
+
   schemas:
     # ───────── primitives ─────────
     Uuid:
@@ -4981,6 +5012,80 @@ components:
     Ids:
       type: array
       items: { $ref: '#/components/schemas/Uuid' }
+
+    # ───────── sync ─────────
+    SyncDatasetName:
+      type: string
+      enum: [accounts, categories, tags, contacts, debt_people, projects, recurring, form_defaults, providers]
+    SyncRequest:
+      type: object
+      properties:
+        want:
+          type: array
+          description: 'Datasets to consider; omitted or empty = every dataset. An unknown or repeated name is 400 VALIDATION_ERROR (the names are in `details`).'
+          items: { $ref: '#/components/schemas/SyncDatasetName' }
+        have:
+          type: object
+          description: 'The fingerprints the app holds, by dataset name.'
+          additionalProperties: { type: string }
+    SyncVersions:
+      type: object
+      description: 'The current fingerprint of every dataset and page-data key.'
+      required: [accounts, categories, tags, contacts, debt_people, projects, recurring, form_defaults, providers, transactions, budgets, saving_goals, pending]
+      properties:
+        accounts: { type: string }
+        categories: { type: string }
+        tags: { type: string }
+        contacts: { type: string }
+        debt_people: { type: string }
+        projects: { type: string }
+        recurring: { type: string }
+        form_defaults: { type: string }
+        providers: { type: string }
+        transactions: { type: string }
+        budgets: { type: string }
+        saving_goals: { type: string }
+        pending: { type: string }
+    FormDefaults:
+      type: object
+      description: 'The two defaults of FormOptions on their own: the wallet the form starts on (the last used one, else the first) and the preferred fee category (active expense category of the caller, else null).'
+      required: [default_account_id, fee_category_id]
+      properties:
+        default_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        fee_category_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+    SyncDatasets:
+      type: object
+      description: |
+        Each key is present only when that dataset changed. `body` is the body of the existing endpoint, with every row and every status, unpaged: accounts = GET /accounts?status=all; categories = GET /categories?include_system=true; tags = GET /tags; contacts = GET /contacts?status=all; debt_people = GET /personal-debts/people?all=true with no paging; projects = GET /projects?status=all with no paging; recurring = GET /recurring?status=all with no paging; form_defaults = FormDefaults; providers = GET /payment-providers.
+      properties:
+        accounts: { type: object, required: [v, body], properties: { v: { type: string }, body: { $ref: '#/components/schemas/AccountList' } } }
+        categories: { type: object, required: [v, body], properties: { v: { type: string }, body: { $ref: '#/components/schemas/CategoryList' } } }
+        tags: { type: object, required: [v, body], properties: { v: { type: string }, body: { $ref: '#/components/schemas/TagList' } } }
+        contacts: { type: object, required: [v, body], properties: { v: { type: string }, body: { $ref: '#/components/schemas/ContactList' } } }
+        debt_people: { type: object, required: [v, body], properties: { v: { type: string }, body: { $ref: '#/components/schemas/DebtPeopleList' } } }
+        projects: { type: object, required: [v, body], properties: { v: { type: string }, body: { $ref: '#/components/schemas/EventList' } } }
+        recurring: { type: object, required: [v, body], properties: { v: { type: string }, body: { $ref: '#/components/schemas/RecurringList' } } }
+        form_defaults: { type: object, required: [v, body], properties: { v: { type: string }, body: { $ref: '#/components/schemas/FormDefaults' } } }
+        providers: { type: object, required: [v, body], properties: { v: { type: string }, body: { $ref: '#/components/schemas/PaymentProviderList' } } }
+    SyncResponse:
+      type: object
+      required: [synced_at, versions, data, unchanged, errors]
+      properties:
+        synced_at: { $ref: '#/components/schemas/DateTime' }
+        versions: { $ref: '#/components/schemas/SyncVersions' }
+        data: { $ref: '#/components/schemas/SyncDatasets' }
+        unchanged:
+          type: array
+          items: { $ref: '#/components/schemas/SyncDatasetName' }
+        errors:
+          type: object
+          description: 'A dataset that failed or timed out; the rest still answer.'
+          additionalProperties:
+            type: object
+            required: [code, message]
+            properties:
+              code: { type: string, example: INTERNAL_ERROR }
+              message: { type: string }
 
     # ───────── shared refs (what a row shows about another record) ─────────
     AccountRef:

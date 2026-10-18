@@ -614,6 +614,8 @@ func (s *Service) detail(ctx context.Context, userID, id uuid.UUID, today time.T
 	return out, nil
 }
 
+const unlimitedPerPage = 100000
+
 func clampPage(page, perPage int) (int, int) {
 	if page <= 0 {
 		page = 1
@@ -649,6 +651,15 @@ func (s *Service) ruleItems(ctx context.Context, userID, ruleID uuid.UUID, today
 // --- reads ---
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType string, hint PickerHint, kind string, page, perPage int, tz string) (*RecurringList, error) {
+	return s.list(ctx, userID, status, q, forType, hint, kind, page, perPage, tz, false)
+}
+
+// ListAll — every rule in one page (the sync dataset); no 100-row cap.
+func (s *Service) ListAll(ctx context.Context, userID uuid.UUID, tz string) (*RecurringList, error) {
+	return s.list(ctx, userID, "all", "", "", PickerHint{}, "", 1, unlimitedPerPage, tz, true)
+}
+
+func (s *Service) list(ctx context.Context, userID uuid.UUID, status, q, forType string, hint PickerHint, kind string, page, perPage int, tz string, unlimited bool) (*RecurringList, error) {
 	if err := s.DueCheck(ctx, userID, tz); err != nil {
 		return nil, err
 	}
@@ -656,7 +667,9 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType
 	if err != nil {
 		return nil, err
 	}
-	page, perPage = clampPage(page, perPage)
+	if !unlimited {
+		page, perPage = clampPage(page, perPage)
+	}
 	cond := `status IN ('active', 'paused')`
 	switch status {
 	case "archived":

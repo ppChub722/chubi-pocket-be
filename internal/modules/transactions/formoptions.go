@@ -312,3 +312,25 @@ func formFeeCategory(ctx context.Context, q shared.Querier, userID uuid.UUID) (*
 	}
 	return &id, nil
 }
+
+type FormDefaults struct {
+	DefaultAccountID *uuid.UUID `json:"default_account_id"`
+	FeeCategoryID    *uuid.UUID `json:"fee_category_id"`
+}
+
+// FormDefaults — the two defaults of FormOptions on their own (the sync dataset form_defaults).
+func (s *Service) FormDefaults(ctx context.Context, userID uuid.UUID) (*FormDefaults, error) {
+	db := s.store.db
+	accounts, err := formAccounts(ctx, db, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := &FormDefaults{}
+	if out.DefaultAccountID, err = formDefaultAccount(ctx, db, userID, accounts); err != nil {
+		return nil, err
+	}
+	if out.FeeCategoryID, err = formFeeCategory(ctx, db, userID); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
