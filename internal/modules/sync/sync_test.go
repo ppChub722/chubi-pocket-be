@@ -269,12 +269,15 @@ func TestFingerprintsMoveOnEveryChange(t *testing.T) {
 	// a contact linked to another user shows that user's live profile name
 	exec(t, pool, `INSERT INTO contacts (id, user_id, display_name, linked_user_id) VALUES ($1, $2, 'Friend', $3)`,
 		uuid.New(), uid, other)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM contacts WHERE linked_user_id = $1`, other)
+	})
 	fp = moved("contact insert", fp, Contacts, DebtPeople)
 	exec(t, pool, `UPDATE users SET display_name = 'Renamed Again' WHERE id = $1`, other)
 	fp = moved("linked user renamed", fp, Contacts, DebtPeople)
 
-	exec(t, pool, `INSERT INTO pending_transactions (id, user_id, kind, type, amount, date, source)
-		VALUES ($1, $2, 'create', 'expense', 5, CURRENT_DATE, 'manual')`, uuid.New(), uid)
+	exec(t, pool, `INSERT INTO pending_transactions (id, user_id, source)
+		VALUES ($1, $2, 'manual')`, uuid.New(), uid)
 	fp = moved("draft insert", fp, Pending)
 
 	exec(t, pool, `UPDATE payment_providers SET short_name = COALESCE(short_name, '') || '' WHERE id = (SELECT id FROM payment_providers LIMIT 1)`)
