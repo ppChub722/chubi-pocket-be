@@ -715,6 +715,8 @@ func (s *Service) boardRows(ctx context.Context, callerID, projectID uuid.UUID, 
 	return rows, err
 }
 
+const unlimitedPerPage = 100000
+
 func clampPage(page, perPage int) (int, int) {
 	if page <= 0 {
 		page = 1

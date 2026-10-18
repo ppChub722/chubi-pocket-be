@@ -1,0 +1,9 @@
+DROP INDEX IF EXISTS idx_transactions_user_updated;
+DROP INDEX IF EXISTS idx_transactions_account_updated;
+DROP INDEX IF EXISTS idx_personal_debts_user_updated;
+DROP INDEX IF EXISTS idx_transaction_tags_tag_updated;
+DROP INDEX IF EXISTS idx_project_transactions_project_updated;
+DROP INDEX IF EXISTS idx_recurring_items_user_updated;
+DROP INDEX IF EXISTS idx_saving_entries_user_updated;
+DROP INDEX IF EXISTS idx_categories_user_updated;
+DROP INDEX IF EXISTS idx_tags_user_updated;

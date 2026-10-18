@@ -25,6 +25,8 @@ func NewService(store *Store, txs *transactions.Service) *Service {
 	return &Service{store: store, txs: txs}
 }
 
+const unlimitedPerPage = 100000
+
 func clampPage(page, perPage, dflt int) (int, int) {
 	if page <= 0 {
 		page = 1
@@ -42,7 +44,20 @@ func clampPage(page, perPage, dflt int) (int, int) {
 
 // People — GET /personal-debts/people: one page of people + the totals.
 func (s *Service) People(ctx context.Context, userID uuid.UUID, f PeopleFilter) (*PeopleList, error) {
-	f.Page, f.PerPage = clampPage(f.Page, f.PerPage, 30)
+	return s.people(ctx, userID, f, false)
+}
+
+// PeopleAll — everyone, settled people included, in one page (the sync dataset); no 100-row cap.
+func (s *Service) PeopleAll(ctx context.Context, userID uuid.UUID) (*PeopleList, error) {
+	return s.people(ctx, userID, PeopleFilter{All: true}, true)
+}
+
+func (s *Service) people(ctx context.Context, userID uuid.UUID, f PeopleFilter, unlimited bool) (*PeopleList, error) {
+	if unlimited {
+		f.Page, f.PerPage = 1, unlimitedPerPage
+	} else {
+		f.Page, f.PerPage = clampPage(f.Page, f.PerPage, 30)
+	}
 	rows, total, err := s.store.listPeople(ctx, userID, f)
 	if err != nil {
 		return nil, err

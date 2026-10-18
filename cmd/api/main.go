@@ -35,6 +35,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/providers"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/recurring"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
+	datasync "github.com/ppChub722/chubi-pocket-be/internal/modules/sync"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/user_pack_permissions"
@@ -262,6 +263,12 @@ func main() {
 		return dc, nil
 	})
 
+	syncHandler := datasync.NewHandler(dbPool, log, datasync.Services{
+		Accounts: accountsService, Categories: categoriesService, Tags: tagsService, Contacts: contactsService,
+		Debts: personalDebtsService, Projects: projectsService, Recurring: recurringService,
+		Transactions: transactionsService, Providers: providersStore,
+	})
+
 	packPermsStore := user_pack_permissions.NewStore(dbPool)
 	packPermsHandler := user_pack_permissions.NewHandler(packPermsStore)
 
@@ -307,7 +314,7 @@ func main() {
 		},
 		// Echo X-Request-ID back so the FE can read it from the response
 		// (ApiException pulls it from this header for error UIs).
-		ExposeHeaders:    []string{"X-Request-ID"},
+		ExposeHeaders:    []string{"X-Request-ID", datasync.VersionsHeader},
 		AllowCredentials: false,
 		MaxAge:           12 * time.Hour,
 	}))
@@ -346,9 +353,12 @@ func main() {
 		// Protected
 		protected := api.Group("/")
 		protected.Use(auth.Middleware(cfg, authStore))
+		protected.Use(datasync.Middleware(dbPool, log))
 		{
 			protected.POST("/auth/logout", authHandler.Logout)
 			protected.PUT("/auth/password", authHandler.ChangePassword)
+
+			protected.POST("/sync", syncHandler.Sync)
 
 			protected.GET("/me/counts", meHandler.Counts)
 			protected.GET("/me/archived", meHandler.Archived)
