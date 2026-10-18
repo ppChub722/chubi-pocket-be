@@ -14,3 +14,7 @@ Test output is expensive in tokens (a bare `flutter test` prints ~560 KB). Follo
 6. **Go DB tests** skip silently without `TEST_DATABASE_URL`. If a run is meant to be a full check, say whether the DB tests actually ran.
 7. **Ask before every re-run**, including after an approved fix. Re-run only the test files that failed, with the same output rules.
 8. **Fix loop only on explicit request.** If the user says "fix until it passes" (or similar), you may fix and re-run without asking, but stop after 3 fix-and-run loops at most. If it still fails after 3, report what is still failing and why, and wait for the user.
+
+## Restarting / rebuilding the backend
+
+Do not rebuild or restart the backend (`docker compose up -d --build`, `docker restart`, `go run`) on your own after a change. The owner will say when. After a BE change, just say it needs a rebuild and wait.
