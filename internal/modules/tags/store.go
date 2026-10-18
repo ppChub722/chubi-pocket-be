@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -20,6 +21,11 @@ type Store struct {
 
 func NewStore(db *pgxpool.Pool) *Store {
 	return &Store{db: db}
+}
+
+type rower interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
 var (
@@ -63,6 +69,10 @@ func scanTagWithCount(row pgx.Row) (*Tag, error) {
 }
 
 func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string, description, note *string, iconCode *shared.IconCode) (*Tag, error) {
+	return createTag(ctx, s.db, userID, name, description, note, iconCode)
+}
+
+func createTag(ctx context.Context, db rower, userID uuid.UUID, name string, description, note *string, iconCode *shared.IconCode) (*Tag, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
@@ -76,7 +86,7 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string, descr
 	q := `INSERT INTO tags (id, user_id, name, description, note, icon_code, created_by_user_id)
 		VALUES ($1, $2, $3, $5, $6, $4::jsonb, $2)
 		RETURNING ` + tagColumns
-	t, err := scanTag(s.db.QueryRow(ctx, q, id, userID, name, iconJSON,
+	t, err := scanTag(db.QueryRow(ctx, q, id, userID, name, iconJSON,
 		shared.CleanText(description), shared.CleanText(note)))
 	if err != nil {
 		return nil, mapInsertError(err)
@@ -99,8 +109,6 @@ func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Tag, error)
 }
 
 func (s *Store) List(ctx context.Context, userID uuid.UUID) ([]Tag, error) {
-	// Spec §3.9 — server sorts by usage_count DESC, then name ASC, so the
-	// user's most-used tags surface first in pickers.
 	q := `SELECT t.id, t.user_id, t.name, t.description, t.note, t.icon_code, t.created_at, t.updated_at,
 		COALESCE(c.cnt, 0) AS usage_count
 		FROM tags t
@@ -126,11 +134,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID) ([]Tag, error) {
 	return out, rows.Err()
 }
 
-// --- Attach / detach ---
-
 // IsTransactionOwnedByUser checks ownership without importing transactions.
-// Returns ErrTransactionNotOwned if the row doesn't exist or belongs to
-// another user.
 func (s *Store) IsTransactionOwnedByUser(ctx context.Context, txID, userID uuid.UUID) error {
 	var owner uuid.UUID
 	err := s.db.QueryRow(ctx,
@@ -147,8 +151,6 @@ func (s *Store) IsTransactionOwnedByUser(ctx context.Context, txID, userID uuid.
 	return nil
 }
 
-// AttachTags inserts (transaction_id, tag_id) rows. Idempotent — already-
-// attached tags are no-ops via ON CONFLICT DO NOTHING.
 func (s *Store) AttachTags(ctx context.Context, txID, userID uuid.UUID, tagIDs []uuid.UUID) error {
 	for _, tagID := range tagIDs {
 		_, err := s.db.Exec(ctx, `
@@ -163,7 +165,6 @@ func (s *Store) AttachTags(ctx context.Context, txID, userID uuid.UUID, tagIDs [
 	return nil
 }
 
-// DetachTag removes a single (transaction_id, tag_id) row.
 func (s *Store) DetachTag(ctx context.Context, txID, tagID uuid.UUID) error {
 	_, err := s.db.Exec(ctx,
 		`DELETE FROM transaction_tags WHERE transaction_id = $1 AND tag_id = $2`,
@@ -174,7 +175,6 @@ func (s *Store) DetachTag(ctx context.Context, txID, tagID uuid.UUID) error {
 	return nil
 }
 
-// TagsForTransaction returns all tags attached to a single transaction.
 func (s *Store) TagsForTransaction(ctx context.Context, txID, userID uuid.UUID) ([]Tag, error) {
 	q := `SELECT t.id, t.user_id, t.name, t.description, t.note, t.icon_code, t.created_at, t.updated_at, 0
 		FROM tags t
@@ -197,8 +197,6 @@ func (s *Store) TagsForTransaction(ctx context.Context, txID, userID uuid.UUID) 
 	return out, rows.Err()
 }
 
-// VerifyOwnership returns ErrTagNotFound if any of the given tag ids isn't
-// owned by the user. Used by AttachTags before the inserts.
 func (s *Store) VerifyOwnership(ctx context.Context, userID uuid.UUID, tagIDs []uuid.UUID) error {
 	if len(tagIDs) == 0 {
 		return nil
@@ -217,6 +215,10 @@ func (s *Store) VerifyOwnership(ctx context.Context, userID uuid.UUID, tagIDs []
 }
 
 func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, name *string, req UpdateTagRequest) (*Tag, error) {
+	return updateTag(ctx, s.db, userID, id, name, req)
+}
+
+func updateTag(ctx context.Context, db rower, userID, id uuid.UUID, name *string, req UpdateTagRequest) (*Tag, error) {
 	iconCode := req.IconCode
 	q := `UPDATE tags SET updated_by_user_id = $1`
 	args := []any{userID}
@@ -243,7 +245,7 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, name *string, 
 	args = append(args, id)
 	q += fmt.Sprintf(" WHERE id = $%d AND user_id = $1 RETURNING ", len(args)) + tagColumns
 
-	t, err := scanTag(s.db.QueryRow(ctx, q, args...))
+	t, err := scanTag(db.QueryRow(ctx, q, args...))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrTagNotFound
 	}
@@ -254,7 +256,11 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, name *string, 
 }
 
 func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
-	tag, err := s.db.Exec(ctx,
+	return deleteTag(ctx, s.db, userID, id)
+}
+
+func deleteTag(ctx context.Context, db rower, userID, id uuid.UUID) error {
+	tag, err := db.Exec(ctx,
 		`DELETE FROM tags WHERE id = $1 AND user_id = $2`, id, userID)
 	if err != nil {
 		return fmt.Errorf("db error: %w", err)
@@ -263,6 +269,41 @@ func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 		return ErrTagNotFound
 	}
 	return nil
+}
+
+func (s *Store) Batch(ctx context.Context, userID uuid.UUID, req BatchRequest) (created, updated []uuid.UUID, err error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for i, id := range req.Delete {
+		if err := deleteTag(ctx, tx, userID, id); err != nil {
+			return nil, nil, &BatchError{Op: "delete", Index: i, Err: err}
+		}
+	}
+	for i, u := range req.Update {
+		var name *string
+		if u.Req.Name != nil {
+			trimmed := strings.TrimSpace(*u.Req.Name)
+			name = &trimmed
+		}
+		if _, err := updateTag(ctx, tx, userID, u.ID, name, u.Req); err != nil {
+			return nil, nil, &BatchError{Op: "update", Index: i, Err: err}
+		}
+		updated = append(updated, u.ID)
+	}
+	for i, c := range req.Create {
+		t, err := createTag(ctx, tx, userID, strings.TrimSpace(c.Name), c.Description, c.Note, c.IconCode)
+		if err != nil {
+			return nil, nil, &BatchError{Op: "create", Index: i, Err: err}
+		}
+		created = append(created, t.ID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, fmt.Errorf("commit: %w", err)
+	}
+	return created, updated, nil
 }
 
 func mapInsertError(err error) error {

@@ -72,6 +72,8 @@ paths:
         - { name: to, in: query, schema: { $ref: '#/components/schemas/Date' } }
         - { name: no_wallet, in: query, description: 'Rows without a wallet (OR-ed with account_id).', schema: { type: boolean } }
         - { name: no_tags, in: query, description: 'Rows without any tag (OR-ed with tag_id).', schema: { type: boolean } }
+        - { name: amount_min, in: query, description: 'Rows whose amount is at least this (>= 0).', schema: { type: number, minimum: 0 } }
+        - { name: amount_max, in: query, description: 'Rows whose amount is at most this (>= amount_min).', schema: { type: number, minimum: 0 } }
         - { name: include_archived, in: query, description: 'Rows on archived wallets are hidden by default; true shows them (listing that wallet by account_id always does).', schema: { type: boolean } }
         - { name: q, in: query, description: 'Substring over description, note, category (incl. parent) and wallet names (max 100).', schema: { type: string, maxLength: 100 } }
         - { name: tag_id, in: query, description: 'Repeatable; rows having ANY of these tags.', schema: { type: array, items: { $ref: '#/components/schemas/Uuid' } }, style: form, explode: true }
@@ -1555,19 +1557,37 @@ paths:
         "tags": [
           "Tags"
         ],
-        "summary": "Create a tag",
+        "summary": "Create a tag (or save many: create + edit + delete in one call)",
         "operationId": "createTag",
+        "description": "One route, two shapes. A body of one tag (`name`, ...) creates it: 201 Tag. A body with any of `create` / `update` / `delete` is a whole save in ONE call and ONE DB transaction (owner 2026-10-18, the tags page): applied delete, then update, then create; any failure rolls all back (409 TAG_EXISTS / 404 NOT_FOUND with `details {op, index}`; 400 when an id repeats). 200 TagBatchResult: `created` / `updated` in request order, `deleted` ids, `data` = the whole list in the GET order.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateTagRequest"
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/CreateTagRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TagBatchRequest"
+                  }
+                ]
               }
             }
           }
         },
         "responses": {
+          "200": {
+            "description": "The batch form: the rows as they are now.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagBatchResult"
+                }
+              }
+            }
+          },
           "201": {
             "description": "Final state.",
             "content": {
@@ -1583,6 +1603,19 @@ paths:
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "409 TAG_EXISTS (batch: `details {op, index}`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -7753,6 +7786,109 @@ components:
           }
         },
         "required": []
+      }
+    TagBatchRequest: {
+        "type": "object",
+        "description": "A whole tags-page save. Applied delete, then update, then create, in one transaction. An update is the partial PUT /tags/{id} body plus its `id`.",
+        "properties": {
+          "create": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "$ref": "#/components/schemas/CreateTagRequest"
+            }
+          },
+          "update": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 50
+                },
+                "description": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 200
+                },
+                "note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 500
+                },
+                "icon_code": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/IconCode"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "id"
+              ]
+            }
+          },
+          "delete": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "required": []
+      }
+    TagBatchResult: {
+        "type": "object",
+        "properties": {
+          "created": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tag"
+            }
+          },
+          "updated": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tag"
+            }
+          },
+          "deleted": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tag"
+            }
+          }
+        },
+        "required": [
+          "created",
+          "updated",
+          "deleted",
+          "data"
+        ]
       }
     ContactList: {
         "type": "object",

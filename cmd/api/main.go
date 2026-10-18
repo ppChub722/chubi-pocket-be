@@ -12,6 +12,9 @@ import (
 	"runtime/debug"
 	"syscall"
 	"time"
+	// Embedded zoneinfo: the alpine runtime image has no tzdata, and without it every
+	// time.LoadLocation (X-Timezone, Asia/Bangkok) fails → UTC "today".
+	_ "time/tzdata"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -66,7 +69,6 @@ func main() {
 	}
 	defer dbPool.Close()
 
-	// --- Modules ---
 	authStore := auth.NewStore(dbPool)
 
 	categoriesStore := categories.NewStore(dbPool)
@@ -81,8 +83,6 @@ func main() {
 	transactionsService := transactions.NewService(transactionsStore, categoriesService)
 	transactionsHandler := transactions.NewHandler(transactionsService)
 
-	// Wire categories <-> transactions cross-module count callback. Categories
-	// uses this to decide DELETE = archive vs hard delete.
 	categoriesService.WithTransactionCounter(transactionsService.CountByCategory)
 
 	accountsStore := accounts.NewStore(dbPool)
@@ -93,48 +93,35 @@ func main() {
 	contactsService := contacts.NewService(contactsStore)
 	contactsHandler := contacts.NewHandler(contactsService)
 
-	// Personal debts — unified bidirectional table (replaces shared_expense_splits).
 	personalDebtsStore := personal_debts.NewStore(dbPool)
 	personalDebtsService := personal_debts.NewService(personalDebtsStore, transactionsService)
 	personalDebtsHandler := personal_debts.NewHandler(personalDebtsService)
 
-	// Notifications — fan-in target.
 	notificationsStore := notifications.NewStore(dbPool)
 	notificationsService := notifications.NewService(notificationsStore)
 	notificationsHandler := notifications.NewHandler(notificationsService)
 	meService := me.NewService(dbPool)
 
-	// Projects. Project transactions support splits (parent + child rows in
-	// project_transactions). Personal-book mirror creation is FE-side via
-	// the regular POST /transactions endpoint — no cross-module claim hook.
 	projectsStore := projects.NewStore(dbPool)
 	projectsService := projects.NewService(projectsStore)
 	projectsHandler := projects.NewHandler(projectsService)
 
-	// Saving goals (Phase 1c).
 	savingGoalsStore := saving_goals.NewStore(dbPool)
 	savingGoalsService := saving_goals.NewService(savingGoalsStore)
 	savingGoalsHandler := saving_goals.NewHandler(savingGoalsService)
 
-	// Budgets (Phase 1c).
 	budgetsStore := budgets.NewStore(dbPool)
 	budgetsService := budgets.NewService(budgetsStore)
 	budgetsHandler := budgets.NewHandler(budgetsService)
 	meHandler := me.NewHandler(meService.WithBudgets(budgetsService).WithDebts(personalDebtsService))
 
-	// Pending transactions — drafts waiting to be confirmed.
 	pendingService := pending.NewService(pending.NewStore(dbPool),
 		transactionsService, tagsService, personalDebtsService, projectsService)
 	pendingHandler := pending.NewHandler(pendingService)
 
-	// Recurring (0.3.1-10, replaces scheduled): settings + their items,
-	// linked to pending drafts / transactions. No job runner: the due check
-	// runs inside the boot reads (me counts, dashboard, notifications).
 	recurringService := recurring.NewService(dbPool, transactionsService, pendingService, notificationsService)
 	recurringHandler := recurring.NewHandler(recurringService)
 
-	// Imports — slips / text into pending drafts. 0.3.1: scan-slip runs OCR
-	// (tesseract CLI, shipped in the Docker image); the rest is still a stub.
 	ocrReader := ocr.NewTesseract(ocr.Config{
 		Bin:     cfg.OCR.Bin,
 		Lang:    cfg.OCR.Lang,
@@ -145,14 +132,12 @@ func main() {
 		log.Warn("ocr: tesseract not found — scan-slip will answer 503", "err", err)
 	}
 	importsHandler := imports.NewHandler(log, ocrReader)
-	// Payment providers (migration 49) + import logs (migration 50): codes
-	// the import meets but doesn't know, and slips it can't read yet.
+	// Payment providers (migration 49) + import logs (migration 50): codes the import meets but
+	// doesn't know, and slips it can't read yet.
 	providersStore := providers.NewStore(dbPool)
 	providersHandler := providers.NewHandler(providersStore)
 	importsHandler.WithImportLogs(imports.NewLogStore(dbPool).Write, providersStore.Known)
 	importsHandler.WithResolver(pending.NewResolver(dbPool).Resolve)
-	// OCR dump (0.3.1 tuning) — OCR_DUMP=1 compares every mode on each slip;
-	// never in production. See imports/ocr_dump.go.
 	if cfg.OCR.Dump && cfg.App.Env != "production" {
 		importsHandler.EnableOCRDump(filepath.Join(os.TempDir(), "ocr-dump"),
 			ocr.NewTesseract(ocr.Config{
@@ -160,53 +145,29 @@ func main() {
 			}))
 	}
 
-	// Dashboard (Phase 2) — read-only aggregate over the modules above.
 	dashboardService := dashboard.NewService(dashboard.NewStore(dbPool),
 		transactionsService, accountsService, budgetsService, savingGoalsService, personalDebtsService)
 	dashboardHandler := dashboard.NewHandler(dashboardService)
 
-	// --- Cross-module wiring (breaks cycles). Same pattern as 1a's
-	// categoriesService.WithTransactionCounter.
-
-	// transactions ↔ personal_debts.
 	transactionsService.WithDebtsCreator(personalDebtsService.CreateForTransactionTx)
 	transactionsService.WithSplitsEditor(personalDebtsService.EditForTransactionTx)
-	// A debt entry and its wallet transaction are one record (0.3.1-10).
 	transactionsService.WithDebtLinks(personalDebtsService)
-	// personal_debts ↔ notifications (linked splits, contract §5).
 	personalDebtsService.WithNotifications(notificationsService)
 
-	// contacts ↔ notifications (link-request flow).
 	contactsService.WithNotificationService(notificationsService)
 
-	// contacts ↔ personal_debts (re-pointing post-1b.2 — the original splits
-	// module that owned these hooks was retired; personal_debts now backs
-	// the same surfaces: unlinked-names list on contact detail, absorb on
-	// wire-up, snapshot-on-contact-delete).
 	contactsService.WithUnlinkedNamesProvider(personalDebtsService.UnlinkedNames)
 	contactsService.WithSplitsAbsorber(personalDebtsService.AbsorbForContact)
 	contactsService.WithSplitsRestorer(personalDebtsService.RestoreOnContactDeleteTx)
 
-	// projects ↔ notifications (project_invite, project_tx_recorded_for_you,
-	// project_tx_changed, project_added). No claim hook — resolve flow uses
-	// /transactions directly with source_project_transaction_id set
-	// client-side.
 	projectsService.WithNotificationService(notificationsService)
 
-	// projects ↔ transactions (quick create from bills, spec §10/4.24 —
-	// the new bill is created through the normal personal-transaction
-	// path inside the quick-create tx, so balances and split debts behave
-	// exactly like POST /v1/transactions).
 	projectsService.WithTransactionsService(transactionsService)
-	// A bill made from a transaction shares its money (0.3.1-10).
 	transactionsService.WithEventBillSyncer(projectsService.SyncBillFromTxTx)
 	transactionsService.WithEventBillDeleter(projectsService.DeleteBillOfTxTx)
 
-	// recurring ↔ transactions / pending / boot reads.
 	transactionsService.WithRecurringLinks(recurringService)
 	pendingService.WithSubmitHook(recurringService.OnDraftSubmitted)
-	// Savings v2: saving drafts (🐷) submit into the notebook; recurring
-	// ออม settings; a goal's page lists its auto-saves.
 	pendingService.WithSavings(savingGoalsService)
 	recurringService.WithSavings(savingGoalsService)
 
@@ -214,12 +175,10 @@ func main() {
 	dashboardService.WithDueCheck(recurringService.DueCheck)
 	notificationsService.WithDueCheck(recurringService.DueCheck)
 
-	// accounts ↔ notifications (account_invite — shared-wallet member
-	// invites ride the same notification pattern as project invites).
 	accountsService.WithNotificationService(notificationsService)
 
-	// Auth registration hooks: seed 6 system + starter user categories AND
-	// the user's notification settings row, atomic with the user insert.
+	// Auth registration hooks: seed 6 system + starter user categories AND the user's notification
+	// settings row, atomic with the user insert.
 	authService := auth.NewService(authStore, cfg,
 		categoriesService.SeedForUser,
 		notificationsService.SeedSettings,
@@ -230,9 +189,6 @@ func main() {
 	usersService := users.NewService(usersStore)
 	usersHandler := users.NewHandler(usersService, authService)
 
-	// Slip import (spec 15 §5, §7): the fee category must be one of the
-	// user's expense categories; drafts get the user's wallets (with their
-	// identifiers) and that fee category.
 	isExpenseCategory := func(ctx context.Context, userID, id uuid.UUID) error {
 		c, err := categoriesService.Get(ctx, userID, id)
 		if err != nil {
@@ -255,7 +211,6 @@ func main() {
 				dc.Wallets = append(dc.Wallets, imports.Wallet{ID: a.ID, Identifiers: a.Identifiers})
 			}
 		}
-		// A deleted (or retyped) fee category is simply not used.
 		if id, err := usersService.FeeCategoryID(ctx, userID); err == nil && id != nil &&
 			isExpenseCategory(ctx, userID, *id) == nil {
 			dc.FeeCategoryID = id
@@ -272,17 +227,14 @@ func main() {
 	packPermsStore := user_pack_permissions.NewStore(dbPool)
 	packPermsHandler := user_pack_permissions.NewHandler(packPermsStore)
 
-	// --- Router ---
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	r := gin.New()
-	// Order matters: RequestID FIRST so the logger middleware (and every
-	// handler via logger.FromCtx) sees the correlation ID.
 	r.Use(logger.RequestIDMiddleware())
 	r.Use(logger.GinLoggerMiddleware(log, cfg.App.LogBodies))
-	// Same semantics as gin.Recovery() (500 + abort), but the panic is
-	// logged through slog with the request_id instead of gin's raw writer.
+	// Same semantics as gin.Recovery() (500 + abort), but the panic is logged through slog with the
+	// request_id instead of gin's raw writer.
 	r.Use(gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, err any) {
 		logger.FromCtx(c, log).Error("panic recovered",
 			"error", fmt.Sprint(err),
@@ -290,8 +242,6 @@ func main() {
 		)
 		c.AbortWithStatus(http.StatusInternalServerError)
 	}))
-	// Phase 0/1: permissive — Flutter web + Android emulator + LAN devices all allowed.
-	// Phase 3: restrict AllowAllOrigins → AllowOrigins with the prod web/app hostnames.
 	r.Use(cors.New(cors.Config{
 		AllowAllOrigins: true,
 		AllowMethods:    []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -299,21 +249,10 @@ func main() {
 			"Origin",
 			"Content-Type",
 			"Authorization",
-			// FE generates a UUID per outbound request and sends it as
-			// X-Request-ID for log correlation. Browsers preflight any
-			// non-CORS-safelisted request header — must be explicitly
-			// allowed here or the OPTIONS response 403s and the actual
-			// request never fires.
 			"X-Request-ID",
-			// The app's build number — the version check (modules/appversion).
 			appversion.Header,
-			// The device timezone (accounts / budgets month windows). Without
-			// it here the browser's preflight fails and the web app reaches
-			// nothing ("can't reach the server"); phones don't preflight.
 			"X-Timezone",
 		},
-		// Echo X-Request-ID back so the FE can read it from the response
-		// (ApiException pulls it from this header for error UIs).
 		ExposeHeaders:    []string{"X-Request-ID", datasync.VersionsHeader},
 		AllowCredentials: false,
 		MaxAge:           12 * time.Hour,
@@ -331,9 +270,6 @@ func main() {
 		MessageEN:   cfg.Version.MessageEN,
 	})
 
-	// The API document (dev hub reads it). Registered on the engine, not the
-	// group: it must stay readable by an app build the version check rejects.
-	// Public locally; in production any logged-in user.
 	openapiHandlers := []gin.HandlerFunc{apidoc.NewHandler(r).Serve}
 	if cfg.App.Env == "production" {
 		openapiHandlers = append([]gin.HandlerFunc{auth.Middleware(cfg, authStore)}, openapiHandlers...)
@@ -342,15 +278,12 @@ func main() {
 
 	api := r.Group("/api/v1")
 	{
-		// Builds older than MIN_APP_BUILD get 426 on every route but this one.
 		api.Use(versionHandler.Middleware("/api/v1/app/version"))
 		api.GET("/app/version", versionHandler.Version)
 
-		// Public
 		api.POST("/auth/register", authHandler.Register)
 		api.POST("/auth/login", authHandler.Login)
 
-		// Protected
 		protected := api.Group("/")
 		protected.Use(auth.Middleware(cfg, authStore))
 		protected.Use(datasync.Middleware(dbPool, log))
@@ -368,7 +301,6 @@ func main() {
 			protected.POST("/users/me/reactivate", usersHandler.Reactivate)
 			protected.GET("/users/me/packs", packPermsHandler.ListMyPacks)
 
-			// Categories (Phase 1a)
 			protected.POST("/categories", categoriesHandler.Create)
 			protected.GET("/categories", categoriesHandler.List)
 			protected.PATCH("/categories/reorder", categoriesHandler.Reorder)
@@ -376,14 +308,11 @@ func main() {
 			protected.PUT("/categories/:id", categoriesHandler.Update)
 			protected.DELETE("/categories/:id", categoriesHandler.Delete)
 
-			// Tags (Phase 1a)
 			protected.POST("/tags", tagsHandler.Create)
 			protected.GET("/tags", tagsHandler.List)
 			protected.PUT("/tags/:id", tagsHandler.Update)
 			protected.DELETE("/tags/:id", tagsHandler.Delete)
 
-			// Accounts (Phase 1a.2 + §14 shared wallets).
-			// Static-path-before-param: /invites/... must come before /:id.
 			protected.POST("/accounts", accountsHandler.Create)
 			protected.GET("/accounts", accountsHandler.List)
 			protected.PATCH("/accounts/reorder", accountsHandler.Reorder)
@@ -396,16 +325,13 @@ func main() {
 			protected.DELETE("/accounts/:id", accountsHandler.Delete)
 			protected.POST("/accounts/:id/adjust-balance", accountsHandler.AdjustBalance)
 			protected.POST("/accounts/:id/identifiers", accountsHandler.AddIdentifier)
-			// Shared-wallet membership (spec §14).
 			protected.POST("/accounts/:id/members", accountsHandler.InviteMember)
 			protected.DELETE("/accounts/:id/members/:member_id", accountsHandler.RemoveMember)
 			protected.POST("/accounts/:id/transfer-ownership", accountsHandler.TransferOwnership)
 			protected.PUT("/accounts/:id/report-scope", accountsHandler.UpdateReportScope)
-			// Saving-goals helper lives under /accounts so the FE can fetch
-			// the per-account allocation pie without an extra round-trip.
+			// Saving-goals helper lives under /accounts so the FE can fetch the per-account allocation pie
+			// without an extra round-trip.
 
-			// Transactions (Phase 1a.3). /summary registered before /:id so the
-			// literal path doesn't get swallowed by the param.
 			protected.POST("/transactions", transactionsHandler.Create)
 			protected.GET("/transactions", transactionsHandler.List)
 			protected.GET("/transactions/summary", transactionsHandler.Summary)
@@ -416,14 +342,10 @@ func main() {
 			protected.PUT("/transactions/:id/tags", transactionsHandler.SetTags)
 			protected.DELETE("/transactions/:id", transactionsHandler.Delete)
 
-			// Contacts (Phase 1b.1 + 1b.2 link-request endpoints).
-			// Static-path-before-param: /unlinked-names AND /link-requests/...
-			// must come before /:id to avoid path collision.
 			protected.POST("/contacts", contactsHandler.Create)
 			protected.GET("/contacts", contactsHandler.List)
-			// Static-path-before-param: `/unlinked-names` and
-			// `/link-requests/...` MUST come before `/:id` so Gin's tree
-			// doesn't match them as a UUID parameter.
+			// Static-path-before-param: `/unlinked-names` and `/link-requests/...` MUST come before `/:id`
+			// so Gin's tree doesn't match them as a UUID parameter.
 			protected.GET("/contacts/unlinked-names", contactsHandler.UnlinkedNames)
 			protected.GET("/contacts/link-requests/:notification_id/sender-profile", contactsHandler.SenderProfile)
 			protected.POST("/contacts/link-requests/:notification_id/accept", contactsHandler.AcceptLinkRequest)
@@ -439,8 +361,6 @@ func main() {
 			protected.POST("/contacts/:id/absorb", contactsHandler.Absorb)
 			protected.DELETE("/contacts/:id", contactsHandler.Delete)
 
-			// Debts = a person ledger (0.3.1-10): people with net balances,
-			// entries paid / received; an entry with a wallet owns its transaction.
 			protected.GET("/personal-debts/people", personalDebtsHandler.People)
 			protected.GET("/personal-debts/people/:key", personalDebtsHandler.Person)
 			protected.GET("/personal-debts/people/:key/entries", personalDebtsHandler.Entries)
@@ -451,7 +371,6 @@ func main() {
 			protected.PUT("/personal-debts/:id", personalDebtsHandler.Update)
 			protected.DELETE("/personal-debts/:id", personalDebtsHandler.Delete)
 
-			// Notifications (Phase 1b.2). Static paths first.
 			protected.GET("/notifications", notificationsHandler.List)
 			protected.GET("/notifications/unread-count", notificationsHandler.UnreadCount)
 			protected.POST("/notifications/read-all", notificationsHandler.ReadAll)
@@ -463,8 +382,6 @@ func main() {
 			protected.POST("/notifications/:id/restore", notificationsHandler.Restore)
 			protected.DELETE("/notifications/:id", notificationsHandler.Delete)
 
-			// Projects (Phase 1b.2). Static-path-before-param applies:
-			// /quick and /link-requests/... must come before /:id.
 			protected.POST("/projects", projectsHandler.Create)
 			protected.GET("/projects", projectsHandler.List)
 			protected.POST("/projects/quick", projectsHandler.QuickCreate)
@@ -498,8 +415,6 @@ func main() {
 			protected.PUT("/projects/:id/tags/:tag_id", projectsHandler.UpdateTag)
 			protected.DELETE("/projects/:id/tags/:tag_id", projectsHandler.DeleteTag)
 
-			// Saving goals (Phase 1c). All paths under /saving-goals are
-			// param-only — no static-vs-param ordering hazard.
 			protected.POST("/saving-goals", savingGoalsHandler.Create)
 			protected.GET("/saving-goals", savingGoalsHandler.List)
 			protected.GET("/saving-goals/spare", savingGoalsHandler.Spare)
@@ -518,7 +433,6 @@ func main() {
 			protected.POST("/saving-goals/:id/archive", savingGoalsHandler.Archive)
 			protected.POST("/saving-goals/:id/restore", savingGoalsHandler.Restore)
 
-			// Budgets v2 (0.3.1-10): named trackers, periods, sources.
 			protected.POST("/budgets", budgetsHandler.Create)
 			protected.GET("/budgets", budgetsHandler.List)
 			protected.GET("/budgets/:id/periods", budgetsHandler.Periods)
@@ -531,8 +445,6 @@ func main() {
 			protected.POST("/budgets/:id/archive", budgetsHandler.Archive)
 			protected.POST("/budgets/:id/restore", budgetsHandler.Restore)
 
-			// Scheduled transactions (Phase 1c). /upcoming registered
-			// before /:id so Gin doesn't match it as a UUID param.
 			protected.GET("/recurring", recurringHandler.List)
 			protected.POST("/recurring", recurringHandler.Create)
 			protected.GET("/recurring/:id", recurringHandler.Get)
@@ -557,10 +469,8 @@ func main() {
 			protected.POST("/recurring-items/:id/archive", recurringHandler.ArchiveItem)
 			protected.POST("/recurring-items/:id/restore", recurringHandler.RestoreItem)
 
-			// Dashboard (Phase 2, contract §4) — one aggregated read for the home screen.
 			protected.GET("/dashboard", dashboardHandler.Get)
 
-			// Pending transactions (drafts). /submit before /:id.
 			protected.GET("/pending-transactions", pendingHandler.List)
 			protected.POST("/pending-transactions", pendingHandler.Create)
 			protected.POST("/pending-transactions/submit", pendingHandler.Submit)
@@ -577,7 +487,6 @@ func main() {
 		}
 	}
 
-	// --- HTTP server ---
 	server := &http.Server{
 		Addr:         ":" + cfg.App.Port,
 		Handler:      r,

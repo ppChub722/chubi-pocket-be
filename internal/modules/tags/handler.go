@@ -1,10 +1,13 @@
 package tags
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
@@ -19,7 +22,6 @@ func NewHandler(s *Service) *Handler {
 	return &Handler{service: s}
 }
 
-// POST /v1/tags
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -27,8 +29,23 @@ func (h *Handler) Create(c *gin.Context) {
 		return
 	}
 
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	var probe map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &probe)
+	_, hasCreate := probe["create"]
+	_, hasUpdate := probe["update"]
+	_, hasDelete := probe["delete"]
+	if hasCreate || hasUpdate || hasDelete {
+		h.batch(c, userID, raw)
+		return
+	}
+
 	var req CreateTagRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := binding.JSON.BindBody(raw, &req); err != nil {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
@@ -41,7 +58,37 @@ func (h *Handler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, t)
 }
 
-// GET /v1/tags
+func (h *Handler) batch(c *gin.Context, userID uuid.UUID, raw []byte) {
+	var req BatchRequest
+	if err := binding.JSON.BindBody(raw, &req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	out, err := h.service.Batch(c.Request.Context(), userID, req)
+	if err != nil {
+		var be *BatchError
+		if errors.As(err, &be) {
+			details := map[string]any{"op": be.Op, "index": be.Index}
+			switch {
+			case errors.Is(err, ErrTagNotFound):
+				response.Fail(c, http.StatusNotFound, "NOT_FOUND", "Tag not found", details)
+			case errors.Is(err, ErrTagExists):
+				response.Fail(c, http.StatusConflict, "TAG_EXISTS", ErrTagExists.Error(), details)
+			default:
+				response.InternalError(c, "Tag operation failed", err.Error())
+			}
+			return
+		}
+		if errors.Is(err, ErrBatchInvalid) {
+			response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+			return
+		}
+		response.InternalError(c, "Tag operation failed", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -57,7 +104,6 @@ func (h *Handler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, ListResponse{Data: tags})
 }
 
-// PUT /v1/tags/:id
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -83,7 +129,6 @@ func (h *Handler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, t)
 }
 
-// DELETE /v1/tags/:id
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {

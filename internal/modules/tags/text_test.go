@@ -8,8 +8,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
-// TestUpdateTextFields — a partial update without description / note
-// keeps them; null or "" clears (owner standard 2026-10-10).
 func TestUpdateTextFields(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()

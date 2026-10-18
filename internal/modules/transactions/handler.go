@@ -2,6 +2,7 @@ package transactions
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,8 +17,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// Handler — the /transactions routes (API spec v2: bare bodies on success,
-// response.Fail errors).
 type Handler struct {
 	service *Service
 }
@@ -26,7 +25,6 @@ func NewHandler(s *Service) *Handler {
 	return &Handler{service: s}
 }
 
-// POST /v1/transactions — 201 TransactionWriteResult.
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -48,7 +46,6 @@ func (h *Handler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, res)
 }
 
-// GET /v1/transactions — TransactionList.
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -77,8 +74,6 @@ func (h *Handler) List(c *gin.Context) {
 			f.PerPage = n
 		}
 	}
-	// account_id / category_id / type may repeat (multi-select; OR inside the
-	// group, AND between groups).
 	for _, v := range c.QueryArray("account_id") {
 		id, err := uuid.Parse(v)
 		if err != nil {
@@ -132,6 +127,23 @@ func (h *Handler) List(c *gin.Context) {
 			*p.dst = &v
 		}
 	}
+	for _, p := range []struct {
+		key string
+		dst **float64
+	}{{"amount_min", &f.AmountMin}, {"amount_max", &f.AmountMax}} {
+		if v := c.Query(p.key); v != "" {
+			n, err := strconv.ParseFloat(v, 64)
+			if err != nil || n < 0 || math.IsNaN(n) || math.IsInf(n, 0) {
+				response.BadRequest(c, "VALIDATION_ERROR", p.key+" must be a non-negative number", nil)
+				return
+			}
+			*p.dst = &n
+		}
+	}
+	if f.AmountMin != nil && f.AmountMax != nil && *f.AmountMin > *f.AmountMax {
+		response.BadRequest(c, "VALIDATION_ERROR", "amount_min must be at most amount_max", nil)
+		return
+	}
 	if c.Query("include_archived") == "true" {
 		f.IncludeArchived = true
 	}
@@ -157,7 +169,6 @@ func (h *Handler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// GET /v1/transactions/:id — Transaction (splits filled).
 func (h *Handler) Get(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -177,8 +188,6 @@ func (h *Handler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, d)
 }
 
-// PUT /v1/transactions/:id — TransactionWriteResult (both rows for a
-// transfer).
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -204,7 +213,6 @@ func (h *Handler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
-// DELETE /v1/transactions/:id — DeleteTransactionResult.
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -224,8 +232,6 @@ func (h *Handler) Delete(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
-// PUT /v1/transactions/:id/splits — replace the split list (see
-// EditSplits); returns the Transaction.
 func (h *Handler) EditSplits(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -249,8 +255,6 @@ func (h *Handler) EditSplits(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// PUT /v1/transactions/:id/tags — replace the caller's tag set on the row;
-// returns the Transaction.
 func (h *Handler) SetTags(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -274,7 +278,6 @@ func (h *Handler) SetTags(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// GET /v1/transactions/form-options — FormOptions.
 func (h *Handler) FormOptions(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -289,7 +292,6 @@ func (h *Handler) FormOptions(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// GET /v1/transactions/summary — TransactionSummary.
 func (h *Handler) Summary(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -345,8 +347,6 @@ func (h *Handler) Summary(c *gin.Context) {
 	c.JSON(http.StatusOK, summary)
 }
 
-// --- Helpers ---
-
 func validDate(s string) bool {
 	_, err := time.Parse("2006-01-02", s)
 	return err == nil
@@ -361,8 +361,6 @@ func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 	return id, true
 }
 
-// MapError — the transaction error codes, for modules whose writes edit
-// transactions (a recurring item's link).
 func MapError(c *gin.Context, err error) { mapServiceError(c, err) }
 
 func mapServiceError(c *gin.Context, err error) {

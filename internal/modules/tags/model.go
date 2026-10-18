@@ -1,6 +1,8 @@
 package tags
 
 import (
+	"encoding/json"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,8 +39,6 @@ type UpdateTagRequest struct {
 	notePresent        bool
 }
 
-// UnmarshalJSON records which keys the body carried: an absent description /
-// note stays as is; null or "" clears it.
 func (r *UpdateTagRequest) UnmarshalJSON(data []byte) error {
 	type alias UpdateTagRequest
 	present, err := shared.DecodeTracked(data, (*alias)(r))
@@ -54,7 +54,6 @@ func (r *UpdateTagRequest) NoteChange() (*string, bool) {
 	return shared.TextChange(r.Note, r.notePresent)
 }
 
-// DeletedResult - spec DeletedResult.
 type DeletedResult struct {
 	ID uuid.UUID `json:"id"`
 }
@@ -62,3 +61,43 @@ type DeletedResult struct {
 type ListResponse struct {
 	Data []Tag `json:"data"`
 }
+
+type BatchRequest struct {
+	Create []CreateTagRequest `json:"create" binding:"omitempty,max=200,dive"`
+	Update []BatchUpdateItem  `json:"update" binding:"omitempty,max=200,dive"`
+	Delete []uuid.UUID        `json:"delete" binding:"omitempty,max=200"`
+}
+
+type BatchUpdateItem struct {
+	ID  uuid.UUID
+	Req UpdateTagRequest
+}
+
+func (b *BatchUpdateItem) UnmarshalJSON(data []byte) error {
+	var head struct {
+		ID uuid.UUID `json:"id"`
+	}
+	if err := json.Unmarshal(data, &head); err != nil {
+		return err
+	}
+	b.ID = head.ID
+	return json.Unmarshal(data, &b.Req)
+}
+
+type BatchResult struct {
+	Created []Tag       `json:"created"`
+	Updated []Tag       `json:"updated"`
+	Deleted []uuid.UUID `json:"deleted"`
+	Data    []Tag       `json:"data"`
+}
+
+type BatchError struct {
+	Op    string
+	Index int
+	Err   error
+}
+
+func (e *BatchError) Error() string {
+	return e.Op + " #" + strconv.Itoa(e.Index) + ": " + e.Err.Error()
+}
+func (e *BatchError) Unwrap() error { return e.Err }

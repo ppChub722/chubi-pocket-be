@@ -29,12 +29,6 @@ var (
 	ErrSourcePTNotForUser = errors.New("caller is not a member of the source project")
 )
 
-// LookupSourcePTTx resolves a project_transaction by id and confirms the
-// caller is an active member of its project. Returns the project_id used to
-// stamp the personal-mirror row's project_id column.
-//
-// Inlined here (instead of calling the projects module) to avoid an import
-// cycle: projects already depends on transactions semantics being stable.
 func (s *Store) LookupSourcePTTx(
 	ctx context.Context, tx pgx.Tx, ptID, userID uuid.UUID,
 ) (uuid.UUID, error) {
@@ -67,7 +61,6 @@ const txColumns = `id, user_id, account_id, type, amount, category_id,
 	source_personal_debt_id, source_project_transaction_id, project_id,
 	created_at, updated_at`
 
-// txColumnsT — txColumns qualified with the alias t.
 const txColumnsT = `t.id, t.user_id, t.account_id, t.type, t.amount, t.category_id,
 	to_char(t.date, 'YYYY-MM-DD') AS date, t.description, t.note, t.transfer_group_id,
 	t.source_personal_debt_id, t.source_project_transaction_id, t.project_id,
@@ -84,13 +77,6 @@ func scanTx(row pgx.Row) (*Transaction, error) {
 	return &t, err
 }
 
-// --- Read ---
-
-// txVisible is the read-visibility rule for transactions (spec §14): the
-// caller sees a row when they authored it (their book, incl. locked
-// history on wallets they left) OR they hold an ACTIVE membership on the
-// row's account (shared-wallet ledger, all authors). Backfilled owner
-// rows make personal accounts behave exactly as the old `user_id = $1`.
 func txVisible(txAlias, userParam string) string {
 	return "(" + txAlias + ".user_id = " + userParam + " OR " +
 		shared.ActiveMembershipPredicate(txAlias+".account_id", userParam) + ")"
@@ -109,9 +95,6 @@ func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Transaction
 	return t, nil
 }
 
-// IsActiveMember reports whether userID holds an active membership on
-// accountID. Inlined here (not calling the accounts module) to avoid an
-// import cycle — same reasoning as LookupSourcePTTx above.
 func (s *Store) IsActiveMember(ctx context.Context, accountID, userID uuid.UUID) (bool, error) {
 	var ok bool
 	err := s.db.QueryRow(ctx,
@@ -123,9 +106,6 @@ func (s *Store) IsActiveMember(ctx context.Context, accountID, userID uuid.UUID)
 	return ok, nil
 }
 
-// GetByGroupID loads both rows of a transfer pair. No author filter —
-// on shared wallets a member may operate on another member's transfer;
-// the service authorizes via membership on both accounts.
 func (s *Store) GetByGroupID(ctx context.Context, groupID uuid.UUID) ([]Transaction, error) {
 	q := `SELECT ` + txColumns + ` FROM transactions
 		WHERE transfer_group_id = $1
@@ -146,9 +126,6 @@ func (s *Store) GetByGroupID(ctx context.Context, groupID uuid.UUID) ([]Transact
 	return out, rows.Err()
 }
 
-// CountByCategory is called by categories.Store.CountTransactions to decide
-// archive-vs-hard-delete. Phase 1a.3 wires this up after the transactions
-// table exists.
 func (s *Store) CountByCategory(ctx context.Context, categoryID uuid.UUID) (int, error) {
 	var n int
 	err := s.db.QueryRow(ctx,
@@ -156,14 +133,10 @@ func (s *Store) CountByCategory(ctx context.Context, categoryID uuid.UUID) (int,
 	return n, err
 }
 
-// List returns a page of rows (Service.List resolves them with
-// buildDetails), the filtered row count and the money totals over the
-// whole filtered set. Sort = date_desc by default.
 func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Transaction, int, Totals, []DailyPoint, error) {
 	whereClauses := []string{txVisible("t", "$1")}
 	args := []any{userID}
 
-	// Wallet group: any of the wallets, or no wallet.
 	walletIDs := append([]uuid.UUID(nil), f.AccountIDs...)
 	if f.AccountID != nil {
 		walletIDs = append(walletIDs, *f.AccountID)
@@ -183,8 +156,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		whereClauses = append(whereClauses,
 			"NOT EXISTS (SELECT 1 FROM accounts xa WHERE xa.id = t.account_id AND xa.status = 'archived')")
 	}
-	// Category group: any of the categories (with their sub-categories when
-	// asked), or no category.
 	categoryIDs := append([]uuid.UUID(nil), f.CategoryIDs...)
 	if f.CategoryID != nil {
 		categoryIDs = append(categoryIDs, *f.CategoryID)
@@ -205,8 +176,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	if len(categoryOr) > 0 {
 		whereClauses = append(whereClauses, "("+strings.Join(categoryOr, " OR ")+")")
 	}
-	// Search + tags use subqueries, not joins, so the COUNT query below can
-	// share the same WHERE.
 	if q := strings.TrimSpace(f.Q); q != "" {
 		args = append(args, "%"+shared.EscapeLike(q)+"%")
 		whereClauses = append(whereClauses, fmt.Sprintf(`(t.description ILIKE $%[1]d OR t.note ILIKE $%[1]d
@@ -214,7 +183,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 			           WHERE qc.id = t.category_id AND (qc.name ILIKE $%[1]d OR qp.name ILIKE $%[1]d))
 			OR EXISTS (SELECT 1 FROM accounts qa WHERE qa.id = t.account_id AND qa.name ILIKE $%[1]d))`, len(args)))
 	}
-	// Tag group: any of the tags, or no tag at all.
 	var tagOr []string
 	if len(f.TagIDs) > 0 {
 		args = append(args, f.TagIDs)
@@ -227,7 +195,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	if len(tagOr) > 0 {
 		whereClauses = append(whereClauses, "("+strings.Join(tagOr, " OR ")+")")
 	}
-	// Type group: any of the types.
 	var typeNames []string
 	if f.Type != nil {
 		typeNames = append(typeNames, string(*f.Type))
@@ -247,10 +214,15 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		args = append(args, *f.To)
 		whereClauses = append(whereClauses, fmt.Sprintf("t.date <= $%d::date", len(args)))
 	}
+	if f.AmountMin != nil {
+		args = append(args, *f.AmountMin)
+		whereClauses = append(whereClauses, fmt.Sprintf("t.amount >= $%d", len(args)))
+	}
+	if f.AmountMax != nil {
+		args = append(args, *f.AmountMax)
+		whereClauses = append(whereClauses, fmt.Sprintf("t.amount <= $%d", len(args)))
+	}
 	if f.CanJoinEvent {
-		// What the event "add existing bills" picker may pull (the can_join_event
-		// rule of a row): mine, expense / income, not in an event, not a debt
-		// entry or system row, no split labelled paid.
 		whereClauses = append(whereClauses, `t.user_id = $1 AND t.type IN ('expense', 'income')
 			AND t.project_id IS NULL AND t.source_personal_debt_id IS NULL AND t.source_project_transaction_id IS NULL
 			AND NOT EXISTS (SELECT 1 FROM categories jc WHERE jc.id = t.category_id AND jc.is_system)
@@ -264,8 +236,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 
 	where := strings.Join(whereClauses, " AND ")
 
-	// Row count + money totals over the whole filtered set, one pass.
-	// Share basis (spec 12 §4.5), same as the summary.
 	var (
 		total  int
 		totals Totals
@@ -327,8 +297,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	return out, total, totals, daily, nil
 }
 
-// EventSplitsTotal — for an event bill (shared.EventBillPredicate), Σ the
-// other members' splits on its board row; 0 for any other transaction.
 func (s *Store) EventSplitsTotal(ctx context.Context, txID uuid.UUID) (float64, error) {
 	var total float64
 	err := s.db.QueryRow(ctx, `
@@ -340,11 +308,6 @@ func (s *Store) EventSplitsTotal(ctx context.Context, txID uuid.UUID) (float64, 
 	return total, err
 }
 
-// --- Tx-aware writes (called via balance helper) ---
-
-// LockAccountsForUpdate runs SELECT 1 ... FOR UPDATE on each account_id in
-// `ids`. Caller MUST sort `ids` (lowest UUID first) before calling — that's
-// the deadlock-prevention rule.
 func (s *Store) LockAccountsForUpdate(ctx context.Context, tx pgx.Tx, ids []uuid.UUID) error {
 	for _, id := range ids {
 		if _, err := tx.Exec(ctx,
@@ -355,14 +318,8 @@ func (s *Store) LockAccountsForUpdate(ctx context.Context, tx pgx.Tx, ids []uuid
 	return nil
 }
 
-// GetAccountBalanceTx reads the current cached balance under lock (an archived wallet is
-// read-only: ErrAccountArchived). Returns
-// also the currency for currency-mismatch checks on transfers.
-//
-// This doubles as the WRITE authorization gate: the caller must hold an
-// ACTIVE membership on the account (spec §14/6 — "writes to an account
-// require active membership"). Personal accounts pass via the backfilled
-// owner row — no special case.
+// GetAccountBalanceTx reads the current cached balance under lock (an archived wallet is read-only:
+// ErrAccountArchived).
 func (s *Store) GetAccountBalanceTx(ctx context.Context, tx pgx.Tx, userID, accountID uuid.UUID) (balance float64, currency string, err error) {
 	var status string
 	err = tx.QueryRow(ctx,
@@ -378,7 +335,6 @@ func (s *Store) GetAccountBalanceTx(ctx context.Context, tx pgx.Tx, userID, acco
 	return
 }
 
-// accountArchived — true when the wallet is archived (read-only).
 func (s *Store) accountArchived(ctx context.Context, id uuid.UUID) (bool, error) {
 	var archived bool
 	err := s.db.QueryRow(ctx, `SELECT status = 'archived' FROM accounts WHERE id = $1`, id).Scan(&archived)
@@ -388,11 +344,6 @@ func (s *Store) accountArchived(ctx context.Context, id uuid.UUID) (bool, error)
 	return archived, err
 }
 
-// ApplyBalanceDeltaTx adjusts accounts.balance by `delta` (positive or
-// negative). Caller has already locked the row AND verified membership
-// (GetAccountBalanceTx) — on a shared wallet the actor is not necessarily
-// the account's owner, so the WHERE matches by id only and the actor is
-// stamped as updater.
 func (s *Store) ApplyBalanceDeltaTx(ctx context.Context, tx pgx.Tx, userID, accountID uuid.UUID, delta float64) (newBalance float64, err error) {
 	err = tx.QueryRow(ctx, `
 		UPDATE accounts SET balance = balance + $1, updated_by_user_id = $2
@@ -401,8 +352,6 @@ func (s *Store) ApplyBalanceDeltaTx(ctx context.Context, tx pgx.Tx, userID, acco
 	return
 }
 
-// InsertRowTx inserts a single transactions row. Caller is responsible for
-// the corresponding balance update.
 func (s *Store) InsertRowTx(ctx context.Context, tx pgx.Tx, t *Transaction) (*Transaction, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -426,9 +375,6 @@ func (s *Store) InsertRowTx(ctx context.Context, tx pgx.Tx, t *Transaction) (*Tr
 	return created, nil
 }
 
-// UpdateRowTx updates editable fields. Called by Service.Update for one of
-// the editable subsets; balance delta is applied separately when amount
-// changes.
 func (s *Store) UpdateRowTx(
 	ctx context.Context, tx pgx.Tx, userID, id uuid.UUID,
 	amount *float64, date *string,
@@ -464,10 +410,6 @@ func (s *Store) UpdateRowTx(
 		q += fmt.Sprintf(", account_id = $%d", len(args))
 	}
 	args = append(args, id)
-	// WHERE by id only — on shared wallets the actor may edit another
-	// member's row (spec §14/2 rule 2); service-level authz decides who
-	// may reach this. $1 (the actor) is stamped into updated_by_user_id
-	// for the audit trail.
 	q += fmt.Sprintf(" WHERE id = $%d RETURNING ", len(args)) + txColumns
 
 	t, err := scanTx(tx.QueryRow(ctx, q, args...))
@@ -480,9 +422,6 @@ func (s *Store) UpdateRowTx(
 	return t, nil
 }
 
-// DeleteRowTx removes a single transactions row by id. Caller (service)
-// already reversed the balance and authorized the actor — members may
-// delete other members' rows on shared wallets, so no author filter here.
 func (s *Store) DeleteRowTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
 	tag, err := tx.Exec(ctx,
 		`DELETE FROM transactions WHERE id = $1`, id)
@@ -495,9 +434,6 @@ func (s *Store) DeleteRowTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) error 
 	return nil
 }
 
-// ReplaceTagsTx makes the caller's tags on txID exactly tagIDs (other
-// users' tags on a shared-wallet row are theirs and stay). Every id must be
-// one of the caller's tags → ErrTagNotFound.
 func (s *Store) ReplaceTagsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, tagIDs []uuid.UUID) error {
 	if err := verifyTagsTx(ctx, tx, userID, tagIDs); err != nil {
 		return err
@@ -514,7 +450,6 @@ func (s *Store) ReplaceTagsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.
 	return attachTagsTx(ctx, tx, userID, txID, tagIDs)
 }
 
-// AttachTagsTx adds the caller's tags to txID (existing pairs stay).
 func (s *Store) AttachTagsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, tagIDs []uuid.UUID) error {
 	if len(tagIDs) == 0 {
 		return nil

@@ -2,6 +2,7 @@ package tags
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// AttachRequest carries the tag IDs to attach to a transaction.
 type AttachRequest struct {
 	TagIDs []uuid.UUID `json:"tag_ids" binding:"required,min=1,dive,required"`
 }
@@ -24,6 +24,48 @@ func NewService(s *Store) *Service {
 
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateTagRequest) (*Tag, error) {
 	return s.store.Create(ctx, userID, strings.TrimSpace(req.Name), req.Description, req.Note, req.IconCode)
+}
+
+var ErrBatchInvalid = errors.New("a tag id appears more than once in the batch")
+
+func (s *Service) Batch(ctx context.Context, userID uuid.UUID, req BatchRequest) (*BatchResult, error) {
+	seen := map[uuid.UUID]bool{}
+	for _, id := range req.Delete {
+		if seen[id] {
+			return nil, ErrBatchInvalid
+		}
+		seen[id] = true
+	}
+	for _, u := range req.Update {
+		if u.ID == uuid.Nil || seen[u.ID] {
+			return nil, ErrBatchInvalid
+		}
+		seen[u.ID] = true
+	}
+	createdIDs, updatedIDs, err := s.store.Batch(ctx, userID, req)
+	if err != nil {
+		return nil, err
+	}
+	all, err := s.store.List(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[uuid.UUID]Tag, len(all))
+	for _, t := range all {
+		byID[t.ID] = t
+	}
+	pick := func(ids []uuid.UUID) []Tag {
+		out := make([]Tag, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, byID[id])
+		}
+		return out
+	}
+	deleted := req.Delete
+	if deleted == nil {
+		deleted = []uuid.UUID{}
+	}
+	return &BatchResult{Created: pick(createdIDs), Updated: pick(updatedIDs), Deleted: deleted, Data: all}, nil
 }
 
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Tag, error) {
@@ -43,7 +85,6 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateTa
 	if _, err := s.store.Update(ctx, userID, id, name, req); err != nil {
 		return nil, err
 	}
-	// Return via GetByID so usage_count is populated consistently.
 	return s.store.GetByID(ctx, userID, id)
 }
 
@@ -51,8 +92,6 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	return s.store.Delete(ctx, userID, id)
 }
 
-// AttachTags validates ownership of the transaction and all tag IDs, then
-// inserts (transaction_id, tag_id) rows. Returns the full attached-tag list.
 func (s *Service) AttachTags(ctx context.Context, userID, txID uuid.UUID, tagIDs []uuid.UUID) ([]Tag, error) {
 	if err := s.store.IsTransactionOwnedByUser(ctx, txID, userID); err != nil {
 		return nil, err
@@ -66,8 +105,6 @@ func (s *Service) AttachTags(ctx context.Context, userID, txID uuid.UUID, tagIDs
 	return s.store.TagsForTransaction(ctx, txID, userID)
 }
 
-// DetachTag removes a single tag from a transaction. Idempotent — if the
-// pairing didn't exist, returns success.
 func (s *Service) DetachTag(ctx context.Context, userID, txID, tagID uuid.UUID) error {
 	if err := s.store.IsTransactionOwnedByUser(ctx, txID, userID); err != nil {
 		return err
@@ -75,9 +112,6 @@ func (s *Service) DetachTag(ctx context.Context, userID, txID, tagID uuid.UUID) 
 	return s.store.DetachTag(ctx, txID, tagID)
 }
 
-// AttachTagsTx attaches inside the caller's DB transaction — used when a
-// pending draft is submitted, so the transaction and its tags land (or
-// roll back) together. Ownership of the tags is checked first.
 func (s *Service) AttachTagsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, tagIDs []uuid.UUID) error {
 	if len(tagIDs) == 0 {
 		return nil
