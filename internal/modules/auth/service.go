@@ -14,10 +14,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 )
 
-// RegistrationHook is invoked inside the Register tx after the user +
-// preferences rows are inserted. Hooks seed per-user data (e.g., categories
-// in Phase 1a; notification settings in 1b). Func-typed instead of an
-// interface to avoid a categories↔auth import cycle.
 type RegistrationHook func(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error
 
 type Service struct {
@@ -26,8 +22,6 @@ type Service struct {
 	hooks []RegistrationHook
 }
 
-// NewService accepts zero or more registration hooks. main.go composes the
-// hook list (categories seeder is the only one in 1a).
 func NewService(s *Store, c *config.Config, hooks ...RegistrationHook) *Service {
 	return &Service{store: s, cfg: c, hooks: hooks}
 }
@@ -35,14 +29,6 @@ func NewService(s *Store, c *config.Config, hooks ...RegistrationHook) *Service 
 var ErrWrongPassword = errors.New("current password is incorrect")
 var ErrSamePassword = errors.New("new password must differ from current")
 
-// Register orchestrates the full registration tx: user insert + preferences
-// insert + every registration hook (e.g., categories seed). Atomic — any
-// failure rolls back the whole thing.
-//
-// When REGISTRATION_OPEN=false the flow runs up to the DB write, SKIPS
-// it, and returns a decoy success: registration looks open from the
-// outside, but no row exists — the returned token points at a
-// nonexistent user and a follow-up login fails like a wrong password.
 func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthResponse, error) {
 	hash, err := utils.HashPassword(req.Password)
 	if err != nil {
@@ -109,7 +95,7 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*AuthResponse, e
 		return nil, err
 	}
 	if !utils.CheckPasswordHash(req.Password, user.PasswordHash) {
-		return nil, ErrUserNotFound // intentionally vague — see spec §3.8
+		return nil, ErrUserNotFound
 	}
 	return s.issueAuthResponse(user)
 }

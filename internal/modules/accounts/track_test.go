@@ -7,9 +7,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
-// A wallet without a balance ("ติดตามยอดเงิน" off): no opening balance, left
-// out of the totals, no adjust; turning it back on takes the balance it has
-// now in the same call.
 func TestWalletTrackBalance(t *testing.T) {
 	e := newAccEnv(t)
 	owner := testdb.User(t, e.pool)

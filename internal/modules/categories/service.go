@@ -12,9 +12,8 @@ import (
 
 const maxDepth = 3
 
-// TransactionCounter is injected by main.go (wired to transactions.Store.CountByCategory)
-// so that DELETE /v1/categories/:id can decide between archive and hard delete.
-// nil = no counter wired yet (Phase 1a.1) → behaves as 0 (always hard-delete).
+// TransactionCounter is injected by main.go (wired to transactions.Store.CountByCategory) so that
+// DELETE /v1/categories/:id can decide between archive and hard delete.
 type TransactionCounter func(ctx context.Context, categoryID uuid.UUID) (int, error)
 
 type Service struct {
@@ -26,37 +25,25 @@ func NewService(s *Store) *Service {
 	return &Service{store: s}
 }
 
-// WithTransactionCounter wires the cross-module count callback. main.go calls
-// this after both transactions and categories services are constructed.
 func (s *Service) WithTransactionCounter(c TransactionCounter) {
 	s.txCounter = c
 }
 
-// Seeder is the public surface that auth.Service calls inside its register tx.
 type Seeder interface {
 	SeedForUser(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error
 }
 
-// SeedForUser implements Seeder. The Service exposes this method so the auth
-// module can depend on the interface, not the concrete struct.
 func (s *Service) SeedForUser(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
 	return s.store.SeedForUserTx(ctx, tx, userID)
 }
 
-// SystemFor is the public lookup other modules call (transactions, accounts).
-// Returns the user's category for `kind`. Cached per-request by callers if hot.
 func (s *Service) SystemFor(ctx context.Context, userID uuid.UUID, kind SystemKind) (*Category, error) {
 	return s.store.LookupSystem(ctx, userID, kind)
 }
 
-// GetCategoryRow returns the bare Category row (no depth / counts). Used by
-// transactions.Service for validating user-supplied category_id without the
-// overhead of the detail computation.
 func (s *Service) GetCategoryRow(ctx context.Context, userID, id uuid.UUID) (*Category, error) {
 	return s.store.GetByID(ctx, userID, id)
 }
-
-// --- CRUD ---
 
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateCategoryRequest) (*Category, error) {
 	if err := s.validateParent(ctx, userID, req.ParentID, req.Type); err != nil {
@@ -142,7 +129,6 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]C
 	return s.ListMonth(ctx, userID, f, "")
 }
 
-// ListMonth — the categories list with the month numbers (tz = X-Timezone).
 func (s *Service) ListMonth(ctx context.Context, userID uuid.UUID, f ListFilter, tz string) ([]Category, error) {
 	cats, err := s.store.List(ctx, userID, f)
 	if err != nil {
@@ -161,10 +147,6 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCa
 		return nil, err
 	}
 	if current.IsSystem {
-		// Per spec §4.14 the display `name` may be renamed for personalization
-		// / i18n. parent_id, icon, color also editable. Type is immutable.
-		// (Phase 1a doesn't otherwise restrict; system identity is system_kind,
-		// not the name string.)
 	}
 
 	newParent, parentChanged := req.ParentIDChange()
@@ -186,13 +168,6 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCa
 			if cycle {
 				return nil, ErrCycleDetected
 			}
-			// Depth check: depth(newParent) + 1 + max-subtree-depth-under-id ≤ 3.
-			// Simplified Phase 1a: just enforce depth(newParent) + 1 ≤ 3, which
-			// works as long as `id` itself has no children (most renames). If
-			// `id` has children, the children's depth becomes
-			// depth(newParent) + 2 — caller must move children separately or
-			// we reject. Enforce strictly: subtree depth of `id` + new parent's
-			// depth ≤ maxDepth.
 			parentDepth, err := s.store.DepthFromParent(ctx, newParent)
 			if err != nil {
 				return nil, err
@@ -235,11 +210,6 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCa
 	return s.Get(ctx, userID, id)
 }
 
-// Delete always hard-deletes (owner decision 2026-10-07; replaces the old
-// archive-when-used rule). Children shift up to the grandparent first.
-// Transactions / scheduled transactions using it drop to "no category"
-// (FK SET NULL); its budgets go with it (FK CASCADE, migration 000043).
-// Returns "deleted" — kept in the response for client compatibility.
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (*DeleteCategoryResult, error) {
 	current, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
@@ -258,7 +228,6 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (*DeleteCate
 	if err := s.store.HardDelete(ctx, userID, id); err != nil {
 		return nil, err
 	}
-	// The shifted children, read AFTER the shift (new parent, depth, path).
 	moved, err := s.store.ByIDs(ctx, userID, childIDs)
 	if err != nil {
 		return nil, err
@@ -270,19 +239,6 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (*DeleteCate
 	return &DeleteCategoryResult{ID: id, Reparented: moved}, nil
 }
 
-// Reorder applies a batch (parent_id, sort_order) rewrite to the user's
-// category tree. Spec §3.13.
-//
-// Validation runs ENTIRELY before any writes:
-//  1. Every id is owned by the user, active, and resolvable.
-//  2. Every entry's `parent_id` is either NULL, a system category staying as
-//     root, or another non-system active category of the SAME type.
-//  3. Cycles: against the post-batch parent map (so dragging A under B and B
-//     under A in the same batch is rejected).
-//  4. Depth ≤ 3 anywhere in the post-batch tree.
-//  5. Sibling-name uniqueness within each (type, parent_id) group.
-//
-// On any failure → no rows change.
 func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []ReorderEntry) ([]Category, error) {
 	if len(entries) == 0 {
 		cats, err := s.store.List(ctx, userID, ListFilter{})
@@ -292,9 +248,6 @@ func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []Reord
 		return s.decorate(ctx, userID, cats)
 	}
 
-	// 1. Pre-load the user's full active set so we can validate without
-	// chatty per-entry round trips. Includes system rows since they may
-	// appear in the batch (sort_order is editable for them).
 	all, err := s.store.List(ctx, userID, ListFilter{
 		IncludeSystem: true,
 	})
@@ -306,27 +259,22 @@ func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []Reord
 		byID[all[i].ID] = &all[i]
 	}
 
-	// 2. Build the post-batch parent map for cycle / depth checks. Rows the
-	// payload doesn't mention keep their existing parent_id.
 	postParent := make(map[uuid.UUID]*uuid.UUID, len(all))
 	for i := range all {
 		postParent[all[i].ID] = all[i].ParentID
 	}
 
-	// 3. Validate each entry against ownership / type / parent rules and
-	// stage the parent overrides.
 	for _, e := range entries {
 		c, ok := byID[e.ID]
 		if !ok {
 			return nil, ErrCategoryNotFound
 		}
-		// System cats: must remain roots (parent_id null). sort_order is fine.
+		// System cats: must remain roots (parent_id null).
 		if c.IsSystem {
 			if e.ParentID != nil {
 				return nil, fmt.Errorf("%w: system categories must remain roots", ErrSystemImmutable)
 			}
 		}
-		// Validate parent: same user, same type, not archived, not system.
 		if e.ParentID != nil {
 			parent, ok := byID[*e.ParentID]
 			if !ok {
@@ -340,8 +288,6 @@ func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []Reord
 		postParent[e.ID] = e.ParentID
 	}
 
-	// 4. Cycle + depth check on the post-batch graph. With 3-level cap and
-	// per-user data the entire tree is small; an O(N·depth) walk is fine.
 	for id := range postParent {
 		seen := make(map[uuid.UUID]struct{})
 		seen[id] = struct{}{}
@@ -360,7 +306,6 @@ func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []Reord
 		}
 	}
 
-	// 5. Sibling-name uniqueness post-batch. Build (type, parent_id, lower(name)) groups.
 	type sibKey struct {
 		typ      string
 		parentID string // "" for null
@@ -386,9 +331,6 @@ func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, entries []Reord
 	return s.decorate(ctx, userID, out)
 }
 
-// --- Internal helpers ---
-
-// countTransactions consults the wired counter. nil counter (1a.1 only) → 0.
 func (s *Service) countTransactions(ctx context.Context, categoryID uuid.UUID) (int, error) {
 	if s.txCounter == nil {
 		return 0, nil
@@ -416,11 +358,7 @@ func (s *Service) validateParent(ctx context.Context, userID uuid.UUID, parentID
 	return nil
 }
 
-// subtreeDepth returns 1 if `id` has no children, 2 if it has children but no
-// grandchildren, 3 if it has grandchildren. Used for depth check on parent
-// change so children/grandchildren don't break the 3-layer limit.
 func (s *Service) subtreeDepth(ctx context.Context, id uuid.UUID) (int, error) {
-	// Phase 1a tree is bounded at 3 → a few SQL hops cover it.
 	type level struct {
 		ids []uuid.UUID
 	}
@@ -454,8 +392,8 @@ func (s *Service) subtreeDepth(ctx context.Context, id uuid.UUID) (int, error) {
 	return depth, nil
 }
 
-// decorate fills depth and path (ancestors root -> parent) on every row from
-// ONE tree query, so a list never walks parents per row.
+// decorate fills depth and path (ancestors root -> parent) on every row from ONE tree query, so a
+// list never walks parents per row.
 func (s *Service) decorate(ctx context.Context, userID uuid.UUID, cats []Category) ([]Category, error) {
 	if len(cats) == 0 {
 		return cats, nil

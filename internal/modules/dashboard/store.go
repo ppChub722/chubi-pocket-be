@@ -12,9 +12,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// Store holds the two reads no other module exposes in the shape the
-// dashboard needs. Every money aggregate goes through the owning
-// module's service instead (report scope + reportable rules live there).
 type Store struct {
 	db *pgxpool.Pool
 }
@@ -33,9 +30,6 @@ type upcomingRow struct {
 	LogoURL  *string
 }
 
-// UpcomingItems — the caller's upcoming recurring items (one-off + active
-// settings, not produced yet) dated after today and up to `until` (dates in
-// the caller's timezone, computed by the service — never CURRENT_DATE).
 func (s *Store) UpcomingItems(ctx context.Context, userID uuid.UUID, today, until string) ([]upcomingRow, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT i.id, COALESCE(r.name, i.draft->>'description', ''), COALESCE(i.draft->>'type', 'expense'),
@@ -64,18 +58,11 @@ func (s *Store) UpcomingItems(ctx context.Context, userID uuid.UUID, today, unti
 	return out, rows.Err()
 }
 
-// attentionTypes — notification types that can still await an answer
-// (shared.AwaitsAnswer); a READ row of any other type has left the block.
 var attentionTypes = []string{
 	"contact_link_request", "account_invite", "project_invite", "recurring_ending", "split_created", "split_changed",
 	"project_tx_recorded_for_you", "project_tx_changed",
 }
 
-// AttentionIDs — the ids of the caller's notifications that belong in the
-// ต้องจัดการ block, newest first (inbox order): not dismissed AND (unread OR
-// awaiting an answer). The awaiting rule is shared.AwaitsAnswer; SQL only
-// narrows the candidates to unread rows and read rows of a type that can
-// await.
 func (s *Store) AttentionIDs(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id, type, payload, read_at, actioned_at, dismissed_at
@@ -116,7 +103,6 @@ func decodeIcon(b []byte) (*shared.IconCode, error) {
 	return ic, nil
 }
 
-// UserCurrency is the caller's display currency (users.currency).
 func (s *Store) UserCurrency(ctx context.Context, userID uuid.UUID) (string, error) {
 	var cur string
 	if err := s.db.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, userID).Scan(&cur); err != nil {

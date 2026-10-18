@@ -1,24 +1,5 @@
 package projects
 
-// Pulling bills into an event (spec §10/4.24, owner 2026-10-12).
-//
-// One atomic database transaction:
-//  1. (quick create) create the event + the caller's owner member row
-//  2. create the new bill through the NORMAL personal-transaction path
-//     (the wallet moves); its splits go onto the board, not into debts
-//  3. validate every listed bill: exists, caller's own, not in an event
-//     (or move), no split labelled paid
-//  4. auto-add members — the split people across all included bills
-//     (linked → active linked member + 'project_added', contact / free text
-//     → ad-hoc member) plus the active members of any shared wallet a bill
-//     lives on; deduped
-//  5. every bill becomes a board parent MADE FROM the transaction: the money
-//     (amount · date · payer · wallet) stays linked (edits on either side
-//     change both), the splits MOVE to the board, the transaction's tags
-//     (→ event tags by name, missing ones created) and description / note
-//     are COPIED once; the personal row links back (project_id +
-//     source_project_transaction_id).
-
 import (
 	"context"
 	"errors"
@@ -34,31 +15,25 @@ import (
 )
 
 var (
-	// ErrQuickTxNotFound — a listed transaction_id doesn't exist or isn't
-	// the caller's (404 TX_NOT_FOUND; not-owned = not-found, no info leak).
+	// ErrQuickTxNotFound — a listed transaction_id doesn't exist or isn't the caller's (404
+	// TX_NOT_FOUND; not-owned = not-found, no info leak).
 	ErrQuickTxNotFound = errors.New("transaction not found or not owned")
-	// ErrQuickTxAlreadyInProject — a listed bill already carries a
-	// project_id (409 TX_ALREADY_IN_PROJECT).
 	ErrQuickTxAlreadyInProject = errors.New("transaction is already in a project")
-	// ErrQuickTxNotBillable — transfer rows can't become board parents
-	// (project_transactions.type is expense|income only).
+	// ErrQuickTxNotBillable — transfer rows can't become board parents (project_transactions.type is
+	// expense|income only).
 	ErrQuickTxNotBillable = errors.New("only expense and income transactions can be pulled into a project")
-	// ErrQuickTxIsRepayment — a debt entry's wallet transaction can't join a
-	// project (it already has a source; 422 TX_NOT_BILLABLE).
+	// ErrQuickTxIsRepayment — a debt entry's wallet transaction can't join a project (it already has
+	// a source; 422 TX_NOT_BILLABLE).
 	ErrQuickTxIsRepayment = errors.New("a debt entry's transaction can't be pulled into a project")
-	// ErrQuickTxSystemRow — a row in a system category (opening balance,
-	// balance adjustment) can't join a project (422 TX_NOT_BILLABLE).
+	// ErrQuickTxSystemRow — a row in a system category (opening balance, balance adjustment) can't
+	// join a project (422 TX_NOT_BILLABLE).
 	ErrQuickTxSystemRow = errors.New("an opening balance or balance adjustment can't be pulled into a project")
-	// ErrQuickNothingToAdd — neither new_transaction nor transaction_ids.
 	ErrQuickNothingToAdd = errors.New("new_transaction or transaction_ids is required")
-	// ErrQuickTxSplitPaid — a split on the bill is labelled paid (its
-	// repayment is in the person's ledger); its splits can't move onto a
-	// board (422 TX_SPLIT_PAID).
+	// ErrQuickTxSplitPaid — a split on the bill is labelled paid (its repayment is in the person's
+	// ledger); its splits can't move onto a board (422 TX_SPLIT_PAID).
 	ErrQuickTxSplitPaid = errors.New("a split on this transaction is labelled paid")
 )
 
-// quickBill is one included bill (the new one or a listed one) normalized
-// for board-parent creation.
 type quickBill struct {
 	TxID        uuid.UUID
 	AccountID   *uuid.UUID // nil: a wallet-less bill
@@ -68,20 +43,12 @@ type quickBill struct {
 	Date        string // YYYY-MM-DD
 	Description *string
 	Note        *string
-	// The transaction's tag names (copied once as event tags).
 	TagNames []string
 
-	// The people the board row is split with. Pulling a bill MOVES its
-	// splits onto the board — no debt lives in both books (owner
-	// 2026-10-10, project-as-separate-book.md).
 	splits []quickDebt
-	// The bill's personal split debts are removed once it's on the board.
 	clearPersonal bool
 }
 
-// quickDebt is one person a bill is split with: one of the caller's
-// personal_debts rows, a new bill's split input, or a board split moving
-// with its bill to another event.
 type quickDebt struct {
 	ContactID    *uuid.UUID
 	PersonName   string
@@ -89,15 +56,11 @@ type quickDebt struct {
 	LinkedUserID *uuid.UUID // contacts.linked_user_id when ContactID is set
 }
 
-// pulled — what a bill pull did.
 type pulled struct {
 	newTxID *uuid.UUID
 	rowIDs  []uuid.UUID // the board parents created, in order
 }
 
-// QuickCreate implements POST /v1/projects/quick. Everything runs in ONE
-// database transaction — the first failure rolls back the event, the new
-// bill, the members, and every board row.
 func (s *Service) QuickCreate(
 	ctx context.Context, callerUserID uuid.UUID, req QuickCreateRequest,
 ) (*QuickCreateEventResult, error) {
@@ -143,7 +106,6 @@ func (s *Service) QuickCreate(
 	return &QuickCreateEventResult{Detail: *d, NewTransactionID: res.newTxID, AccountBalances: balances}, nil
 }
 
-// newBillBalances — balances of the wallet the new bill posted to (none: []).
 func (s *Service) newBillBalances(ctx context.Context, bill *transactions.CreateRequest) ([]shared.WalletBalance, error) {
 	var ids []uuid.UUID
 	if bill != nil && bill.AccountID != nil {
@@ -152,10 +114,6 @@ func (s *Service) newBillBalances(ctx context.Context, bill *transactions.Create
 	return shared.LoadWalletBalances(ctx, s.store.Pool(), ids)
 }
 
-// AddBills implements POST /v1/projects/:id/bills — the same bill pull as
-// quick create, into an event that already exists. The caller must be an
-// active, non-viewer member of an active event; the new bill's payer is the
-// caller's own member row. Split people not yet in the event are added.
 func (s *Service) AddBills(
 	ctx context.Context, callerUserID, projectID uuid.UUID, req AddBillsRequest,
 ) (*AddBillsResult, error) {
@@ -195,9 +153,6 @@ func (s *Service) AddBills(
 	return &AddBillsResult{EventPatch: *p, NewTransactionID: res.newTxID, Rows: rows}, nil
 }
 
-// AddNewBillTx creates a new bill through the normal personal path and puts
-// it in an existing event, inside the caller's database transaction (a
-// pending draft with a project_id, confirmed). Returns the new transaction's id.
 func (s *Service) AddNewBillTx(
 	ctx context.Context, tx pgx.Tx, callerUserID, projectID uuid.UUID, bill transactions.CreateRequest,
 ) (uuid.UUID, error) {
@@ -214,8 +169,6 @@ func (s *Service) AddNewBillTx(
 	return *res.newTxID, nil
 }
 
-// addBillsTx — the event checks, then the bill pull, all on tx. Nothing is
-// written before the checks pass.
 func (s *Service) addBillsTx(
 	ctx context.Context, tx pgx.Tx, callerUserID, projectID uuid.UUID, req AddBillsRequest,
 ) (*pulled, error) {
@@ -234,8 +187,6 @@ func (s *Service) addBillsTx(
 	if err != nil {
 		return nil, err
 	}
-	// Seed the builder with the current roster so a person already in the
-	// event (linked user, or the same name) is reused, not duplicated.
 	mb := &quickMemberBuilder{
 		svc: s, tx: tx, projectID: projectID, callerUserID: callerUserID,
 		byUser:    map[uuid.UUID]uuid.UUID{},
@@ -256,8 +207,7 @@ func (s *Service) addBillsTx(
 		req.NewTransaction, req.TransactionIDs, req.Move)
 }
 
-// checkNewBill — at least one bill; a new bill must be a plain expense /
-// income.
+// checkNewBill — at least one bill; a new bill must be a plain expense / income.
 func (s *Service) checkNewBill(req *transactions.CreateRequest, txIDs []uuid.UUID) error {
 	if req == nil {
 		if len(txIDs) == 0 {
@@ -271,17 +221,12 @@ func (s *Service) checkNewBill(req *transactions.CreateRequest, txIDs []uuid.UUI
 	if req.Type != transactions.TypeExpense && req.Type != transactions.TypeIncome {
 		return ErrQuickTxNotBillable
 	}
-	// Linking to the board is done by this flow itself, not by the
-	// claim-style create parameter.
 	if req.SourceProjectTransactionID != nil {
 		return transactions.ErrProjectIDNotAllowed
 	}
 	return nil
 }
 
-// pullBillsTx creates the new bill (if any) through the normal personal
-// path, then pulls it plus the listed loose bills into project p (steps 2–5
-// of the file comment). actorMemberID is the caller's member row in p.
 func (s *Service) pullBillsTx(
 	ctx context.Context, tx pgx.Tx, p *Project, actorMemberID uuid.UUID, actorName string,
 	mb *quickMemberBuilder, newReq *transactions.CreateRequest, txIDs []uuid.UUID, move bool,
@@ -291,8 +236,6 @@ func (s *Service) pullBillsTx(
 	seen := map[uuid.UUID]bool{}
 	out := &pulled{}
 
-	// --- 2. New bill through the normal create path (balance moves). Its
-	// splits go straight onto the board, never into personal debts. ---
 	if newReq != nil {
 		req := *newReq
 		req.Splits, req.MyShare = nil, nil
@@ -321,7 +264,6 @@ func (s *Service) pullBillsTx(
 		out.newTxID = &newBill.TxID
 	}
 
-	// --- 3. Load + validate listed bills (deduped, order-preserving). ---
 	for _, txID := range txIDs {
 		if seen[txID] {
 			continue
@@ -337,7 +279,6 @@ func (s *Service) pullBillsTx(
 		bills = append(bills, *bill)
 	}
 
-	// --- 4. Member set: union across all included bills. ---
 	for _, bill := range bills {
 		for _, d := range bill.splits {
 			if _, err := mb.memberForDebt(ctx, d); err != nil {
@@ -351,8 +292,6 @@ func (s *Service) pullBillsTx(
 		}
 	}
 
-	// --- 5. Board parents + split children + copied tags; link the
-	// personal rows. ---
 	for _, bill := range bills {
 		splits := make([]ProjectSplitInput, 0, len(bill.splits))
 		for _, d := range bill.splits {
@@ -376,8 +315,6 @@ func (s *Service) pullBillsTx(
 		if err != nil {
 			return nil, err
 		}
-		// The bill is made from the transaction: link it back. No money
-		// moves here.
 		if _, err := tx.Exec(ctx, `
 			UPDATE transactions
 			SET project_id = $1, source_project_transaction_id = $2, updated_by_user_id = $3
@@ -385,10 +322,6 @@ func (s *Service) pullBillsTx(
 			p.ID, pt.ID, callerUserID, bill.TxID); err != nil {
 			return nil, fmt.Errorf("link bill %s: %w", bill.TxID, err)
 		}
-		// The splits now live on the board: the personal debts go, the
-		// usual way (linked partners get split_changed / their pending
-		// split_created is superseded). None was labelled paid (checked
-		// when loaded).
 		if bill.clearPersonal {
 			if err := s.txs.ClearSplitsTx(ctx, tx, callerUserID, bill.TxID); err != nil {
 				return nil, fmt.Errorf("move splits of bill %s: %w", bill.TxID, err)
@@ -397,7 +330,6 @@ func (s *Service) pullBillsTx(
 		out.rowIDs = append(out.rowIDs, pt.ID)
 	}
 
-	// --- 6. Informational 'project_added' notifications (no actions). ---
 	if s.notifs != nil {
 		for _, added := range mb.notifyLinked {
 			if err := s.notifs.DispatchProjectAdded(ctx, tx, added.userID, callerUserID,
@@ -415,15 +347,10 @@ func (s *Service) pullBillsTx(
 	return out, nil
 }
 
-// billCurrencySQL — a bill's currency: its wallet's, else its author's
-// (a wallet exists only on my side; a project has no currency of its own).
-// $1 = account id (may be NULL), $2 = user id.
 const billCurrencySQL = `SELECT COALESCE(
 	(SELECT currency FROM accounts WHERE id = $1),
 	(SELECT currency FROM users WHERE id = $2), 'THB')`
 
-// quickBillFromNew normalizes the just-created personal transaction. The
-// transactions row carries no currency column — see billCurrencySQL.
 func (s *Service) quickBillFromNew(
 	ctx context.Context, tx pgx.Tx, d *transactions.TransactionDetail,
 ) (*quickBill, error) {
@@ -443,10 +370,8 @@ func (s *Service) quickBillFromNew(
 	}, nil
 }
 
-// loadQuickBillTx loads + validates one listed bill under FOR UPDATE so a
-// concurrent quick create can't pull the same bill into two projects. A
-// bill in another project fails with 409 — or, with move, leaves that
-// project first (detachBillTx). Already in targetProjectID: always 409.
+// loadQuickBillTx loads + validates one listed bill under FOR UPDATE so a concurrent quick create
+// can't pull the same bill into two projects.
 func (s *Service) loadQuickBillTx(
 	ctx context.Context, tx pgx.Tx, callerUserID, txID, targetProjectID uuid.UUID, move bool,
 ) (*quickBill, error) {
@@ -457,7 +382,6 @@ func (s *Service) loadQuickBillTx(
 		repaysID  *uuid.UUID
 		isSystem  bool
 	)
-	// Wallet-less bills join too: currency falls back to the author's.
 	err := tx.QueryRow(ctx, `
 		SELECT t.id, t.user_id, t.project_id, t.account_id, t.type, t.amount,
 		       COALESCE(a.currency, u.currency, 'THB'), to_char(t.date, 'YYYY-MM-DD'),
@@ -485,11 +409,9 @@ func (s *Service) loadQuickBillTx(
 	if bill.Type != PTTypeExpense && bill.Type != PTTypeIncome {
 		return nil, ErrQuickTxNotBillable
 	}
-	// A repayment already has a source (CHECK transactions_source_at_most_one).
 	if repaysID != nil {
 		return nil, ErrQuickTxIsRepayment
 	}
-	// Opening balance / balance adjustment rows aren't spending.
 	if isSystem {
 		return nil, ErrQuickTxSystemRow
 	}
@@ -497,8 +419,6 @@ func (s *Service) loadQuickBillTx(
 		if !move || *projectID == targetProjectID {
 			return nil, ErrQuickTxAlreadyInProject
 		}
-		// The bill's board row leaves its old event; its member splits
-		// come along to the new board row (not back into personal debts).
 		carried, err := s.detachBillTx(ctx, tx, callerUserID, txID, false)
 		if err != nil {
 			return nil, err
@@ -516,8 +436,6 @@ func (s *Service) loadQuickBillTx(
 	return &bill, nil
 }
 
-// quickDebtsFromInputsTx — a new bill's split inputs as board splits. The
-// contact must be the caller's own (same rule as a personal split).
 func quickDebtsFromInputsTx(
 	ctx context.Context, tx pgx.Tx, callerUserID uuid.UUID, inputs []transactions.SplitInput,
 ) ([]quickDebt, error) {
@@ -539,11 +457,6 @@ func quickDebtsFromInputsTx(
 	return out, nil
 }
 
-// loadQuickDebtsTx returns the caller's personal_debts hanging off the
-// bill (both directions — expense splits are 'owed_to_me', income
-// splits 'i_owe') with the counterparty contact's linked user resolved.
-// They're about to move onto a board, so none may be labelled paid — its
-// repayment already happened in the person's ledger.
 func (s *Service) loadQuickDebtsTx(
 	ctx context.Context, tx pgx.Tx, callerUserID, txID uuid.UUID,
 ) ([]quickDebt, error) {
@@ -576,10 +489,6 @@ func (s *Service) loadQuickDebtsTx(
 	return out, rows.Err()
 }
 
-// quickMemberBuilder dedupes the auto-added member set: the same linked
-// user / contact / free-text name maps to one project_members row no matter
-// how many bills it appears on. Linked members are collected for the
-// 'project_added' notification fan-out.
 type quickMemberBuilder struct {
 	svc          *Service
 	tx           pgx.Tx
@@ -593,19 +502,10 @@ type quickMemberBuilder struct {
 	notifyLinked []struct{ userID, memberID uuid.UUID }
 }
 
-// memberForDebt resolves (or creates) the member row for one debt's
-// counterparty. Consent is implied by the underlying split — linked users
-// join active immediately, no invite handshake (spec §10/4.24 step 2).
 func (b *quickMemberBuilder) memberForDebt(ctx context.Context, d quickDebt) (uuid.UUID, error) {
-	// Linked counterparty → active linked member. A contact linked to the
-	// caller themself falls through to the contact/name branches (a member
-	// row for the caller already exists — the owner).
 	if d.LinkedUserID != nil && *d.LinkedUserID != b.callerUserID {
 		return b.ensureLinked(ctx, *d.LinkedUserID, d.PersonName)
 	}
-	// Contact without a linked user → member from the contact (post-
-	// migration 27 project_members carries no contact_id, so this is an
-	// ad-hoc row deduped by the contact's id and carrying its name).
 	if d.ContactID != nil {
 		if id, ok := b.byContact[*d.ContactID]; ok {
 			return id, nil
@@ -617,7 +517,6 @@ func (b *quickMemberBuilder) memberForDebt(ctx context.Context, d quickDebt) (uu
 		b.byContact[*d.ContactID] = id
 		return id, nil
 	}
-	// Bare free-text counterparty → ad-hoc member.
 	return b.ensureAdHoc(ctx, d.PersonName)
 }
 
@@ -665,10 +564,6 @@ func (b *quickMemberBuilder) ensureAdHoc(ctx context.Context, name string) (uuid
 	return m.ID, nil
 }
 
-// addSharedWalletMembers — when a bill's account has more than one active
-// account_member, every OTHER active member joins as an active linked
-// member (consent implied by the shared wallet), deduped with the split-
-// derived linked members.
 func (b *quickMemberBuilder) addSharedWalletMembers(ctx context.Context, accountID uuid.UUID) error {
 	rows, err := b.tx.Query(ctx, `
 		SELECT am.user_id, u.display_name

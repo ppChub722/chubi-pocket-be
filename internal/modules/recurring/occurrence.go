@@ -1,9 +1,5 @@
 package recurring
 
-// The CURRENT occurrence of a setting (0.4.0): the occurrence of the present
-// period, not done and not skipped: what an existing transaction links to
-// ("this payment is my Netflix"). A recurring picker is GET /recurring?for_type.
-
 import (
 	"context"
 	"fmt"
@@ -12,7 +8,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// Occurrence — spec RecurringOccurrence.
 type Occurrence struct {
 	ItemID    uuid.UUID `json:"item_id"`
 	Date      string    `json:"date"`
@@ -21,8 +16,6 @@ type Occurrence struct {
 	Status    string    `json:"status"` // upcoming | pending | not_created
 }
 
-// windowDays — how far ahead of today an occurrence still belongs to the
-// present period: one cycle of the setting.
 func windowDays(r *Rule) int {
 	n := r.Interval
 	if n < 1 {
@@ -39,7 +32,6 @@ func windowDays(r *Rule) int {
 	return 31 * n // monthly, custom dates
 }
 
-// currentOccurrences — per setting, its current occurrence (nil = none).
 func (s *Service) currentOccurrences(ctx context.Context, userID uuid.UUID, today time.Time, rules []*Rule) (map[uuid.UUID]*Occurrence, error) {
 	out := map[uuid.UUID]*Occurrence{}
 	if len(rules) == 0 {

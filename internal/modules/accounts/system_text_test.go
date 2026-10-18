@@ -9,9 +9,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
-// TestSystemRowsHaveNoCannedText — opening-balance and adjust-balance rows
-// store no English default; the app labels them by their system category
-// (owner 2026-10-10). What the user types is kept.
 func TestSystemRowsHaveNoCannedText(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()

@@ -53,7 +53,6 @@ func userAndID(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 	return uid, id, true
 }
 
-// presence — the keys a JSON object carried (null included).
 func presence(raw []byte) (map[string]json.RawMessage, error) {
 	m := map[string]json.RawMessage{}
 	if len(raw) == 0 {
@@ -69,7 +68,6 @@ func markFields(f *Fields, keys map[string]json.RawMessage) {
 	}
 }
 
-// bind decodes the body into v and returns its top-level keys.
 func bind(c *gin.Context, v any) (map[string]json.RawMessage, bool) {
 	raw, err := c.GetRawData()
 	if err == nil {
@@ -137,9 +135,6 @@ func mapError(c *gin.Context, err error) {
 	}
 }
 
-// --- settings ---
-
-// GET /v1/recurring
 func (h *Handler) List(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {
@@ -182,7 +177,6 @@ func (h *Handler) List(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/recurring
 func (h *Handler) Create(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {
@@ -198,7 +192,6 @@ func (h *Handler) Create(c *gin.Context) {
 	reply(c, http.StatusCreated, out, err)
 }
 
-// GET /v1/recurring/:id
 func (h *Handler) Get(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -209,7 +202,6 @@ func (h *Handler) Get(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// PUT /v1/recurring/:id
 func (h *Handler) Update(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -225,7 +217,6 @@ func (h *Handler) Update(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// DELETE /v1/recurring/:id
 func (h *Handler) Delete(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -235,7 +226,6 @@ func (h *Handler) Delete(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// GET /v1/recurring/:id/items
 func (h *Handler) RuleItems(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -287,7 +277,6 @@ func (h *Handler) Restore(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/recurring/:id/extend
 func (h *Handler) Extend(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -301,9 +290,6 @@ func (h *Handler) Extend(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// --- items ---
-
-// GET /v1/recurring-items
 func (h *Handler) Items(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {
@@ -337,7 +323,6 @@ func (h *Handler) Items(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/recurring-items
 func (h *Handler) CreateItem(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {
@@ -353,7 +338,6 @@ func (h *Handler) CreateItem(c *gin.Context) {
 	reply(c, http.StatusCreated, out, err)
 }
 
-// GET /v1/recurring-items/:id
 func (h *Handler) GetItem(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -363,7 +347,6 @@ func (h *Handler) GetItem(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// PUT /v1/recurring-items/:id
 func (h *Handler) UpdateItem(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -379,7 +362,6 @@ func (h *Handler) UpdateItem(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// DELETE /v1/recurring-items/:id
 func (h *Handler) DeleteItem(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -389,7 +371,6 @@ func (h *Handler) DeleteItem(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// nestedFields marks the presence of the keys inside body key "fields".
 func nestedFields(f *Fields, keys map[string]json.RawMessage) error {
 	if f == nil {
 		return nil
@@ -402,7 +383,6 @@ func nestedFields(f *Fields, keys map[string]json.RawMessage) error {
 	return nil
 }
 
-// POST /v1/recurring-items/:id/create
 func (h *Handler) CreateNow(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -439,7 +419,6 @@ func (h *Handler) RestoreItem(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/recurring-items/batch
 func (h *Handler) Batch(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {

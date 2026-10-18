@@ -9,7 +9,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// Limits — keep the payload a single glanceable screen (contract §4).
 const (
 	upcomingDays     = 14 // look-ahead window for "coming up"
 	upcomingMax      = 10
@@ -20,15 +19,11 @@ const (
 	attentionMax     = 10 // notifications listed in the ต้องจัดการ block
 )
 
-// Upcoming item kinds.
 const (
 	KindRecurring = "recurring" // an upcoming recurring item (one-off or from a setting)
 	KindCardDue   = "card_due"  // credit card / pay-later payment due date
 )
 
-// Response is GET /v1/dashboard. Month-scoped blocks (summary, previous,
-// categories, trend) follow ?month=; the rest is a "right now" snapshot.
-// Empty sections are zero values / [] — never omitted.
 type Response struct {
 	Month    string `json:"month"` // YYYY-MM
 	From     string `json:"from"`
@@ -66,23 +61,17 @@ type Totals struct {
 	TransactionCount int     `json:"transaction_count"`
 }
 
-// CategorySlice is one top-level (parent) expense category.
-// Category nil = uncategorized.
 type CategorySlice struct {
 	Category *shared.CategoryRef `json:"category"`
 	Expense  float64             `json:"expense"`
 	Count    int                 `json:"count"`
 }
 
-// PendingBlock — the รอยืนยัน group: ALL the caller's drafts counted in
-// Total, the newest pendingMax listed (resolved).
 type PendingBlock struct {
 	Total int                          `json:"total"`
 	Items []pending.PendingTransaction `json:"items"`
 }
 
-// AttentionBlock — the notifications of the ต้องจัดการ card: Total =
-// max(unread badge, matching rows); Items = the first attentionMax.
 type AttentionBlock struct {
 	Total int                       `json:"total"`
 	Items []shared.NotificationView `json:"items"`
@@ -101,8 +90,6 @@ type Upcoming struct {
 	TotalIncome  float64        `json:"total_income"`
 }
 
-// UpcomingItem — an upcoming recurring item or a card due date (a card due
-// date always rolls forward to the next occurrence).
 type UpcomingItem struct {
 	Kind      string           `json:"kind"`
 	ID        uuid.UUID        `json:"id"` // recurring item id, or account id for card_due
@@ -124,5 +111,4 @@ type BudgetsTile struct {
 	OverLimitCount int     `json:"over_limit_count"`
 }
 
-// DebtsTile — spec schema DebtTotals (the same rule as the debts header).
 type DebtsTile = personal_debts.DebtTotals

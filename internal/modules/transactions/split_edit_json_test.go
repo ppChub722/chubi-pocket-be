@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// TestSplitEditContactPresence — "contact_id": null (drop the contact) is
-// told apart from a body without the key (unchanged).
+// TestSplitEditContactPresence — "contact_id": null (drop the contact) is told apart from a body
+// without the key (unchanged).
 func TestSplitEditContactPresence(t *testing.T) {
 	var req EditSplitsRequest
 	body := `{"splits":[

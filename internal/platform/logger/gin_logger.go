@@ -11,52 +11,35 @@ import (
 )
 
 const (
-	// maxBodyLog — logged body size cap (logging-plan.md: 4KB).
 	maxBodyLog = 4 * 1024
-	// maxBodyCapture — hard cap on how much we buffer for redaction.
-	// Redaction needs the complete JSON document (truncating first would
-	// break parsing), so bodies larger than this are skipped outright.
 	maxBodyCapture = 64 * 1024
 
 	bodyTooLarge = "[BODY TOO LARGE — SKIPPED]"
 	truncMark    = "…[TRUNCATED]"
 )
 
-// GinLoggerMiddleware replaces the default Gin logger with slog.
-// Every line carries request_id (set by RequestIDMiddleware — wire that
-// FIRST), user_id (when authed), status, method, path, query, latency_ms,
-// ip. Level by status: 5xx → Error, 4xx → Warn, else Info.
-//
-// When logBodies is true (LOG_BODIES=true, closed beta only) request and
-// response bodies are captured too — JSON content types only, redacted via
-// RedactJSON BEFORE truncation at 4KB. Multipart/binary is never captured.
 func GinLoggerMiddleware(log *slog.Logger, logBodies bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
 		query := c.Request.URL.RawQuery
 
-		// --- Request body capture (gated) ---
 		var reqBody []byte
 		reqIsJSON := isJSONContent(c.ContentType())
 		if logBodies && reqIsJSON && c.Request.Body != nil {
 			raw, err := io.ReadAll(io.LimitReader(c.Request.Body, maxBodyCapture+1))
 			if err == nil {
 				reqBody = raw
-				// Restore the body for the handler (chain any remainder past
-				// the capture cap so oversized requests still parse fully).
 				c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(raw), c.Request.Body))
 			}
 		}
 
-		// --- Response body capture (gated) ---
 		var resWriter *bodyCaptureWriter
 		if logBodies {
 			resWriter = &bodyCaptureWriter{ResponseWriter: c.Writer}
 			c.Writer = resWriter
 		}
 
-		// Process Request
 		c.Next()
 
 		latency := time.Since(start)
@@ -71,8 +54,8 @@ func GinLoggerMiddleware(log *slog.Logger, logBodies bool) gin.HandlerFunc {
 			"latency_ms", float64(latency.Nanoseconds()) / 1e6,
 			"ip", c.ClientIP(),
 		}
-		// user_id is set by the auth middleware (runs inside this one, so
-		// it's present by the time c.Next() returns on protected routes).
+		// user_id is set by the auth middleware (runs inside this one, so it's present by the time
+		// c.Next() returns on protected routes).
 		if uid, ok := c.Get(ctxKeyUserID); ok {
 			attrs = append(attrs, "user_id", uid)
 		}
@@ -94,7 +77,6 @@ func GinLoggerMiddleware(log *slog.Logger, logBodies bool) gin.HandlerFunc {
 			}
 		}
 
-		// Choose log level based on status code
 		switch {
 		case status >= 500:
 			log.Error("HTTP Request", attrs...)
@@ -106,9 +88,6 @@ func GinLoggerMiddleware(log *slog.Logger, logBodies bool) gin.HandlerFunc {
 	}
 }
 
-// loggableBody redacts FIRST (needs whole JSON), then truncates to 4KB.
-// Bodies past the capture cap are skipped — redacting a partial document
-// isn't safe.
 func loggableBody(raw []byte) string {
 	if len(raw) > maxBodyCapture {
 		return bodyTooLarge
@@ -120,16 +99,10 @@ func loggableBody(raw []byte) string {
 	return string(red)
 }
 
-// isJSONContent gates body capture to JSON payloads (application/json,
-// application/*+json, ...). Multipart uploads and binary responses are
-// skipped entirely.
 func isJSONContent(contentType string) bool {
 	return strings.Contains(strings.ToLower(contentType), "json")
 }
 
-// bodyCaptureWriter tees the response into a buffer (capped at
-// maxBodyCapture+1 so oversized bodies are detected and skipped, not
-// half-logged).
 type bodyCaptureWriter struct {
 	gin.ResponseWriter
 	buf  bytes.Buffer

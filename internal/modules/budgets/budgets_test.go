@@ -93,7 +93,6 @@ func (f *budFix) call(method, path, op string, body any, want int, out any) []by
 	return raw
 }
 
-// tx — an expense of mine; returns its id.
 func (f *budFix) tx(amount float64, cat *uuid.UUID, date string, tags ...string) uuid.UUID {
 	f.t.Helper()
 	id := uuid.New()
@@ -119,8 +118,6 @@ func src(d Detail, s string) *SourceRow {
 	return nil
 }
 
-// A recurring monthly budget on Food (+ sub-categories): sources, status,
-// periods and the "which periods" scopes.
 func TestBudgetRecurringCategory(t *testing.T) {
 	f := newBudFix(t)
 	monthStart := time.Date(f.today.Year(), f.today.Month(), 1, 0, 0, 0, 0, time.UTC)
@@ -141,7 +138,6 @@ func TestBudgetRecurringCategory(t *testing.T) {
 	f.tx(200, &f.cafe, cur)                                             // a sub-category counts
 	f.tx(999, &f.travel, cur)                                           // out of scope
 	f.tx(400, &f.food, monthStart.AddDate(0, -1, 0).Format(dateLayout)) // last month
-	// Expected: an upcoming recurring item and a pending draft in this period.
 	end := monthStart.AddDate(0, 1, -1)
 	if f.today.Before(end) {
 		f.exec(`INSERT INTO recurring_items (id, user_id, date, draft) VALUES (gen_random_uuid(), $1, $2,
@@ -169,7 +165,6 @@ func TestBudgetRecurringCategory(t *testing.T) {
 	if d.Items.Pagination.Total < 3 || d.Items.Data[0].CountsAs != "expected" {
 		t.Errorf("items = %+v", d.Items)
 	}
-	// Detail numbers (0.4.0): available, the pace tick, and the reason per row.
 	if d.Forecast.Available != 500 || d.Forecast.PacePct == nil || *d.Forecast.PacePct < 0 || *d.Forecast.PacePct > 100 ||
 		d.Forecast.DaysLeft == nil || d.Forecast.ProjectedEnd == nil {
 		t.Errorf("forecast = %+v", d.Forecast)
@@ -187,7 +182,6 @@ func TestBudgetRecurringCategory(t *testing.T) {
 		t.Errorf("last month = %+v", d.Periods.Data[1])
 	}
 
-	// Over: another 600 → 1,100 / 1,000.
 	f.tx(600, &f.food, cur)
 	var l List
 	f.call("GET", "/budgets", "listBudgets", nil, http.StatusOK, &l)
@@ -196,7 +190,6 @@ func TestBudgetRecurringCategory(t *testing.T) {
 		t.Fatalf("list = %+v", l)
 	}
 
-	// One period on its own, then the setup "this and following".
 	last := d.Periods.Data[1]
 	f.call("PUT", "/budgets/"+id+"/periods/"+last.ID.String(), "updateBudgetPeriod",
 		map[string]any{"amount": 1500, "note": "trip month"}, http.StatusOK, &d)
@@ -231,7 +224,6 @@ func TestBudgetRecurringCategory(t *testing.T) {
 		t.Errorf("items of last month = %+v", il.Data)
 	}
 
-	// ปิดงบ → ended; archive / restore; delete.
 	f.call("POST", "/budgets/"+id+"/close", "closeBudget", nil, http.StatusOK, &d)
 	if d.Budget.State != StateEnded || d.Budget.ClosedOn == nil {
 		t.Fatalf("close = %s", d.Budget.State)
@@ -247,9 +239,6 @@ func TestBudgetRecurringCategory(t *testing.T) {
 	f.call("GET", "/budgets/"+id, "", nil, http.StatusNotFound, nil)
 }
 
-// A tag-name budget over a fixed range: my tagged txs + my share of event
-// bills whose event tag has that name (once — the tx a bill was made from
-// is not counted again).
 func TestBudgetTagRangeWithEvent(t *testing.T) {
 	f := newBudFix(t)
 	var d Detail
@@ -261,8 +250,6 @@ func TestBudgetTagRangeWithEvent(t *testing.T) {
 	f.tx(100, &f.travel, f.day(0), "trip")
 	f.tx(50, &f.travel, f.day(0), "other")
 
-	// An event: Bee paid 300 split 100 to me; I paid 200 from my tx (a bill
-	// made from it) with Bee's split 80 → my share 120.
 	ev, meM, beeM := uuid.New(), uuid.New(), uuid.New()
 	f.exec(`INSERT INTO projects (id, owner_user_id, name, status) VALUES ($1, $2, 'CNX', 'active')`, ev, f.me)
 	f.exec(`INSERT INTO project_members (id, project_id, user_id, display_name, role, status) VALUES
@@ -293,7 +280,6 @@ func TestBudgetTagRangeWithEvent(t *testing.T) {
 	if d.Budget.Recurring || d.Budget.Period.End == nil || d.Forecast.TotalDays == nil || *d.Forecast.TotalDays != 10 {
 		t.Errorf("range = %+v / %+v", d.Budget, d.Forecast)
 	}
-	// avg 320 / 5 days = 64 → 640 by the end, under 1,000.
 	if d.Forecast.AvgDaily == nil || *d.Forecast.AvgDaily != 64 || d.Forecast.ForecastOverBy != nil || p.Status != PeriodOK {
 		t.Errorf("forecast = %+v status %s", d.Forecast, p.Status)
 	}
@@ -302,7 +288,6 @@ func TestBudgetTagRangeWithEvent(t *testing.T) {
 			t.Errorf("event item = %+v", it)
 		}
 	}
-	// Pace: spend 380 more today → 700 in 5 days → 1,400 by the end.
 	f.tx(380, &f.travel, f.day(0), "Trip")
 	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
 	if d.Budget.Period.Status != PeriodPace || d.Forecast.ForecastOverDate == nil || d.Forecast.ForecastOverBy == nil {
@@ -310,7 +295,6 @@ func TestBudgetTagRangeWithEvent(t *testing.T) {
 	}
 }
 
-// Everything / wallet scopes, an open-ended budget, validation.
 func TestBudgetOpenEndedAndValidation(t *testing.T) {
 	f := newBudFix(t)
 	if raw := f.call("POST", "/budgets", "", map[string]any{"name": "X", "amount": 10, "start_date": f.day(0),
@@ -335,7 +319,6 @@ func TestBudgetOpenEndedAndValidation(t *testing.T) {
 	if len(d.Budget.Scope.Wallets) != 1 || d.Budget.Scope.Wallets[0].ID != f.wallet {
 		t.Errorf("scope = %+v", d.Budget.Scope)
 	}
-	// A budget that starts later is listed as upcoming.
 	f.call("POST", "/budgets", "createBudget", map[string]any{
 		"name": "New year", "amount": 5000, "start_date": f.day(40), "end": map[string]any{"kind": "date", "date": f.day(70)},
 		"scope": map[string]any{"all": true},
@@ -350,8 +333,6 @@ func TestBudgetOpenEndedAndValidation(t *testing.T) {
 	}
 }
 
-// A rule change "this and following" keeps the past periods as they were;
-// "all" rebuilds every period from the start.
 func TestBudgetRuleChangeScopes(t *testing.T) {
 	f := newBudFix(t)
 	var d Detail
@@ -365,8 +346,6 @@ func TestBudgetRuleChangeScopes(t *testing.T) {
 	}
 	f.call("PUT", "/budgets/"+id, "updateBudget", map[string]any{"rule": map[string]any{"freq": "daily", "interval": 2}}, http.StatusOK, &d)
 	p := d.Budget.Period
-	// The weekly periods before the current one stay; the new rule runs
-	// from the current period's start (day -6): -6, -4, -2, today.
 	seqStart := map[int]string{}
 	for _, q := range d.Periods.Data {
 		seqStart[q.Seq] = q.Start
@@ -381,9 +360,6 @@ func TestBudgetRuleChangeScopes(t *testing.T) {
 	}
 }
 
-// TestBudgetListSummaryCard — the summary card: limits add up, used counts a
-// transaction ONCE across overlapping budgets, counts split ok / near / over,
-// `health` narrows the rows but never the summary.
 func TestBudgetListSummaryCard(t *testing.T) {
 	f := newBudFix(t)
 	monthStart := time.Date(f.today.Year(), f.today.Month(), 1, 0, 0, 0, 0, time.UTC).Format(dateLayout)

@@ -14,7 +14,6 @@ func TestParseTSVGroupsLinesAndScalesBoxes(t *testing.T) {
 	tsv := header +
 		"1\t1\t0\t0\t0\t0\t0\t0\t2000\t3000\t-1\t\n" +
 		"4\t1\t1\t1\t1\t0\t100\t200\t600\t40\t-1\t\n" +
-		// Thai "words" touching each other → no space; a real gap → space.
 		"5\t1\t1\t1\t1\t1\t100\t200\t100\t40\t90\tโอน\n" +
 		"5\t1\t1\t1\t1\t2\t202\t200\t100\t40\t80\tเงิน\n" +
 		"5\t1\t1\t1\t1\t3\t500\t200\t200\t40\t70\t500.00\n" +

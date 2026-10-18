@@ -1,10 +1,5 @@
 package projects
 
-// Page-ready event shapes (spec schemas Event*, Board*). Every read and
-// every write response is built here, one query per kind (never per row):
-// the write handlers return EventPatch so the app patches instead of
-// re-fetching.
-
 import (
 	"context"
 	"fmt"
@@ -16,7 +11,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// myMember — the caller's member row facts in one event.
 type myMember struct {
 	id     uuid.UUID
 	role   string
@@ -27,7 +21,6 @@ func (m *myMember) canWrite() bool {
 	return m != nil && m.status == MemberStatusActive && m.role != RoleViewer
 }
 
-// loadEvents builds the Event rows of ids for callerID (map by id).
 func loadEvents(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]Event, error) {
 	out := map[uuid.UUID]Event{}
 	if len(ids) == 0 {
@@ -102,7 +95,6 @@ func loadEvents(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids [
 	if err := fillMyNumbers(ctx, q, callerID, out, evIDs); err != nil {
 		return nil, err
 	}
-	// MY personal tags on each event.
 	trows, err := q.Query(ctx, `SELECT mt.project_id, t.id, t.name, t.icon_code
 		FROM project_my_tags mt JOIN tags t ON t.id = mt.tag_id
 		WHERE mt.project_id = ANY($1) AND mt.user_id = $2
@@ -140,7 +132,6 @@ func loadEvent(ctx context.Context, q shared.Querier, callerID, id uuid.UUID) (E
 	return e, nil
 }
 
-// loadMembers — the event's members (active / pending first, then left).
 func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid.UUID) ([]EventMember, error) {
 	rows, err := q.Query(ctx, `SELECT pm.id, pm.user_id, COALESCE(u.display_name, pm.display_name),
 			COALESCE(u.icon_code, pm.icon_code), pm.role, pm.status, pm.invited_at, pm.joined_at, pm.left_at
@@ -168,8 +159,6 @@ func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid
 	return out, rows.Err()
 }
 
-// loadEventTags — the event's tags, most used first; mine = I have a
-// personal tag with the same name.
 func loadEventTags(ctx context.Context, q shared.Querier, callerID, projectID uuid.UUID) ([]EventTag, error) {
 	rows, err := q.Query(ctx, `SELECT et.id, et.name, et.icon_code,
 			EXISTS (SELECT 1 FROM tags t WHERE t.user_id = $2 AND LOWER(t.name) = LOWER(et.name)),
@@ -195,7 +184,6 @@ func loadEventTags(ctx context.Context, q shared.Querier, callerID, projectID uu
 	return out, rows.Err()
 }
 
-// loadSummary — totals, plan, positions and the top-5 tags.
 func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid.UUID, e Event) (EventSummary, error) {
 	s := EventSummary{
 		TotalExpense: e.TotalExpense, TotalIncome: e.TotalIncome, MemberCount: e.MembersCount,
@@ -216,9 +204,6 @@ func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid
 	}
 	rows.Close()
 
-	// Positions (contract §6a): expense bills only; the payer's share of a
-	// bill is what its splits leave (all of it without splits), so the nets
-	// add up to 0.
 	rows, err = q.Query(ctx, `
 		WITH parents AS (
 			SELECT id, transaction_member_id AS m, amount FROM project_transactions
@@ -283,7 +268,6 @@ func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid
 		}
 	}
 
-	// By tag (top 5): total of the tagged expense bills and my share of them.
 	me := uuid.Nil
 	if e.MyMemberID != nil {
 		me = *e.MyMemberID
@@ -374,11 +358,6 @@ func loadTagRefs(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids 
 	return out, rows.Err()
 }
 
-// --- board ---
-
-// loadBoard — one page of bills (parents) of projectID for callerID,
-// splits nested, everything resolved. ids (when set) replaces the filter:
-// exactly those bills, in board order.
 func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.UUID, e Event, f BoardFilter, ids []uuid.UUID) ([]BoardRow, int, error) {
 	me := uuid.Nil
 	if e.MyMemberID != nil {
@@ -458,7 +437,6 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 	return out, total, err
 }
 
-// ptColumnsPrefixed — ptColumns with an @ where the table alias goes.
 const ptColumnsPrefixed = `@id, @project_id, @parent_project_transaction_id,
 	@transaction_member_id, @record_user_id,
 	@type, @amount, @currency,
@@ -466,8 +444,6 @@ const ptColumnsPrefixed = `@id, @project_id, @parent_project_transaction_id,
 	@note, @description,
 	@marks, @created_at, @updated_at`
 
-// buildRows resolves bills (parents) into BoardRows: children, members,
-// event tags, the linked source transaction.
 func buildRows(ctx context.Context, q shared.Querier, callerID uuid.UUID, e Event, parents []ProjectTransaction) ([]BoardRow, error) {
 	out := make([]BoardRow, 0, len(parents))
 	if len(parents) == 0 {
@@ -479,7 +455,6 @@ func buildRows(ctx context.Context, q shared.Querier, callerID uuid.UUID, e Even
 		ids[i] = p.ID
 		memberIDs = append(memberIDs, p.TransactionMemberID)
 	}
-	// Children.
 	rows, err := q.Query(ctx, `SELECT `+ptColumns+` FROM project_transactions
 		WHERE parent_project_transaction_id = ANY($1) ORDER BY created_at, id`, ids)
 	if err != nil {
@@ -503,7 +478,6 @@ func buildRows(ctx context.Context, q shared.Querier, callerID uuid.UUID, e Even
 	if err != nil {
 		return nil, err
 	}
-	// Event tags per bill.
 	rows, err = q.Query(ctx, `SELECT ptt.project_transaction_id, et.id, et.name, et.icon_code,
 			EXISTS (SELECT 1 FROM tags t WHERE t.user_id = $2 AND LOWER(t.name) = LOWER(et.name))
 		FROM project_transaction_tags ptt JOIN event_tags et ON et.id = ptt.event_tag_id
@@ -530,7 +504,6 @@ func buildRows(ctx context.Context, q shared.Querier, callerID uuid.UUID, e Even
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// The linked personal transaction (the bill was made from it).
 	rows, err = q.Query(ctx, `SELECT pt.id, t.id, t.user_id, t.description, t.account_id
 		FROM project_transactions pt JOIN transactions t ON t.id = pt.linked_transaction_id
 		WHERE pt.id = ANY($1)`, ids)
@@ -641,9 +614,6 @@ func containsID(ids []uuid.UUID, id uuid.UUID) bool {
 
 func round2(f float64) float64 { return math.Round(f*100) / 100 }
 
-// --- composed responses ---
-
-// detail — GET /projects/:id/detail (and create / quick / accept).
 func (s *Service) detail(ctx context.Context, callerID, projectID uuid.UUID, page, perPage int) (*EventDetail, error) {
 	if _, err := s.store.GetByIDForCaller(ctx, callerID, projectID); err != nil {
 		return nil, err
@@ -672,8 +642,6 @@ func (s *Service) detail(ctx context.Context, callerID, projectID uuid.UUID, pag
 	return out, nil
 }
 
-// patch — what every event write returns. rowID = the bill the write
-// touched (a split / tick → its parent); removed = a bill that left.
 func (s *Service) patch(ctx context.Context, callerID, projectID uuid.UUID, rowID, removed *uuid.UUID, touched []uuid.UUID) (*EventPatch, error) {
 	q := s.store.db
 	e, err := loadEvent(ctx, q, callerID, projectID)
@@ -705,7 +673,6 @@ func (s *Service) patch(ctx context.Context, callerID, projectID uuid.UUID, rowI
 	return out, nil
 }
 
-// boardRows — bills ids as BoardRows (board order).
 func (s *Service) boardRows(ctx context.Context, callerID, projectID uuid.UUID, ids []uuid.UUID) ([]BoardRow, error) {
 	e, err := loadEvent(ctx, s.store.db, callerID, projectID)
 	if err != nil {

@@ -1,10 +1,3 @@
-// Package apidoc serves the OpenAPI document (source of truth for the API
-// shapes, owner-approved 2026-10-12) at GET /api/v1/openapi.json.
-//
-// The yaml is embedded and converted to JSON once. At serve time two
-// counters are injected so the dev hub can show coverage exactly:
-//   - x-registered-routes — routes the server really registers under /api/v1
-//   - x-spec-routes       — method + path pairs described in the document
 package apidoc
 
 import (
@@ -26,7 +19,6 @@ const apiPrefix = "/api/v1/"
 
 var httpMethods = map[string]bool{"get": true, "put": true, "post": true, "delete": true, "patch": true}
 
-// Handler serves the converted document.
 type Handler struct {
 	engine *gin.Engine
 
@@ -35,11 +27,8 @@ type Handler struct {
 	err  error
 }
 
-// NewHandler — engine is read lazily (on the first request) so every route
-// is registered by then.
 func NewHandler(engine *gin.Engine) *Handler { return &Handler{engine: engine} }
 
-// Document converts the embedded yaml into a JSON object (no counters).
 func Document() (map[string]any, error) {
 	raw, err := yaml.YAMLToJSON(specYAML)
 	if err != nil {
@@ -52,7 +41,6 @@ func Document() (map[string]any, error) {
 	return doc, nil
 }
 
-// SpecRoutes counts the method + path pairs in the document.
 func SpecRoutes(doc map[string]any) int {
 	paths, _ := doc["paths"].(map[string]any)
 	n := 0
@@ -84,7 +72,6 @@ func (h *Handler) build() {
 	h.body, h.err = json.Marshal(doc)
 }
 
-// Serve — GET /api/v1/openapi.json (public, read-only).
 func (h *Handler) Serve(c *gin.Context) {
 	h.once.Do(h.build)
 	if h.err != nil {

@@ -35,10 +35,6 @@ func scanMember(row pgx.Row) (*ProjectMember, error) {
 	return &m, nil
 }
 
-// InsertMemberTx is the unified insert used by all AddMember variants and
-// by the create-project owner-row insert. Caller decides values based on
-// variant. Post-migration 27, members have only two kinds: linked
-// (userID set) or ad-hoc (userID nil).
 func (s *Store) InsertMemberTx(
 	ctx context.Context, tx pgx.Tx,
 	projectID uuid.UUID, userID *uuid.UUID,
@@ -49,10 +45,6 @@ func (s *Store) InsertMemberTx(
 	if err != nil {
 		return nil, fmt.Errorf("uuid: %w", err)
 	}
-	// invited_at / joined_at derived from status. We compute them in Go
-	// (rather than CASE expressions on $7 status) because Postgres rejects
-	// same-positional-param across mixed contexts with SQLSTATE 42P08
-	// "inconsistent types deduced for parameter".
 	now := time.Now()
 	var invitedAt, joinedAt *time.Time
 	switch status {
@@ -77,7 +69,6 @@ func (s *Store) InsertMemberTx(
 		invitedAt, joinedAt, createdBy,
 	))
 	if err != nil {
-		// Translate the unique-violation on the partial (project_id, user_id) index.
 		if isUniqueViolation(err) {
 			return nil, ErrMemberAlreadyExists
 		}
@@ -86,7 +77,6 @@ func (s *Store) InsertMemberTx(
 	return m, nil
 }
 
-// GetMember loads a single member row.
 func (s *Store) GetMember(ctx context.Context, memberID uuid.UUID) (*ProjectMember, error) {
 	q := `SELECT ` + memberColumns + ` FROM project_members WHERE id = $1`
 	m, err := scanMember(s.db.QueryRow(ctx, q, memberID))
@@ -99,7 +89,6 @@ func (s *Store) GetMember(ctx context.Context, memberID uuid.UUID) (*ProjectMemb
 	return m, nil
 }
 
-// GetMemberTx is the tx-aware variant — locks the row for update.
 func (s *Store) GetMemberTx(ctx context.Context, tx pgx.Tx, memberID uuid.UUID) (*ProjectMember, error) {
 	q := `SELECT ` + memberColumns + ` FROM project_members WHERE id = $1 FOR UPDATE`
 	m, err := scanMember(tx.QueryRow(ctx, q, memberID))
@@ -112,7 +101,6 @@ func (s *Store) GetMemberTx(ctx context.Context, tx pgx.Tx, memberID uuid.UUID) 
 	return m, nil
 }
 
-// IsActiveMember reports whether userID has an active member row in projectID.
 func (s *Store) IsActiveMember(ctx context.Context, projectID, userID uuid.UUID) (bool, error) {
 	var n int
 	err := s.db.QueryRow(ctx,
@@ -181,8 +169,6 @@ func (s *Store) UpdateMemberIconCode(
 	return m, nil
 }
 
-// SoftRemoveMember marks status='left' and stamps left_at. Used by both
-// owner removal and member self-leave.
 func (s *Store) SoftRemoveMember(
 	ctx context.Context, projectID, memberID uuid.UUID, actorUserID uuid.UUID,
 ) (*ProjectMember, error) {
@@ -200,8 +186,6 @@ func (s *Store) SoftRemoveMember(
 	return m, nil
 }
 
-// LinkMemberToUserTx populates user_id, sets joined_at, flips status to
-// 'active'. Inside the link-request accept tx.
 func (s *Store) LinkMemberToUserTx(
 	ctx context.Context, tx pgx.Tx, memberID, newUserID uuid.UUID,
 ) (*ProjectMember, error) {
@@ -246,8 +230,6 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
-// AssertCanWrite — the caller is an active, non-viewer member (contract
-// §6b: viewers are read-only for project transactions and marks).
 func (s *Store) AssertCanWrite(ctx context.Context, projectID, userID uuid.UUID) (*ProjectMember, error) {
 	m, err := s.MemberByUserID(ctx, projectID, userID)
 	if err != nil {
@@ -262,7 +244,6 @@ func (s *Store) AssertCanWrite(ctx context.Context, projectID, userID uuid.UUID)
 	return m, nil
 }
 
-// MemberByUserIDTx — MemberByUserID inside tx (rows not committed yet).
 func (s *Store) MemberByUserIDTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UUID) (*ProjectMember, error) {
 	m, err := scanMember(tx.QueryRow(ctx, `SELECT `+memberColumns+` FROM project_members
 		WHERE project_id = $1 AND user_id = $2`, projectID, userID))

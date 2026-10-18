@@ -15,18 +15,12 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// ErrTxNotFound — the transaction to link isn't the caller's.
 var ErrTxNotFound = errors.New("transaction not found")
 
-// LinkRequest — POST /recurring-items/:id/link.
 type LinkRequest struct {
 	TransactionID uuid.UUID `json:"transaction_id"`
 }
 
-// LinkResult — spec RecurringLinkResult: the item (done, with the
-// transaction) and whether the transaction's amount differs from the
-// setting's, so the app can ask "อัปเดตยอดรายการประจำด้วยไหม?" (answer: PUT
-// /recurring/:id {amount}).
 type LinkResult struct {
 	Item              Item                   `json:"item"`
 	Transaction       any                    `json:"transaction"`
@@ -37,10 +31,6 @@ type LinkResult struct {
 	Setting *Recurring `json:"setting"`
 }
 
-// Link ties an existing transaction to an occurrence (normally the current
-// one): the item becomes done with the transaction, the occurrence's pending
-// draft goes, and the item takes the real amount (for a reminder that IS the
-// period's amount; the setting is untouched).
 func (s *Service) Link(ctx context.Context, userID, itemID uuid.UUID, req LinkRequest) (*LinkResult, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -132,7 +122,6 @@ func (s *Service) Link(ctx context.Context, userID, itemID uuid.UUID, req LinkRe
 
 var _ = transactions.TypeExpense
 
-// POST /v1/recurring-items/:id/link
 func (h *Handler) Link(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -146,15 +135,11 @@ func (h *Handler) Link(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// UnlinkResult — spec RecurringUnlinkResult: the occurrence, open again.
 type UnlinkResult struct {
 	Item Item `json:"item"`
 	Setting *Recurring `json:"setting"`
 }
 
-// Unlink removes a transaction's link to its occurrence: the item is open again
-// (not done, no transaction; a due one gets its draft at the next due check)
-// and takes the setting's amount back. The transaction itself is untouched.
 func (s *Service) Unlink(ctx context.Context, userID, itemID uuid.UUID) (*UnlinkResult, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -188,7 +173,6 @@ func (s *Service) Unlink(ctx context.Context, userID, itemID uuid.UUID) (*Unlink
 	return &UnlinkResult{Item: *v, Setting: s.settingOf(ctx, userID, ruleOf(v))}, nil
 }
 
-// POST /v1/recurring-items/:id/unlink
 func (h *Handler) Unlink(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {

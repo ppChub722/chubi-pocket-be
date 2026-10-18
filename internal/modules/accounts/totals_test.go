@@ -2,8 +2,6 @@ package accounts
 
 import "testing"
 
-// The "shared pot": the summed balance of the shared wallets in the user's
-// (signed; currency is a label, USD counts as-is), next to how many there are.
 func TestTotalsSharedBalance(t *testing.T) {
 	accs := []Account{
 		{Type: TypeBank, Group: "asset", Currency: "THB", Balance: 1000, IsShared: true, TrackBalance: true},

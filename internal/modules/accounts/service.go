@@ -30,15 +30,12 @@ type Service struct {
 	store *Store
 	txs   *transactions.Service
 	cats  *categories.Service
-	// Wired post-construction via WithNotificationService (wallet invites).
 	notifs *notifications.Service
 }
 
 func NewService(s *Store, txs *transactions.Service, cats *categories.Service) *Service {
 	return &Service{store: s, txs: txs, cats: cats}
 }
-
-// --- Reads ---
 
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Account, error) {
 	return s.getDecorated(ctx, userID, id, "")
@@ -51,8 +48,6 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, accType st
 	return s.store.List(ctx, userID, status, accType)
 }
 
-// ListPage is the wallets page read: the list plus its totals and the
-// archived count (spec AccountList).
 func (s *Service) ListPage(ctx context.Context, userID uuid.UUID, status, accType, tz string) (*AccountList, error) {
 	accs, err := s.List(ctx, userID, status, accType)
 	if err != nil {
@@ -77,10 +72,6 @@ func (s *Service) ListPage(ctx context.Context, userID uuid.UUID, status, accTyp
 	}, nil
 }
 
-// buildTotals sums the wallets in the user's currency (other-currency legacy
-// wallets are only counted). assets = balances of asset-group wallets;
-// liabilities = what credit_card / pay_later wallets owe (a negative balance
-// is debt); net = assets - liabilities.
 func buildTotals(accs []Account, currency string) AccountTotals {
 	t := AccountTotals{Currency: currency, ByType: []TypeTotal{}}
 	byType := map[string]*TypeTotal{}
@@ -154,9 +145,6 @@ func buildTotals(accs []Account, currency string) AccountTotals {
 
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
 
-// GetDetail is the wallet page read: the wallet; include lists the optional
-// blocks ("summary" for from..to, default the current month; "members" for
-// the full membership history). Archived wallets work too.
 func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, include []string, from, to, tz string) (*AccountDetail, error) {
 	wantSummary, wantMembers, wantDelete := false, false, false
 	for _, inc := range include {
@@ -205,11 +193,6 @@ func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, include [
 	return out, nil
 }
 
-// Summary computes income/expense/net for an account in a date range
-// (default: the current month), filtered to **reportable** transactions only
-// - categories with `include_in_report = false` (Opening Balance,
-// Adjustment, Transfer In/Out, Lending, Reimbursements) are excluded.
-// Uncategorized rows count (still real activity).
 func (s *Service) Summary(ctx context.Context, userID, accountID uuid.UUID, from, to string) (*AccountSummary, error) {
 	if _, err := s.store.GetByID(ctx, userID, accountID); err != nil {
 		return nil, err
@@ -235,14 +218,11 @@ func (s *Service) Summary(ctx context.Context, userID, accountID uuid.UUID, from
 	}, nil
 }
 
-// --- Create ---
-
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateRequest) (*Account, error) {
 	if err := s.validateCreditFields(req.Type, req); err != nil {
 		return nil, err
 	}
 
-	// A wallet takes the user's (locked) currency; the body has no say.
 	currency, err := s.store.UserCurrency(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -279,11 +259,6 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 		return nil, err
 	}
 
-	// Owner auto-membership (spec §14/1.1): account_members exists for
-	// EVERY account; a personal account is simply a single owner row with
-	// report_scope='all' (fully counts in the owner's reports). Must land
-	// before the opening-balance transaction — the transaction service
-	// authorizes writes by active membership.
 	now := time.Now()
 	if _, err := s.store.InsertMemberTx(ctx, tx,
 		created.ID, userID, MemberRoleOwner, ReportScopeAll, &now, userID,
@@ -300,7 +275,6 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 			amount = -req.Balance
 		}
 		today := time.Now().Format("2006-01-02")
-		// No description: the app labels it by its system category (owner 2026-10-10).
 		_, newBalance, err := s.txs.CreateSystemInTx(ctx, tx, userID, created.ID, kind, amount, today, nil, nil)
 		if err != nil {
 			return nil, err
@@ -311,13 +285,8 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	// Re-fetch so the response carries members[] / my_report_scope /
-	// is_shared (pinned §14 shape) — same re-fetch pattern as
-	// projects.Create for members_count.
 	return s.getDecorated(ctx, userID, created.ID, "")
 }
-
-// --- Update ---
 
 func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (*Account, error) {
 	current, err := s.store.GetByID(ctx, userID, id)
@@ -328,7 +297,6 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		return nil, ErrNotOwner
 	}
 
-	// Determine effective type after this update.
 	effectiveType := current.Type
 	if req.Type != nil {
 		effectiveType = *req.Type
@@ -340,12 +308,10 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		if IsCreditType(effectiveType) && req.CreditLimit == nil && current.CreditLimit == nil {
 			return nil, ErrTypeChangeNeedsLimit
 		}
-		// Switching FROM credit: clear billing fields
 		if IsCreditType(current.Type) && !IsCreditType(effectiveType) {
 			clearCreditFields = true
 		}
 	} else {
-		// No type change. Block setting credit fields on a non-credit account.
 		if !IsCreditType(effectiveType) {
 			if req.CreditLimit != nil || req.StatementDate != nil ||
 				req.PaymentDueDate != nil || req.MinimumPayment != nil {
@@ -368,26 +334,20 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 	if _, err := s.store.Update(ctx, userID, id, req, clearCreditFields); err != nil {
 		return nil, err
 	}
-	// Turned back on with the balance it has now: one adjustment row.
 	if req.CurrentBalance != nil {
 		if _, err := s.AdjustBalance(ctx, userID, id, AdjustBalanceRequest{NewBalance: req.CurrentBalance}); err != nil &&
 			!errors.Is(err, ErrAdjustNoOp) {
 			return nil, err
 		}
 	}
-	// sort_order is the caller's own position (not a column of the wallet).
 	if req.SortOrder != nil {
 		if err := s.store.SetMySortOrder(ctx, userID, id, *req.SortOrder); err != nil {
 			return nil, err
 		}
 	}
-	// Re-fetch for the members[] / my_report_scope / is_shared shape.
 	return s.getDecorated(ctx, userID, id, "")
 }
 
-// AddIdentifier appends one identifier to the wallet's list (spec 15 §8,
-// "remember this number" on the pending page); an identical one is not
-// added twice. Owner only, like every wallet field.
 func (s *Service) AddIdentifier(ctx context.Context, userID, id uuid.UUID, in Identifier) (*Account, error) {
 	current, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
@@ -399,8 +359,6 @@ func (s *Service) AddIdentifier(ctx context.Context, userID, id uuid.UUID, in Id
 	}
 	return s.Update(ctx, userID, id, UpdateRequest{Identifiers: &list})
 }
-
-// --- Adjust balance ---
 
 func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID, req AdjustBalanceRequest) (*AdjustBalanceResult, error) {
 	tx, err := s.store.Pool().Begin(ctx)
@@ -432,8 +390,6 @@ func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID
 	if req.Date != nil {
 		date = *req.Date
 	}
-	// Only what the user typed — no canned text; the app labels the row by
-	// its system category (owner 2026-10-10).
 	created, newBalance, err := s.txs.CreateSystemInTx(ctx, tx, userID, accountID, kind, amount, date, req.Description, req.Note)
 	if err != nil {
 		return nil, err
@@ -445,8 +401,6 @@ func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID
 
 	_ = newBalance
 
-	// Final state: the wallet, the adjustment row as the transactions module
-	// returns it, and the wallet's balance after the write.
 	acc, err := s.store.GetByID(ctx, userID, accountID)
 	if err != nil {
 		return nil, err
@@ -462,11 +416,6 @@ func (s *Service) AdjustBalance(ctx context.Context, userID, accountID uuid.UUID
 	return &AdjustBalanceResult{Account: acc, Transaction: row, AccountBalances: balances}, nil
 }
 
-// --- Archive ---
-
-// Archive soft-deletes (status='archived'). Spec §14/2 rule 5: a wallet
-// with other active members cannot be deleted or archived away — the
-// owner must be the only active member.
 func (s *Service) Archive(ctx context.Context, userID, id uuid.UUID) (*Account, error) {
 	a, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
@@ -488,8 +437,6 @@ func (s *Service) Archive(ctx context.Context, userID, id uuid.UUID) (*Account, 
 	return s.getDecorated(ctx, userID, id, "")
 }
 
-// Restore brings an archived wallet back (owner only); an active one is
-// returned as is.
 func (s *Service) Restore(ctx context.Context, userID, id uuid.UUID) (*Account, error) {
 	a, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
@@ -503,8 +450,6 @@ func (s *Service) Restore(ctx context.Context, userID, id uuid.UUID) (*Account, 
 	}
 	return s.getDecorated(ctx, userID, id, "")
 }
-
-// --- Validation ---
 
 func (s *Service) validateCreditFields(accType string, req CreateRequest) error {
 	if IsCreditType(accType) {

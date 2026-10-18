@@ -1,8 +1,5 @@
 package recurring
 
-// Goal auto-saving (0.4.0): the due check makes ONE saving draft (🐷) a month
-// per setting in saving_auto, on its day (31 = the last day of the month).
-
 import (
 	"context"
 	"encoding/json"

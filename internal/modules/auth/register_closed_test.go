@@ -1,10 +1,5 @@
 package auth
 
-// Decoy-registration test: with REGISTRATION_OPEN=false the register
-// flow must return a convincing success WITHOUT touching the database
-// (the service is constructed with a nil store — any DB access would
-// panic, which is exactly the guarantee this test wants).
-
 import (
 	"context"
 	"testing"

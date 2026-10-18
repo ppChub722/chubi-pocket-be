@@ -1,8 +1,5 @@
 package notifications
 
-// Handler tests for the notification operations of the API spec v2, driven
-// over HTTP with apitest and checked against openapi.yaml.
-
 import (
 	"context"
 	"encoding/json"
@@ -48,7 +45,6 @@ func newFix(t *testing.T) *nfix {
 	return &nfix{pool: pool, uid: uid, r: r}
 }
 
-// add inserts a notification for the caller; age orders the list.
 func (f *nfix) add(t *testing.T, typ string, actor *uuid.UUID, payload string, age time.Duration) uuid.UUID {
 	t.Helper()
 	id, _ := uuid.NewV7()
@@ -116,7 +112,6 @@ func TestListNotifications(t *testing.T) {
 		t.Errorf("project_added = %v", third)
 	}
 
-	// Filters.
 	if _, err := f.pool.Exec(context.Background(),
 		`UPDATE notifications SET read_at = NOW() WHERE id = $1`, oldest); err != nil {
 		t.Fatal(err)
@@ -169,7 +164,6 @@ func TestMarkReadActionedDismiss(t *testing.T) {
 	if num(out, "badges", "unread_notifications") != 2 {
 		t.Errorf("badges after read = %v", out["badges"])
 	}
-	// Idempotent.
 	f.do(t, "POST", "/api/v1/notifications/"+a.String()+"/read", nil, "markNotificationRead", http.StatusOK)
 
 	out = f.do(t, "POST", "/api/v1/notifications/"+b.String()+"/actioned", nil, "markNotificationActioned", http.StatusOK)
@@ -180,7 +174,6 @@ func TestMarkReadActionedDismiss(t *testing.T) {
 	if num(out, "badges", "unread_notifications") != 1 {
 		t.Errorf("badges after actioned = %v", out["badges"])
 	}
-	// Dismissing an actioned row is a conflict.
 	f.status(t, "POST", "/api/v1/notifications/"+b.String()+"/dismiss", nil, http.StatusConflict, "NOTIFICATION_STATE_CONFLICT")
 
 	out = f.do(t, "POST", "/api/v1/notifications/"+c.String()+"/dismiss", nil, "dismissNotification", http.StatusOK)
@@ -192,8 +185,6 @@ func TestMarkReadActionedDismiss(t *testing.T) {
 		t.Errorf("badges after dismiss = %v", out["badges"])
 	}
 
-	// A dismissed row is hidden from the default list, shown by
-	// ?dismissed=true, and restore brings it back (read stays).
 	out = f.do(t, "GET", "/api/v1/notifications?read=all", nil, "listNotifications", http.StatusOK)
 	if len(out["data"].([]any)) != 2 {
 		t.Errorf("default list after dismiss = %v", out["data"])
@@ -217,7 +208,6 @@ func TestMarkReadActionedDismiss(t *testing.T) {
 		t.Errorf("list after restore = %v", out["data"])
 	}
 
-	// Unknown id and someone else's row are both 404.
 	missing := uuid.NewString()
 	f.do(t, "POST", "/api/v1/notifications/"+missing+"/read", nil, "markNotificationRead", http.StatusNotFound)
 	f.do(t, "POST", "/api/v1/notifications/"+missing+"/actioned", nil, "markNotificationActioned", http.StatusNotFound)
@@ -285,7 +275,6 @@ func TestNotificationSettings(t *testing.T) {
 		t.Errorf("muted = %v", got)
 	}
 
-	// A partial update keeps the wallet; explicit null clears it.
 	out = f.do(t, "PUT", "/api/v1/notifications/settings", map[string]any{"muted_types": []string{}}, "updateNotificationSettings", http.StatusOK)
 	if out["default_account"] == nil {
 		t.Error("partial update must keep default_account")
@@ -295,15 +284,12 @@ func TestNotificationSettings(t *testing.T) {
 		t.Errorf("null must clear default_account: %v", out)
 	}
 
-	// Errors.
 	f.status(t, "PUT", "/api/v1/notifications/settings", map[string]any{"muted_types": []string{TypeAccountInvite}}, http.StatusBadRequest, "")
 	f.status(t, "PUT", "/api/v1/notifications/settings", map[string]any{"muted_types": []string{"nope"}}, http.StatusBadRequest, "")
 	f.status(t, "PUT", "/api/v1/notifications/settings", map[string]any{"default_account_id": uuid.NewString()}, http.StatusBadRequest, "")
 	f.status(t, "PUT", "/api/v1/notifications/settings", `{"default_account_id": "x"}`, http.StatusBadRequest, "")
 }
 
-// status checks an error status the spec does not document (reported as a
-// spec question), so no Conform.
 func (f *nfix) status(t *testing.T, method, path string, body any, want int, code string) {
 	t.Helper()
 	status, raw := apitest.Do(t, f.r, method, path, body)
@@ -321,8 +307,6 @@ func (f *nfix) status(t *testing.T, method, path string, body any, want int, cod
 	}
 }
 
-// TestInboxSummaryAndAwaitsAnswer — the inbox summary counts and the new
-// awaiting types (project_invite, recurring_ending).
 func TestInboxSummaryAndAwaitsAnswer(t *testing.T) {
 	f := newFix(t)
 	f.add(t, TypeProjectInvite, nil, `{}`, time.Hour)
@@ -336,7 +320,6 @@ func TestInboxSummaryAndAwaitsAnswer(t *testing.T) {
 	if num(out, "summary", "needs_answer") != 2 || num(out, "summary", "unread") != 2 || num(out, "summary", "dismissed") != 1 {
 		t.Errorf("summary = %v", out["summary"])
 	}
-	// The summary does not follow the filter.
 	out = f.do(t, "GET", "/api/v1/notifications?type=project_added&read=all", nil, "listNotifications", http.StatusOK)
 	if num(out, "summary", "needs_answer") != 2 {
 		t.Errorf("filtered summary = %v", out["summary"])

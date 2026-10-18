@@ -1,8 +1,3 @@
-// Package providers — payment providers (migration 49): who a slip's money
-// moved through. Banks for now (scheme "bot" = the Bank of Thailand's
-// 3-digit bank code, as on a slip's QR); e-wallets and card issuers later.
-// Read-only over the API; rows are added by migrations as unknown codes
-// show up in import_logs.
 package providers
 
 import (
@@ -18,7 +13,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
-// SchemeBOT — the Bank of Thailand's 3-digit bank codes.
 const SchemeBOT = "bot"
 
 type Provider struct {
@@ -43,7 +37,6 @@ type Store struct{ db *pgxpool.Pool }
 
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 
-// List — every provider, banks first, then by scheme + code.
 func (s *Store) List(ctx context.Context) ([]Provider, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id, kind, scheme, code, name_th, name_en, short_name, color, created_at, updated_at
@@ -65,7 +58,6 @@ func (s *Store) List(ctx context.Context) ([]Provider, error) {
 	return out, rows.Err()
 }
 
-// Known — is (scheme, code) in the table?
 func (s *Store) Known(ctx context.Context, scheme, code string) (bool, error) {
 	var ok bool
 	err := s.db.QueryRow(ctx,
@@ -78,7 +70,6 @@ type Handler struct{ store *Store }
 
 func NewHandler(s *Store) *Handler { return &Handler{store: s} }
 
-// GET /v1/payment-providers — for the wallet page's bank picker.
 func (h *Handler) List(c *gin.Context) {
 	list, err := h.store.List(c.Request.Context())
 	if err != nil {

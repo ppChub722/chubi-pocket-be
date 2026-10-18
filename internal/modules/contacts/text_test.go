@@ -8,8 +8,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
-// TestUpdateTextFields — see tags/text_test.go; contacts also renamed
-// notes → note.
 func TestUpdateTextFields(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()

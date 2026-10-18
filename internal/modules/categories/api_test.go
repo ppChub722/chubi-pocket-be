@@ -53,15 +53,12 @@ func mkCat(t *testing.T, r *gin.Engine, body map[string]any) catJSON {
 	return c
 }
 
-// TestCategoryAPI drives every category operation and checks the responses
-// against the OpenAPI spec, plus depth / path, reparenting, the fee flag.
 func TestCategoryAPI(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()
 	uid := testdb.User(t, pool)
 	r := newCatEngine(t, uid)
 
-	// createCategory: a root, a child, a grandchild; depth / path follow.
 	a := mkCat(t, r, map[string]any{"name": "A", "type": "expense", "description": "D"})
 	b := mkCat(t, r, map[string]any{"name": "B", "type": "expense", "parent_id": a.ID})
 	c := mkCat(t, r, map[string]any{"name": "C", "type": "expense", "parent_id": b.ID})
@@ -79,7 +76,6 @@ func TestCategoryAPI(t *testing.T) {
 		t.Errorf("new sibling sort_order = %d, want appended (%d)", sib.SortOrder, a.SortOrder+1)
 	}
 
-	// Errors: too deep (a 4th level), wrong-type parent, empty name.
 	if status, _ := apitest.Do(t, r, "POST", "/api/v1/categories", map[string]any{"name": "D", "type": "expense", "parent_id": c.ID}); status != http.StatusBadRequest {
 		t.Errorf("4th level status = %d, want 400", status)
 	}
@@ -104,7 +100,6 @@ func TestCategoryAPI(t *testing.T) {
 	if got := list(""); len(got) != 4 {
 		t.Errorf("list = %d rows, want 4", len(got))
 	}
-	// system_kind is exposed on system rows.
 	seed, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +121,6 @@ func TestCategoryAPI(t *testing.T) {
 		t.Fatalf("no system row with system_kind in %+v", rows)
 	}
 
-	// getCategory: counts + fee flag + budget count.
 	if _, err := pool.Exec(ctx, `INSERT INTO user_preferences (user_id, preferences)
 		VALUES ($1, jsonb_build_object('fee_category_id', $2::text))`, uid, b.ID.String()); err != nil {
 		t.Fatalf("set fee category: %v", err)
@@ -161,7 +155,6 @@ func TestCategoryAPI(t *testing.T) {
 		t.Errorf("get unknown = %d, want 404", status)
 	}
 
-	// updateCategory answers the detail.
 	status, raw = apitest.Do(t, r, "PUT", "/api/v1/categories/"+a.ID.String(), map[string]any{"name": "A renamed", "note": "N"})
 	apitest.Conform(t, "updateCategory", status, raw)
 	_ = json.Unmarshal(raw, &det)
@@ -169,7 +162,6 @@ func TestCategoryAPI(t *testing.T) {
 		t.Errorf("update = %+v", det)
 	}
 
-	// reorderCategories: move C up under A (depth 2), ahead of B.
 	status, raw = apitest.Do(t, r, "PATCH", "/api/v1/categories/reorder", map[string]any{"categories": []map[string]any{
 		{"id": c.ID, "parent_id": a.ID, "sort_order": 0},
 		{"id": b.ID, "parent_id": a.ID, "sort_order": 1},
@@ -196,7 +188,6 @@ func TestCategoryAPI(t *testing.T) {
 		t.Errorf("reorder unknown id = %d, want 404", status)
 	}
 
-	// deleteCategory: D under B shifts up to B's parent (A).
 	d := mkCat(t, r, map[string]any{"name": "D", "type": "expense", "parent_id": b.ID})
 	status, raw = apitest.Do(t, r, "DELETE", "/api/v1/categories/"+b.ID.String(), nil)
 	apitest.Conform(t, "deleteCategory", status, raw)
@@ -221,8 +212,8 @@ func TestCategoryAPI(t *testing.T) {
 	}
 }
 
-// TestCategoryMonthNumbers — month_spent / month_count: a parent counts its
-// sub-categories' transactions too; last month and other types don't count.
+// TestCategoryMonthNumbers — month_spent / month_count: a parent counts its sub-categories'
+// transactions too; last month and other types don't count.
 func TestCategoryMonthNumbers(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()
@@ -264,8 +255,6 @@ func TestCategoryMonthNumbers(t *testing.T) {
 	}
 }
 
-// TestCategoryDuplicateNameAndPath — a duplicate sibling name is a 422 with
-// the field; the detail's path carries the ancestors with their icons.
 func TestCategoryDuplicateNameAndPath(t *testing.T) {
 	pool := testdb.Pool(t)
 	uid := testdb.User(t, pool)

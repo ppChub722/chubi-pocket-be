@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// NextUp — RecurringList.summary.next.
 type NextUp struct {
 	ID     uuid.UUID `json:"id"`
 	Name   string    `json:"name"`
@@ -19,12 +18,10 @@ type NextUp struct {
 	Type   string    `json:"type"`
 }
 
-// ListSummary — RecurringList.summary: the list's summary card.
 type ListSummary struct {
 	MonthPay     float64 `json:"month_pay"`
 	MonthReceive float64 `json:"month_receive"`
 	Next         *NextUp `json:"next"`
-	// 0.4.0: due_30d_total = what is still to pay in the next 30 days (expense items, known amounts); awaiting_amount_count = occurrences (not done, due within 30 days) with no amount yet; by_kind = per kind, over the active settings.
 	Due30dTotal         float64  `json:"due_30d_total"`
 	AwaitingAmountCount int      `json:"awaiting_amount_count"`
 	ByKind              KindsSum `json:"by_kind"`
@@ -35,8 +32,6 @@ const (
 	weeksPerMonth = 52.1775 / 12
 )
 
-// monthlyCount — how many times a setting happens in an average month
-// (custom dates: the dates inside the month of `today`).
 func monthlyCount(r *Rule, today time.Time) float64 {
 	n := float64(r.Interval)
 	if n < 1 {
@@ -67,7 +62,6 @@ func monthlyCount(r *Rule, today time.Time) float64 {
 	return 0
 }
 
-// summary — the list's summary card over the ACTIVE settings (see the spec).
 func (s *Service) summary(ctx context.Context, userID uuid.UUID, today time.Time) (ListSummary, error) {
 	out := ListSummary{}
 	var err error
@@ -162,15 +156,12 @@ func (s *Service) summary(ctx context.Context, userID uuid.UUID, today time.Time
 	return out, nil
 }
 
-// KindTotals — one kind's card: how many active settings, their per-month
-// equivalent and their yearly cost.
 type KindTotals struct {
 	Count   int     `json:"count"`
 	Monthly float64 `json:"monthly"`
 	Yearly  float64 `json:"yearly"`
 }
 
-// KindsSum — by_kind.
 type KindsSum struct {
 	Subscription KindTotals `json:"subscription"`
 	Installment  KindTotals `json:"installment"`
@@ -190,7 +181,6 @@ func (k *KindsSum) of(kind string) *KindTotals {
 	return &k.Subscription
 }
 
-// dueWindow — the occurrences of the next 30 days that are still to happen.
 func (s *Service) dueWindow(ctx context.Context, userID uuid.UUID, today time.Time) (total float64, awaiting int, err error) {
 	err = s.db.QueryRow(ctx, `
 		SELECT COALESCE(SUM((i.draft->>'amount')::numeric) FILTER (WHERE i.draft->>'type' = 'expense'

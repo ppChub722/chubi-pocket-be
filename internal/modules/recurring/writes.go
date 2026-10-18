@@ -22,8 +22,6 @@ type ConflictError struct{ IDs []uuid.UUID }
 func (e *ConflictError) Error() string { return ErrAlreadyLinked.Error() }
 func (e *ConflictError) Unwrap() error { return ErrAlreadyLinked }
 
-// --- fields ---
-
 func validateFields(f *Fields) error {
 	if f.has("type") {
 		if f.Type == nil {
@@ -55,7 +53,6 @@ func validateFields(f *Fields) error {
 	return nil
 }
 
-// applyToDraft — the sent value fields onto d (the date is the caller's).
 func applyToDraft(d *pending.Draft, f *Fields) {
 	if f.has("type") {
 		d.Type = f.Type
@@ -149,11 +146,6 @@ func checkDraftRefsTx(ctx context.Context, q rowQuerier, userID uuid.UUID, d pen
 	return nil
 }
 
-// --- the other side of a link ---
-
-// syncLinkTx gives an item's linked draft / transaction the sent fields (and
-// date). A linked transfer keeps its values (its pair is edited from the
-// transaction). Returns the wallets touched.
 func (s *Service) syncLinkTx(ctx context.Context, tx pgx.Tx, it *itemRow, f *Fields, date *string) ([]uuid.UUID, error) {
 	switch {
 	case it.SavingEntryID != nil:
@@ -236,8 +228,6 @@ func (s *Service) syncLinkTx(ctx context.Context, tx pgx.Tx, it *itemRow, f *Fie
 	return nil, nil
 }
 
-// unlinkTx deletes an item's linked draft / transaction (delete_linked_tx).
-// Returns the deleted transaction id and the wallets touched.
 func (s *Service) unlinkTx(ctx context.Context, tx pgx.Tx, it *itemRow) (*uuid.UUID, []uuid.UUID, error) {
 	if it.PendingID != nil {
 		if err := s.pending.Store().DeleteTx(ctx, tx, it.UserID, *it.PendingID); err != nil {
@@ -266,13 +256,10 @@ func (s *Service) unlinkTx(ctx context.Context, tx pgx.Tx, it *itemRow) (*uuid.U
 	return &id, touched, nil
 }
 
-// --- settings ---
-
 func (s *Service) begin(ctx context.Context) (pgx.Tx, error) {
 	return s.db.Begin(ctx)
 }
 
-// afterWrite — the due check (a write may make items due), then the page.
 func (s *Service) afterWrite(ctx context.Context, userID, id uuid.UUID, tz string, touched []uuid.UUID) (*Detail, error) {
 	if err := s.DueCheck(ctx, userID, tz); err != nil {
 		return nil, err
@@ -386,8 +373,8 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		return nil, err
 	}
 	f := &req.Fields
-	// Without a description of its own an item shows the setting's name:
-	// a rename carries over to the items still showing the old one.
+	// Without a description of its own an item shows the setting's name: a rename carries over to the
+	// items still showing the old one.
 	var renamed *[2]string
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
@@ -485,7 +472,6 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 	return s.afterWrite(ctx, userID, r.ID, tz, touched)
 }
 
-// lockItems — the items matching where (alias i), locked.
 func (s *Service) lockItems(ctx context.Context, tx pgx.Tx, where string, args ...any) ([]*itemRow, error) {
 	rows, err := tx.Query(ctx, `SELECT `+prefixed(itemColumns, "i.")+` FROM recurring_items i `+where+
 		` ORDER BY i.date, i.id FOR UPDATE`, args...)
@@ -504,7 +490,6 @@ func (s *Service) lockItems(ctx context.Context, tx pgx.Tx, where string, args .
 	return out, rows.Err()
 }
 
-// prefixed — "a, b" → "i.a, i.b".
 func prefixed(cols, p string) string {
 	parts := strings.Split(cols, ",")
 	for i, c := range parts {
@@ -553,7 +538,6 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked
 	return out, nil
 }
 
-// transition — pause / resume / archive / restore / extend.
 func (s *Service) transition(ctx context.Context, userID, id uuid.UUID, tz string, fn func(tx pgx.Tx, r *Rule, today time.Time) error) (*Detail, error) {
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
@@ -671,7 +655,6 @@ func (s *Service) Extend(ctx context.Context, userID, id uuid.UUID, req ExtendRe
 			}
 		}
 		r.EndingNotified = false
-		// ต่ออีก answers the "ending soon" notice of this setting.
 		if _, err := tx.Exec(ctx, `UPDATE notifications SET actioned_at = NOW(), read_at = COALESCE(read_at, NOW())
 			WHERE recipient_user_id = $1 AND type = 'recurring_ending' AND actioned_at IS NULL AND dismissed_at IS NULL
 			  AND payload->>'recurring_id' = $2`, userID, r.ID.String()); err != nil {
@@ -683,8 +666,6 @@ func (s *Service) Extend(ctx context.Context, userID, id uuid.UUID, req ExtendRe
 		return s.generateTx(ctx, tx, r, today)
 	})
 }
-
-// --- items ---
 
 func (s *Service) itemsResult(ctx context.Context, userID uuid.UUID, ids, touched []uuid.UUID) (*ItemsWriteResult, error) {
 	today, err := s.today(ctx, userID, "")
@@ -721,7 +702,6 @@ func (s *Service) itemResult(ctx context.Context, userID, id uuid.UUID, txRow an
 	return out, nil
 }
 
-// CreateItem — POST /recurring-items: a manual item.
 func (s *Service) CreateItem(ctx context.Context, userID uuid.UUID, req ItemCreateRequest, tz string) (*ItemWriteResult, error) {
 	if req.Date == nil || req.Type == nil || req.Amount == nil {
 		return nil, ErrValidation
@@ -764,7 +744,6 @@ func (s *Service) CreateItem(ctx context.Context, userID uuid.UUID, req ItemCrea
 	return s.itemResult(ctx, userID, it.ID, nil, nil)
 }
 
-// UpdateItem — PUT /recurring-items/:id.
 func (s *Service) UpdateItem(ctx context.Context, userID, id uuid.UUID, req ItemUpdateRequest, tz string) (*ItemsWriteResult, error) {
 	if err := validateFields(&req.Fields); err != nil {
 		return nil, err
@@ -832,7 +811,6 @@ func (s *Service) UpdateItem(ctx context.Context, userID, id uuid.UUID, req Item
 		}
 		if req.AlsoUpdateLink {
 			if date != nil && x.Date.After(today) && x.linked() {
-				// A date after today: the real side leaves, the item is upcoming again.
 				_, t, err := s.unlinkTx(ctx, tx, x)
 				if err != nil {
 					return nil, err
@@ -861,7 +839,6 @@ func (s *Service) UpdateItem(ctx context.Context, userID, id uuid.UUID, req Item
 	return s.itemsResult(ctx, userID, ids, touched)
 }
 
-// DeleteItem — DELETE /recurring-items/:id.
 func (s *Service) DeleteItem(ctx context.Context, userID, id uuid.UUID, deleteLinked bool) (*ItemDeleteResult, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -892,7 +869,6 @@ func (s *Service) DeleteItem(ctx context.Context, userID, id uuid.UUID, deleteLi
 	return out, nil
 }
 
-// CreateNow — POST /recurring-items/:id/create ("สร้างใหม่").
 func (s *Service) CreateNow(ctx context.Context, userID, id uuid.UUID, req CreateNowRequest, tz string) (*ItemWriteResult, error) {
 	if req.Target != "pending" && req.Target != "transaction" {
 		return nil, ErrValidation
@@ -928,7 +904,6 @@ func (s *Service) CreateNow(ctx context.Context, userID, id uuid.UUID, req Creat
 		it.Edited = true
 	}
 	if it.Date.After(today) {
-		// A date after today: upcoming again, nothing made.
 		it.ProducedAt, it.Archived = nil, false
 		if err := saveItemTx(ctx, tx, it); err != nil {
 			return nil, err
@@ -981,7 +956,6 @@ func (s *Service) RestoreItem(ctx context.Context, userID, id uuid.UUID) (*ItemW
 	return s.setArchived(ctx, userID, id, false)
 }
 
-// Batch — POST /recurring-items/batch: one action on many items.
 func (s *Service) Batch(ctx context.Context, userID uuid.UUID, req BatchRequest, tz string) (*BatchResult, error) {
 	ids := uniqueIDs(req.IDs)
 	if len(ids) == 0 || len(ids) > 100 {
@@ -1105,8 +1079,6 @@ func (s *Service) Batch(ctx context.Context, userID uuid.UUID, req BatchRequest,
 	return out, nil
 }
 
-// --- hooks (transactions / pending) ---
-
 func draftFromCreate(req transactions.CreateRequest) pending.Draft {
 	typ := string(req.Type)
 	d := pending.Draft{
@@ -1117,7 +1089,6 @@ func draftFromCreate(req transactions.CreateRequest) pending.Draft {
 	return d
 }
 
-// CreateUpcomingTx — transactions.RecurringLinks: a one-off upcoming item.
 func (s *Service) CreateUpcomingTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, req transactions.CreateRequest) (uuid.UUID, error) {
 	date, err := parseDate(req.Date)
 	if err != nil {
@@ -1130,8 +1101,6 @@ func (s *Service) CreateUpcomingTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	return insertItemTx(ctx, tx, &itemRow{UserID: userID, Date: date, Draft: d})
 }
 
-// MoveToUpcomingTx — transactions.RecurringLinks: row txID moves to a
-// future date; its item (if any) takes the values and is upcoming again.
 func (s *Service) MoveToUpcomingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, req transactions.CreateRequest) (uuid.UUID, error) {
 	date, err := parseDate(req.Date)
 	if err != nil {
@@ -1155,8 +1124,6 @@ func (s *Service) MoveToUpcomingTx(ctx context.Context, tx pgx.Tx, userID, txID 
 	return id, saveItemTx(ctx, tx, it)
 }
 
-// TxEditedTx — transactions.RecurringLinks (also_update_link): the item
-// linked to row takes its values.
 func (s *Service) TxEditedTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, row *transactions.Transaction, tagIDs []uuid.UUID, tagsSet bool) error {
 	var id uuid.UUID
 	err := tx.QueryRow(ctx, `SELECT id FROM recurring_items WHERE transaction_id = $1 AND user_id = $2 FOR UPDATE`,
@@ -1184,7 +1151,6 @@ func (s *Service) TxEditedTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, r
 	return saveItemTx(ctx, tx, it)
 }
 
-// TxDeletingTx — transactions.RecurringLinks (also_delete_link).
 func (s *Service) TxDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (*uuid.UUID, error) {
 	var id uuid.UUID
 	err := tx.QueryRow(ctx, `DELETE FROM recurring_items WHERE transaction_id = $1 AND user_id = $2 RETURNING id`,
@@ -1198,8 +1164,6 @@ func (s *Service) TxDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid
 	return &id, nil
 }
 
-// OnDraftSubmitted — pending.SubmitHook: the item linked to the draft takes
-// the new transaction (a saving draft: the saving entry).
 func (s *Service) OnDraftSubmitted(ctx context.Context, tx pgx.Tx, userID, draftID, id uuid.UUID, kind string) error {
 	col := "transaction_id"
 	if kind == pending.KindSaving {

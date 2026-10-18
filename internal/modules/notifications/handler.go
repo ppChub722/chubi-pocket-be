@@ -27,7 +27,6 @@ func unauthorized(c *gin.Context) {
 	response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
 }
 
-// GET /v1/notifications — listNotifications.
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -69,7 +68,6 @@ func (h *Handler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// GET /v1/notifications/unread-count — getUnreadCount.
 func (h *Handler) UnreadCount(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -88,7 +86,6 @@ func (h *Handler) UnreadCount(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"unread_count": b.UnreadNotifications})
 }
 
-// POST /v1/notifications/read-all — readAllNotifications.
 func (h *Handler) ReadAll(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -113,7 +110,6 @@ func (h *Handler) ReadAll(c *gin.Context) {
 	c.JSON(http.StatusOK, ReadAllResult{MarkedRead: n, Badges: badges, Summary: sum})
 }
 
-// POST /v1/notifications/:id/read — markNotificationRead.
 func (h *Handler) MarkRead(c *gin.Context) {
 	userID, id, ok := h.bind(c)
 	if !ok {
@@ -127,7 +123,6 @@ func (h *Handler) MarkRead(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/notifications/:id/actioned — markNotificationActioned.
 func (h *Handler) MarkActioned(c *gin.Context) {
 	userID, id, ok := h.bind(c)
 	if !ok {
@@ -141,7 +136,6 @@ func (h *Handler) MarkActioned(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/notifications/:id/dismiss — dismissNotification.
 func (h *Handler) MarkDismissed(c *gin.Context) {
 	userID, id, ok := h.bind(c)
 	if !ok {
@@ -155,7 +149,6 @@ func (h *Handler) MarkDismissed(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// DELETE /v1/notifications/:id — deleteNotification.
 func (h *Handler) Delete(c *gin.Context) {
 	userID, id, ok := h.bind(c)
 	if !ok {
@@ -178,7 +171,6 @@ func (h *Handler) Delete(c *gin.Context) {
 	c.JSON(http.StatusOK, DeleteResult{ID: id, Badges: badges, Summary: sum})
 }
 
-// GET /v1/notifications/settings — getNotificationSettings.
 func (h *Handler) GetSettings(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -193,7 +185,6 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// PUT /v1/notifications/settings — updateNotificationSettings.
 func (h *Handler) UpdateSettings(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -205,7 +196,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
-	// Explicit "default_account_id": null clears it (contract section 5).
 	var raw map[string]json.RawMessage
 	if body, ok := c.Get(gin.BodyBytesKey); ok {
 		_ = json.Unmarshal(body.([]byte), &raw)
@@ -266,7 +256,6 @@ func atoiOr(s string, dflt int) int {
 	return n
 }
 
-// POST /v1/notifications/:id/restore — restoreNotification.
 func (h *Handler) Restore(c *gin.Context) {
 	userID, id, ok := h.bind(c)
 	if !ok {

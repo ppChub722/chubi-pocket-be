@@ -9,13 +9,11 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports/slip"
 )
 
-// Wallet — one of the user's active wallets and the numbers it's known by.
 type Wallet struct {
 	ID          uuid.UUID
 	Identifiers []accounts.Identifier
 }
 
-// Which identifier kinds a slip side may match (spec 15 §5.2).
 var (
 	senderKinds = kindSet(accounts.IdentifierBankAccount, accounts.IdentifierOther)
 	// by slip.Party.Kind of the receiver; a merchant's ref is never ours.
@@ -35,9 +33,6 @@ func kindSet(kinds ...string) map[string]bool {
 	return m
 }
 
-// matchWallet — the one wallet with an identifier matching masked, or nil
-// when none or more than one does (spec: unsure → empty). bankCode, when
-// both it and the identifier's are set, must agree.
 func matchWallet(wallets []Wallet, masked string, kinds map[string]bool, bankCode string) *uuid.UUID {
 	if masked == "" || kinds == nil {
 		return nil
@@ -68,11 +63,6 @@ func matchWallet(wallets []Wallet, masked string, kinds map[string]bool, bankCod
 // minMatchDigits — digits that must agree before a number counts as ours.
 const minMatchDigits = 4
 
-// matchDigits — does a slip's masked number ("xxxxx2780x") fit a stored
-// one? Same length: aligned digit by digit, every position where both show
-// a digit agrees, at least 4 of them. Different length (the user typed
-// part of the number): a run of 4+ visible digits on the slip appears in
-// the stored value.
 func matchDigits(slipMasked, stored string) bool {
 	if len(slipMasked) == len(stored) {
 		compared := 0

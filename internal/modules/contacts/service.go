@@ -14,19 +14,10 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// SplitsAbsorber rewrites person_name + contact_id on caller-owned splits
-// matching `names` (case-insensitive) where contact_id IS NULL. Returns
-// the count rewritten. Implemented by splits.Service.AbsorbForContact.
 type SplitsAbsorber func(ctx context.Context, userID, contactID uuid.UUID, names []string) (int, error)
 
-// SplitsRestorer is called inside the contact-delete tx. Snapshots the
-// contact's current display name into person_name on every referencing
-// split before contact_id is nullified by the cascade. Implemented by
-// splits.Service.RestoreOnContactDeleteTx.
 type SplitsRestorer func(ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID) (int, error)
 
-// UnlinkedNamesProvider returns the [(name, count)] list backing the
-// "unlinked names" wizard. Implemented by splits.Service.UnlinkedNames.
 type UnlinkedNamesProvider func(ctx context.Context, userID uuid.UUID) ([]UnlinkedName, error)
 
 type UnlinkedName struct {
@@ -46,19 +37,11 @@ func NewService(s *Store) *Service {
 	return &Service{store: s}
 }
 
-// WithNotificationService wires the notifications dep post-construction. Until
-// it's set, the link-request endpoints return a 500 with a clear "module not
-// wired" message — preferable to nil-deref.
 func (s *Service) WithNotificationService(n *notifications.Service)   { s.notifs = n }
 func (s *Service) WithSplitsAbsorber(fn SplitsAbsorber)               { s.absorber = fn }
 func (s *Service) WithSplitsRestorer(fn SplitsRestorer)               { s.restorer = fn }
 func (s *Service) WithUnlinkedNamesProvider(fn UnlinkedNamesProvider) { s.unlinked = fn }
 
-// Create inserts a new contact. When absorb_names is set and the splits
-// hook is wired, also runs the rewrite for those names in the same flow
-// (best-effort — failure on absorb does not roll back the contact insert
-// in 1b.1; tighten to one tx in 1b.2 once the splits package is part of
-// the same workflow).
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateContactRequest) (CreateContactResponse, error) {
 	c, err := s.store.Create(ctx, userID, req)
 	if err != nil {
@@ -75,10 +58,7 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateContac
 	return CreateContactResponse{Contact: *c, AbsorbedCount: absorbed}, nil
 }
 
-// Absorb wraps the splits absorber for the standalone POST /:id/absorb
-// endpoint. Returns 501-style error if the hook isn't wired.
 func (s *Service) Absorb(ctx context.Context, userID, id uuid.UUID, names []string) (*AbsorbResult, error) {
-	// Confirm the contact exists + is owned before delegating.
 	if _, err := s.store.GetByID(ctx, userID, id); err != nil {
 		return nil, err
 	}
@@ -96,8 +76,6 @@ func (s *Service) Absorb(ctx context.Context, userID, id uuid.UUID, names []stri
 	return &AbsorbResult{Contact: *c, AbsorbedCount: n}, nil
 }
 
-// UnlinkedNames returns the (name, count) list. Returns empty when the
-// hook isn't wired (no splits → nothing to absorb).
 func (s *Service) UnlinkedNames(ctx context.Context, userID uuid.UUID) ([]UnlinkedName, error) {
 	if s.unlinked == nil {
 		return []UnlinkedName{}, nil
@@ -109,9 +87,6 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Contact, erro
 	return s.store.GetByID(ctx, userID, id)
 }
 
-// GetDetail is the contact page's read: the contact, plus the absorbable
-// free-text names when withUnlinkedNames (else UnlinkedNames stays nil =
-// JSON null).
 func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, withUnlinkedNames, withDeletePreview bool) (*ContactDetail, error) {
 	c, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
@@ -140,8 +115,6 @@ func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, withUnlin
 	return d, nil
 }
 
-// linkResult builds the LinkRequestResult of a link-request action: the
-// notification in its new state and the badges (read after commit).
 func (s *Service) linkResult(ctx context.Context, userID, notificationID uuid.UUID, c *Contact) (*LinkRequestResult, error) {
 	nv, err := shared.LoadNotificationView(ctx, s.store.Pool(), userID, notificationID)
 	if err != nil {
@@ -177,11 +150,6 @@ func (s *Service) Restore(ctx context.Context, userID, id uuid.UUID) (*Contact, 
 	return s.store.SetStatus(ctx, userID, id, StatusActive)
 }
 
-// Delete hard-deletes the contact. When the splits restorer is wired,
-// snapshots the contact's display name onto every referencing split's
-// person_name BEFORE the contact row is dropped (cascade nullifies
-// contact_id on those rows automatically). Wrapped in a tx so a failure
-// in the restore step rolls back the delete.
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (int, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -212,19 +180,10 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (int, error)
 	return splitsRestored, nil
 }
 
-// --- Link-request flow (1b.2) ---
-
-// RequestLinkResponse is intentionally identical for hit and miss to
-// preserve privacy. A "miss" still returns 200 with sent=true so the
-// client can't probe for known users.
 type RequestLinkResponse struct {
 	Message string `json:"message"`
 }
 
-// RequestLink looks up a user with a matching email and fires a
-// `contact_link_request` notification iff there's a hit. In both branches
-// the lookup runs and the response is identical (privacy preservation per
-// spec §07/§4.3).
 func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) (*Contact, error) {
 	if s.notifs == nil {
 		return nil, errors.New("notifications module not wired")
@@ -238,9 +197,6 @@ func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) 
 		return nil, ErrAlreadyLinked
 	}
 
-	// Always-execute lookup. Constant-time intent: same code path runs on
-	// hit and miss, so the response timing doesn't leak whether the email
-	// matches a registered user.
 	var matchedUser *uuid.UUID
 	if contact.Email != nil && *contact.Email != "" {
 		matchedUser, err = s.notifs.LookupUserByEmail(ctx, *contact.Email)
@@ -249,14 +205,7 @@ func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) 
 		}
 	}
 
-	// Fire the notification iff hit AND not self.
 	if matchedUser != nil && *matchedUser != userID {
-		// Idempotency: if the recipient already has an unresolved
-		// `contact_link_request` from this sender for this same contact,
-		// silently skip the dispatch. Once they Accept / Reject /
-		// Dismiss the previous one (or hard-delete it), a new request
-		// will create a fresh row again. The response stays "sent" so
-		// the timing channel doesn't leak the dedup decision either.
 		pending, err := s.notifs.HasPendingContactLinkRequest(
 			ctx, *matchedUser, userID, contactID,
 		)
@@ -267,7 +216,6 @@ func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) 
 			return contact, nil
 		}
 
-		// Look up sender's display name for the payload.
 		var senderName string
 		_ = s.store.Pool().QueryRow(ctx,
 			`SELECT display_name FROM users WHERE id = $1`, userID).Scan(&senderName)
@@ -293,15 +241,9 @@ func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) 
 		}
 	}
 
-	// Privacy: same response shape on hit and miss.
 	return contact, nil
 }
 
-// AcceptLinkRequest is called by the recipient. Reads the
-// `contact_link_request` notification (must be addressed to caller),
-// validates uniqueness in both directions, sets the contact's
-// linked_user_id = caller, and marks the notification actioned. All in
-// one tx.
 func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID uuid.UUID) (*LinkRequestResult, error) {
 	if s.notifs == nil {
 		return nil, errors.New("notifications module not wired")
@@ -321,8 +263,6 @@ func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID 
 		return nil, ErrNotLinkRequest
 	}
 	if n.ActionedAt != nil || n.DismissedAt != nil {
-		// Idempotent re-accept: re-emit success on already-actioned. Reject
-		// if the notification was previously dismissed.
 		if n.DismissedAt != nil {
 			return nil, ErrRequestRejected
 		}
@@ -333,7 +273,6 @@ func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID 
 		return nil, fmt.Errorf("payload: %w", err)
 	}
 
-	// Verify sender still owns the contact (might have been deleted).
 	contact, err := s.store.GetByIDTx(ctx, tx, p.SenderUserID, p.ContactID)
 	if err != nil {
 		return nil, err
@@ -345,8 +284,6 @@ func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID 
 		return nil, ErrCannotLinkSelf
 	}
 
-	// Uniqueness in both directions: caller might already have linked back,
-	// or sender might have already linked another contact to caller.
 	exists, err := s.store.LinkExistsBetween(ctx, tx, userID, p.SenderUserID)
 	if err != nil {
 		return nil, err
@@ -360,13 +297,6 @@ func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID 
 		return nil, err
 	}
 
-	// Spec change: the FE owns reciprocal contact creation now via
-	// `AcceptWithContact` — the recipient picks (existing contact vs
-	// create-with-prefill). The old auto-create-on-server path was
-	// dropped along with `autoLinkReciprocalTx`. This endpoint is kept
-	// for legacy callers that just want to link the sender's side
-	// without touching their own contact book.
-
 	if _, err := s.notifs.MarkActionedTx(ctx, tx, userID, notificationID); err != nil {
 		return nil, err
 	}
@@ -374,15 +304,9 @@ func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	// The linked contact is the SENDER's; the recipient has none yet (they
-	// create or link one next), so no contact is returned.
 	return s.linkResult(ctx, userID, notificationID, nil)
 }
 
-// RejectLinkRequest marks the notification dismissed — the inbox hides
-// dismissed rows entirely (different from Accept, which leaves the row
-// visible-but-actioned for the post-accept tap flow). The sender is
-// not notified; rejection is silent on the sender's side.
 func (s *Service) RejectLinkRequest(ctx context.Context, userID, notificationID uuid.UUID) (*LinkRequestResult, error) {
 	if s.notifs == nil {
 		return nil, errors.New("notifications module not wired")
@@ -409,21 +333,10 @@ func (s *Service) RejectLinkRequest(ctx context.Context, userID, notificationID 
 	return s.linkResult(ctx, userID, notificationID, nil)
 }
 
-// Unlink clears linked_user_id. Splits keep their contact_id; the linked
-// user simply loses visibility into the splits.
 func (s *Service) Unlink(ctx context.Context, userID, contactID uuid.UUID) (*Contact, error) {
 	return s.store.ClearLinkedUserID(ctx, userID, contactID)
 }
 
-// GetSenderProfile returns the public-profile fields of the actor on a
-// `contact_link_request` notification owned by the caller. Used by the
-// post-accept tap flow to render locked display_name / email fields on
-// the link-mode contact form.
-//
-// Gated to `caller is the recipient` AND `notification not dismissed`.
-// Allowed even when the request is already actioned (post-accept tap
-// still needs the data). Returns an error when dismissed (rejected
-// requests don't expose the sender).
 func (s *Service) GetSenderProfile(
 	ctx context.Context, userID, notificationID uuid.UUID,
 ) (*SenderProfile, error) {
@@ -465,12 +378,6 @@ func (s *Service) GetSenderProfile(
 	return &p, nil
 }
 
-// CreateLinkedContactFromLinkRequest is the post-accept "I have no
-// existing contact for them, create a fresh one" path. The notification
-// must already be actioned (caller previously hit Accept). BE pulls
-// display_name + email from the sender's user record so they're frozen
-// at create time as the contact's snapshot fallback; phone / description / note /
-// icon come from the form.
 func (s *Service) CreateLinkedContactFromLinkRequest(
 	ctx context.Context, userID, notificationID uuid.UUID, req CreateLinkedContactRequest,
 ) (*LinkRequestResult, error) {
@@ -489,8 +396,6 @@ func (s *Service) CreateLinkedContactFromLinkRequest(
 		return nil, err
 	}
 
-	// Pull sender's name + email; both are required snapshot values
-	// for the contact row even though the FE displays them live.
 	var senderName string
 	var senderEmail *string
 	if err := tx.QueryRow(ctx,
@@ -513,14 +418,6 @@ func (s *Service) CreateLinkedContactFromLinkRequest(
 	return s.linkResult(ctx, userID, notificationID, created)
 }
 
-// LinkExistingContactFromLinkRequest is the post-accept "I already have
-// a contact for them, just wire the link" path. Notification must be
-// actioned. The contact must be caller-owned and unlinked (or already
-// linked to the same sender — idempotent).
-//
-// `display_name` and `email` are NOT touched on the contact row — the
-// FE pulls them from the linked user once linked. Phone / description / note / icon
-// are optional B-side updates.
 func (s *Service) LinkExistingContactFromLinkRequest(
 	ctx context.Context, userID, notificationID, contactID uuid.UUID,
 	req LinkExistingContactRequest,
@@ -548,9 +445,6 @@ func (s *Service) LinkExistingContactFromLinkRequest(
 		return nil, ErrAlreadyLinked
 	}
 
-	// Apply optional B-side field updates first (so they're persisted
-	// regardless of whether the link write below is a no-op). Only
-	// phone / description / note / icon — display_name / email are linked-driven.
 	if req.Phone != nil || req.Description != nil || req.Note != nil || req.IconCode != nil {
 		setClauses := []string{"updated_by_user_id = $1"}
 		args := []any{userID}
@@ -597,15 +491,6 @@ func (s *Service) LinkExistingContactFromLinkRequest(
 	return s.linkResult(ctx, userID, notificationID, updated)
 }
 
-// verifyAcceptedLinkRequestTx is the shared gate for both post-accept
-// linking paths. The notification must:
-//   - exist for the caller,
-//   - be a contact_link_request,
-//   - be actioned (caller previously hit Accept),
-//   - not be dismissed,
-//   - have an actor.
-//
-// Returns the sender's user_id on success.
 func (s *Service) verifyAcceptedLinkRequestTx(
 	ctx context.Context, tx pgx.Tx, userID, notificationID uuid.UUID,
 ) (uuid.UUID, error) {

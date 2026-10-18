@@ -7,18 +7,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports/ocr"
 )
 
-// KBank / K PLUS (bank code 004) — spec §3.2, built on 15 real slips read
-// with psm 11. Layout, top to bottom:
-//
-//	header · date · sender (name, ธ.bank, masked acct) · receiver block ·
-//	จำนวน: amount · ค่าธรรมเนียม: fee · เลขที่รายการ: ref · [บันทึกช่วยจำ: memo]
-//
-// Values are found by their label, not by position (a bill slip puts
-// เลขที่รายการ before จำนวน). The sender / receiver blocks are a text
-// column at ~15–50 % of the width; logos and the arrow left of it and the
-// cartoon right of it come out as junk lines, dropped by their x.
-
-// Column of the party blocks, as a fraction of the slip's width.
 const kbankColMin, kbankColMax = 0.12, 0.55
 
 var kbankHeaders = []struct {
@@ -30,7 +18,6 @@ var kbankHeaders = []struct {
 	{"จ่ายบิลสำเร็จ", KindBill},
 }
 
-// Label skeletons (no spaces). OCR sometimes drops the ่ of ที่.
 var (
 	kbankAmountLabel = []string{"จำนวน"}
 	kbankFeeLabel    = []string{"ค่าธรรมเนียม"}
@@ -38,20 +25,16 @@ var (
 	kbankMemoLabel   = []string{"ช่วยจำ"}
 )
 
-// Company prefixes on a merchant's second line.
 var companyRe = regexp.MustCompile(`^(บจก|บมจ|หจก|บริษัท|ห้างหุ้นส่วน)`)
 
-// A bill / merchant reference: letters and digits, no spaces.
 var refRe = regexp.MustCompile(`^[A-Z0-9]{5,}$`)
 
-// isRef — a reference has digits; "AYUDHYA CAPIT" does not.
 func isRef(s string) bool { return refRe.MatchString(s) && strings.ContainsAny(s, "0123456789") }
 
 func parseKBank(res *ocr.Result) *Slip {
 	lines := sortedLines(res)
 	s := &Slip{}
 
-	// Header + date: the first lines that look like them.
 	dateBottom := -1
 	for _, l := range lines {
 		sk := skeleton(l.Text)
@@ -70,7 +53,6 @@ func parseKBank(res *ocr.Result) *Slip {
 		}
 	}
 
-	// Labels.
 	amountAt := findLabel(lines, kbankAmountLabel)
 	feeAt := findLabel(lines, kbankFeeLabel)
 	refAt := findLabel(lines, kbankRefLabel)
@@ -87,7 +69,6 @@ func parseKBank(res *ocr.Result) *Slip {
 		s.Memo = memoText(lines[memoAt].Text)
 	}
 
-	// Party blocks: between the date and the first label, in the column.
 	firstLabel := len(lines)
 	for _, i := range labels {
 		if i >= 0 && i < firstLabel {
@@ -113,8 +94,6 @@ func parseKBank(res *ocr.Result) *Slip {
 	return s
 }
 
-// findLabel — index of the first line containing one of the label
-// skeletons, or -1.
 func findLabel(lines []ocr.Line, labels []string) int {
 	for i, l := range lines {
 		sk := skeleton(l.Text)
@@ -127,8 +106,8 @@ func findLabel(lines []ocr.Line, labels []string) int {
 	return -1
 }
 
-// valueAfter — the first amount below the label at `at`, before the next
-// label (a missing value must not borrow the next label's).
+// valueAfter — the first amount below the label at `at`, before the next label (a missing value
+// must not borrow the next label's).
 func valueAfter(lines []ocr.Line, at int, labels []int) (float64, bool) {
 	if at < 0 {
 		return 0, false
@@ -143,7 +122,6 @@ func valueAfter(lines []ocr.Line, at int, labels []int) (float64, bool) {
 		}
 		text := lines[i].Text
 		if i == at {
-			// "จำนวน: 97.00 บาท" on one line — only what follows the label.
 			_, after, ok := strings.Cut(text, ":")
 			if !ok {
 				continue
@@ -161,15 +139,12 @@ func memoText(line string) string {
 	if _, after, ok := strings.Cut(line, ":"); ok {
 		return strings.TrimSpace(after)
 	}
-	// No colon read: drop the label word itself.
 	if i := strings.Index(line, "ช่วยจำ"); i >= 0 {
 		return strings.TrimSpace(line[i+len("ช่วยจำ"):])
 	}
 	return ""
 }
 
-// kbankParties splits the column into the sender (name · ธ.bank · masked
-// account) and whatever follows as the receiver.
 func kbankParties(zone []ocr.Line, kind Kind) (*Party, *Party) {
 	senderEnd := -1
 	sender := &Party{}
@@ -230,8 +205,6 @@ func kbankParties(zone []ocr.Line, kind Kind) (*Party, *Party) {
 				recv.Name = t
 			}
 		}
-		// An all-digit Ref 1 is usually the card / account being paid —
-		// kept whole so a wallet's number can match it.
 		if isDigits(recv.Ref1) && len(recv.Ref1) >= 10 {
 			recv.Masked = recv.Ref1
 		}
@@ -259,7 +232,6 @@ func kbankParties(zone []ocr.Line, kind Kind) (*Party, *Party) {
 	return sender, recv
 }
 
-// "ธ.กสิกรไทย" — the bank line under a name.
 func isBankLine(s string) bool { return strings.HasPrefix(skeleton(s), "ธ.") }
 
 func isDigits(s string) bool {

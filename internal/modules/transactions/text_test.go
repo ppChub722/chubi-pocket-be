@@ -11,8 +11,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
-// TestUpdateTextFields — see tags/text_test.go. A transfer's two rows
-// both follow; search matches the description too.
 func TestUpdateTextFields(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()
@@ -84,7 +82,6 @@ func TestUpdateTextFields(t *testing.T) {
 		t.Errorf("search by description: %d rows, want 3", len(found))
 	}
 
-	// SetText (a project row's copy) writes both, nil = clear.
 	req := UpdateRequest{}
 	req.SetText(testdb.Str("D3"), nil)
 	if _, err := svc.Update(ctx, uid, tx.ID, req); err != nil {

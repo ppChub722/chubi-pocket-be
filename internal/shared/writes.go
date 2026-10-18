@@ -1,8 +1,5 @@
 package shared
 
-// Helpers every write response uses (API spec v2): the post-write balances of
-// the wallets a write touched, and the app-bar badges.
-
 import (
 	"context"
 	"fmt"
@@ -10,10 +7,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// LoadWalletBalances returns the current balance of each wallet in ids
-// (deduped, in the order first seen). Call it AFTER the write is committed
-// (or inside the write's transaction with the Tx as q). Unknown ids are
-// skipped.
 func LoadWalletBalances(ctx context.Context, q Querier, ids []uuid.UUID) ([]WalletBalance, error) {
 	ids = uniqueIDs(ids)
 	out := make([]WalletBalance, 0, len(ids))
@@ -47,8 +40,6 @@ func LoadWalletBalances(ctx context.Context, q Querier, ids []uuid.UUID) ([]Wall
 	return out, nil
 }
 
-// LoadBadges counts the caller's unread notifications (read_at IS NULL, the
-// same predicate as the inbox's unread_count) and pending drafts.
 func LoadBadges(ctx context.Context, q Querier, userID uuid.UUID) (Badges, error) {
 	var b Badges
 	rows, err := q.Query(ctx, `SELECT

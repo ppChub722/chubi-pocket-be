@@ -1,14 +1,5 @@
 package imports
 
-// OCR dump (0.3.1 tuning, owner 2026-10-09) — a switch for comparing OCR
-// modes on real slips. Kept (not deleted) while other banks' slips are
-// still to come; off unless OCR_DUMP=1, and never in production (main.go).
-//
-// Every slip that scan-slip reads OK is read again in the background in
-// every mode (psm × preprocess) and dumped to <dir>/<time>-<file>/:
-// the original image + result.json with each mode's text, lines, conf and
-// timings — so the modes can be compared side by side.
-
 import (
 	"context"
 	"encoding/json"
@@ -27,7 +18,6 @@ type ocrDumper struct {
 	reader ocr.Reader
 }
 
-// EnableOCRDump turns the dump on.
 func (h *Handler) EnableOCRDump(dir string, reader ocr.Reader) {
 	h.dump = &ocrDumper{dir: dir, reader: reader}
 	h.log.Warn("imports: OCR dump ON — every scanned slip is re-read in all modes", "dir", dir)
@@ -47,7 +37,6 @@ type dumpFile struct {
 	TransRef    string `json:"trans_ref"` // from the phone's QR read
 	Size        int    `json:"size"`
 	ContentType string `json:"content_type"`
-	// The mode the app asked for — what the lab showed.
 	Served   dumpVariant   `json:"served"`
 	Variants []dumpVariant `json:"variants"`
 	DumpedAt time.Time     `json:"dumped_at"`
@@ -55,8 +44,6 @@ type dumpFile struct {
 
 var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
-// queueOCRDump re-reads img in every mode in the background and writes
-// the dump. No-op when the dump is off.
 func (h *Handler) queueOCRDump(img []byte, filename, key, transRef, contentType string, served ocr.Options, servedRes *ocr.Result) {
 	d := h.dump
 	if d == nil {

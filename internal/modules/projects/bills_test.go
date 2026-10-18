@@ -1,10 +1,5 @@
 package projects
 
-// Attaching existing transactions to an event after the fact (owner
-// 2026-10-10): add / quick create from existing bills only, remove (back to
-// a loose transaction), move, and deleting a board row that has personal
-// copies. Same fixture + DB convention as quick_test.go.
-
 import (
 	"context"
 	"errors"
@@ -15,7 +10,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
-// boardParentOf — the board row a personal transaction is linked to.
 func (f *qcFixture) boardParentOf(t *testing.T, txID uuid.UUID) uuid.UUID {
 	t.Helper()
 	var pt uuid.UUID
@@ -26,8 +20,6 @@ func (f *qcFixture) boardParentOf(t *testing.T, txID uuid.UUID) uuid.UUID {
 	return pt
 }
 
-// insertCopy — userID's personal copy of board row ptID (what CopyToPersonal
-// makes: floating, linked by source_project_transaction_id).
 func (f *qcFixture) insertCopy(t *testing.T, userID, projectID, ptID uuid.UUID, amount float64) uuid.UUID {
 	t.Helper()
 	id := qcMustV7(t)
@@ -53,7 +45,6 @@ func TestAddExistingBillsOnly(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
 
-	// New event from an existing bill — no new_transaction.
 	resp, err := f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{
 		Name: "From bill1", TransactionIDs: []uuid.UUID{f.bill1},
 	})
@@ -71,7 +62,6 @@ func TestAddExistingBillsOnly(t *testing.T) {
 		t.Errorf("balance moved: %.2f", b)
 	}
 
-	// Add an existing bill to that event.
 	added, err := f.svc.AddBills(ctx, f.owner, resp.Detail.Event.ID, AddBillsRequest{TransactionIDs: []uuid.UUID{f.bill2}})
 	if err != nil {
 		t.Fatalf("add existing: %v", err)
@@ -80,7 +70,6 @@ func TestAddExistingBillsOnly(t *testing.T) {
 		t.Errorf("add: transaction_id=%v linked=%d", added.NewTransactionID, len(added.Rows))
 	}
 
-	// Nothing to add.
 	if _, err := f.svc.AddBills(ctx, f.owner, resp.Detail.Event.ID, AddBillsRequest{}); !errors.Is(err, ErrQuickNothingToAdd) {
 		t.Errorf("empty add: want ErrQuickNothingToAdd, got %v", err)
 	}
@@ -110,8 +99,6 @@ func TestPullRejectsRepayment(t *testing.T) {
 	}
 }
 
-// A wallet exists only on my side; an event has none (owner 2026-10-10):
-// wallet-less bills join, the board row takes the author's currency.
 func TestPullWalletlessBill(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
@@ -136,7 +123,6 @@ func TestPullWalletlessBill(t *testing.T) {
 		t.Errorf("wallet-less bill not on the board with the user's currency")
 	}
 
-	// A wallet-less new bill too.
 	added, err := f.svc.AddBills(ctx, f.owner, resp.Detail.Event.ID, AddBillsRequest{
 		NewTransaction: &transactions.CreateRequest{
 			Type: transactions.TypeExpense, Amount: 30, Date: "2026-09-04",
@@ -163,7 +149,6 @@ func TestRemoveBill(t *testing.T) {
 	parent := f.boardParentOf(t, f.bill1)
 	beeCopy := f.insertCopy(t, f.friend, resp.Detail.Event.ID, parent, 100)
 
-	// Only the author: the owner can't remove Bee's copy, Bee can't remove bill1.
 	if _, err := f.svc.RemoveBill(ctx, f.owner, resp.Detail.Event.ID, beeCopy); !errors.Is(err, ErrQuickTxNotFound) {
 		t.Errorf("non-author: want ErrQuickTxNotFound, got %v", err)
 	}
@@ -171,7 +156,6 @@ func TestRemoveBill(t *testing.T) {
 		t.Errorf("non-author bill: want ErrQuickTxNotFound, got %v", err)
 	}
 
-	// Bee removes their copy: only the copy is unlinked; the board row stays.
 	if _, err := f.svc.RemoveBill(ctx, f.friend, resp.Detail.Event.ID, beeCopy); err != nil {
 		t.Fatalf("remove copy: %v", err)
 	}
@@ -180,8 +164,6 @@ func TestRemoveBill(t *testing.T) {
 		t.Errorf("board row must stay when a copy leaves")
 	}
 
-	// The origin leaves: board row + children go, every copy is unlinked,
-	// the bill's debts lose their project tag but stay as they were.
 	beeCopy2 := f.insertCopy(t, f.friend, resp.Detail.Event.ID, parent, 100)
 	if _, err := f.svc.RemoveBill(ctx, f.owner, resp.Detail.Event.ID, f.bill1); err != nil {
 		t.Fatalf("remove origin: %v", err)
@@ -193,8 +175,6 @@ func TestRemoveBill(t *testing.T) {
 		parent); n != 0 {
 		t.Errorf("board rows left: %d", n)
 	}
-	// The board's member splits came back as bill1's personal splits: Bee
-	// through my contact linked to her, Grandma by name.
 	if n := f.countRows(t, `
 		SELECT COUNT(*) FROM personal_debts
 		WHERE source_transaction_id = $1 AND project_id IS NULL`, f.bill1); n != 2 {
@@ -224,7 +204,6 @@ func TestRemoveBill(t *testing.T) {
 		t.Errorf("project_tx_changed(deleted) to Bee = %d, want 1", n)
 	}
 
-	// Already out.
 	if _, err := f.svc.RemoveBill(ctx, f.owner, resp.Detail.Event.ID, f.bill1); !errors.Is(err, ErrBillNotInProject) {
 		t.Errorf("second remove: want ErrBillNotInProject, got %v", err)
 	}
@@ -270,8 +249,8 @@ func TestMoveBill(t *testing.T) {
 	if n := f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE project_id = $1`, first.Detail.Event.ID); n != 0 {
 		t.Errorf("first event still has %d board rows", n)
 	}
-	// The board splits went straight to the new board row — never back
-	// into personal debts in between.
+	// The board splits went straight to the new board row — never back into personal debts in
+	// between.
 	if n := f.countRows(t, `SELECT COUNT(*) FROM personal_debts WHERE source_transaction_id = $1`,
 		f.bill1); n != 0 {
 		t.Errorf("personal splits on the moved bill = %d, want 0", n)
@@ -287,8 +266,6 @@ func TestMoveBill(t *testing.T) {
 	}
 }
 
-// v0.3.3 plan step 1: deleting a board row someone copied used to 500 on
-// CHECK transactions_project_id_implies_source.
 func TestDeleteBoardRowWithCopies(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
@@ -313,8 +290,8 @@ func TestDeleteBoardRowWithCopies(t *testing.T) {
 	}
 }
 
-// Opening balance / balance adjustment rows (system categories) aren't
-// spending — they can't join an event.
+// Opening balance / balance adjustment rows (system categories) aren't spending — they can't join
+// an event.
 func TestPullRejectsSystemRow(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
@@ -334,8 +311,6 @@ func TestPullRejectsSystemRow(t *testing.T) {
 	}
 }
 
-// Splits move onto the board, so a split labelled paid (its repayment sits
-// in the person's ledger) blocks the pull.
 func TestPullBlocksPaidSplits(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
@@ -361,8 +336,6 @@ func TestPullBlocksPaidSplits(t *testing.T) {
 	}
 }
 
-// A linked partner's split leaves my book the usual way when the bill
-// joins an event: they get split_changed (removed) for their copy.
 func TestPullMovesLinkedSplitOffPartnersBook(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
@@ -443,8 +416,8 @@ func TestNewBillSplitsGoStraightToBoard(t *testing.T) {
 	}
 }
 
-// Deleting a board row: my own bill's row gives its splits back to my bill;
-// anyone else deleting it only unlinks (never writes another user's book).
+// Deleting a board row: my own bill's row gives its splits back to my bill; anyone else deleting it
+// only unlinks (never writes another user's book).
 func TestDeleteBoardRowRestoresOnlyForAuthor(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
@@ -474,8 +447,6 @@ func TestDeleteBoardRowRestoresOnlyForAuthor(t *testing.T) {
 	}
 }
 
-// A copy of an event row is the member's share (project-as-separate-book
-// §2 "I spent"): the actor's is the amount minus the others' splits.
 func TestCopyIsMyShare(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
@@ -523,7 +494,6 @@ func TestCopyIsMyShare(t *testing.T) {
 		t.Errorf("Bee's copy should be her split (200)")
 	}
 
-	// Fully split to others: no share, no auto copy, no error.
 	full, err := f.svc.CreateProjectTransaction(ctx, f.owner, resp.Detail.Event.ID, CreateProjectTransactionRequest{
 		TransactionMemberID: me, Type: "expense", Amount: 600, Date: "2026-09-11",
 		Splits: []ProjectSplitInput{{MemberID: bee, Amount: 300}, {MemberID: gran, Amount: 300}},
@@ -536,7 +506,6 @@ func TestCopyIsMyShare(t *testing.T) {
 	}
 }
 
-// can_split / can_edit_splits / can_join_event follow the BE's own rules.
 func TestSplitFlags(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
@@ -549,8 +518,6 @@ func TestSplitFlags(t *testing.T) {
 		return [3]bool{d.CanSplit, d.CanEditSplits, d.CanJoinEvent}
 	}
 
-	// My split bill on the shared wallet: everything; the wallet mate sees
-	// it but may do nothing with it.
 	if got := flags(f.owner, f.bill2); got != [3]bool{true, true, true} {
 		t.Errorf("own split bill = %v, want all true", got)
 	}
@@ -558,7 +525,6 @@ func TestSplitFlags(t *testing.T) {
 		t.Errorf("mate's view = %v, want can_split only", got)
 	}
 
-	// A split labelled paid blocks joining an event, not editing.
 	if _, err := f.pool.Exec(ctx, `UPDATE personal_debts SET paid = TRUE WHERE id = $1`, f.debtGr1); err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +532,6 @@ func TestSplitFlags(t *testing.T) {
 		t.Errorf("repaid split bill = %v, want join false", got)
 	}
 
-	// An event bill can still carry splits of its own (a layer on my share).
 	if _, err := f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{
 		Name: "Trip", TransactionIDs: []uuid.UUID{f.bill2},
 	}); err != nil {
@@ -576,7 +541,6 @@ func TestSplitFlags(t *testing.T) {
 		t.Errorf("event bill = %v, want all true", got)
 	}
 
-	// A repayment and an adjustment row: nothing.
 	repay := qcMustV7(t)
 	if _, err := f.pool.Exec(ctx, `
 		INSERT INTO transactions (id, user_id, account_id, type, amount, date, source_personal_debt_id)
@@ -599,14 +563,10 @@ func TestSplitFlags(t *testing.T) {
 	}
 }
 
-// An event bill's own splits are a layer on my share of it (owner
-// 2026-10-10): capped at amount − the board's splits, both come off
-// my_share, and removing the bill from the event merges both layers back.
 func TestEventBillPersonalSplits(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
 
-	// bill2 ฿200, Bee ฿50 → on the board; my share 150.
 	resp, err := f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{
 		Name: "Trip", TransactionIDs: []uuid.UUID{f.bill2},
 	})
@@ -628,7 +588,6 @@ func TestEventBillPersonalSplits(t *testing.T) {
 		t.Errorf("my_share = %v, want 50 (200 − 50 board − 100 mine)", d.MyShare)
 	}
 
-	// Leaving the event: Bee's board split comes back next to Outsider.
 	if _, err := f.svc.RemoveBill(ctx, f.owner, resp.Detail.Event.ID, f.bill2); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
@@ -644,8 +603,6 @@ func TestEventBillPersonalSplits(t *testing.T) {
 	}
 }
 
-// my_share: a pulled bill counts amount − the board's member splits; a
-// personal split bill amount − its splits (a forgiven one doesn't come off).
 func TestMyShare(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()

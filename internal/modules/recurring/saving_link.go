@@ -1,10 +1,5 @@
 package recurring
 
-// Recurring ออม (goals v2, 0.3.1-10): a setting of type saving saves
-// `amount` from its wallet into a goal (nil = the spare bucket). Each item
-// becomes a pending saving draft (🐷); confirming it makes a saving entry,
-// linked to the item like a transaction would be.
-
 import (
 	"context"
 	"errors"
@@ -19,8 +14,6 @@ const typeSaving = "saving"
 
 func (s *Service) WithSavings(sv *saving_goals.Service) { s.savings = sv }
 
-// checkSavingTx — a saving setting / item: the caller's active wallet that
-// tracks its balance, and an active goal of theirs (nil = spare).
 func checkSavingTx(ctx context.Context, q rowQuerier, userID uuid.UUID, account, goal *uuid.UUID) error {
 	if account == nil {
 		return ErrValidation
@@ -52,7 +45,6 @@ func checkSavingTx(ctx context.Context, q rowQuerier, userID uuid.UUID, account,
 	return nil
 }
 
-// checkRuleRefsTx — a setting's references.
 func checkRuleRefsTx(ctx context.Context, q rowQuerier, userID uuid.UUID, r *Rule) error {
 	if err := checkRefsTx(ctx, q, userID, r.Type, r.AccountID, r.ToAccountID, r.CategoryID, r.TagIDs); err != nil {
 		return err

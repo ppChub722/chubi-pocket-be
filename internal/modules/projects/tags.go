@@ -1,16 +1,5 @@
 package projects
 
-// Event tags (owner 2026-10-12). Two layers:
-//   - event-scoped tags (event_tags): owned by the event, shared by all its
-//     members, real entities with icon / colour; bills carry them.
-//   - MY personal tags on an event (project_my_tags): each member groups
-//     events their own way; private to that member.
-//
-// Name matching (case-insensitive, trimmed) bridges the two: a pulled
-// personal transaction's tags become event tags by name, a copy into my book
-// gets my personal tags with the same names, and import creates personal
-// tags for the event tags I don't have yet.
-
 import (
 	"context"
 	"encoding/json"
@@ -25,13 +14,9 @@ import (
 )
 
 var (
-	// ErrEventTagNotFound — the path's tag isn't this event's (404).
 	ErrEventTagNotFound = errors.New("event tag not found")
-	// ErrUnknownTag — a tag id in a body isn't this event's / mine (400 TAG_NOT_FOUND).
 	ErrUnknownTag = errors.New("tag not found")
-	// ErrTagNameTaken — the event already has a tag with that name (409).
 	ErrTagNameTaken = errors.New("this event already has a tag with that name")
-	// ErrTagNameRequired — create needs a name.
 	ErrTagNameRequired = errors.New("name is required")
 )
 
@@ -43,7 +28,6 @@ func cleanTagName(n string) string {
 	return n
 }
 
-// setRowTagsTx replaces bill ptID's event tags (every id must be this event's).
 func setRowTagsTx(ctx context.Context, tx pgx.Tx, projectID, ptID uuid.UUID, tagIDs []uuid.UUID) error {
 	tagIDs = uniqueIDs(tagIDs)
 	if len(tagIDs) > 0 {
@@ -70,8 +54,6 @@ func setRowTagsTx(ctx context.Context, tx pgx.Tx, projectID, ptID uuid.UUID, tag
 	return nil
 }
 
-// ensureEventTagsTx — the event tags with these names (case-insensitive),
-// created when missing. Returns their ids (deduped, order kept).
 func ensureEventTagsTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UUID, names []string) ([]uuid.UUID, error) {
 	out := make([]uuid.UUID, 0, len(names))
 	seen := map[string]bool{}
@@ -98,7 +80,6 @@ func ensureEventTagsTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UU
 	return out, nil
 }
 
-// personalTagNamesTx — the names of userID's tags on transaction txID.
 func personalTagNamesTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) ([]string, error) {
 	rows, err := tx.Query(ctx, `SELECT t.name FROM transaction_tags tt JOIN tags t ON t.id = tt.tag_id
 		WHERE tt.transaction_id = $1 AND t.user_id = $2 ORDER BY LOWER(t.name)`, txID, userID)
@@ -117,8 +98,6 @@ func personalTagNamesTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) 
 	return out, rows.Err()
 }
 
-// personalTagNamesByIDTx — the names of userID's tags tagIDs (a new bill's
-// tag_ids, before its transaction exists).
 func personalTagNamesByIDTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, tagIDs []uuid.UUID) ([]string, error) {
 	if len(tagIDs) == 0 {
 		return nil, nil
@@ -139,10 +118,6 @@ func personalTagNamesByIDTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, ta
 	return out, rows.Err()
 }
 
-// MatchPersonalTags — the name-matching helper for resolve / claim (owner
-// 2026-10-12): userID's personal tags whose names match (case-insensitive)
-// and the names that have no personal tag yet (the app asks before
-// creating those).
 func MatchPersonalTags(ctx context.Context, q shared.Querier, userID uuid.UUID, names []string) (matched []uuid.UUID, missing []string, err error) {
 	lowered := make([]string, 0, len(names))
 	for _, n := range names {
@@ -190,7 +165,6 @@ func MatchPersonalTags(ctx context.Context, q shared.Querier, userID uuid.UUID, 
 	return matched, missing, nil
 }
 
-// setMyTagsTx replaces userID's personal tags on project projectID.
 func setMyTagsTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UUID, tagIDs []uuid.UUID) error {
 	tagIDs = uniqueIDs(tagIDs)
 	if len(tagIDs) > 0 {
@@ -217,10 +191,6 @@ func setMyTagsTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UUID, ta
 	return nil
 }
 
-// --- service: event tag CRUD + import ---
-
-// tagWriteGate — an active non-viewer member of an event not cancelled /
-// archived.
 func (s *Service) tagWriteGate(ctx context.Context, callerUserID, projectID uuid.UUID) error {
 	if _, err := s.store.GetByIDForCaller(ctx, callerUserID, projectID); err != nil {
 		return err
@@ -232,7 +202,6 @@ func (s *Service) tagWriteGate(ctx context.Context, callerUserID, projectID uuid
 	return err
 }
 
-// ListTags — GET /projects/:id/tags.
 func (s *Service) ListTags(ctx context.Context, callerUserID, projectID uuid.UUID) (*EventTagList, error) {
 	if _, err := s.store.GetByIDForCaller(ctx, callerUserID, projectID); err != nil {
 		return nil, err
@@ -253,7 +222,6 @@ func iconJSON(ic *shared.IconCode) ([]byte, error) {
 
 func isNameTaken(err error) bool { return err != nil && isUniqueViolation(err) }
 
-// CreateTag — POST /projects/:id/tags.
 func (s *Service) CreateTag(ctx context.Context, callerUserID, projectID uuid.UUID, req EventTagRequest) (*EventTagWriteResult, error) {
 	if req.Name == nil || cleanTagName(*req.Name) == "" {
 		return nil, ErrTagNameRequired
@@ -277,7 +245,6 @@ func (s *Service) CreateTag(ctx context.Context, callerUserID, projectID uuid.UU
 	return s.tagResult(ctx, callerUserID, projectID, id)
 }
 
-// UpdateTag — PUT /projects/:id/tags/:tag_id (rename / restyle).
 func (s *Service) UpdateTag(ctx context.Context, callerUserID, projectID, tagID uuid.UUID, req EventTagRequest) (*EventTagWriteResult, error) {
 	if err := s.tagWriteGate(ctx, callerUserID, projectID); err != nil {
 		return nil, err
@@ -312,7 +279,6 @@ func (s *Service) UpdateTag(ctx context.Context, callerUserID, projectID, tagID 
 	return s.tagResult(ctx, callerUserID, projectID, tagID)
 }
 
-// DeleteTag — DELETE /projects/:id/tags/:tag_id (it comes off every bill).
 func (s *Service) DeleteTag(ctx context.Context, callerUserID, projectID, tagID uuid.UUID) (*EventPatch, error) {
 	if err := s.tagWriteGate(ctx, callerUserID, projectID); err != nil {
 		return nil, err
@@ -341,9 +307,8 @@ func (s *Service) tagResult(ctx context.Context, callerUserID, projectID, tagID 
 	return out, nil
 }
 
-// ImportTags — POST /projects/:id/tags/import: a personal tag (same name
-// and icon) for each listed event tag (none listed = all) I don't have by
-// name yet. Any member may.
+// ImportTags — POST /projects/:id/tags/import: a personal tag (same name and icon) for each
+// listed event tag (none listed = all) I don't have by name yet.
 func (s *Service) ImportTags(ctx context.Context, callerUserID, projectID uuid.UUID, req EventTagImportRequest) (*EventTagImportResult, error) {
 	if _, err := s.store.GetByIDForCaller(ctx, callerUserID, projectID); err != nil {
 		return nil, err

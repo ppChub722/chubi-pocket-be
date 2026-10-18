@@ -18,7 +18,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports/ocr"
 )
 
-// newRouter wires the stub routes behind a fake auth step.
 func newRouter(logs *bytes.Buffer) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	h := NewHandler(slog.New(slog.NewTextHandler(logs, nil)), &fakeOCR{})
@@ -109,8 +108,6 @@ func TestParseTextEchoes(t *testing.T) {
 	}
 }
 
-// check → scan one → check again: the scanned file is now "seen"; reset
-// forgets it.
 func TestSlipFlowRemembersScanned(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := NewHandler(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), &fakeOCR{})
@@ -152,8 +149,6 @@ func TestSlipFlowRemembersScanned(t *testing.T) {
 	}
 }
 
-// fakeOCR answers res (or a one-line text), or err when set; it keeps the
-// options it was called with.
 type fakeOCR struct {
 	err error
 	res *ocr.Result
@@ -177,7 +172,6 @@ func slipPNG() []byte {
 	return buf.Bytes()
 }
 
-// scanReq builds a scan-slip upload; extra holds the other form fields.
 func scanReq(img []byte, extra map[string]string) *http.Request {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
@@ -236,7 +230,6 @@ func TestScanSlipRejectsBadInput(t *testing.T) {
 	}
 }
 
-// A failed read maps to its own status and doesn't count the file as seen.
 func TestScanSlipOCRErrors(t *testing.T) {
 	cases := []struct {
 		err    error
@@ -261,7 +254,6 @@ func TestScanSlipOCRErrors(t *testing.T) {
 	}
 }
 
-// A K PLUS slip read by OCR → ScanResult with a status and its drafts.
 func TestScanSlipBuildsDrafts(t *testing.T) {
 	res := &ocr.Result{Width: 1328, Lines: []ocr.Line{
 		{Text: "โอนเงินสำเร็จ", Box: ocr.Box{X: 224, Y: 66}},
@@ -307,8 +299,8 @@ func TestScanSlipUnsupportedBank(t *testing.T) {
 	}
 }
 
-// Import logs: an unknown bank code, a bank without rules, an incomplete
-// read — each written once; a clean slip writes nothing.
+// Import logs: an unknown bank code, a bank without rules, an incomplete read — each written
+// once; a clean slip writes nothing.
 func TestScanSlipWritesImportLogs(t *testing.T) {
 	okSlip := &ocr.Result{Width: 1000, Lines: []ocr.Line{
 		{Text: "โอนเงินสำเร็จ", Box: ocr.Box{Y: 10}},

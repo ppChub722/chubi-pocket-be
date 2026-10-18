@@ -19,15 +19,10 @@ func NewService(store *Store) *Service {
 	return &Service{store: store}
 }
 
-// SeedSettings is the auth.RegistrationHook entrypoint. Inserts a default
-// notification-settings row for the new user inside the registration tx.
 func (s *Service) SeedSettings(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
 	return s.store.SeedSettingsTx(ctx, tx, userID)
 }
 
-// LookupUserByEmail returns the user id for an active user with a matching
-// email, or nil if none. Always-execute path — callers run it on hits and
-// misses to keep response timing flat (privacy preservation).
 func (s *Service) LookupUserByEmail(ctx context.Context, email string) (*uuid.UUID, error) {
 	return s.store.LookupUserByEmail(ctx, email)
 }
@@ -36,12 +31,6 @@ func (s *Service) LookupUserByUsername(ctx context.Context, username string) (*u
 	return s.store.LookupUserByUsername(ctx, username)
 }
 
-// HasPendingContactLinkRequest reports whether [recipientUserID] still
-// has an unresolved `contact_link_request` notification from
-// [actorUserID] for the same [contactID]. Used by contacts.RequestLink
-// to make a re-send a no-op while the previous request is still in the
-// inbox awaiting Accept / Reject / Dismiss. Resolved (or hard-deleted)
-// rows don't count, so a follow-up request after rejection works.
 func (s *Service) HasPendingContactLinkRequest(
 	ctx context.Context, recipientUserID, actorUserID, contactID uuid.UUID,
 ) (bool, error) {
@@ -52,14 +41,10 @@ func (s *Service) HasPendingContactLinkRequest(
 	)
 }
 
-// GetSettings returns the caller's settings row.
 func (s *Service) GetSettings(ctx context.Context, userID uuid.UUID) (*Settings, error) {
 	return s.store.GetSettings(ctx, userID)
 }
 
-// Per-type switches (contract §5). Requests need an answer, so they can't
-// be muted or automated; auto exists only where the notification carries
-// an action.
 var (
 	mutableTypes = map[string]bool{
 		TypeSplitCreated: true, TypeRecurringDue: true, TypeRecurringEnding: true,
@@ -83,7 +68,6 @@ var (
 	ErrDefaultAccountBad = errors.New("default_account_id must be an active wallet you're a member of")
 )
 
-// cleanTypes validates + de-duplicates a muted_types / auto_types list.
 func cleanTypes(in []string, allowed map[string]bool) ([]string, error) {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(in))
@@ -101,8 +85,6 @@ func cleanTypes(in []string, allowed map[string]bool) ([]string, error) {
 	return out, nil
 }
 
-// UpdateSettings applies a partial patch. A muted type keeps whatever is in
-// auto_types — it's simply ignored until the type is unmuted.
 func (s *Service) UpdateSettings(ctx context.Context, userID uuid.UUID, req UpdateSettingsRequest) (*Settings, error) {
 	if req.MutedTypes != nil {
 		clean, err := cleanTypes(*req.MutedTypes, mutableTypes)
@@ -184,13 +166,6 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	return s.store.Delete(ctx, userID, id)
 }
 
-// --- Tx-aware variants for cross-module callers ---
-//
-// Producer modules (contacts, projects) sometimes need to read or mark a
-// notification inside their own action's tx — e.g., the link-request
-// accept flow reads the payload then marks actioned in the same tx as
-// setting contacts.linked_user_id.
-
 func (s *Service) GetByIDForCallerTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) (*Notification, error) {
 	return s.store.GetByIDForCallerTx(ctx, tx, userID, id)
 }
@@ -203,8 +178,6 @@ func (s *Service) MarkDismissedTx(ctx context.Context, tx pgx.Tx, userID, id uui
 	return s.store.MarkDismissedTx(ctx, tx, userID, id)
 }
 
-// SettingsCounts — the settings tile: how many of the mutable types are on
-// (not muted) and how many run automatically.
 func SettingsCounts(muted, auto []string) (on, autoN int) {
 	m := map[string]bool{}
 	for _, t := range muted {

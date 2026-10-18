@@ -52,8 +52,6 @@ func parseFixture(t *testing.T, name string) *slip.Slip {
 	return s
 }
 
-// The fixtures' accounts: sender 1234 (masked xxxxx1234x), own second
-// account 5678, a card 4000123412341234, a friend's PromptPay 9999.
 func TestBuildPendingDirection(t *testing.T) {
 	main := uuid.New()
 	savings := uuid.New()
@@ -64,7 +62,6 @@ func TestBuildPendingDirection(t *testing.T) {
 		{ID: savings, Identifiers: []accounts.Identifier{{Kind: "other", Value: "xxxxx5678x"}}},
 		{ID: card, Identifiers: []accounts.Identifier{{Kind: "card", Value: "4000123412341234"}}},
 	}
-	// 1112212345 → visible "1234" at positions 5–8, like the slip's xxxxx1234x.
 	ctx := DraftContext{Wallets: wallets, FeeCategoryID: &feeCat}
 
 	type want struct {
@@ -90,13 +87,11 @@ func TestBuildPendingDirection(t *testing.T) {
 		}
 	}
 
-	// No identifiers at all → expense, no wallet.
 	items := buildPending(parseFixture(t, "transfer_own_account"), "REF", "004", DraftContext{})
 	if d := items[0].Draft; *d.Type != typeExpense || d.AccountID != nil {
 		t.Errorf("default: %+v", d)
 	}
 
-	// Only the receiver is ours → income into it.
 	onlySavings := DraftContext{Wallets: wallets[1:2]}
 	items = buildPending(parseFixture(t, "transfer_own_account"), "REF", "004", onlySavings)
 	if d := items[0].Draft; *d.Type != typeIncome || !sameID(d.AccountID, &savings) {
@@ -109,7 +104,6 @@ func TestBuildPendingDirection(t *testing.T) {
 		t.Errorf("bank mismatch still matched: %+v", d)
 	}
 
-	// Two wallets with the same number → unsure → no wallet.
 	twice := DraftContext{Wallets: []Wallet{wallets[0], {ID: uuid.New(), Identifiers: wallets[0].Identifiers}}}
 	items = buildPending(parseFixture(t, "transfer_promptpay_phone"), "REF", "004", twice)
 	if d := items[0].Draft; d.AccountID != nil {
@@ -137,7 +131,6 @@ func TestBuildPendingFee(t *testing.T) {
 		t.Errorf("fee draft: %+v %+v", f.Draft, f.SourceRef)
 	}
 
-	// Income: the sender paid the fee — no fee draft.
 	ctx.Wallets = []Wallet{{ID: main, Identifiers: []accounts.Identifier{{Kind: "promptpay", Value: "0812349999"}}}}
 	if items := buildPending(s, "REF", "004", ctx); len(items) != 1 || *items[0].Draft.Type != typeIncome {
 		t.Errorf("income with fee: %d items, %+v", len(items), items[0].Draft)

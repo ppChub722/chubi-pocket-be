@@ -14,11 +14,10 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// ErrInvalidDefaultAccount — default_account_id must be an active wallet the
-// caller is an active member of.
+// ErrInvalidDefaultAccount — default_account_id must be an active wallet the caller is an active
+// member of.
 var ErrInvalidDefaultAccount = errors.New("default_account_id must be an active wallet you're a member of")
 
-// defaultAccountChange — (id, true) sets, (nil, true) clears, false = absent.
 func (r *UpdateProfileRequest) defaultAccountChange() (*uuid.UUID, bool, error) {
 	raw := bytes.TrimSpace(r.DefaultAccountID)
 	if len(raw) == 0 {
@@ -34,7 +33,6 @@ func (r *UpdateProfileRequest) defaultAccountChange() (*uuid.UUID, bool, error) 
 	return &id, true, nil
 }
 
-// loadSettings fills DefaultAccount and AutoCopyOwnEventBills of the profile.
 func (s *Store) loadSettings(ctx context.Context, p *Profile) error {
 	var (
 		acc              *uuid.UUID
@@ -60,7 +58,6 @@ func (s *Store) loadSettings(ctx context.Context, p *Profile) error {
 	return nil
 }
 
-// saveSettingsTx upserts the two settings that live in user_notification_settings.
 func saveSettingsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, acc *uuid.UUID, accSet bool, auto *bool) error {
 	if !accSet && auto == nil {
 		return nil

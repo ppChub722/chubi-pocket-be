@@ -40,13 +40,9 @@ var (
 	ErrSplitsExceedParent   = errors.New("sum of splits exceeds parent amount")
 	ErrMemberNotInProject   = errors.New("member does not belong to this project")
 	ErrLinkRequestNotForYou = errors.New("link request is not addressed to caller")
-	// Contract §6b.
 	ErrCannotChangeOwner = errors.New("the owner's role can't be changed here; use transfer-ownership")
 	ErrViewerReadOnly    = errors.New("viewers can't change project transactions")
-	// ErrInvalidDateRange — end_date before start_date.
 	ErrInvalidDateRange = errors.New("end_date must not be before start_date")
-	// ErrBadMemberRequest — AddMember needs (ad_hoc + display_name) or
-	// (email + display_name).
 	ErrBadMemberRequest = errors.New("add a member with ad_hoc + display_name, or email + display_name")
 )
 
@@ -77,8 +73,6 @@ func checkDates(start, end *string) error {
 	return nil
 }
 
-// CreateInTx inserts the project (the owner's member row is the caller's job,
-// in the same tx).
 func (s *Store) CreateInTx(ctx context.Context, tx pgx.Tx, ownerUserID uuid.UUID, req CreateProjectRequest) (*Project, error) {
 	if err := checkDates(req.StartDate, req.EndDate); err != nil {
 		return nil, err
@@ -114,8 +108,6 @@ func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (*Project, error) {
 	return p, nil
 }
 
-// GetByIDForCaller checks that caller is the owner or an active member.
-// Non-members get ErrProjectNotFound (no info leak).
 func (s *Store) GetByIDForCaller(ctx context.Context, userID, projectID uuid.UUID) (*Project, error) {
 	p, err := s.GetByID(ctx, projectID)
 	if err != nil {
@@ -137,7 +129,6 @@ func (s *Store) GetByIDForCaller(ctx context.Context, userID, projectID uuid.UUI
 	return p, nil
 }
 
-// ListIDs — one page of the caller's event ids (ListFilter) and the count.
 func (s *Store) ListIDs(ctx context.Context, userID uuid.UUID, f ListFilter) ([]uuid.UUID, int, error) {
 	where := []string{`(p.owner_user_id = $1 OR EXISTS (
 		SELECT 1 FROM project_members m
@@ -189,7 +180,6 @@ func (s *Store) ListIDs(ctx context.Context, userID uuid.UUID, f ListFilter) ([]
 	return out, total, rows.Err()
 }
 
-// UpdateTx applies the owner's edit (MY tags are not here: setMyTagsTx).
 func (s *Store) UpdateTx(ctx context.Context, tx pgx.Tx, actorID, id uuid.UUID, current *Project, req UpdateProjectRequest) error {
 	start, end := current.StartDate, current.EndDate
 	if req.has("start_date") {
@@ -249,8 +239,6 @@ func (s *Store) UpdateTx(ctx context.Context, tx pgx.Tx, actorID, id uuid.UUID, 
 	return nil
 }
 
-// DeleteTx deletes the project; personal transactions in it stay in their
-// books, unlinked (the CHECK needs both columns cleared together).
 func (s *Store) DeleteTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
 	if _, err := tx.Exec(ctx, `UPDATE transactions SET project_id = NULL, source_project_transaction_id = NULL
 		WHERE project_id = $1 OR source_project_transaction_id IN (SELECT id FROM project_transactions WHERE project_id = $1)`, id); err != nil {
@@ -269,8 +257,6 @@ func (s *Store) DeleteTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
 	return nil
 }
 
-// TransferOwnershipTx atomically swaps the project's owner_user_id and the
-// owner role on project_members. The new owner must be a linked active member.
 func (s *Store) TransferOwnershipTx(
 	ctx context.Context, tx pgx.Tx, projectID, currentOwner, newOwner uuid.UUID,
 ) error {
@@ -298,18 +284,6 @@ func (s *Store) TransferOwnershipTx(
 	return nil
 }
 
-// AssertWritable enforces the lifecycle gate per spec §10.3.1.
-//   - active     → all writes OK
-//   - completed  → resolve actions + edits OK, new project_transactions blocked
-//   - cancelled  → only resolve actions OK
-//   - archived   → fully read-only
-//
-// `op` selects the policy:
-//
-//	"create_pt"   blocks if !active
-//	"edit_pt"     blocks if cancelled || archived
-//	"resolve"     blocks if archived
-//	"member_crud" blocks if archived
 func (s *Store) AssertWritable(ctx context.Context, projectID uuid.UUID, op string) error {
 	var status string
 	if err := s.db.QueryRow(ctx,

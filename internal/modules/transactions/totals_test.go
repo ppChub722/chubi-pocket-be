@@ -10,8 +10,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
-// TestListTotals — totals cover the whole filtered set (not just the page),
-// use the list's own filters, and leave transfers out of both sides.
 func TestListTotals(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()

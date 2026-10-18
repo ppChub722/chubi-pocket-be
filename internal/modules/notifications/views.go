@@ -1,7 +1,5 @@
 package notifications
 
-// HTTP shapes and display-ready service methods (API spec v2).
-
 import (
 	"context"
 	"fmt"
@@ -12,7 +10,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// ListView is the spec schema NotificationList.
 type ListView struct {
 	Data        []shared.NotificationView `json:"data"`
 	UnreadCount int                       `json:"unread_count"`
@@ -20,28 +17,24 @@ type ListView struct {
 	Pagination  shared.Page               `json:"pagination"`
 }
 
-// ActionResult is the spec schema NotificationActionResult.
 type ActionResult struct {
 	Notification shared.NotificationView `json:"notification"`
 	Badges       shared.Badges           `json:"badges"`
 	Summary      InboxSummary            `json:"summary"`
 }
 
-// ReadAllResult is the spec schema ReadAllResult.
 type ReadAllResult struct {
 	MarkedRead int           `json:"marked_read"`
 	Summary    InboxSummary  `json:"summary"`
 	Badges     shared.Badges `json:"badges"`
 }
 
-// DeleteResult is the spec schema DeleteNotificationResult.
 type DeleteResult struct {
 	ID      uuid.UUID     `json:"id"`
 	Summary InboxSummary  `json:"summary"`
 	Badges  shared.Badges `json:"badges"`
 }
 
-// SettingsView is the spec schema NotificationSettings.
 type SettingsView struct {
 	MutedTypes     []string           `json:"muted_types"`
 	AutoTypes      []string           `json:"auto_types"`
@@ -53,7 +46,6 @@ func (s *Service) Badges(ctx context.Context, userID uuid.UUID) (shared.Badges, 
 	return shared.LoadBadges(ctx, s.store.db, userID)
 }
 
-// ListViews is the inbox: items built by shared.LoadNotificationViews in list order.
 func (s *Service) ListViews(ctx context.Context, userID uuid.UUID, f ListFilter) (*ListView, error) {
 	if f.AwaitsAnswer {
 		ids, err := s.awaitingIDs(ctx, userID)
@@ -163,16 +155,11 @@ func (s *Service) UpdateSettingsView(ctx context.Context, userID uuid.UUID, req 
 	return s.settingsView(ctx, st)
 }
 
-// RestoreResult un-hides a dismissed notification.
 func (s *Service) RestoreResult(ctx context.Context, userID, id uuid.UUID) (*ActionResult, error) {
 	n, err := s.store.Restore(ctx, userID, id)
 	return s.actionResult(ctx, userID, n, err)
 }
 
-// InboxSummary — ListView.summary: over ALL the user's notifications, the
-// same whatever the list's filter. needs_answer = rows that still wait for an
-// answer (shared.AwaitsAnswer), unread = unread and not dismissed,
-// dismissed = the hidden ones ("ที่ซ่อนไว้").
 type InboxSummary struct {
 	All         int `json:"all"` // everything not dismissed (the ทั้งหมด tile)
 	NeedsAnswer int `json:"needs_answer"`
@@ -184,7 +171,6 @@ func (s *Service) inboxSummary(ctx context.Context, userID uuid.UUID) (InboxSumm
 	return LoadInboxSummary(ctx, s.store.db, userID)
 }
 
-// LoadInboxSummary — the inbox summary, for the answers of other modules' notification actions.
 func LoadInboxSummary(ctx context.Context, db shared.Querier, userID uuid.UUID) (InboxSummary, error) {
 	var out InboxSummary
 	rows, err := db.Query(ctx, `SELECT type, payload, read_at, actioned_at, dismissed_at

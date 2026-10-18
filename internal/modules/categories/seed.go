@@ -1,21 +1,5 @@
 package categories
 
-// Seed catalog applied at user registration. See:
-// - design/spec/05-categories-tags.md §2.1 (system) + §2.2 (starter)
-// - design/spec/05-categories-tags.md §4.14b (color inheritance) + §4.14c
-//   (`include_in_report` defaults)
-//
-// 6 system + 11 expense parents + 37 expense subcategories + 5 income
-// flat = 59 starter rows per fresh user. Mirrors the Flutter mock seed
-// 1:1 so the API-backed app shows the same Thai-finance taxonomy users
-// were piloting against the in-memory mock.
-//
-// Color hexes are the 12-swatch palette shared by accounts / categories
-// / tags. Icon ids are free-form strings (spec §4.12) — clients render
-// against their own preset registry.
-
-// ── 6 system categories ────────────────────────────────────────────────
-
 type systemSeed struct {
 	Name            string
 	Type            string
@@ -25,13 +9,6 @@ type systemSeed struct {
 	IncludeInReport bool
 }
 
-// All 6 system categories ship with `include_in_report = false`.
-// Spec §03/§2.7: "real activity only" reports — opening balances,
-// adjustments, and transfers are bookkeeping, not spending or earning,
-// and pollute report totals if counted. The flag is the single rule
-// the summary endpoints filter by; this catalog plus the user-flagged
-// starter rows (Lending, Reimbursements/Payback) cover every "money
-// movement, not real activity" case out of the box.
 var systemCatalog = []systemSeed{
 	{Name: "Opening Balance", Type: "income", Kind: SystemOpeningIn,
 		Icon: "system_opening", Color: "#AED581", IncludeInReport: false},
@@ -50,8 +27,6 @@ var systemCatalog = []systemSeed{
 	{Name: "Debt Paid", Type: "expense", Kind: SystemDebtPaid,
 		Icon: "system_debt_paid", Color: "#E57373", IncludeInReport: false},
 }
-
-// ── Starter expense — 11 parents with subs ─────────────────────────────
 
 type starterChild struct {
 	Name            string
@@ -187,11 +162,6 @@ var starterCatalog = []starterRoot{
 		},
 	},
 	{
-		// "Adjustments" sub-category from the original FE taxonomy is
-		// intentionally omitted — Adjustment is a system category
-		// (sys_adjustment_in / sys_adjustment_out) auto-assigned by the
-		// backend on POST /v1/accounts/:id/adjust-balance. Surfacing it
-		// here as a user-editable sibling would be a confusing duplicate.
 		Name: "Other", Icon: "more_horiz", Color: "#A1887F",
 		Children: []starterChild{
 			{Name: "Miscellaneous", Icon: "more_horiz", IncludeInReport: true,
@@ -202,8 +172,6 @@ var starterCatalog = []starterRoot{
 	},
 }
 
-// ── Starter income — flat (no parents) ─────────────────────────────────
-
 type starterIncome struct {
 	Name            string
 	Icon            string
@@ -212,8 +180,6 @@ type starterIncome struct {
 	IncludeInReport bool
 }
 
-// Income-side "Adjustment" intentionally omitted — same rationale as the
-// expense side: sys_adjustment_in covers it.
 var starterIncomeCatalog = []starterIncome{
 	{Name: "Salary", Icon: "payments", Color: "#AED581", IncludeInReport: true,
 		Description: "เงินเดือนจากงานประจำ หรือรายรับหลัก"},

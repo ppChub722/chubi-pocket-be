@@ -8,11 +8,8 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 )
 
-// ScanResultVersion — bump on a breaking change to ScanResult.
 const ScanResultVersion = 1
 
-// Status of one scanned image (spec §4). `not_slip` is decided on the
-// phone (no slip QR → never uploaded); `duplicate` comes with 0.3.3.
 type Status string
 
 const (
@@ -21,9 +18,6 @@ const (
 	StatusUnsupportedBank Status = "unsupported_bank"
 )
 
-// ScanResult — what scan-slip answers for one image: what was read
-// (Slip) and the pending drafts it becomes (Pending, saved in 0.3.3).
-// Every key is always present ("" / null when unknown), except `ocr`.
 type ScanResult struct {
 	V        int           `json:"v"`
 	Status   Status        `json:"status"`
@@ -32,11 +26,9 @@ type ScanResult struct {
 	BankCode string        `json:"bank_code"`
 	Slip     *slip.Slip    `json:"slip"`
 	Pending  []PendingItem `json:"pending"`
-	// Only with debug=1 (the Imports lab).
 	OCR *ocr.Result `json:"ocr,omitempty"`
 }
 
-// PendingItem — one pending_transactions row, as-is.
 type PendingItem struct {
 	Source    string                `json:"source"` // "ocr"
 	Kind      string                `json:"kind"`   // "create"
@@ -45,9 +37,8 @@ type PendingItem struct {
 	SourceRef SlipRef               `json:"source_ref"`
 }
 
-// SlipRef — the row's source_ref: what the draft can't hold (the time,
-// the slip's ref, payee, masked numbers) and how each guess was made.
-// Display only; submit never reads it.
+// SlipRef — the row's source_ref: what the draft can't hold (the time, the slip's ref, payee,
+// masked numbers) and how each guess was made.
 type SlipRef struct {
 	Type           string     `json:"type"` // "slip"
 	Part           string     `json:"part"` // main | fee
@@ -62,7 +53,6 @@ type SlipRef struct {
 	Guessed        Guessed    `json:"guessed"`
 }
 
-// Guessed — where the draft's type / wallet / category came from.
 type Guessed struct {
 	Type     string `json:"type"`     // identifiers | default
 	Account  string `json:"account"`  // identifier | none
@@ -76,8 +66,6 @@ const (
 	partFee    = "fee"
 )
 
-// ParseTextResult — what parse-text answers: the drafts the text becomes
-// (a stub for now: none).
 type ParseTextResult struct {
 	Pending []PendingItem `json:"pending"`
 }

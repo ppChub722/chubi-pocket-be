@@ -8,8 +8,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
-// TestUpdateTextFields — see tags/text_test.go, for a project and one of
-// its rows.
 func TestUpdateTextFields(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()
@@ -82,8 +80,6 @@ func TestUpdateTextFields(t *testing.T) {
 	}
 }
 
-// TestSuggestedUpdateCarriesText — the "update to match" suggestion for a
-// personal copy maps description → description and note → note.
 func TestSuggestedUpdateCarriesText(t *testing.T) {
 	after := &ProjectTransaction{Date: "2026-10-10", Description: testdb.Str("Dinner"), Note: nil}
 	sug := suggestedUpdate(100, 100, 50, 120, 60, after)

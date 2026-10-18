@@ -21,18 +21,15 @@ const (
 	StatusArchived = "archived"
 )
 
-// IsCreditType returns true for the two account types that carry billing fields.
 func IsCreditType(t string) bool {
 	return t == TypeCreditCard || t == TypePayLater
 }
 
-// Member role enum (account_members.role).
 const (
 	MemberRoleOwner  = "owner"
 	MemberRoleMember = "member"
 )
 
-// Report scope enum (account_members.report_scope) — spec §14/5.
 const (
 	ReportScopeNone = "none"
 	ReportScopeOwn  = "own"
@@ -44,7 +41,6 @@ type Account struct {
 	UserID uuid.UUID `json:"-"`
 	Name   string    `json:"name"`
 	Type   string    `json:"type"`
-	// Group: asset | liability (shared.AccountGroup), drives the colour group.
 	Group          string           `json:"group"`
 	Balance        float64          `json:"balance"`
 	Currency       string           `json:"currency"`
@@ -60,40 +56,22 @@ type Account struct {
 	SortOrder      int              `json:"sort_order"`
 	CreatedAt      time.Time        `json:"created_at"`
 	UpdatedAt      time.Time        `json:"updated_at"`
-	// Numbers this wallet is known by on bank slips (spec 15 §5). Always an
-	// array; edited by the owner.
 	Identifiers []Identifier `json:"identifiers"`
-	// Shared-wallet fields (spec §14, pinned contract). `members` holds
-	// ACTIVE members only, always including the caller. `is_shared` =
-	// active member count > 1. `my_report_scope` is the caller's own
-	// membership setting.
 	Members       []MemberView `json:"members"`
 	MyReportScope string       `json:"my_report_scope"`
 	IsShared      bool         `json:"is_shared"`
-	// MyRole is the caller's role on the wallet; CanEdit = the caller owns it
-	// (edits fields, invites, transfers ownership, archives).
 	MyRole  string `json:"my_role"`
 	CanEdit bool   `json:"can_edit"`
-	// TrackBalance — "ติดตามยอดเงิน" (owner 2026-10-12). false: no balance
-	// shown, left out of every total / net worth, no adjust; transfers and
-	// income / expense reports as usual. Balance is still the running sum.
 	TrackBalance bool `json:"track_balance"`
-	// Savings — the caller's saving buckets in this wallet: saved, spare,
-	// available (= balance − saved), the over-balance warning.
 	Savings shared.WalletSavings `json:"savings"`
-	// 0.4.0 page numbers (spec 03): this month's cash in / out on the wallet; a
-	// card with a due day also gets the next due date and the days until it.
 	MonthIn      float64 `json:"month_in"`
 	MonthOut     float64 `json:"month_out"`
 	DueDateNext  *string `json:"due_date_next"`
 	DaysUntilDue *int    `json:"days_until_due"`
-	// Credit wallets with a limit: credit_used_pct = what is owed / the limit (rounded, not clamped); credit_available = limit − owed, ≥ 0. null otherwise.
 	CreditUsedPct   *int     `json:"credit_used_pct"`
 	CreditAvailable *float64 `json:"credit_available"`
 }
 
-// AccountMember is the account_members DB row. A pending invite has
-// JoinedAt == nil; active = JoinedAt set + LeftAt nil.
 type AccountMember struct {
 	ID          uuid.UUID  `json:"id"`
 	AccountID   uuid.UUID  `json:"account_id"`
@@ -106,8 +84,6 @@ type AccountMember struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
-// MemberView is the pinned members[] entry shape on GET /v1/accounts —
-// membership row + denormalized user display fields.
 type MemberView struct {
 	ID       uuid.UUID        `json:"id"`
 	UserID   uuid.UUID        `json:"user_id"`
@@ -118,10 +94,6 @@ type MemberView struct {
 	IsMe     bool             `json:"is_me"`
 }
 
-// MemberHistoryView is one row of GET /v1/accounts/:id/members — the full
-// membership history for the members screen: active members, pending
-// invites, and past members (left_at set). Voided invites (never joined,
-// already closed) are excluded by the store query.
 type MemberHistoryView struct {
 	ID       uuid.UUID        `json:"id"`
 	UserID   uuid.UUID        `json:"user_id"`
@@ -134,9 +106,6 @@ type MemberHistoryView struct {
 	IsMe     bool             `json:"is_me"`
 }
 
-// InviteMemberRequest — exactly one of: contact_id (one of my contacts
-// linked to an app user; owner 2026-10-11, the app's picker) or email (the
-// older form, still accepted).
 type InviteMemberRequest struct {
 	ContactID *uuid.UUID `json:"contact_id"`
 	Email     *string    `json:"email" binding:"omitempty,email"`
@@ -163,15 +132,9 @@ type CreateRequest struct {
 	PaymentDueDate *int             `json:"payment_due_date" binding:"omitempty,min=1,max=31"`
 	MinimumPayment *float64         `json:"minimum_payment"  binding:"omitempty,gte=0"`
 	Identifiers    []Identifier     `json:"identifiers"`
-	// TrackBalance — default true; false = no opening balance.
 	TrackBalance *bool `json:"track_balance"`
 }
 
-// UpdateRequest — partial. `balance` is intentionally absent (use the
-// adjust-balance endpoint per spec §3.4).
-//
-// `description`, `note`, and `icon_code` are presence-tracked: field absent →
-// leave alone; explicit `null` → clear the column.
 type UpdateRequest struct {
 	Name           *string          `json:"name"             binding:"omitempty,min=1,max=100"`
 	Type           *string          `json:"type"             binding:"omitempty,oneof=cash bank e_wallet credit_card pay_later"`
@@ -184,11 +147,7 @@ type UpdateRequest struct {
 	PaymentDueDate *int             `json:"payment_due_date" binding:"omitempty,min=1,max=31"`
 	MinimumPayment *float64         `json:"minimum_payment"  binding:"omitempty,gte=0"`
 	SortOrder      *int             `json:"sort_order"       binding:"omitempty"`
-	// Present → replaces the whole list ([] clears it); absent → unchanged.
 	Identifiers *[]Identifier `json:"identifiers"`
-	// TrackBalance turns "ติดตามยอดเงิน" off / on; CurrentBalance (only with
-	// track_balance: true) = the balance it has now (an adjustment row when
-	// it differs), so turning it back on is one call.
 	TrackBalance   *bool    `json:"track_balance"`
 	CurrentBalance *float64 `json:"current_balance"`
 
@@ -230,8 +189,6 @@ func (r *UpdateRequest) NoteChange() (*string, bool) {
 	return shared.CleanText(r.Note), r.notePresent
 }
 
-// NewBalance is a pointer so 0 is a valid target (`required` on a plain
-// float64 rejects zero) — and it may be negative (overdraft, card debt).
 type AdjustBalanceRequest struct {
 	NewBalance  *float64 `json:"new_balance" binding:"required"`
 	Date        *string  `json:"date"        binding:"omitempty,datetime=2006-01-02"`
@@ -239,16 +196,12 @@ type AdjustBalanceRequest struct {
 	Note        *string  `json:"note"        binding:"omitempty,max=500"`
 }
 
-// AdjustBalanceResult - spec AdjustBalanceResult. Transaction is the
-// adjustment row exactly as the transactions module returns it.
 type AdjustBalanceResult struct {
 	Account         *Account               `json:"account"`
 	Transaction     any                    `json:"transaction"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
 }
 
-// AccountSummary - spec AccountSummary (income / expense of one wallet over a
-// period, default the current month).
 type AccountSummary struct {
 	From             string  `json:"from"`
 	To               string  `json:"to"`
@@ -258,24 +211,19 @@ type AccountSummary struct {
 	TransactionCount int     `json:"transaction_count"`
 }
 
-// AccountDetail - spec AccountDetail: the wallet + the optional blocks
-// (null when not asked for).
 type AccountDetail struct {
 	Account
 	Summary        *AccountSummary     `json:"summary"`
 	MembersHistory []MemberHistoryView `json:"members_history"`
-	// DeletePreview — with ?include=delete_preview: what a delete would do; null unless the caller can delete (owner, no other active member).
 	DeletePreview *DeletePreview `json:"delete_preview"`
 }
 
-// TypeTotal - one by_type row of AccountTotals.
 type TypeTotal struct {
 	Type    string  `json:"type"`
 	Count   int     `json:"count"`
 	Balance float64 `json:"balance"`
 }
 
-// AccountTotals - spec AccountList.totals.
 type AccountTotals struct {
 	Assets        float64     `json:"assets"`
 	Liabilities   float64     `json:"liabilities"`
@@ -289,24 +237,16 @@ type AccountTotals struct {
 	// UntrackedCount — wallets with track_balance false (never summed).
 	UntrackedCount int `json:"untracked_count"`
 
-	// 0.4.0 summary card (spec 03): total = every tracked wallet, cash_total =
-	// the non-credit wallets, card_debt = what the cards owe, card_used_pct =
-	// card_debt / credit limit, saved_total = money set aside in the wallets
-	// (unallocated goal money not included), available_total = cash_total − saved_total.
 	Total          float64 `json:"total"`
 	CashTotal      float64 `json:"cash_total"`
 	CardDebt       float64 `json:"card_debt"`
 	CardUsedPct    int     `json:"card_used_pct"`
 	SavedTotal     float64 `json:"saved_total"`
 	AvailableTotal float64 `json:"available_total"`
-	// CashSplit — the share of cash_total by non-credit wallet type (integer %,
-	// only the types that have wallets; bank, cash, e_wallet order); CardRemaining —
-	// the cards' credit limits − card_debt, floored at 0.
 	CashSplit     []CashShare `json:"cash_split"`
 	CardRemaining float64     `json:"card_remaining"`
 }
 
-// AccountList - spec AccountList.
 type AccountList struct {
 	Data          []Account     `json:"data"`
 	Total         int           `json:"total"`
@@ -314,14 +254,11 @@ type AccountList struct {
 	ArchivedCount int           `json:"archived_count"`
 }
 
-// MembersResult - spec MembersResult. Account is null when the caller left
-// the wallet (removed themselves).
 type MembersResult struct {
 	Account *Account            `json:"account"`
 	Members []MemberHistoryView `json:"members"`
 }
 
-// AcceptInviteResult - spec AcceptInviteResult.
 type AcceptInviteResult struct {
 	Account      *Account                   `json:"account"`
 	Notification *shared.NotificationView   `json:"notification"`
@@ -329,14 +266,12 @@ type AcceptInviteResult struct {
 	Summary      notifications.InboxSummary `json:"summary"`
 }
 
-// NotificationActionResult - spec NotificationActionResult.
 type NotificationActionResult struct {
 	Notification *shared.NotificationView   `json:"notification"`
 	Badges       shared.Badges              `json:"badges"`
 	Summary      notifications.InboxSummary `json:"summary"`
 }
 
-// CashShare — one cash_split entry.
 type CashShare struct {
 	Type string `json:"type"`
 	Pct  int    `json:"pct"`

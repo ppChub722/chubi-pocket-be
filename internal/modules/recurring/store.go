@@ -86,7 +86,6 @@ func getRule(ctx context.Context, q rowQuerier, userID, id uuid.UUID, lock bool)
 	return r, nil
 }
 
-// saveRuleTx inserts (r.ID == Nil) or updates the rule row.
 func saveRuleTx(ctx context.Context, tx pgx.Tx, r *Rule) error {
 	icon, err := iconJSON(r.IconCode)
 	if err != nil {
@@ -138,7 +137,6 @@ func iconJSON(ic *shared.IconCode) ([]byte, error) {
 	return json.Marshal(ic)
 }
 
-// itemRow — the recurring_items row.
 type itemRow struct {
 	ID            uuid.UUID
 	UserID        uuid.UUID
@@ -156,7 +154,6 @@ type itemRow struct {
 	SavingEntryID *uuid.UUID
 }
 
-// linked — the item has a pending draft, a transaction or a saving entry.
 func (it *itemRow) linked() bool {
 	return it.PendingID != nil || it.TransactionID != nil || it.SavingEntryID != nil
 }
@@ -199,8 +196,6 @@ func getItem(ctx context.Context, q rowQuerier, userID, id uuid.UUID, lock bool)
 	return it, nil
 }
 
-// insertItemTx writes an item; a generated item skips a slot that already
-// has one (idempotent generation). Returns the id (Nil when skipped).
 func insertItemTx(ctx context.Context, tx pgx.Tx, it *itemRow) (uuid.UUID, error) {
 	id, _ := uuid.NewV7()
 	if it.ID != uuid.Nil {
@@ -232,7 +227,6 @@ func insertItemTx(ctx context.Context, tx pgx.Tx, it *itemRow) (uuid.UUID, error
 	return id, nil
 }
 
-// saveItemTx writes an item's mutable columns.
 func saveItemTx(ctx context.Context, tx pgx.Tx, it *itemRow) error {
 	it.Draft.Date = ptr(it.Date.Format(dateLayout))
 	draft, err := json.Marshal(it.Draft)
@@ -250,8 +244,6 @@ func saveItemTx(ctx context.Context, tx pgx.Tx, it *itemRow) error {
 }
 
 func ptr[T any](v T) *T { return &v }
-
-// --- validation of references (the caller's own) ---
 
 func checkRefsTx(ctx context.Context, q rowQuerier, userID uuid.UUID, typ string, account, toAccount, category *uuid.UUID, tags []uuid.UUID) error {
 	for _, acc := range []*uuid.UUID{account, toAccount} {

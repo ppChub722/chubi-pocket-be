@@ -9,10 +9,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// SystemKind names the 8 reserved system categories. The DB column
-// `system_kind` stores these strings; lookups by other modules (transfers,
-// opening balance, balance adjustments, debt settlements) go through
-// SystemFor.
 type SystemKind string
 
 const (
@@ -22,24 +18,16 @@ const (
 	SystemAdjustOut   SystemKind = "ADJUST_OUT"
 	SystemTransferIn  SystemKind = "TRANSFER_IN"
 	SystemTransferOut SystemKind = "TRANSFER_OUT"
-	// Auto-assigned on transactions created by the personal_debts settle
-	// flow. Both include_in_report=false so debt repayments don't double-
-	// count in spending reports — settled debt outflow/inflow is just
-	// returning the underlying amount that was originally accounted for.
 	SystemDebtReceived SystemKind = "DEBT_RECEIVED" // income — settled owed_to_me
 	SystemDebtPaid     SystemKind = "DEBT_PAID"     // expense — settled i_owe
 )
 
-// Category mirrors the row in `categories`. system_kind is omitted from JSON
-// (it's a backend implementation detail; clients see is_system + display name).
 type Category struct {
 	ID       uuid.UUID  `json:"id"`
 	UserID   uuid.UUID  `json:"-"`
 	Name     string     `json:"name"`
 	Type     string     `json:"type"`
 	ParentID *uuid.UUID `json:"parent_id"`
-	// Depth: 1 = root. Path: the ancestors root -> parent (empty for a root).
-	// Both are filled by the service (decorate), not by the row scan.
 	Depth           int              `json:"depth"`
 	Path            []PathItem       `json:"path"`
 	IsSystem        bool             `json:"is_system"`
@@ -51,25 +39,16 @@ type Category struct {
 	Note            *string          `json:"note"`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
-	// This month (spec 05): the money in the category incl. its sub-categories
-	// (my share; income categories sum income) and the number of transactions.
-	// Filled on the list and the detail.
 	MonthSpent float64 `json:"month_spent"`
 	MonthCount int     `json:"month_count"`
 }
 
-// CategoryDetail is the response shape for GET /v1/categories/:id —
-// adds computed fields. Phase 1a `transaction_count` is always 0 until the
-// transactions module ships in 1a.3.
 type CategoryDetail struct {
 	Category
 	ParentName       *string `json:"parent_name"`
 	ChildCount       int     `json:"child_count"`
 	TransactionCount int     `json:"transaction_count"`
-	// BudgetCount = budgets tracking this category (a delete takes it out of
-	// their scope).
 	BudgetCount int `json:"budget_count"`
-	// IsFeeCategory: this is the user's fee category (user_preferences.fee_category_id).
 	IsFeeCategory bool `json:"is_fee_category"`
 }
 
@@ -83,17 +62,6 @@ type CreateCategoryRequest struct {
 	Note            *string          `json:"note"              binding:"omitempty,max=500"`
 }
 
-// UpdateCategoryRequest — partial update. `type` and `is_system` are
-// immutable per spec §3.4; `status` flows through DELETE / restore;
-// `sort_order` flows through PATCH /v1/categories/reorder (§3.13).
-//
-// Presence semantics for `parent_id`, `description`, `note`, `icon_code`:
-//   - field absent → leave unchanged
-//   - field explicitly `null` → clear (set NULL / make root for parent_id)
-//   - field with a value → set
-//
-// Custom UnmarshalJSON tracks the presence flags so the service layer can
-// distinguish "leave alone" from "clear".
 type UpdateCategoryRequest struct {
 	Name            *string          `json:"name"              binding:"omitempty,min=1,max=100"`
 	ParentID        *uuid.UUID       `json:"parent_id"`
@@ -124,21 +92,14 @@ func (r *UpdateCategoryRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ParentIDChange returns (newParent, true) if the request asked to change the
-// parent. newParent is nil to mean "make root", otherwise the new parent UUID.
-// Returns (nil, false) when the field was absent.
 func (r *UpdateCategoryRequest) ParentIDChange() (*uuid.UUID, bool) {
 	return r.ParentID, r.parentIDPresent
 }
 
-// IconCodeChange returns (iconCode, true) when icon_code was present in the
-// request (even if null). Returns (nil, false) when absent (leave unchanged).
 func (r *UpdateCategoryRequest) IconCodeChange() (*shared.IconCode, bool) {
 	return r.IconCode, r.iconCodePresent
 }
 
-// DescriptionChange / NoteChange follow the same convention as
-// ParentIDChange — the bool tells the service "the client touched this field".
 func (r *UpdateCategoryRequest) DescriptionChange() (*string, bool) {
 	return shared.CleanText(r.Description), r.descriptionPresent
 }
@@ -147,8 +108,6 @@ func (r *UpdateCategoryRequest) NoteChange() (*string, bool) {
 	return shared.CleanText(r.Note), r.notePresent
 }
 
-// ReorderRequest — body of PATCH /v1/categories/reorder. Carries the user's
-// post-reorder layout for one (or both) types. See spec §3.13 for semantics.
 type ReorderRequest struct {
 	Categories []ReorderEntry `json:"categories" binding:"required,min=1,dive"`
 }
@@ -159,15 +118,12 @@ type ReorderEntry struct {
 	SortOrder int        `json:"sort_order" binding:"min=0"`
 }
 
-// PathItem - one ancestor in Category.path.
 type PathItem struct {
 	ID       uuid.UUID        `json:"id"`
 	Name     string           `json:"name"`
 	IconCode *shared.IconCode `json:"icon_code"`
 }
 
-// DeleteCategoryResult - spec DeleteCategoryResult: the children shifted up
-// to the grandparent, as returned AFTER the shift.
 type DeleteCategoryResult struct {
 	ID         uuid.UUID  `json:"id"`
 	Reparented []Category `json:"reparented"`

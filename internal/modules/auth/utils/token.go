@@ -8,8 +8,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// Claims matches the JWT shape from 01-auth.md §2.4.
-// Phase 0/1 tokens are 30-day access tokens; refresh tokens land in Phase 2+.
 type Claims struct {
 	jwt.RegisteredClaims
 	Type string `json:"type"`
@@ -36,7 +34,6 @@ func GenerateToken(userID uuid.UUID, secret string, ttl time.Duration) (string, 
 	return tok.SignedString([]byte(secret))
 }
 
-// ParseToken verifies signature + expiry and returns the user ID from `sub`.
 func ParseToken(tokenString, secret string) (uuid.UUID, error) {
 	tok, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {

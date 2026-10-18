@@ -1,8 +1,5 @@
 package me
 
-// The archived hub (ที่เก็บถาวร): everything the user archived, by kind, in one
-// call — counts and the rows to restore / delete from.
-
 import (
 	"context"
 	"fmt"
@@ -17,26 +14,20 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// ArchivedItem — one archived thing (spec ArchivedItem). The restore / delete
-// calls are the entity's own (POST /<kind>/:id/restore, DELETE /<kind>/:id).
 type ArchivedItem struct {
 	ID         uuid.UUID        `json:"id"`
 	Name       string           `json:"name"`
 	IconCode   *shared.IconCode `json:"icon_code"`
 	ArchivedAt time.Time        `json:"archived_at"` // last change of the row
-	// CanRestore — whether the caller may restore it (wallets: owner only; events: owner only).
 	CanRestore bool `json:"can_restore"`
-	// Secondary — the row's second line, as data: kind balance | limit | target | planned | amount; null for contacts.
 	Secondary *Secondary `json:"secondary"`
 }
 
-// ArchivedGroup — one kind.
 type ArchivedGroup struct {
 	Count int            `json:"count"`
 	Items []ArchivedItem `json:"items"`
 }
 
-// ArchivedHub — spec schema ArchivedHub.
 type ArchivedHub struct {
 	Total     int           `json:"total"`
 	Wallets   ArchivedGroup `json:"wallets"`
@@ -76,7 +67,6 @@ func (s *Service) archivedGroup(ctx context.Context, q string, userID uuid.UUID)
 	return g, rows.Err()
 }
 
-// Archived — GET /me/archived.
 func (s *Service) Archived(ctx context.Context, userID uuid.UUID) (*ArchivedHub, error) {
 	out := &ArchivedHub{}
 	var err error
@@ -128,7 +118,6 @@ func (s *Service) Archived(ctx context.Context, userID uuid.UUID) (*ArchivedHub,
 	return out, nil
 }
 
-// GET /v1/me/archived — getMyArchived.
 func (h *Handler) Archived(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -143,7 +132,6 @@ func (h *Handler) Archived(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// Secondary — the second line of an archived row (the app formats the amount).
 type Secondary struct {
 	Kind   string   `json:"kind"`
 	Amount *float64 `json:"amount"`

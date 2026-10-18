@@ -24,7 +24,6 @@ func NewHandler(s *Service) *Handler {
 	return &Handler{service: s}
 }
 
-// reply writes out (status) or maps err.
 func reply(c *gin.Context, status int, out any, err error) {
 	if err != nil {
 		mapServiceError(c, err)
@@ -50,9 +49,6 @@ func pathID(c *gin.Context, name, label string) (uuid.UUID, bool) {
 	return id, true
 }
 
-// --- Events ---
-
-// POST /v1/projects
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -67,7 +63,6 @@ func (h *Handler) Create(c *gin.Context) {
 	reply(c, http.StatusCreated, out, err)
 }
 
-// POST /v1/projects/quick — quick create from bills (spec §10/4.24).
 func (h *Handler) QuickCreate(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -86,7 +81,6 @@ func (h *Handler) QuickCreate(c *gin.Context) {
 	c.JSON(http.StatusCreated, out)
 }
 
-// GET /v1/projects
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -121,7 +115,6 @@ func (h *Handler) List(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// GET /v1/projects/:id
 func (h *Handler) Get(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -131,7 +124,6 @@ func (h *Handler) Get(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// GET /v1/projects/:id/detail — the detail page in one call.
 func (h *Handler) Detail(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -143,7 +135,6 @@ func (h *Handler) Detail(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// PUT /v1/projects/:id
 func (h *Handler) Update(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -157,7 +148,6 @@ func (h *Handler) Update(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// DELETE /v1/projects/:id
 func (h *Handler) Delete(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -167,7 +157,6 @@ func (h *Handler) Delete(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/projects/:id/leave
 func (h *Handler) Leave(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -177,7 +166,6 @@ func (h *Handler) Leave(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/projects/:id/transfer-ownership
 func (h *Handler) TransferOwnership(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -193,7 +181,6 @@ func (h *Handler) TransferOwnership(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// GET /v1/projects/:id/summary
 func (h *Handler) Summary(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -203,9 +190,6 @@ func (h *Handler) Summary(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// --- Members ---
-
-// GET /v1/projects/:id/members
 func (h *Handler) ListMembers(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -215,7 +199,6 @@ func (h *Handler) ListMembers(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/projects/:id/members
 func (h *Handler) AddMember(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -229,7 +212,6 @@ func (h *Handler) AddMember(c *gin.Context) {
 	reply(c, http.StatusCreated, out, err)
 }
 
-// PUT /v1/projects/:id/members/:member_id
 func (h *Handler) UpdateMember(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -247,7 +229,6 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// DELETE /v1/projects/:id/members/:member_id
 func (h *Handler) RemoveMember(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -261,7 +242,6 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/projects/:id/members/:member_id/request-link
 func (h *Handler) RequestLink(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -278,7 +258,6 @@ func (h *Handler) RequestLink(c *gin.Context) {
 	response.OK(c, "Invite sent", nil)
 }
 
-// POST /v1/projects/link-requests/:notification_id/accept
 func (h *Handler) AcceptLinkRequest(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -302,7 +281,6 @@ func (h *Handler) AcceptLinkRequest(c *gin.Context) {
 	reply(c, http.StatusOK, &InviteAcceptResult{EventDetail: out, InboxSummary: sum}, nil)
 }
 
-// POST /v1/projects/link-requests/:notification_id/reject
 func (h *Handler) RejectLinkRequest(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -325,9 +303,6 @@ func (h *Handler) RejectLinkRequest(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Project link request rejected", "inbox_summary": sum})
 }
 
-// --- Bills (board rows) ---
-
-// POST /v1/projects/:id/project-transactions
 func (h *Handler) CreatePT(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -341,7 +316,6 @@ func (h *Handler) CreatePT(c *gin.Context) {
 	reply(c, http.StatusCreated, out, err)
 }
 
-// PUT /v1/projects/:id/project-transactions/:pt_id
 func (h *Handler) UpdatePT(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -359,7 +333,6 @@ func (h *Handler) UpdatePT(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// DELETE /v1/projects/:id/project-transactions/:pt_id
 func (h *Handler) DeletePT(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -373,7 +346,6 @@ func (h *Handler) DeletePT(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// GET /v1/projects/:id/transactions — the board.
 func (h *Handler) ListPT(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -415,7 +387,6 @@ func (h *Handler) ListPT(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// PUT /v1/projects/:id/project-transactions/:pt_id/mark
 func (h *Handler) ToggleMark(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -433,8 +404,6 @@ func (h *Handler) ToggleMark(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/projects/:id/project-transactions/:pt_id/copy — my share of a
-// bill into my book (idempotent).
 func (h *Handler) CopyToPersonal(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -448,7 +417,6 @@ func (h *Handler) CopyToPersonal(c *gin.Context) {
 	reply(c, http.StatusCreated, out, err)
 }
 
-// POST /v1/projects/:id/bills — a new bill and / or my transactions pulled in.
 func (h *Handler) AddBills(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -466,7 +434,6 @@ func (h *Handler) AddBills(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// DELETE /v1/projects/:id/bills/:transaction_id — my transaction leaves.
 func (h *Handler) RemoveBill(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -484,9 +451,6 @@ func (h *Handler) RemoveBill(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// --- Event tags ---
-
-// GET /v1/projects/:id/tags
 func (h *Handler) ListTags(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -496,7 +460,6 @@ func (h *Handler) ListTags(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/projects/:id/tags
 func (h *Handler) CreateTag(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -510,7 +473,6 @@ func (h *Handler) CreateTag(c *gin.Context) {
 	reply(c, http.StatusCreated, out, err)
 }
 
-// PUT /v1/projects/:id/tags/:tag_id
 func (h *Handler) UpdateTag(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -528,7 +490,6 @@ func (h *Handler) UpdateTag(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// DELETE /v1/projects/:id/tags/:tag_id
 func (h *Handler) DeleteTag(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -542,7 +503,6 @@ func (h *Handler) DeleteTag(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/projects/:id/tags/import
 func (h *Handler) ImportTags(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -555,8 +515,6 @@ func (h *Handler) ImportTags(c *gin.Context) {
 	out, err := h.service.ImportTags(c.Request.Context(), userID, id, req)
 	reply(c, http.StatusOK, out, err)
 }
-
-// --- Helpers ---
 
 func (h *Handler) bindProjectID(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 	userID, ok := auth.UserIDFromContext(c)
@@ -630,9 +588,6 @@ func mapServiceError(c *gin.Context, err error) {
 	}
 }
 
-// mapQuickCreateError maps the bill-pull errors plus the transactions-module
-// errors that can bubble out of the embedded personal-transaction create,
-// then falls back to the shared project error mapping.
 func mapQuickCreateError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrQuickTxNotFound):
@@ -678,8 +633,6 @@ func atoiOr(s string, dflt int) int {
 	return n
 }
 
-// setStatus — archive / restore: the owner's status change (same rules and
-// answer as PUT /projects/:id {status}).
 func (h *Handler) setStatus(c *gin.Context, status string) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -690,8 +643,6 @@ func (h *Handler) setStatus(c *gin.Context, status string) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/projects/:id/archive — hide the event (not counted anywhere, read-only).
 func (h *Handler) Archive(c *gin.Context) { h.setStatus(c, StatusArchived) }
 
-// POST /v1/projects/:id/restore — an archived event is active again.
 func (h *Handler) Restore(c *gin.Context) { h.setStatus(c, StatusActive) }

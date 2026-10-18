@@ -23,9 +23,6 @@ const dateLayout = "2006-01-02"
 
 var ErrInvalidMonth = errors.New("month must be YYYY-MM")
 
-// Service aggregates the home screen in one call (contract §4). It owns
-// no money rules: totals come from the modules that define them, so the
-// dashboard can never disagree with the screen behind each tile.
 type Service struct {
 	store        *Store
 	transactions *transactions.Service
@@ -36,7 +33,6 @@ type Service struct {
 	due          shared.DueChecker
 }
 
-// WithDueCheck runs the recurring due check before the dashboard is built.
 func (s *Service) WithDueCheck(fn shared.DueChecker) { s.due = fn }
 
 func NewService(
@@ -50,8 +46,6 @@ func NewService(
 	return &Service{store: store, transactions: tx, accounts: acc, budgets: bud, goals: goals, debts: debts}
 }
 
-// Get builds the dashboard for `month` (YYYY-MM; "" = current month in
-// the caller's timezone).
 func (s *Service) Get(ctx context.Context, userID uuid.UUID, month, headerTZ string) (*Response, error) {
 	if s.due != nil {
 		if err := s.due(ctx, userID, headerTZ); err != nil {
@@ -93,8 +87,7 @@ func (s *Service) Get(ctx context.Context, userID uuid.UUID, month, headerTZ str
 		Attention:     AttentionBlock{Items: []shared.NotificationView{}},
 	}
 
-	// Each block writes only its own fields, so the goroutines never
-	// share state.
+	// Each block writes only its own fields, so the goroutines never share state.
 	g, gctx := errgroup.WithContext(ctx)
 	var accts []accounts.Account
 	g.Go(func() error {
@@ -188,7 +181,6 @@ func (s *Service) fillCategories(ctx context.Context, userID uuid.UUID, start, e
 	return nil
 }
 
-// fillTrend — one point per month, zero-filled, ending at the selected month.
 func (s *Service) fillTrend(ctx context.Context, userID uuid.UUID, start, end time.Time, out *Response) error {
 	first := start.AddDate(0, -(trendMonths - 1), 0)
 	r, err := s.summary(ctx, userID, first, end, "month", nil)
@@ -209,7 +201,6 @@ func (s *Service) fillTrend(ctx context.Context, userID uuid.UUID, start, end ti
 	return nil
 }
 
-// fillBudgets — every active budget at its own current period.
 func (s *Service) fillBudgets(ctx context.Context, userID uuid.UUID, headerTZ string, out *Response) error {
 	r, err := s.budgets.Totals(ctx, userID, headerTZ)
 	if err != nil {
@@ -252,10 +243,6 @@ func (s *Service) fillRecent(ctx context.Context, userID uuid.UUID, out *Respons
 	return nil
 }
 
-// netWorth — accounts the caller reports on (scope 'none' wallets are
-// hidden from personal figures, spec §14/5; wallets without a balance
-// too). Positive balances are assets, negative ones (credit cards,
-// overdrafts) liabilities.
 func netWorth(accts []accounts.Account) NetWorth {
 	var nw NetWorth
 	for _, a := range accts {
@@ -274,9 +261,6 @@ func netWorth(accts []accounts.Account) NetWorth {
 	return nw
 }
 
-// buildUpcoming merges the upcoming recurring items with credit card /
-// pay-later due dates inside the window. A card only shows when it has an
-// outstanding balance; its amount is that balance.
 func buildUpcoming(today time.Time, scheduled []upcomingRow, accts []accounts.Account) Upcoming {
 	up := Upcoming{Days: upcomingDays, Items: make([]UpcomingItem, 0)}
 	for _, r := range scheduled {
@@ -321,8 +305,6 @@ func buildUpcoming(today time.Time, scheduled []upcomingRow, accts []accounts.Ac
 	return up
 }
 
-// nextDayOfMonth — the next date (today included) falling on `day`,
-// clamped to the month's last day (31 → 30 Apr, 28/29 Feb).
 func nextDayOfMonth(today time.Time, day int) time.Time {
 	at := func(y int, m time.Month) time.Time {
 		last := time.Date(y, m+1, 0, 0, 0, 0, 0, today.Location()).Day()
@@ -336,7 +318,6 @@ func nextDayOfMonth(today time.Time, day int) time.Time {
 }
 
 func daysBetween(from, to time.Time) int {
-	// Dates are local midnights; rounding absorbs DST hour shifts.
 	return int(math.Round(to.Sub(from).Hours() / 24))
 }
 
@@ -344,8 +325,6 @@ func round2(f float64) float64 {
 	return math.Round(f*100) / 100
 }
 
-// fillPending — the pending block: every draft counted, the newest few
-// listed with their resolved refs.
 func (s *Service) fillPending(ctx context.Context, userID uuid.UUID, out *Response) error {
 	ps := pending.NewStore(s.store.db)
 	total, err := ps.Count(ctx, userID)
@@ -363,7 +342,6 @@ func (s *Service) fillPending(ctx context.Context, userID uuid.UUID, out *Respon
 	return nil
 }
 
-// fillAttention — the notifications of the ต้องจัดการ card, plus the badges.
 func (s *Service) fillAttention(ctx context.Context, userID uuid.UUID, out *Response) error {
 	badges, err := shared.LoadBadges(ctx, s.store.db, userID)
 	if err != nil {

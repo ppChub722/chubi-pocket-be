@@ -16,12 +16,10 @@ type Handler struct {
 	authService *auth.Service
 }
 
-// NewHandler. authService is kept for wiring compatibility (the PUT /users/me/password alias is gone).
 func NewHandler(s *Service, a *auth.Service) *Handler {
 	return &Handler{service: s, authService: a}
 }
 
-// GET /v1/users/me
 func (h *Handler) GetMe(c *gin.Context) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -37,7 +35,6 @@ func (h *Handler) GetMe(c *gin.Context) {
 	c.JSON(http.StatusOK, prof)
 }
 
-// PUT /v1/users/me
 func (h *Handler) UpdateMe(c *gin.Context) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -67,7 +64,6 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	c.JSON(http.StatusOK, prof)
 }
 
-// POST /v1/users/me/deactivate
 func (h *Handler) Deactivate(c *gin.Context) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -82,7 +78,6 @@ func (h *Handler) Deactivate(c *gin.Context) {
 	h.respondProfile(c, id)
 }
 
-// POST /v1/users/me/reactivate
 func (h *Handler) Reactivate(c *gin.Context) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {

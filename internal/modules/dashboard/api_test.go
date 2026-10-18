@@ -1,8 +1,5 @@
 package dashboard
 
-// GET /dashboard (spec v2): conformance with openapi.yaml plus the rules of
-// the new blocks (top_categories refs, pending total vs items, attention).
-
 import (
 	"context"
 	"encoding/json"
@@ -191,7 +188,7 @@ func TestDashboardAttentionRule(t *testing.T) {
 	actionedRead := e.notif(t, "split_created", &read, &actioned, nil, ago(8), empty)           // OUT: actioned + read
 	dismissedUnread := e.notif(t, "project_added", nil, nil, &dismissed, ago(9), empty)        // OUT: dismissed
 	dismissedAwaiting := e.notif(t, "split_created", &read, nil, &dismissed, ago(10), empty)    // OUT: dismissed
-	supersededRead := e.notif(t, "split_created", &read, nil, nil, ago(11), `{"superseded":1}`) // OUT: no longer awaits
+	supersededRead := e.notif(t, "split_created", &read, nil, nil, ago(11), `{"superseded":1}`)
 
 	blk := e.attention(t)
 	var got []uuid.UUID
@@ -206,14 +203,11 @@ func TestDashboardAttentionRule(t *testing.T) {
 	if !blk.Items[1].AwaitsAnswer || blk.Items[0].AwaitsAnswer {
 		t.Fatalf("awaits_answer flags: %+v", blk.Items)
 	}
-	// Badge = 1 unread (the dismissed unread one still counts as unread in
-	// the badge predicate → max(badge, rows)).
 	if blk.Total < len(blk.Items) {
 		t.Fatalf("total %d < items %d", blk.Total, len(blk.Items))
 	}
 }
 
-// total = max(unread badge, matching rows) and items cap at 10.
 func TestDashboardAttentionTotalAndCap(t *testing.T) {
 	e := newDashEnv(t)
 	now := time.Now()
@@ -225,8 +219,6 @@ func TestDashboardAttentionTotalAndCap(t *testing.T) {
 		t.Fatalf("total %d items %d, want 12 / 10", blk.Total, len(blk.Items))
 	}
 
-	// Unread but dismissed rows count in the badge (read_at IS NULL) yet
-	// are not rows of the block: total follows the larger number.
 	dismissed := now
 	for i := 0; i < 3; i++ {
 		e.notif(t, "project_added", nil, nil, &dismissed, now.Add(-time.Hour), `{}`)

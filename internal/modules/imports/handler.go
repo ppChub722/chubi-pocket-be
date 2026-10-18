@@ -1,12 +1,3 @@
-// Package imports — turning outside input into pending drafts: bank-slip
-// images scanned from the phone's gallery, and free text typed in the
-// Pending page's chat box (0.3.0).
-//
-// 0.3.1: scan-slip reads the slip's text (OCR) and answers with it — still
-// no draft. The rest is the 0.3.0 stub: validate, log, echo. "Seen" slip
-// files live in memory only (lost on restart) — just enough to walk the
-// check → scan → check-again flow from the dev lab; the real version keeps
-// them in a slip_imports table (0.3.3).
 package imports
 
 import (
@@ -31,26 +22,20 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// maxSlipBytes — a phone screenshot of a slip is well under this.
 const maxSlipBytes = 10 << 20
 
-// scanDeadline — scan-slip outlives the server's 10 s read/write timeouts:
-// a slow upload plus OCR (and maybe a wait for the OCR slot).
 const scanDeadline = 90 * time.Second
 
 type Handler struct {
 	log  *slog.Logger
 	ocr  ocr.Reader
 	dump *ocrDumper // nil unless OCR_DUMP=1 — see ocr_dump.go
-	// draftContext loads the user's wallets + fee category for the
-	// drafts; nil → drafts without them. Wired in main (WithDraftContext).
+	// draftContext loads the user's wallets + fee category for the drafts; nil → drafts without
+	// them.
 	draftContext func(ctx context.Context, userID uuid.UUID) (DraftContext, error)
-	// Import logs (migration 50): what the import met and can't handle
-	// yet. nil → not written. Wired in main (WithImportLogs).
+	// Import logs (migration 50): what the import met and can't handle yet.
 	writeLog      func(ctx context.Context, l ImportLog) error
 	providerKnown func(ctx context.Context, scheme, code string) (bool, error)
-	// resolve fills each draft's `resolved` block (wallets, category, tags,
-	// event, split persons). nil → empty blocks. Wired in main (WithResolver).
 	resolve func(ctx context.Context, userID uuid.UUID, drafts []pending.Draft) ([]pending.DraftResolved, error)
 
 	mu   sync.Mutex
@@ -61,8 +46,6 @@ func NewHandler(log *slog.Logger, reader ocr.Reader) *Handler {
 	return &Handler{log: log, ocr: reader, seen: map[uuid.UUID]map[string]bool{}}
 }
 
-// CheckRequest — POST /v1/slip-imports/check. One key per image found in
-// the chosen albums ("name|size|modified").
 type CheckRequest struct {
 	Files []string `json:"files" binding:"required,min=1,max=500,dive,min=1,max=300"`
 }
@@ -70,11 +53,9 @@ type CheckRequest struct {
 type CheckResponse struct {
 	// Keys never scanned before — the ones the app should upload.
 	NewFiles []string `json:"new_files"`
-	// Keys already scanned — skipped.
 	SeenFiles []string `json:"seen_files"`
 }
 
-// ParseTextRequest — POST /v1/pending-transactions/parse-text.
 type ParseTextRequest struct {
 	Text string `json:"text" binding:"required,min=1,max=500"`
 }
@@ -87,7 +68,6 @@ func userID(c *gin.Context) (uuid.UUID, bool) {
 	return id, ok
 }
 
-// POST /v1/slip-imports/check
 func (h *Handler) CheckSlips(c *gin.Context) {
 	uid, ok := userID(c)
 	if !ok {
@@ -114,7 +94,6 @@ func (h *Handler) CheckSlips(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// DELETE /v1/slip-imports — forget every scanned file ("ล้างประวัติการสแกน").
 func (h *Handler) ResetSlips(c *gin.Context) {
 	uid, ok := userID(c)
 	if !ok {
@@ -128,13 +107,6 @@ func (h *Handler) ResetSlips(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"forgot": n})
 }
 
-// POST /v1/pending-transactions/scan-slip — multipart: `image` (the slip,
-// PNG / JPEG), `file_key` (same key as in /check), `trans_ref` and
-// `bank_code` (from the slip's QR, read on the phone). Answers a
-// ScanResult (spec §4): what was read + the pending drafts it becomes —
-// nothing is saved yet (0.3.3). Lab knobs: `debug=1` adds the OCR result,
-// `psm` (3/4/6/11), `preprocess=1`. file_key counts as scanned only once
-// the read worked.
 func (h *Handler) ScanSlip(c *gin.Context) {
 	uid, ok := userID(c)
 	if !ok {
@@ -264,7 +236,6 @@ func (h *Handler) ScanSlip(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/pending-transactions/parse-text
 func (h *Handler) ParseText(c *gin.Context) {
 	uid, ok := userID(c)
 	if !ok {
@@ -279,19 +250,14 @@ func (h *Handler) ParseText(c *gin.Context) {
 	c.JSON(http.StatusOK, ParseTextResult{Pending: []PendingItem{}})
 }
 
-// WithDraftContext sets how a user's wallets + fee category are loaded
-// for the drafts.
 func (h *Handler) WithDraftContext(fn func(ctx context.Context, userID uuid.UUID) (DraftContext, error)) {
 	h.draftContext = fn
 }
 
-// WithResolver sets how a draft's ids are resolved for the `resolved` block
-// of every PendingItem (pending.NewResolver(pool).Resolve).
 func (h *Handler) WithResolver(fn func(ctx context.Context, userID uuid.UUID, drafts []pending.Draft) ([]pending.DraftResolved, error)) {
 	h.resolve = fn
 }
 
-// resolveItems fills Resolved on every item — one batch for all of them.
 func (h *Handler) resolveItems(ctx context.Context, uid uuid.UUID, items []PendingItem) error {
 	drafts := make([]pending.Draft, len(items))
 	for i := range items {
@@ -316,8 +282,6 @@ func (h *Handler) resolveItems(ctx context.Context, uid uuid.UUID, items []Pendi
 	return nil
 }
 
-// WithImportLogs sets where import logs go and how a provider code is
-// checked.
 func (h *Handler) WithImportLogs(
 	write func(ctx context.Context, l ImportLog) error,
 	known func(ctx context.Context, scheme, code string) (bool, error),
@@ -325,10 +289,6 @@ func (h *Handler) WithImportLogs(
 	h.writeLog, h.providerKnown = write, known
 }
 
-// noteIssues writes an import log for what this slip met and can't be
-// handled yet (spec 15 §11): a bank code we don't know, a bank with no
-// rule set, a slip that read incomplete. Failures only warn — the answer
-// to the user doesn't depend on them.
 func (h *Handler) noteIssues(ctx context.Context, uid uuid.UUID, bankCode, transRef string, out ScanResult) {
 	if h.writeLog == nil {
 		return

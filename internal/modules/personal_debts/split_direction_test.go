@@ -1,12 +1,5 @@
 package personal_debts
 
-// Split debt-direction tests: expense splits put the splitter on
-// 'paid' (counterparties owe them), income splits flip to 'received'
-// (the splitter received money that partly belongs to others); linked
-// partner mirrors invert. Live-DB tests, same conventions as
-// transactions/sharedwallets_test.go — self-skip when the dev Postgres
-// is unreachable; every fixture row is torn down in t.Cleanup.
-
 import (
 	"context"
 	"fmt"
@@ -116,7 +109,6 @@ func newSDFixture(t *testing.T) *sdFixture {
 	return f
 }
 
-// newBill inserts a raw personal transaction row for the splitter.
 func (f *sdFixture) newBill(t *testing.T, txType string, amount float64) uuid.UUID {
 	t.Helper()
 	id := sdV7(t)
@@ -152,8 +144,8 @@ func (f *sdFixture) runCreator(t *testing.T, billID uuid.UUID, parentType string
 
 func (f *sdFixture) directions(t *testing.T, userID uuid.UUID, source *uuid.UUID) []string {
 	t.Helper()
-	// $2::uuid IS NULL matches the mirror rows (partner side has no
-	// transaction in their book); otherwise filter by the source bill.
+	// $2::uuid IS NULL matches the mirror rows (partner side has no transaction in their book);
+	// otherwise filter by the source bill.
 	rows, err := f.pool.Query(context.Background(), `
 		SELECT direction FROM personal_debts
 		WHERE user_id = $1
@@ -181,7 +173,6 @@ func (f *sdFixture) directions(t *testing.T, userID uuid.UUID, source *uuid.UUID
 func TestSplitDirectionsByParentType(t *testing.T) {
 	f := newSDFixture(t)
 
-	// Expense: splitter fronted money → paid; linked mirror received.
 	expense := f.newBill(t, "expense", 900)
 	f.runCreator(t, expense, "expense")
 	for _, d := range f.directions(t, f.splitter, &expense) {
@@ -194,8 +185,6 @@ func TestSplitDirectionsByParentType(t *testing.T) {
 		t.Fatalf("expense partner mirror = %v, want [received]", mirrors)
 	}
 
-	// Income: splitter received money that partly belongs to others →
-	// received; linked mirror paid.
 	income := f.newBill(t, "income", 1000)
 	f.runCreator(t, income, "income")
 	for _, d := range f.directions(t, f.splitter, &income) {

@@ -10,12 +10,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// A person's CYCLE: entries in book order (date, created_at, id) with a running
-// balance; a cycle ends at the last entry where the balance is 0. Entries
-// after it are the CURRENT cycle, the rest are earlier cycles. A person whose
-// balance never hit 0 has only the current cycle.
-
-// cycleMark — the last entry of the previous cycle (the book position).
 type cycleMark struct {
 	Date    string
 	Created time.Time
@@ -45,7 +39,6 @@ func (s *Store) cycleBoundary(ctx context.Context, q shared.Querier, userID uuid
 	return &m, nil
 }
 
-// after — true when the entry comes after the boundary (current cycle).
 func (m *cycleMark) after(date string, created time.Time, id uuid.UUID) bool {
 	if m == nil {
 		return true

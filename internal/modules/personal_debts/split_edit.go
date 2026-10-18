@@ -1,15 +1,5 @@
 package personal_debts
 
-// Editing a bill's splits after save (owner 2026-10-10) and telling the
-// linked partners. Ledger rule: the partner's book is never changed for
-// them — they get split_changed with a one-shot "อัปเดตตาม" (or their own
-// auto switch runs it on arrival).
-//
-//   - added person    → the usual split_created (as at create)
-//   - re-amounted / removed, partner has the mirror → split_changed
-//   - partner hasn't added it yet → their pending split_created is refreshed
-//     (amount) or superseded (removed); nothing new is sent
-
 import (
 	"context"
 	"errors"
@@ -33,8 +23,6 @@ var (
 
 const amountEps = 0.005
 
-// EditForTransactionTx is the transactions.SplitsEditor hook: make
-// parentTxID's split debts match `edits` (the whole new list).
 func (s *Service) EditForTransactionTx(
 	ctx context.Context, tx pgx.Tx,
 	parentTxID, userID uuid.UUID,
@@ -63,7 +51,6 @@ func (s *Service) EditForTransactionTx(
 		return err
 	}
 
-	// Validate everything before touching a row.
 	kept := map[uuid.UUID]float64{}
 	idents := map[uuid.UUID]identityEdit{}
 	var added []transactions.SplitInput
@@ -95,13 +82,10 @@ func (s *Service) EditForTransactionTx(
 			idents[d.ID] = ident
 		}
 	}
-	// Apply: removals, re-amounts, additions.
 	for _, id := range order {
 		d := existing[id]
 		newAmount, ok := kept[id]
 		if ident, swap := idents[id]; ok && swap && ident.replace {
-			// A linked person swapped for someone else: this person is taken
-			// off (told "removed") and the new one added with the amount.
 			if err := s.notifySplitChangeTx(ctx, tx, d, 0, notifications.SplitChangeRemoved); err != nil {
 				return err
 			}
@@ -129,7 +113,6 @@ func (s *Service) EditForTransactionTx(
 				return err
 			}
 		}
-		// After the re-amount, so a newly linked partner hears the current amount.
 		if ident, ok := idents[id]; ok {
 			if err := s.applyIdentityEditTx(ctx, tx, d.ID, parentTxID, ident); err != nil {
 				return err
@@ -142,31 +125,13 @@ func (s *Service) EditForTransactionTx(
 	return nil
 }
 
-// identityEdit — the new person of a kept split (owner 2026-10-10/11).
 type identityEdit struct {
 	name      string
 	contactID *uuid.UUID // the split's contact after the edit; nil = a free name
 	newLink   bool       // contactID is a different contact than before
-	// replace — the split's contact is linked to an app user and the contact
-	// changes: not an in-place edit but remove + add (owner 2026-10-12), so
-	// the old partner hears "removed" and the new one hears split_created.
 	replace bool
 }
 
-// checkIdentityEditTx — does kept split d change its person? person_name /
-// contact_id left out (or equal) = unchanged; "contact_id": null drops the
-// contact (back to a free name).
-//
-// The name rule is enforced here, not trusted from the caller:
-//   - the contact is unchanged and not nil → the sent name is IGNORED (a
-//     contact split shows the contact's live name; there is no in-place rename);
-//   - the contact changes to another one → the name is always that contact's
-//     resolved name (shared.PersonNameSQL), whatever was sent;
-//   - no contact before and after (a free name) → a new name renames in place.
-//
-// Free names and contacts without an app account change in place; when d's
-// contact is linked to another app user (they may hold a mirror) and the
-// contact changes, the edit is a replace — see identityEdit.replace.
 func checkIdentityEditTx(
 	ctx context.Context, tx pgx.Tx, userID uuid.UUID, d *Entry, e transactions.SplitEdit,
 ) (identityEdit, bool, error) {
@@ -185,7 +150,6 @@ func checkIdentityEditTx(
 	}
 	out.replace = contactChanged && linkedPartnerTx(ctx, tx, d) != nil
 	if out.contactID == nil {
-		// A free name (no contact before or after / the contact dropped).
 		if name != "" {
 			out.name = name
 		}
@@ -210,10 +174,6 @@ func sameUUID(a, b *uuid.UUID) bool {
 	return *a == *b
 }
 
-// applyIdentityEditTx changes splitter debt debtID's person in place — same
-// row, so repayments stay. Nobody is told, except when the new contact is
-// linked to an app user: they hear it like a new split (split_created per
-// their flags).
 func (s *Service) applyIdentityEditTx(
 	ctx context.Context, tx pgx.Tx, debtID, parentTxID uuid.UUID, e identityEdit,
 ) error {
@@ -237,8 +197,8 @@ func (s *Service) applyIdentityEditTx(
 	return s.splitToPartnerTx(ctx, tx, d, *partner, parentTxID)
 }
 
-// assertSplitContactTx — a new split's contact must be the caller's own (an
-// archived contact is fine: archiving only hides it from lists and pickers).
+// assertSplitContactTx — a new split's contact must be the caller's own (an archived contact is
+// fine: archiving only hides it from lists and pickers).
 func assertSplitContactTx(ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID) error {
 	var one int
 	err := tx.QueryRow(ctx, `SELECT 1 FROM contacts WHERE id = $1 AND user_id = $2`,
@@ -249,8 +209,6 @@ func assertSplitContactTx(ctx context.Context, tx pgx.Tx, userID, contactID uuid
 	return err
 }
 
-// linkedPartnerTx — the app user behind a splitter debt's contact (nil when
-// the contact isn't linked, or is the splitter).
 func linkedPartnerTx(ctx context.Context, tx pgx.Tx, d *Entry) *uuid.UUID {
 	if d.ContactID == nil {
 		return nil
@@ -264,8 +222,6 @@ func linkedPartnerTx(ctx context.Context, tx pgx.Tx, d *Entry) *uuid.UUID {
 	return linked
 }
 
-// notifySplitChangeTx tells the linked partner that splitter debt `d` (as it
-// was before) is now `newAmount` (change=amount) or gone (change=removed).
 func (s *Service) notifySplitChangeTx(
 	ctx context.Context, tx pgx.Tx, d *Entry, newAmount float64, change string,
 ) error {
@@ -287,7 +243,6 @@ func (s *Service) notifySplitChangeTx(
 		}
 	}
 	if mirror == nil {
-		// Nothing in their book yet: keep a pending "add to my debts" in step.
 		if change == notifications.SplitChangeRemoved {
 			return s.notifs.SupersedeSplitNoticesTx(ctx, tx, *partner, notifications.TypeSplitCreated, d.ID)
 		}
@@ -315,7 +270,6 @@ func (s *Service) notifySplitChangeTx(
 	}
 	actioned := false
 	if dl.Auto {
-		// Their own switch: apply now.
 		if _, err := applySplitChangeTx(ctx, tx, mirror, p); err != nil {
 			return err
 		}

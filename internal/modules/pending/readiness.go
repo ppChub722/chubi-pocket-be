@@ -1,13 +1,9 @@
 package pending
 
-// What a draft still needs before it can be confirmed (0.4.0): the page shows
-// "ต้องใส่ข้อมูล" on it and a bulk confirm takes only the ready ones.
-
 import (
 	"strings"
 )
 
-// Missing keys of PendingTransaction.needs_input.
 const (
 	NeedAmount   = "amount"    // hard: confirm is rejected (MISSING_AMOUNT)
 	NeedType     = "type"      // hard
@@ -17,9 +13,6 @@ const (
 	NeedCategory = "category"  // soft: an uncategorized bill is valid
 )
 
-// readiness — the keys a draft is still missing, and whether it can be
-// confirmed at all (no hard key missing). A draft with no soft / hard key is
-// "ready" (the bulk confirm takes it).
 func readiness(p *PendingTransaction) (missing []string, canConfirm bool) {
 	missing = []string{}
 	hard := false
@@ -30,7 +23,6 @@ func readiness(p *PendingTransaction) (missing []string, canConfirm bool) {
 	d := p.Draft
 	switch p.Kind {
 	case KindUpdateTx:
-		// an edit of an existing transaction: nothing is required
 	case KindSettleDebt:
 		if d.Amount == nil || *d.Amount <= 0 {
 			add(NeedAmount, true)
@@ -66,7 +58,6 @@ func readiness(p *PendingTransaction) (missing []string, canConfirm bool) {
 	return missing, !hard
 }
 
-// summarize — the list summary of resolved rows.
 func summarize(rows []PendingTransaction) ListSummary {
 	s := ListSummary{Count: len(rows)}
 	for i := range rows {

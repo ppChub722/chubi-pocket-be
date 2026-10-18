@@ -11,7 +11,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// DailyPoint — one day of the list's daily series (spec TransactionDailyPoint).
 type DailyPoint struct {
 	Date    string  `json:"date"`
 	Income  float64 `json:"income"`
@@ -20,8 +19,6 @@ type DailyPoint struct {
 
 const maxDailyDays = 366
 
-// listRange — the days the summary numbers and the daily series cover: the
-// list's from / to, else the current month (user timezone).
 func (s *Service) listRange(ctx context.Context, userID uuid.UUID, f ListFilter) (from, to, today time.Time, err error) {
 	if today, err = shared.UserToday(ctx, s.store.db, userID, f.TZ); err != nil {
 		return
@@ -46,8 +43,6 @@ func (s *Service) listRange(ctx context.Context, userID uuid.UUID, f ListFilter)
 	return
 }
 
-// dailySeries — income / expense (my share) per day over [from, to] for the
-// rows `where` selects, zero-filled; empty when the range is over a year.
 func (s *Store) dailySeries(ctx context.Context, where string, args []any, from, to time.Time) ([]DailyPoint, error) {
 	out := []DailyPoint{}
 	if int(to.Sub(from).Hours()/24)+1 > maxDailyDays {
@@ -92,8 +87,6 @@ func (s *Store) dailySeries(ctx context.Context, where string, args []any, from,
 	return out, nil
 }
 
-// avgDailySpend — expense over the days of the range that have happened
-// (up to today).
 func avgDailySpend(series []DailyPoint, from, to, today time.Time) float64 {
 	end := to
 	if today.Before(end) {

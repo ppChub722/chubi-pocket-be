@@ -13,8 +13,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// --- goals ---
-
 func applyGoal(g *Goal, r *GoalRequest, creating bool) error {
 	has := func(k string) bool { return r.present[k] }
 	if creating || has("name") {
@@ -42,8 +40,6 @@ func applyGoal(g *Goal, r *GoalRequest, creating bool) error {
 	if has("icon_code") {
 		g.IconCode = r.IconCode
 	}
-	// The target is optional (0.4.0-1): missing / null = an open-ended goal;
-	// a given target must be > 0. On update, null clears it.
 	if has("target_amount") {
 		if r.TargetAmount != nil && *r.TargetAmount <= 0 {
 			return ErrValidation
@@ -174,9 +170,6 @@ func (s *Service) setStatus(ctx context.Context, userID, id uuid.UUID, check fun
 	return s.Get(ctx, userID, id, entriesPerPage, false)
 }
 
-// Archive — เก็บถาวร, also while the goal holds money (0.4.0-1): the money
-// stays in the goal but is left out of every total (savings, wallets'
-// saved / available) until the goal is restored.
 func (s *Service) Archive(ctx context.Context, userID, id uuid.UUID) (*GoalDetail, error) {
 	return s.setStatus(ctx, userID, id, func(g *Goal, _ float64) error {
 		if g.Status == StateArchived {
@@ -195,8 +188,6 @@ func (s *Service) Restore(ctx context.Context, userID, id uuid.UUID) (*GoalDetai
 	}, StateActive)
 }
 
-// Close — ปิดเป้าหมาย: the money goes to spare or back to its wallets, the
-// goal is completed.
 func (s *Service) Close(ctx context.Context, userID, id uuid.UUID, r CloseRequest) (*WriteResult, error) {
 	if r.To != BucketSpare && r.To != "wallets" {
 		return nil, ErrValidation
@@ -257,9 +248,6 @@ func (s *Service) Close(ctx context.Context, userID, id uuid.UUID, r CloseReques
 	return s.writeResult(ctx, userID, ids, []uuid.UUID{g.ID}, wallets, pageRef{goal: &g.ID})
 }
 
-// --- entries ---
-
-// sourceOf — the bucket a withdraw / move takes from.
 func bucketOf(goalID *uuid.UUID) string {
 	if goalID == nil {
 		return BucketSpare
@@ -274,8 +262,6 @@ func sameBucket(a, b *uuid.UUID) bool {
 	return *a == *b
 }
 
-// splitsFor — how much each wallet gives: the client's splits (checked) or
-// largest-first.
 func splitsFor(per map[uuid.UUID]float64, amount float64, in []Split) ([]Split, error) {
 	var total float64
 	for _, a := range per {
@@ -331,7 +317,6 @@ func splitsFor(per map[uuid.UUID]float64, amount float64, in []Split) ([]Split, 
 	return out, nil
 }
 
-// checkGoalTarget — a goal money may go into: the caller's, active.
 func (s *Service) checkGoalTarget(ctx context.Context, q querier, userID uuid.UUID, goalID *uuid.UUID) error {
 	if goalID == nil {
 		return nil
@@ -346,8 +331,6 @@ func (s *Service) checkGoalTarget(ctx context.Context, q querier, userID uuid.UU
 	return nil
 }
 
-// createEntriesTx writes one action (one row per wallet). Returns the
-// entry ids, the goals and the wallets it touched.
 func (s *Service) createEntriesTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, r EntryRequest, source string) ([]uuid.UUID, []uuid.UUID, []uuid.UUID, error) {
 	if r.Amount <= 0 || (r.Note != nil && len([]rune(*r.Note)) > 500) {
 		return nil, nil, nil, ErrValidation
@@ -381,7 +364,7 @@ func (s *Service) createEntriesTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 		if len(r.Splits) > 0 || r.ToGoalID != nil {
 			return nil, nil, nil, ErrValidation
 		}
-		walletID := uuid.Nil // no wallet_id sent = NO wallet (outside any wallet; counts for the goal only)
+		walletID := uuid.Nil
 		if r.WalletID != nil {
 			if err := checkWallet(ctx, tx, userID, *r.WalletID); err != nil {
 				return nil, nil, nil, err
@@ -446,7 +429,6 @@ func (s *Service) createEntriesTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 	return ids, goals, wallets, nil
 }
 
-// CreateEntry — POST /saving-entries.
 func (s *Service) CreateEntry(ctx context.Context, userID uuid.UUID, r EntryRequest) (*WriteResult, error) {
 	tx, err := s.store.db.Begin(ctx)
 	if err != nil {
@@ -463,8 +445,6 @@ func (s *Service) CreateEntry(ctx context.Context, userID uuid.UUID, r EntryRequ
 	return s.writeResult(ctx, userID, ids, goals, wallets, pageRef{goal: r.GoalID, spare: r.GoalID == nil})
 }
 
-// entryPageRef — the page an entry belongs to: a save's target, else its
-// source.
 func entryPageRef(e *entryRow) pageRef {
 	bucket, goal := e.FromBucket, e.FromGoalID
 	if e.Kind == KindSave {
@@ -473,8 +453,6 @@ func entryPageRef(e *entryRow) pageRef {
 	return pageRef{goal: goal, spare: bucket == BucketSpare}
 }
 
-// updateEntryTx changes one entry (amount / date / note); no bucket of its
-// wallet may go below 0.
 func (s *Service) updateEntryTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, r EntryUpdateRequest) (*entryRow, error) {
 	if err := lockUser(ctx, tx, userID); err != nil {
 		return nil, err
@@ -571,7 +549,6 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, id uuid.UUID) (*Write
 	return s.writeResult(ctx, userID, nil, goalsOf(e), walletList(e.AccountID), entryPageRef(e))
 }
 
-// writeResult — the final state after a write.
 func (s *Service) writeResult(ctx context.Context, userID uuid.UUID, entryIDs, goalIDs, walletIDs []uuid.UUID, page pageRef) (*WriteResult, error) {
 	today, err := s.today(ctx, userID)
 	if err != nil {
@@ -632,10 +609,6 @@ func (s *Service) writeResult(ctx context.Context, userID uuid.UUID, entryIDs, g
 	return out, nil
 }
 
-// --- hooks (pending / recurring) ---
-
-// SaveFromDraftTx — pending: a saving draft submitted (save `amount` from
-// the wallet into the goal, nil = spare). Returns the entry id.
 func (s *Service) SaveFromDraftTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, accountID *uuid.UUID, goalID *uuid.UUID,
 	amount float64, date string, note *string, source string) (uuid.UUID, error) {
 	d := date
@@ -648,21 +621,17 @@ func (s *Service) SaveFromDraftTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 	return ids[0], nil
 }
 
-// UpdateEntryTx — recurring also_update_link: the entry takes the item's
-// amount / date / note.
 func (s *Service) UpdateEntryTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, amount *float64, date *string, note *string, noteSet bool) error {
 	r := EntryUpdateRequest{Amount: amount, Date: date, Note: note, present: map[string]bool{"note": noteSet}}
 	_, err := s.updateEntryTx(ctx, tx, userID, id, r)
 	return err
 }
 
-// DeleteEntryTx — recurring delete_linked_tx.
 func (s *Service) DeleteEntryTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) error {
 	_, err := s.deleteEntryTx(ctx, tx, userID, id)
 	return err
 }
 
-// walletList — the wallet an entry touched (none for money with no wallet).
 func walletList(id uuid.UUID) []uuid.UUID {
 	if id == uuid.Nil {
 		return nil

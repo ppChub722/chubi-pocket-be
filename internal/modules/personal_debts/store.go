@@ -24,34 +24,20 @@ func NewStore(db *pgxpool.Pool) *Store {
 func (s *Store) Pool() *pgxpool.Pool { return s.db }
 
 var (
-	// ErrEntryNotFound — not the caller's entry (404 NOT_FOUND).
 	ErrEntryNotFound = errors.New("debt entry not found")
-	// ErrPersonNotFound — a typed-name key with no entries (404 NOT_FOUND).
 	ErrPersonNotFound = errors.New("no entries with this person")
-	// ErrContactNotFound — the contact doesn't exist or belongs to another
-	// user. Never link an entry to someone else's contact row.
 	ErrContactNotFound = errors.New("contact not found")
-	// ErrTagsNeedWallet — tags belong to the wallet transaction.
 	ErrTagsNeedWallet = errors.New("tags go on the wallet transaction: pick a wallet first")
-	// ErrLedgerOnlyNoWallet — a ledger-only entry (create_transaction false)
-	// has no wallet or tags: they belong to the transaction.
 	ErrLedgerOnlyNoWallet = errors.New("a ledger-only entry has no wallet or tags: turn create_transaction on to use them")
-	// ErrMarkPaidNotFound — a mark_paid_ids entry isn't this person's.
 	ErrMarkPaidNotFound = errors.New("an entry to mark paid is not one of this person's")
-	// ErrManagedBySource — a split-sourced entry edits only description /
-	// note / paid (409 ENTRY_MANAGED_BY_SOURCE).
 	ErrManagedBySource = errors.New("this entry comes from a split: only its description, note and paid label can change here")
 )
 
-// querier is satisfied by both *pgxpool.Pool and pgx.Tx.
 type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// assertContactOwned returns ErrContactNotFound unless contactID is one of
-// userID's own contacts. nil contactID is always fine (free-text name). An
-// archived contact is fine: archiving only hides a contact from lists and
-// pickers, it never blocks a money record.
+// assertContactOwned returns ErrContactNotFound unless contactID is one of userID's own contacts.
 func assertContactOwned(ctx context.Context, q querier, userID uuid.UUID, contactID *uuid.UUID) error {
 	if contactID == nil {
 		return nil
@@ -86,7 +72,6 @@ func scanEntry(row pgx.Row) (*Entry, error) {
 	return &e, err
 }
 
-// getEntry — the caller's entry (FOR UPDATE inside a write).
 func getEntry(ctx context.Context, q querier, userID, id uuid.UUID, forUpdate bool) (*Entry, error) {
 	sql := `SELECT ` + entryColumns + ` FROM personal_debts WHERE id = $1 AND user_id = $2`
 	if forUpdate {
@@ -102,7 +87,6 @@ func getEntry(ctx context.Context, q querier, userID, id uuid.UUID, forUpdate bo
 	return e, nil
 }
 
-// getAnyEntryTx — any user's entry, locked (the split flows touch both books).
 func getAnyEntryTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*Entry, error) {
 	e, err := scanEntry(tx.QueryRow(ctx,
 		`SELECT `+entryColumns+` FROM personal_debts WHERE id = $1 FOR UPDATE`, id))
@@ -112,8 +96,6 @@ func getAnyEntryTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*Entry, error)
 	return e, err
 }
 
-// insertEntryTx writes a new entry (e.ID is assigned) and bumps the
-// contact's last_used_at (the "recent first" typeahead).
 func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -145,10 +127,6 @@ func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 	return row, nil
 }
 
-// --- people (balances) ---
-
-// peopleSQL aggregates the caller's entries per person key ($1 = user id).
-// keyFilter (may be "") narrows the entries, e.g. `AND <key> = ANY($2)`.
 func peopleSQL(keyFilter string) string {
 	return `
 		WITH e AS (
@@ -184,16 +162,12 @@ func peopleSQL(keyFilter string) string {
 		LEFT JOIN users lu ON lu.id = c.linked_user_id`
 }
 
-// todayInUserTZ — the user's calendar date today (their stored timezone, else
-// Asia/Bangkok); $1 = user id.
 const todayInUserTZ = `(NOW() AT TIME ZONE COALESCE(
 	(SELECT z.name FROM pg_timezone_names z JOIN user_preferences up ON up.preferences->>'timezone' = z.name
 	 WHERE up.user_id = $1 LIMIT 1), 'Asia/Bangkok'))::date`
 
-// TodayInUserTZSQL is todayInUserTZ for packages that fingerprint days_outstanding.
 const TodayInUserTZSQL = todayInUserTZ
 
-// openSQL — the person has something open: net ≠ 0 or an entry not labelled paid.
 const openSQL = `(ABS(p.net) > 0.005 OR p.open_count > 0)`
 
 func scanPerson(rows pgx.Rows) (DebtPerson, error) {
@@ -217,7 +191,6 @@ func scanPerson(rows pgx.Rows) (DebtPerson, error) {
 	return p, nil
 }
 
-// listPeople — one page of people (PeopleFilter) and the filtered count.
 func (s *Store) listPeople(ctx context.Context, userID uuid.UUID, f PeopleFilter) ([]DebtPerson, int, error) {
 	where := []string{"TRUE"}
 	args := []any{userID}
@@ -258,7 +231,6 @@ func (s *Store) listPeople(ctx context.Context, userID uuid.UUID, f PeopleFilter
 	return out, total, rows.Err()
 }
 
-// totals — the header / tile numbers over every person.
 func (s *Store) totals(ctx context.Context, q shared.Querier, userID uuid.UUID) (DebtTotals, error) {
 	var t DebtTotals
 	rows, err := q.Query(ctx, `
@@ -283,9 +255,6 @@ func (s *Store) totals(ctx context.Context, q shared.Querier, userID uuid.UUID) 
 	return t, rows.Err()
 }
 
-// personBalance — one person's balance. found = they have entries; a
-// contact key without entries still resolves (zeros) when the contact is
-// the caller's.
 func (s *Store) personBalance(ctx context.Context, q shared.Querier, userID uuid.UUID, k shared.DebtPersonKey) (DebtPerson, bool, error) {
 	key := k.Key()
 	rows, err := q.Query(ctx, `SELECT key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD'), cleared_at, days_out
@@ -324,9 +293,6 @@ func (s *Store) personBalance(ctx context.Context, q shared.Querier, userID uuid
 	return p, false, nil
 }
 
-// --- entries (views) ---
-
-// entryViewSQL — an entry with its wallet transaction and source title.
 const entryViewSQL = `SELECT pd.id, ` + `pd.direction, pd.counterparty_contact_id, pd.counterparty_person_name,
 		pd.amount, to_char(pd.date, 'YYYY-MM-DD'), pd.description, pd.note, pd.paid, pd.source_kind,
 		CASE pd.source_kind WHEN 'transaction' THEN pd.source_transaction_id
@@ -343,8 +309,6 @@ const entryViewSQL = `SELECT pd.id, ` + `pd.direction, pd.counterparty_contact_i
 	LEFT JOIN personal_debts op ON op.id = pd.counterpart_debt_id
 	LEFT JOIN users ou ON ou.id = op.user_id`
 
-// loadViews runs entryViewSQL + tail (WHERE / ORDER / LIMIT) and resolves
-// the wallets in one batch.
 func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) ([]DebtEntry, error) {
 	rows, err := q.Query(ctx, entryViewSQL+" "+tail, args...)
 	if err != nil {
@@ -404,7 +368,6 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 	return out, nil
 }
 
-// entryView — one entry, page-ready.
 func entryView(ctx context.Context, q shared.Querier, userID, id uuid.UUID) (*DebtEntry, error) {
 	vs, err := loadViews(ctx, q, `WHERE pd.id = $1 AND pd.user_id = $2`, id, userID)
 	if err != nil {
@@ -416,7 +379,6 @@ func entryView(ctx context.Context, q shared.Querier, userID, id uuid.UUID) (*De
 	return &vs[0], nil
 }
 
-// listEntries — one page of a person's entries and the filtered count.
 func (s *Store) listEntries(ctx context.Context, userID uuid.UUID, key string, f EntryFilter) ([]DebtEntry, int, error) {
 	where := []string{"pd.user_id = $1", shared.DebtKeySQL("pd") + " = $2"}
 	args := []any{userID, key}
@@ -487,7 +449,6 @@ func (s *Store) listEntries(ctx context.Context, userID uuid.UUID, key string, f
 	return out, total, err
 }
 
-// entryCounts — the person page tab counts.
 func (s *Store) entryCounts(ctx context.Context, userID uuid.UUID, key string) (EntryCounts, error) {
 	var c EntryCounts
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(t.id) FROM personal_debts pd
@@ -512,7 +473,6 @@ func (s *Store) entryCounts(ctx context.Context, userID uuid.UUID, key string) (
 	return c, err
 }
 
-// entryTxID — the entry's wallet transaction, if any.
 func entryTxID(ctx context.Context, q querier, entryID uuid.UUID) (*uuid.UUID, error) {
 	var id uuid.UUID
 	err := q.QueryRow(ctx, `SELECT id FROM transactions WHERE source_personal_debt_id = $1`, entryID).Scan(&id)
@@ -525,11 +485,6 @@ func entryTxID(ctx context.Context, q querier, entryID uuid.UUID) (*uuid.UUID, e
 	return &id, nil
 }
 
-// --- contacts hooks ---
-
-// UnlinkedNames returns (counterparty_person_name, count) pairs for every
-// entry owned by userID whose counterparty_contact_id is NULL — the wire-up
-// surface on contact detail. Highest count first.
 func (s *Store) UnlinkedNames(ctx context.Context, userID uuid.UUID) ([]struct {
 	Name  string
 	Count int
@@ -561,9 +516,6 @@ func (s *Store) UnlinkedNames(ctx context.Context, userID uuid.UUID) ([]struct {
 	return out, rows.Err()
 }
 
-// AbsorbForContact wires every entry whose typed name matches one of names
-// (case-insensitive) to contactID, snapshotting the contact's display_name.
-// Returns the rows rewritten; bumps contacts.last_used_at.
 func (s *Store) AbsorbForContact(ctx context.Context, userID, contactID uuid.UUID, names []string) (int, error) {
 	if len(names) == 0 {
 		return 0, nil
@@ -605,10 +557,6 @@ func (s *Store) AbsorbForContact(ctx context.Context, userID, contactID uuid.UUI
 	return int(tag.RowsAffected()), nil
 }
 
-// RestoreOnContactDeleteTx snapshots the contact's SHOWN name (nickname / linked
-// profile name / display_name: shared.PersonNameSQL) onto every
-// entry referencing it, BEFORE the FK ON DELETE SET NULL fires (the entries
-// become a typed-name person). Called inside the contact-delete tx.
 func (s *Store) RestoreOnContactDeleteTx(ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID) (int, error) {
 	var displayName string
 	if err := tx.QueryRow(ctx,
@@ -638,9 +586,6 @@ func round2(f float64) float64 {
 	return float64(int64(f*100+0.5)) / 100
 }
 
-// peopleOrder — the people list order: oldest = the oldest open entry first
-// (days_outstanding desc, none last, then |net|); amount = |net| desc; recent
-// = the latest activity first.
 func peopleOrder(sort string) string {
 	switch sort {
 	case "amount":

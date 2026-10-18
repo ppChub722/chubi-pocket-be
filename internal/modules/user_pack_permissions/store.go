@@ -16,8 +16,6 @@ func NewStore(db *pgxpool.Pool) *Store {
 	return &Store{db: db}
 }
 
-// ListForUser returns all non-expired pack permissions for the user.
-// Expired rows (expires_at IS NOT NULL AND expires_at < NOW()) are excluded.
 func (s *Store) ListForUser(ctx context.Context, userID uuid.UUID) ([]UserPackPermission, error) {
 	q := `SELECT id, user_id, pack_id, granted_at, expires_at
 		FROM user_pack_permissions

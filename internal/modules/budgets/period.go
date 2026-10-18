@@ -4,7 +4,6 @@ import "time"
 
 const maxPeriods = 5000 // safety stop for any loop
 
-// span — one period's dates (end nil = open-ended).
 type span struct {
 	Start time.Time
 	End   *time.Time
@@ -18,7 +17,6 @@ func days(a, b time.Time) int { return int(b.Sub(a).Hours() / 24) }
 
 func dptr(t time.Time) *time.Time { return &t }
 
-// nthStart — the start of the k-th period counted from anchor.
 func (b *Budget) nthStart(anchor time.Time, k int) time.Time {
 	n := k * b.Interval
 	switch *b.Freq {
@@ -42,9 +40,6 @@ func (b *Budget) nthStart(anchor time.Time, k int) time.Time {
 	return time.Date(first.Year(), first.Month(), d, 0, 0, 0, 0, time.UTC)
 }
 
-// stopDate — the last day the budget may count, from its end and ปิดงบ
-// (nil = open). baseSeq = periods kept before the anchor (a count end
-// counts them too).
 func (b *Budget) stopDate(baseSeq int) *time.Time {
 	var stop *time.Time
 	min := func(t time.Time) {
@@ -69,8 +64,6 @@ func (b *Budget) stopDate(baseSeq int) *time.Time {
 	return stop
 }
 
-// spans — the periods from the anchor that have started by `until` (the
-// first one always), each cut at the stop date.
 func (b *Budget) spans(baseSeq int, until time.Time) []span {
 	stop := b.stopDate(baseSeq)
 	cut := func(sp span) span {
@@ -97,7 +90,6 @@ func (b *Budget) spans(baseSeq int, until time.Time) []span {
 	return out
 }
 
-// state — the budget's state on `today`.
 func (b *Budget) state(today time.Time, baseSeq int) string {
 	switch {
 	case b.Status == StatusArchived:

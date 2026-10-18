@@ -1,11 +1,5 @@
 package transactions
 
-// Page-ready rows (API spec v2, schema Transaction): every list / detail /
-// write response builds its TransactionDetails here, so the shape and the
-// rules behind the flags live in one place. One query per kind for the whole
-// slice (row facts, account / category / event refs, tags, splits, persons)
-// — never per row.
-
 import (
 	"context"
 	"fmt"
@@ -15,7 +9,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// rowFacts — what one query learns about each row besides its columns.
 type rowFacts struct {
 	currency      string
 	myShare       *float64
@@ -31,14 +24,11 @@ type rowFacts struct {
 	peerAccountID *uuid.UUID
 	kind          *string // this row's category system_kind
 	peerKind      *string
-	// The debt entry the row is the wallet side of (author's book).
 	debtContactID *uuid.UUID
 	debtName      *string
 	debtDirection *string
 	debtPaid      *bool
-	// The board bill (parent) the row belongs to.
 	billID *uuid.UUID
-	// The recurring item linked to the row.
 	recItemID   *uuid.UUID
 	recItemUser *uuid.UUID
 	recItemSeq  *int
@@ -48,10 +38,6 @@ type rowFacts struct {
 	recTotal    *int
 }
 
-// buildDetails turns rows into page-ready TransactionDetails for callerID.
-// withSplits fills `splits` (detail and write responses; [] when none);
-// list rows leave it nil (null). q is the pool, or the write's pgx.Tx when
-// the rows aren't committed yet.
 func buildDetails(
 	ctx context.Context, q shared.Querier, callerID uuid.UUID, rows []Transaction, withSplits bool,
 ) ([]TransactionDetail, error) {
@@ -143,7 +129,6 @@ func buildDetails(
 			d.Splits = &s
 		}
 		f := facts[r.ID]
-		// The debt entry lives in the author's book: only they see it.
 		if r.SourcePersonalDebtID != nil && f.debtDirection != nil && r.UserID == callerID {
 			name := ""
 			if f.debtName != nil {
@@ -176,8 +161,6 @@ func buildDetails(
 		own := r.UserID == callerID
 		d.CanSplit = f.billable
 		d.CanEditSplits = f.billable && own
-		// An event bill's own splits stay on it when it moves (only the
-		// board splits travel), so a repaid one doesn't block the move.
 		d.CanJoinEvent = f.billable && own && (f.eventBill || !f.closed)
 		d.IsLocked = r.AccountID != nil && !f.callerActive
 		d.CanEditCategory = own && !d.IsLocked && f.billable
@@ -200,8 +183,8 @@ func buildDetails(
 	return out, nil
 }
 
-// transferDirection — out when this row carries the Transfer OUT system
-// category (or, without one, its twin carries Transfer IN).
+// transferDirection — out when this row carries the Transfer OUT system category (or, without
+// one, its twin carries Transfer IN).
 func transferDirection(f rowFacts) string {
 	switch {
 	case f.kind != nil && *f.kind == "TRANSFER_OUT":
@@ -271,7 +254,6 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 	return out, rows.Err()
 }
 
-// loadRowTags — the caller's tags on each row (tags are per user), by name.
 func loadRowTags(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID][]shared.TagRef, error) {
 	rows, err := q.Query(ctx, `
 		SELECT tt.transaction_id, t.id, t.name, t.icon_code
@@ -299,9 +281,6 @@ func loadRowTags(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids 
 	return out, rows.Err()
 }
 
-// loadSplits — the split entries each row made in the caller's book (a shared-wallet
-// member who isn't the author gets none: the debts are the author's), with
-// the person resolved by the name rule (live contact name).
 func loadSplits(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID][]SplitRef, error) {
 	rows, err := q.Query(ctx, `
 		SELECT source_transaction_id, id, counterparty_person_name, counterparty_contact_id,
@@ -350,7 +329,6 @@ func loadSplits(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids [
 	return out, nil
 }
 
-// detailOf builds one row with its splits (detail / write responses).
 func detailOf(ctx context.Context, q shared.Querier, callerID uuid.UUID, t *Transaction) (*TransactionDetail, error) {
 	ds, err := buildDetails(ctx, q, callerID, []Transaction{*t}, true)
 	if err != nil {

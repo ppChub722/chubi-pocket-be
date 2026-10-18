@@ -14,8 +14,6 @@ const (
 	StatusArchived = "archived"
 )
 
-// LinkedUser - spec schema LinkedUser: the app user a contact is linked to
-// (live profile values).
 type LinkedUser struct {
 	ID          uuid.UUID        `json:"id"`
 	DisplayName string           `json:"display_name"`
@@ -24,10 +22,6 @@ type LinkedUser struct {
 	IconCode    *shared.IconCode `json:"icon_code"`
 }
 
-// Contact - spec schema Contact. Name is the resolved display name
-// (shared.PersonNameSQL: nickname when set and shown, else the linked user's
-// live profile name, else display_name). Email / IconCode are resolved too:
-// the linked user's when linked, else the contact's own.
 type Contact struct {
 	ID           uuid.UUID        `json:"id"`
 	UserID       uuid.UUID        `json:"-"`
@@ -43,21 +37,15 @@ type Contact struct {
 	LinkedUserID *uuid.UUID       `json:"-"`
 	LinkedUser   *LinkedUser      `json:"linked_user"`
 	Status       string           `json:"status"`
-	// LastUsedAt is bumped whenever this contact is referenced by a new
-	// personal_debts row (drives the "recent first" typeahead sort).
 	LastUsedAt *time.Time `json:"last_used_at"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
-// ContactDetail - spec schema ContactDetail: the contact plus the
-// absorbable free-text names (only with ?include=unlinked_names, else null).
 type ContactDetail struct {
 	Contact
 	UnlinkedNames []UnlinkedName `json:"unlinked_names"`
-	// UnlinkedTotal — always present: the wizard badge (names + records).
 	UnlinkedTotal UnlinkedTotal `json:"unlinked_total"`
-	// DeletePreview — only with ?include=delete_preview, else null.
 	DeletePreview *DeletePreview `json:"delete_preview"`
 }
 
@@ -70,9 +58,6 @@ type CreateContactRequest struct {
 	Description  *string          `json:"description"  binding:"omitempty,max=200"`
 	Note         *string          `json:"note"         binding:"omitempty,max=500"`
 	IconCode     *shared.IconCode `json:"icon_code"    binding:"omitempty"`
-	// AbsorbNames wires existing free-text person_names from the caller's
-	// personal_debts to the new contact in the same call. Case-insensitive
-	// exact match against counterparty_person_name.
 	AbsorbNames []string `json:"absorb_names"`
 }
 
@@ -91,8 +76,6 @@ type UpdateContactRequest struct {
 	nicknamePresent    bool
 }
 
-// UnmarshalJSON records which keys the body carried: an absent description /
-// note / nickname stays as is; null or "" clears it.
 func (r *UpdateContactRequest) UnmarshalJSON(data []byte) error {
 	type alias UpdateContactRequest
 	present, err := shared.DecodeTracked(data, (*alias)(r))
@@ -122,24 +105,20 @@ type ListResponse struct {
 	Data []Contact `json:"data"`
 }
 
-// AbsorbRequest - spec AbsorbRequest.
 type AbsorbRequest struct {
 	Names []string `json:"names" binding:"required,min=1,dive,min=1"`
 }
 
-// AbsorbResult - spec AbsorbResult.
 type AbsorbResult struct {
 	Contact       Contact `json:"contact"`
 	AbsorbedCount int     `json:"absorbed_count"`
 }
 
-// DeleteContactResult - spec DeleteContactResult.
 type DeleteContactResult struct {
 	ID             uuid.UUID `json:"id"`
 	SplitsRestored int       `json:"splits_restored"`
 }
 
-// LinkRequestResult - spec LinkRequestResult.
 type LinkRequestResult struct {
 	Contact      *Contact                   `json:"contact"`
 	Notification *shared.NotificationView   `json:"notification"`
@@ -147,15 +126,10 @@ type LinkRequestResult struct {
 	Summary      notifications.InboxSummary `json:"summary"`
 }
 
-// UnlinkedNameList - spec UnlinkedNameList.
 type UnlinkedNameList struct {
 	Data []UnlinkedName `json:"data"`
 }
 
-// SenderProfile - spec SenderProfile: the sender of a link request, plus
-// the caller's own contact that already links to that sender (null when
-// none). Gated to "caller has a contact_link_request notification from this
-// user that wasn't rejected", so random users' emails don't leak.
 type SenderProfile struct {
 	ID          uuid.UUID        `json:"id"`
 	DisplayName string           `json:"display_name"`
@@ -164,9 +138,6 @@ type SenderProfile struct {
 	ContactID   *uuid.UUID       `json:"contact_id"`
 }
 
-// LinkExistingContactRequest is the optional body of
-// `POST /v1/contacts/link-requests/:id/link-existing-contact/:contact_id`.
-// All fields optional - additional B-side updates applied at link time.
 type LinkExistingContactRequest struct {
 	Phone       *string          `json:"phone"     binding:"omitempty,max=50"`
 	Description *string          `json:"description" binding:"omitempty,max=200"`
@@ -174,9 +145,6 @@ type LinkExistingContactRequest struct {
 	IconCode    *shared.IconCode `json:"icon_code" binding:"omitempty"`
 }
 
-// CreateLinkedContactRequest is the optional body of
-// `POST /v1/contacts/link-requests/:id/create-linked-contact`. No
-// display_name/email - the BE pulls those from the sender's user record.
 type CreateLinkedContactRequest struct {
 	Phone       *string          `json:"phone"     binding:"omitempty,max=50"`
 	Description *string          `json:"description" binding:"omitempty,max=200"`
@@ -184,15 +152,12 @@ type CreateLinkedContactRequest struct {
 	IconCode    *shared.IconCode `json:"icon_code" binding:"omitempty"`
 }
 
-// UnlinkedTotal — the badge of "จับคู่ชื่อในรายการหาร": how many absorbable
-// free-text names and how many records carry them.
 type UnlinkedTotal struct {
 	Names   int `json:"names"`
 	Records int `json:"records"`
 }
 
 // DeletePreview — with ?include=delete_preview: what a delete would touch.
-// Nothing is removed from the records: they keep the contact's name as text.
 type DeletePreview struct {
 	DebtRecords  int  `json:"debt_records"`  // debts / splits with this person
 	EventMembers int  `json:"event_members"` // event members pointing at this contact

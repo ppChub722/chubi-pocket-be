@@ -7,7 +7,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// Reasons a counted row is in a budget (BudgetItem.reason).
 const (
 	ReasonAll         = "all"          // the budget counts all expenses
 	ReasonCategory    = "category"     // the row's category is one of the scope categories
@@ -16,8 +15,6 @@ const (
 	ReasonWallet      = "wallet"
 )
 
-// reasoner — why each counted row belongs to b, first match of: all,
-// category, sub_category (a child of a scope category), tag, wallet.
 func (s *Service) reasoner(ctx context.Context, b *Budget) (func(countRow) string, error) {
 	expanded, err := s.store.expandCategories(ctx, b.Categories)
 	if err != nil {

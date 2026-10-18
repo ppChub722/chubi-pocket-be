@@ -16,10 +16,6 @@ func NewHandler(s *Store) *Handler {
 	return &Handler{store: s}
 }
 
-// GET /v1/users/me/packs
-// Returns all non-expired pack permissions for the authenticated user.
-// The base pack is always available client-side; this endpoint surfaces only
-// explicitly-granted additional packs (DLC / seasonal).
 func (h *Handler) ListMyPacks(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {

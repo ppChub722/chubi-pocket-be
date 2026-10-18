@@ -1,8 +1,5 @@
 package auth_test
 
-// Handler tests for the Auth operations of the API spec v2. register / login
-// are public, so they run on a plain gin engine (no user middleware).
-
 import (
 	"context"
 	"encoding/json"
@@ -35,7 +32,6 @@ func newPublic(t *testing.T) (*gin.Engine, *auth.Handler) {
 	r.POST("/api/v1/auth/login", h.Login)
 	t.Cleanup(func() {
 		ctx := context.Background()
-		// Users created through register in this test (username prefix).
 		_, _ = pool.Exec(ctx, `DELETE FROM user_preferences WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'authtest_%')`)
 		_, _ = pool.Exec(ctx, `DELETE FROM users WHERE username LIKE 'authtest_%'`)
 	})
@@ -73,7 +69,6 @@ func TestRegisterLogin(t *testing.T) {
 	if _, ok := user["password_hash"]; ok {
 		t.Error("password hash leaked")
 	}
-	// A new user sees amounts in colour only (owner 2026-10-17).
 	var style string
 	if err := testdb.Pool(t).QueryRow(context.Background(),
 		`SELECT preferences->>'money_style' FROM user_preferences WHERE user_id = $1`, user["id"]).Scan(&style); err != nil || style != "color_only" {
@@ -84,19 +79,16 @@ func TestRegisterLogin(t *testing.T) {
 		t.Errorf("token = %v", tok)
 	}
 
-	// Login by username and by email.
 	out = call(t, r, "POST", "/api/v1/auth/login", map[string]any{"identifier": name, "password": "Password123!"}, "login", http.StatusOK)
 	if out["user"].(map[string]any)["id"] != user["id"] {
 		t.Errorf("login user = %v", out["user"])
 	}
 	call(t, r, "POST", "/api/v1/auth/login", map[string]any{"identifier": email, "password": "Password123!"}, "login", http.StatusOK)
 
-	// Errors.
 	call(t, r, "POST", "/api/v1/auth/login", map[string]any{"identifier": name, "password": "wrong-password"}, "login", http.StatusUnauthorized)
 	call(t, r, "POST", "/api/v1/auth/login", map[string]any{"identifier": name}, "login", http.StatusBadRequest)
 	call(t, r, "POST", "/api/v1/auth/register", map[string]any{"username": uniq(), "password": "short", "display_name": "X"}, "register", http.StatusBadRequest)
 	call(t, r, "POST", "/api/v1/auth/register", map[string]any{"username": "ab", "password": "Password123!", "display_name": "X"}, "register", http.StatusBadRequest)
-	// Duplicate username: 409 is not documented in the spec for register.
 	call(t, r, "POST", "/api/v1/auth/register", body, "", http.StatusConflict)
 }
 

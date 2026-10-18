@@ -9,12 +9,6 @@ import (
 	"testing"
 )
 
-// TestSmoke runs the real tesseract over every image in $OCR_SMOKE_DIR and
-// prints what it read, for each psm × preprocess. Needs tesseract, so it
-// runs inside the BE image:
-//
-//	GOOS=linux go test -c -tags ocrsmoke -o ocr.test ./internal/modules/imports/ocr
-//	docker run --rm -v "$PWD:/w" -e OCR_SMOKE_DIR=/w/slips --entrypoint /w/ocr.test chubi-be:prod -test.v
 func TestSmoke(t *testing.T) {
 	dir := os.Getenv("OCR_SMOKE_DIR")
 	if dir == "" {

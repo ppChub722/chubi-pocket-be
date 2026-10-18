@@ -1,14 +1,5 @@
 package apidoc
 
-// Conformance: does a JSON body match the spec? Handler tests call
-// Response / Request with the operationId and the real body, so the spec
-// stays the source of truth: a key the spec doesn't document, a missing
-// required key, a null where the spec says none, a wrong type — all fail.
-//
-// A small JSON-Schema subset (what the spec uses): $ref, allOf, oneOf, type
-// (incl. a list with "null"), properties / required, additionalProperties,
-// items, enum, const, minItems / maxItems, format uuid / date-time / date.
-
 import (
 	"encoding/json"
 	"fmt"
@@ -30,8 +21,6 @@ func loadedDoc() (map[string]any, error) {
 	return docMap, docErr
 }
 
-// Response checks `body` (a response body) against operationId's schema for
-// `status`. A status the spec doesn't describe is an error.
 func Response(operationID string, status int, body []byte) error {
 	op, err := findOp(operationID)
 	if err != nil {
@@ -55,7 +44,6 @@ func Response(operationID string, status int, body []byte) error {
 	return check(operationID+" "+strconv.Itoa(status), schema, body)
 }
 
-// Request checks a request body against operationId's JSON requestBody schema.
 func Request(operationID string, body []byte) error {
 	op, err := findOp(operationID)
 	if err != nil {
@@ -144,7 +132,6 @@ var (
 	dtRe   = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}`)
 )
 
-// flatten resolves $ref and merges allOf into one schema.
 func flatten(s map[string]any) (map[string]any, error) {
 	if ref, ok := s["$ref"].(string); ok {
 		r, err := resolve(ref)

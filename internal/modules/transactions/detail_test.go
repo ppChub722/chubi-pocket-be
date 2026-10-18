@@ -10,8 +10,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
-// TestDetailSplitsAndProject — split_count on list rows + detail, the
-// debts themselves on detail only, and the embedded project ref.
 func TestDetailSplitsAndProject(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()
@@ -37,7 +35,6 @@ func TestDetailSplitsAndProject(t *testing.T) {
 	if split.SplitCount != 2 {
 		t.Errorf("create response split_count = %d, want 2", split.SplitCount)
 	}
-	// The create response is the full detail, splits included.
 	if split.Splits == nil || len(*split.Splits) != 2 {
 		t.Fatalf("create response splits = %v, want 2", split.Splits)
 	}
@@ -56,7 +53,6 @@ func TestDetailSplitsAndProject(t *testing.T) {
 	}
 	plainID := plain.(*transactions.TransactionDetail).ID
 
-	// The plain row becomes a project row's personal copy (what a claim does).
 	if _, err := pool.Exec(ctx, `
 		WITH p AS (INSERT INTO projects (id, owner_user_id, name, status)
 		           VALUES (gen_random_uuid(), $1, 'Japan Trip', 'active') RETURNING id),
@@ -115,8 +111,6 @@ func TestDetailSplitsAndProject(t *testing.T) {
 	}
 }
 
-// TestWalletlessSplitCurrency — a wallet-less bill's split debts take the
-// user's currency (they used to be stored with currency ”).
 func TestWalletlessSplitCurrency(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()
@@ -146,8 +140,6 @@ func TestWalletlessSplitCurrency(t *testing.T) {
 	}
 }
 
-// TestShareBasisReports — spec 12 §4.5: the wallet moves the cash amount,
-// reports count my share (amount − what others owe on it).
 func TestShareBasisReports(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()

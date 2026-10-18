@@ -14,7 +14,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// Service errors — mapped to HTTP codes by the handler.
 var (
 	ErrAccountForbidden            = errors.New("account not found or not owned")
 	ErrAccountArchived             = errors.New("wallet is archived: restore it first")
@@ -29,7 +28,6 @@ var (
 	ErrTransferFieldsOnNonTransfer = errors.New("transfer_to_account_id is only valid for type=transfer")
 	ErrAmountInvalid               = errors.New("amount must be > 0")
 	ErrSplitContactNotFound        = errors.New("split contact not found or not owned")
-	// PUT /transactions/:id/splits (owner 2026-10-10).
 	ErrSplitsAuthorOnly            = errors.New("only the transaction's author can change its splits")
 	ErrSplitsExceedAmount          = errors.New("splits add up to more than the transaction amount")
 	ErrSplitUnknownDebt            = errors.New("debt_id is not one of this transaction's splits (or is listed twice)")
@@ -41,39 +39,14 @@ var (
 	ErrTransferCategoryEdit        = errors.New("cannot change category on a transfer; delete and recreate")
 	// tag_ids / PUT /:id/tags: every id must be one of the caller's tags.
 	ErrTagNotFound = errors.New("tag not found")
-	// System-category rows (Opening Balance, Adjustment) are bookkeeping
-	// reflections of account-level operations and aren't user-mutable
-	// directly — see spec §03/§3.4 (account edit), §03/§2.5 (adjust),
-	// §04/§4.16 (transfer pair). Transfer rows are NOT blocked here:
-	// they have their own cascade path in updateTransferInTx + Delete.
 	ErrSystemTransactionImmutable = errors.New("transactions in a system category cannot be edited or deleted directly; use the account-level operation that created them")
-	// Shared wallets (spec §14/2). Rule 2: only the row's author may
-	// change category_id (their taxonomy). Rule 3: leaving locks your
-	// rows — an ex-member can no longer edit/delete their old rows on
-	// the wallet they left.
 	ErrCategoryAuthorOnly = errors.New("only the row's author may change its category")
 	ErrRowLocked          = errors.New("membership on this account has ended; the row is read-only for you")
 )
 
-// Cross-module hooks. Wired post-construction in main.go to break the
-// transactions ↔ personal_debts cycle. Each hook is optional in the
-// sense that "feature off" = nil callback; the service rejects requests
-// that need the missing hook with a clear error rather than silently no-op.
 type (
-	// DebtsCreator inserts one personal_debts row per split entry on the
-	// splitter's side AND one mirror row on each linked partner's side.
-	// Direction follows parentType ('expense' | 'income'): on an expense
-	// the splitter fronted money → counterparties owe them
-	// ('owed_to_me', mirror 'i_owe'); on an income the splitter received
-	// money that partly belongs to others → they owe the counterparties
-	// ('i_owe', mirror 'owed_to_me'). Called inside Create's tx after the
-	// parent transaction row lands. Implemented by
-	// personal_debts.Service.CreateForTransactionTx.
 	DebtsCreator func(ctx context.Context, tx pgx.Tx, parentTxID, userID uuid.UUID, parentType, parentCurrency string, parentDescription *string, splits []SplitInput) error
 
-	// SplitsEditor replaces parentTxID's split debts with `edits` (PUT
-	// /transactions/:id/splits) — add, re-amount, remove, and tell linked
-	// partners. Inside the caller's tx; wired from personal_debts in main.
 	SplitsEditor func(ctx context.Context, tx pgx.Tx, parentTxID, userID uuid.UUID, parentType, parentCurrency string, parentDescription *string, edits []SplitEdit) error
 )
 
@@ -95,18 +68,10 @@ func NewService(s *Store, cats *categories.Service) *Service {
 func (s *Service) WithDebtsCreator(fn DebtsCreator) { s.debtsCreator = fn }
 func (s *Service) WithSplitsEditor(fn SplitsEditor) { s.splitsEditor = fn }
 
-// CountByCategory exposes the underlying count to categories.Service via the
-// TransactionCounter func wired in main.go.
 func (s *Service) CountByCategory(ctx context.Context, categoryID uuid.UUID) (int, error) {
 	return s.store.CountByCategory(ctx, categoryID)
 }
 
-// CreateSystemInTx inserts a transaction backed by a system category (Opening
-// Balance / Adjustment / Transfer) inside `tx`. Used by the accounts module
-// for opening-balance auto-tx and adjust-balance flows that the public
-// CreateInTx wouldn't accept (it rejects system categories).
-//
-// Returns the created row + the account's new balance after the delta.
 func (s *Service) CreateSystemInTx(
 	ctx context.Context, tx pgx.Tx, userID uuid.UUID,
 	accountID uuid.UUID, kind categories.SystemKind,
@@ -155,9 +120,6 @@ func (s *Service) CreateSystemInTx(
 	return created, newBalance, nil
 }
 
-// --- Read ---
-
-// Get — GET /transactions/:id: the page-ready row with its splits.
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*TransactionDetail, error) {
 	t, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
@@ -166,8 +128,6 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*TransactionDe
 	return detailOf(ctx, s.store.db, userID, t)
 }
 
-// List — GET /transactions: a page of page-ready rows (splits null) plus
-// totals over the whole filtered set.
 func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*ListResponse, error) {
 	if f.Page <= 0 {
 		f.Page = 1
@@ -205,8 +165,6 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*Li
 	}, nil
 }
 
-// buildTransferResponse resolves both rows of a transfer (OUT first, IN
-// second) through q (the pool, or the write's tx before commit).
 func buildTransferResponse(
 	ctx context.Context, q shared.Querier, userID, groupID uuid.UUID, outRow, inRow *Transaction,
 ) (*TransferResponse, error) {
@@ -217,10 +175,6 @@ func buildTransferResponse(
 	return &TransferResponse{TransferGroupID: groupID, Rows: rows}, nil
 }
 
-// --- Create (the atomic balance flow) ---
-
-// Create opens a tx, calls CreateInTx, commits. Returns what CreateInTx
-// returns (the rows are already in their final state).
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateRequest) (any, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -238,10 +192,7 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 	return res, nil
 }
 
-// CreateWrite — POST /transactions: Create, answered as a WriteResult (the
-// row(s) + the post-commit balances of the wallets they sit on).
 func (s *Service) CreateWrite(ctx context.Context, userID uuid.UUID, req CreateRequest) (*WriteResult, error) {
-	// A date after today: a one-off upcoming item, not a transaction.
 	if future, err := s.isFuture(ctx, userID, req.Date); err != nil {
 		return nil, err
 	} else if future {
@@ -280,14 +231,6 @@ func (s *Service) writeResult(ctx context.Context, rows []TransactionDetail, tou
 	return &WriteResult{Rows: rows, AccountBalances: balances}, nil
 }
 
-// CreateInTx writes the transaction(s), their tags and balance delta(s)
-// inside `tx`. Used by both Service.Create AND accounts.Service for the
-// opening-balance and adjust-balance flows that compose the account write
-// with the transaction write in one atomic tx.
-//
-// Returns (rows resolved inside tx, final state):
-//   - For expense/income: (*TransactionDetail, nil)
-//   - For transfer:        (*TransferResponse, nil)
 func (s *Service) CreateInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, req CreateRequest) (any, error) {
 	if err := s.validateCreateCommon(req); err != nil {
 		return nil, err
@@ -305,8 +248,6 @@ func (s *Service) CreateInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, r
 
 func (s *Service) validateCreateCommon(req CreateRequest) error {
 	if len(req.Splits) > 0 || req.MyShare != nil {
-		// Splits create personal_debts rows in the same tx. Reject upfront
-		// when the hook isn't wired so we don't silently lose split data.
 		if s.debtsCreator == nil {
 			return ErrSplitsNotSupportedYet
 		}
@@ -315,8 +256,6 @@ func (s *Service) validateCreateCommon(req CreateRequest) error {
 		}
 	}
 	if req.ProjectID != nil {
-		// Not accepted: the project resolve flow uses
-		// source_project_transaction_id and the BE derives the project.
 		return ErrProjectIDNotAllowed
 	}
 	if req.SourceProjectTransactionID != nil && req.Type == TypeTransfer {
@@ -358,8 +297,7 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 		}
 		currency = cur
 	} else {
-		// No wallet: split debts take the user's currency (same fallback
-		// as EditSplits) — never ''.
+		// No wallet: split debts take the user's currency (same fallback as EditSplits) — never ''.
 		if err := tx.QueryRow(ctx,
 			`SELECT COALESCE((SELECT currency FROM users WHERE id = $1), 'THB')`,
 			userID).Scan(&currency); err != nil {
@@ -367,8 +305,6 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 		}
 	}
 
-	// Validate category if provided. System cats not allowed for
-	// expense/income — those flows go through their own paths.
 	var categoryID *uuid.UUID
 	if req.CategoryID != nil {
 		c, err := s.cats.GetCategoryRow(ctx, userID, *req.CategoryID)
@@ -384,9 +320,6 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 		categoryID = &c.ID
 	}
 
-	// Project resolve flow: when the caller passes
-	// source_project_transaction_id, derive project_id from it and stamp
-	// both columns on the personal-mirror row.
 	var projectID *uuid.UUID
 	if req.SourceProjectTransactionID != nil {
 		pid, err := s.store.LookupSourcePTTx(ctx, tx, *req.SourceProjectTransactionID, userID)
@@ -466,7 +399,6 @@ func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 	srcID := src
 	dstID := dst
 
-	// OUT row → debits source
 	outRow, err := s.store.InsertRowTx(ctx, tx, &Transaction{
 		UserID:          userID,
 		AccountID:       &srcID,
@@ -485,7 +417,6 @@ func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 		return nil, err
 	}
 
-	// IN row → credits destination
 	inRow, err := s.store.InsertRowTx(ctx, tx, &Transaction{
 		UserID:          userID,
 		AccountID:       &dstID,
@@ -504,18 +435,12 @@ func (s *Service) createTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 		return nil, err
 	}
 
-	// A transfer's tags go on its OUT row (as a submitted draft's do).
 	if err := s.store.AttachTagsTx(ctx, tx, userID, outRow.ID, req.TagIDs); err != nil {
 		return nil, err
 	}
 	return buildTransferResponse(ctx, tx, userID, groupID, outRow, inRow)
 }
 
-// --- Update ---
-
-// UpdateInTx — a non-transfer row edit inside the caller's transaction,
-// under the same rules as Update (row authz, system rows read-only).
-// Used by the project "update to match" auto-action (contract §5).
 func (s *Service) UpdateInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, req UpdateRequest) error {
 	current, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
@@ -536,19 +461,13 @@ func (s *Service) UpdateInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUI
 	return s.replaceTagsIfSent(ctx, tx, userID, id, req)
 }
 
-// updated — what an edit wrote: the final row(s) (a transfer's OUT row
-// first) and every wallet it touched (before and after a move).
 type updated struct {
 	rows    []Transaction
 	group   *uuid.UUID // transfers
 	touched []uuid.UUID
-	// The debt entry the edited row is the wallet side of.
 	debtEntry *uuid.UUID
 }
 
-// Update returns either *TransactionDetail (single row) or
-// *TransferResponse (transfer pair) — for Go callers; the HTTP handler uses
-// UpdateWrite.
 func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (any, error) {
 	u, err := s.update(ctx, userID, id, req)
 	if err != nil {
@@ -560,10 +479,7 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 	return detailOf(ctx, s.store.db, userID, &u.rows[0])
 }
 
-// UpdateWrite — PUT /transactions/:id: the edited row(s) and the
-// post-commit balances of every wallet the edit touched.
 func (s *Service) UpdateWrite(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (*WriteResult, error) {
-	// Moved to a date after today: the row leaves transactions.
 	if req.Date != nil {
 		if future, err := s.isFuture(ctx, userID, *req.Date); err != nil {
 			return nil, err
@@ -615,22 +531,16 @@ func (s *Service) update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		}
 		out = updated{rows: []Transaction{*outRow, *inRow}, group: current.TransferGroupID, touched: touched}
 	} else {
-		// Shared-wallet authz (spec §14/2): active members may edit any
-		// member's rows EXCEPT category_id (author-only); ex-members can no
-		// longer touch their own old rows on the wallet they left.
 		if err := s.authorizeRowMutation(ctx, userID, current, req); err != nil {
 			return nil, err
 		}
 		if current.SourcePersonalDebtID != nil {
-			// A debt entry's wallet side: one record with the entry.
 			if err := checkDebtTxEdit(userID, current, req, false); err != nil {
 				return nil, err
 			}
 		} else if err := s.checkNotSystemRow(ctx, current); err != nil {
-			// Non-transfer with a system category (Opening Balance /
-			// Adjustment) is read-only — the user can't directly edit the
-			// auto-created bookkeeping row. They mutate the account-level
-			// state instead (account edit / adjust-balance).
+			// Non-transfer with a system category (Opening Balance / Adjustment) is read-only — the user
+			// can't directly edit the auto-created bookkeeping row.
 			return nil, err
 		}
 		bill, err := linkedBillTx(ctx, tx, current)
@@ -641,13 +551,11 @@ func (s *Service) update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		if err != nil {
 			return nil, err
 		}
-		// An event bill made from this row shares its money.
 		if bill != nil && req.AlsoUpdateLink && s.eventBills != nil && (row.Amount != current.Amount || row.Date != current.Date) {
 			if err := s.eventBills(ctx, tx, userID, *bill, row.Amount, row.Date); err != nil {
 				return nil, err
 			}
 		}
-		// A recurring item linked to this row, when asked.
 		if req.AlsoUpdateLink && s.recurring != nil {
 			tagIDs, tagsSet := req.TagIDsChange()
 			if err := s.recurring.TxEditedTx(ctx, tx, userID, row, tagIDs, tagsSet); err != nil {
@@ -670,8 +578,6 @@ func (s *Service) update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 	return &out, nil
 }
 
-// replaceTagsIfSent — tag_ids in an edit replace the caller's tags on the
-// edited row.
 func (s *Service) replaceTagsIfSent(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, req UpdateRequest) error {
 	ids, ok := req.TagIDsChange()
 	if !ok {
@@ -680,19 +586,9 @@ func (s *Service) replaceTagsIfSent(ctx context.Context, tx pgx.Tx, userID, id u
 	return s.store.ReplaceTagsTx(ctx, tx, userID, id, ids)
 }
 
-// authorizeRowMutation applies the shared-wallet co-ownership rules
-// (spec §14/2) for edit/delete of a non-transfer row the caller can see:
-//
-//   - author + active member    → full edit (incl. category)
-//   - author + membership ended → ROW_LOCKED (rule 3)
-//   - other active member       → allowed EXCEPT category_id (rule 2)
-//
-// Non-members never reach here — GetByID's visibility already 404'd.
-// Pass a zero-value UpdateRequest for delete (no category change).
 func (s *Service) authorizeRowMutation(
 	ctx context.Context, userID uuid.UUID, current *Transaction, req UpdateRequest,
 ) error {
-	// Floating rows (no account) are always personal — only the author may mutate.
 	if current.AccountID == nil {
 		if current.UserID != userID {
 			return ErrTxNotFound
@@ -710,7 +606,6 @@ func (s *Service) authorizeRowMutation(
 		}
 		return s.assertWritable(ctx, current.AccountID)
 	}
-	// Non-author: visibility guaranteed membership, but keep the guard.
 	if !active {
 		return ErrTxNotFound
 	}
@@ -720,8 +615,6 @@ func (s *Service) authorizeRowMutation(
 	return s.assertWritable(ctx, current.AccountID)
 }
 
-// assertWritable — rows on an archived wallet are read-only (409
-// ACCOUNT_ARCHIVED): no edit, delete, tag or split change until restored.
 func (s *Service) assertWritable(ctx context.Context, ids ...*uuid.UUID) error {
 	for _, id := range ids {
 		if id == nil {
@@ -744,7 +637,6 @@ func (s *Service) updateSingleInTx(
 ) (*Transaction, error) {
 	newAccID, accChange := req.AccountIDChange()
 
-	// Validate category if changing
 	newCatID, catChange := req.CategoryIDChange()
 	if catChange && newCatID != nil {
 		c, err := s.cats.GetCategoryRow(ctx, userID, *newCatID)
@@ -765,7 +657,6 @@ func (s *Service) updateSingleInTx(
 	}
 
 	if accChange {
-		// Move wallet: reverse old account balance, apply to new account.
 		if current.AccountID != nil {
 			if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*current.AccountID}); err != nil {
 				return nil, err
@@ -788,7 +679,6 @@ func (s *Service) updateSingleInTx(
 			}
 		}
 	} else if req.Amount != nil && *req.Amount != current.Amount && current.AccountID != nil {
-		// Amount-only change on an existing account.
 		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*current.AccountID}); err != nil {
 			return nil, err
 		}
@@ -809,8 +699,6 @@ func (s *Service) updateSingleInTx(
 		newAccID, accChange)
 }
 
-// transferPair loads both rows of current's transfer and tells OUT from IN
-// by the AUTHOR's Transfer OUT system category (categories are per user).
 func (s *Service) transferPair(ctx context.Context, current *Transaction) (outRow, inRow *Transaction, err error) {
 	if current.TransferGroupID == nil {
 		return nil, nil, fmt.Errorf("transfer row has no transfer_group_id")
@@ -839,9 +727,6 @@ func (s *Service) transferPair(ctx context.Context, current *Transaction) (outRo
 	return outRow, inRow, nil
 }
 
-// updateTransferInTx applies amount/date/text/wallet changes to both rows
-// of a transfer in one tx, re-balancing the accounts atomically. Returns
-// (outRow, inRow, every wallet touched before and after).
 func (s *Service) updateTransferInTx(
 	ctx context.Context, tx pgx.Tx, userID uuid.UUID,
 	current *Transaction, req UpdateRequest,
@@ -854,17 +739,10 @@ func (s *Service) updateTransferInTx(
 		return nil, nil, nil, err
 	}
 
-	// A transfer mutation moves money on BOTH accounts — the caller needs
-	// active membership on both (shared-wallet rules §14/2; ex-author →
-	// ROW_LOCKED, foreign non-member side → not found).
 	if err := s.authorizePairMutation(ctx, userID, current, outRow, inRow); err != nil {
 		return nil, nil, nil, err
 	}
 
-	// Each leg is re-filed on its own: account_id = the OUT leg's wallet,
-	// transfer_to_account_id = the IN leg's. A leg that has a wallet can't be
-	// cleared (a wallet-less leg only comes from deleting its wallet); a
-	// wallet-less leg can be given one.
 	newOutAccID, outAccChange := req.AccountIDChange()
 	newInAccID, inAccChange := req.TransferToAccountIDChange()
 	if outAccChange && newOutAccID == nil {
@@ -895,7 +773,6 @@ func (s *Service) updateTransferInTx(
 		effectiveAmount = *req.Amount
 	}
 
-	// Every account involved (old + new), for locking and the response.
 	touched := nonNilIDs(outRow.AccountID, inRow.AccountID, newOutAccID, newInAccID)
 	lockIDs := uniqueUUIDs(touched)
 	sort.Slice(lockIDs, func(i, j int) bool { return uuidLess(lockIDs[i], lockIDs[j]) })
@@ -905,8 +782,6 @@ func (s *Service) updateTransferInTx(
 		}
 	}
 
-	// Balances move per leg; a wallet-less leg moves nothing.
-	// sign: OUT leg loses the amount, IN leg gains it.
 	legs := []struct {
 		old, neu *uuid.UUID
 		moved    bool
@@ -952,16 +827,11 @@ func (s *Service) updateTransferInTx(
 	return updatedOut, updatedIn, touched, nil
 }
 
-// --- Delete ---
-
-// Delete removes a row (both rows of a transfer) and reverses its balance.
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	_, err := s.delete(ctx, userID, id, false)
 	return err
 }
 
-// deleted — what a delete did: the wallets it moved money on and the debt
-// entry that went with the row (its person key, for the new balance).
 type deleted struct {
 	touched   []uuid.UUID
 	debtEntry *uuid.UUID
@@ -970,9 +840,6 @@ type deleted struct {
 	bill      *uuid.UUID
 }
 
-// DeleteWrite — DELETE /transactions/:id: the deleted id and the
-// post-commit balances of every wallet the delete touched.
-// alsoDeleteLink — the recurring item / event bill linked to the row go too.
 func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID, alsoDeleteLink bool) (*DeleteResult, error) {
 	d, err := s.delete(ctx, userID, id, alsoDeleteLink)
 	if err != nil {
@@ -992,8 +859,6 @@ func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID, alsoDel
 	return out, nil
 }
 
-// delete removes the row (both rows of a transfer; a debt entry's wallet
-// side takes its entry along).
 func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLink bool) (*deleted, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -1025,15 +890,13 @@ func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLi
 			return nil, err
 		}
 	} else {
-		// Shared-wallet authz: same matrix as Update (delete never
-		// carries a category change, hence the zero-value request).
+		// Shared-wallet authz: same matrix as Update (delete never carries a category change, hence the
+		// zero-value request).
 		if err := s.authorizeRowMutation(ctx, userID, current, UpdateRequest{}); err != nil {
 			return nil, err
 		}
-		// Non-transfer with a system category (Opening Balance,
-		// Adjustment) is undeletable — silently dropping it would
-		// leave the cached `accounts.balance` honest but the audit
-		// trail would lie. Reverse via the account-level operation.
+		// Non-transfer with a system category (Opening Balance, Adjustment) is undeletable — silently
+		// dropping it would leave the cached `accounts.balance` honest but the audit trail would lie.
 		if current.SourcePersonalDebtID != nil {
 			if err := checkDebtTxEdit(userID, current, UpdateRequest{}, true); err != nil {
 				return nil, err
@@ -1044,7 +907,6 @@ func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLi
 		if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
 			return nil, err
 		}
-		// A debt entry's wallet side: the entry goes too (one record).
 		if current.SourcePersonalDebtID != nil && s.debtLinks != nil {
 			key, err := s.debtLinks.TxDeletedTx(ctx, tx, userID, *current.SourcePersonalDebtID)
 			if err != nil {
@@ -1060,11 +922,8 @@ func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLi
 	return out, nil
 }
 
-// authorizePairMutation is the transfer-pair variant of
-// authorizeRowMutation: the caller must hold active membership on BOTH
-// accounts of the pair. The row's author whose membership ended gets
-// ROW_LOCKED; a non-author without membership on either side gets
-// not-found (they shouldn't learn the pair exists).
+// authorizePairMutation is the transfer-pair variant of authorizeRowMutation: the caller must hold
+// active membership on BOTH accounts of the pair.
 func (s *Service) authorizePairMutation(
 	ctx context.Context, userID uuid.UUID, current, outRow, inRow *Transaction,
 ) error {
@@ -1083,13 +942,11 @@ func (s *Service) authorizePairMutation(
 		}
 	}
 	if outRow.AccountID == nil && inRow.AccountID == nil {
-		// Both floating — only author may mutate.
 		if current.UserID != userID {
 			return ErrTxNotFound
 		}
 		return nil
 	}
-	// A wallet-less leg (its wallet was deleted) needs no membership.
 	if (outRow.AccountID == nil || activeOut) && (inRow.AccountID == nil || activeIn) {
 		return s.assertWritable(ctx, outRow.AccountID, inRow.AccountID)
 	}
@@ -1099,23 +956,14 @@ func (s *Service) authorizePairMutation(
 	return ErrTxNotFound
 }
 
-// checkNotSystemRow rejects mutations on transactions whose category
-// is a system kind (Opening Balance, Adjustment). Transfer rows have
-// system categories too, but they're handled by the dedicated transfer
-// path above this check; callers must gate by `current.Type !=
-// TypeTransfer` themselves.
-//
-// The lookup is AUTHOR-scoped — categories belong to the row's author,
-// so a shared-wallet co-member editing the owner's row must still trip
-// on the owner's system categories.
 func (s *Service) checkNotSystemRow(ctx context.Context, current *Transaction) error {
 	if current.CategoryID == nil {
 		return nil
 	}
 	cat, err := s.cats.GetCategoryRow(ctx, current.UserID, *current.CategoryID)
 	if err != nil {
-		// If the category was hard-deleted out from under the row,
-		// the FK is set NULL — we can't tell what kind it was. Allow.
+		// If the category was hard-deleted out from under the row, the FK is set NULL — we can't tell
+		// what kind it was.
 		return nil
 	}
 	if cat.IsSystem {
@@ -1137,8 +985,6 @@ func (s *Service) deleteSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	return s.store.DeleteRowTx(ctx, tx, current.ID)
 }
 
-// deleteTransferInTx deletes both rows of a transfer and reverses both
-// balances; returns the wallets touched (OUT first).
 func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) ([]uuid.UUID, error) {
 	outRow, inRow, err := s.transferPair(ctx, current)
 	if err != nil {
@@ -1157,7 +1003,6 @@ func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 		}
 	}
 
-	// Reverse balances
 	if outRow.AccountID != nil {
 		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *outRow.AccountID, current.Amount); err != nil {
 			return nil, err
@@ -1169,7 +1014,6 @@ func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 		}
 	}
 
-	// Delete both rows
 	if err := s.store.DeleteRowTx(ctx, tx, outRow.ID); err != nil {
 		return nil, err
 	}
@@ -1179,11 +1023,6 @@ func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid
 	return touched, nil
 }
 
-// --- Tags ---
-
-// SetTags — PUT /transactions/:id/tags: the caller's tags on the row become
-// exactly tagIDs ([] clears). Same row rules as an edit (visible row; a row
-// on a wallet the caller left is read-only). Returns the row, final state.
 func (s *Service) SetTags(ctx context.Context, userID, id uuid.UUID, tagIDs []uuid.UUID) (*TransactionDetail, error) {
 	current, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
@@ -1206,15 +1045,7 @@ func (s *Service) SetTags(ctx context.Context, userID, id uuid.UUID, tagIDs []uu
 	return s.Get(ctx, userID, id)
 }
 
-// --- Summary ---
-
 func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequest) (*SummaryResponse, error) {
-	// The central report-scope predicate (spec §14/5 guardrail) replaces
-	// the old bare `user_id = $1` — every personal aggregate must go
-	// through shared.ReportScopePredicate, never an inlined filter.
-	// Reportable-category filter drops system rows (opening balance,
-	// adjustments, transfers, debt received/paid) — same rule as the
-	// per-account summary. Every query below joins categories as `c`.
 	whereClauses := []string{
 		shared.ReportScopePredicate("t", "$1"),
 		shared.ReportableCategoryPredicate("c"),
@@ -1281,22 +1112,14 @@ func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequ
 	return resp, nil
 }
 
-// summaryFrom is the FROM clause every summary query shares — the
-// categories join backs shared.ReportableCategoryPredicate("c").
 const summaryFrom = `transactions t LEFT JOIN categories c ON c.id = t.category_id`
 
-// shareT — each row's share-basis amount (spec 12 §4.5): summaries sum
-// "my share", not the cash amount.
 var shareT = shared.ShareAmountExpr("t")
 
-// summaryAmounts is the shared aggregate tail: total, count, income, expense.
 var summaryAmounts = `COALESCE(SUM(` + shareT + `), 0), COUNT(*),
 		COALESCE(SUM(` + shareT + `) FILTER (WHERE t.type = 'income'),  0),
 		COALESCE(SUM(` + shareT + `) FILTER (WHERE t.type = 'expense'), 0)`
 
-// summaryByCategory groups by leaf category, or — rollup=true — by the
-// top-level parent. Uncategorized rows come back as key "" / name "" /
-// category null so the client can localise the label.
 func (s *Service) summaryByCategory(ctx context.Context, where string, args []any, rollup bool) ([]SummaryGroup, error) {
 	keyExpr, nameExpr, join := "c.id", "c.name", ""
 	if rollup {
@@ -1396,8 +1219,6 @@ func (s *Service) scanSummary(ctx context.Context, q string, args []any) ([]Summ
 	return out, rows.Err()
 }
 
-// --- Internal ---
-
 func uuidLess(a, b uuid.UUID) bool {
 	for i := 0; i < 16; i++ {
 		if a[i] != b[i] {
@@ -1407,7 +1228,6 @@ func uuidLess(a, b uuid.UUID) bool {
 	return false
 }
 
-// nonNilIDs — the set ids, in order (duplicates kept; callers dedupe).
 func nonNilIDs(ids ...*uuid.UUID) []uuid.UUID {
 	out := make([]uuid.UUID, 0, len(ids))
 	for _, id := range ids {
@@ -1418,8 +1238,6 @@ func nonNilIDs(ids ...*uuid.UUID) []uuid.UUID {
 	return out
 }
 
-// splitParentTx — what the debt hooks need of the caller's txID: its type,
-// currency (wallet's, else the user's) and description.
 func splitParentTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (typ, currency string, description *string, err error) {
 	err = tx.QueryRow(ctx, `
 		SELECT t.type, COALESCE(a.currency, u.currency, 'THB'), t.description
@@ -1433,10 +1251,6 @@ func splitParentTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (typ,
 	return
 }
 
-// AddSplitsTx gives the caller's expense / income txID these split debts,
-// inside tx — the same path as create, so linked contacts hear
-// split_created. An event removal moves the board's member splits back
-// this way (owner 2026-10-10).
 func (s *Service) AddSplitsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, splits []SplitInput) error {
 	if len(splits) == 0 {
 		return nil
@@ -1451,9 +1265,6 @@ func (s *Service) AddSplitsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.
 	return s.debtsCreator(ctx, tx, txID, userID, typ, currency, description, splits)
 }
 
-// ClearSplitsTx removes all of txID's split debts, inside tx — the usual
-// removal (linked partners get split_changed / their pending split_created
-// is superseded). A pull onto an event board moves the splits there.
 func (s *Service) ClearSplitsTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) error {
 	if s.splitsEditor == nil {
 		return ErrSplitsNotSupportedYet
@@ -1465,11 +1276,6 @@ func (s *Service) ClearSplitsTx(ctx context.Context, tx pgx.Tx, userID, txID uui
 	return s.splitsEditor(ctx, tx, txID, userID, typ, currency, description, nil)
 }
 
-// EditSplits — PUT /v1/transactions/:id/splits (owner 2026-10-10): the
-// whole new split list for an expense / income the caller wrote. The debt
-// rows (and the linked partners' notifications) are personal_debts'
-// business, reached through the SplitsEditor hook inside this tx. Returns
-// the row, final state (its splits are the new list).
 func (s *Service) EditSplits(ctx context.Context, userID, id uuid.UUID, edits []SplitEdit) (*TransactionDetail, error) {
 	if s.splitsEditor == nil {
 		return nil, ErrSplitsNotSupportedYet
@@ -1498,8 +1304,6 @@ func (s *Service) EditSplits(ctx context.Context, userID, id uuid.UUID, edits []
 	if sum > current.Amount+0.005 {
 		return nil, ErrSplitsExceedAmount
 	}
-	// An event bill's own splits are a layer on my share of it (owner
-	// 2026-10-10): they can't go past amount − the board's member splits.
 	board, err := s.store.EventSplitsTotal(ctx, current.ID)
 	if err != nil {
 		return nil, err
@@ -1513,7 +1317,6 @@ func (s *Service) EditSplits(ctx context.Context, userID, id uuid.UUID, edits []
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	// The bill's currency: its wallet's, else the user's.
 	var currency string
 	if err := tx.QueryRow(ctx, `
 		SELECT COALESCE((SELECT currency FROM accounts WHERE id = $1),
@@ -1534,17 +1337,6 @@ func (s *Service) EditSplits(ctx context.Context, userID, id uuid.UUID, edits []
 	return s.Get(ctx, userID, id)
 }
 
-// contactNamesTx applies the person rule to an edit list (owner
-// 2026-10-12): a split WITH a contact takes the contact's name — a sent
-// person_name is ignored. Returns a copy where, per row:
-//   - kept split, same contact          → person_name "" (unchanged)
-//   - kept / new split, a new contact   → the contact's resolved name (the
-//     stored snapshot follows the contact)
-//   - kept split back to a free name    → person_name as sent; blank keeps
-//     the name the contact showed
-//   - free-name split                   → person_name as sent (rename)
-//
-// An unknown debt_id or contact is left for the editor hook to reject.
 func contactNamesTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, edits []SplitEdit) ([]SplitEdit, error) {
 	if len(edits) == 0 {
 		return edits, nil

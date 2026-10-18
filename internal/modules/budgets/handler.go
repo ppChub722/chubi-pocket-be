@@ -50,7 +50,6 @@ func userAndID(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 	return uid, id, true
 }
 
-// optionalID — a uuid query param (nil when absent).
 func optionalID(c *gin.Context, name string) (*uuid.UUID, bool) {
 	v := c.Query(name)
 	if v == "" {
@@ -64,7 +63,6 @@ func optionalID(c *gin.Context, name string) (*uuid.UUID, bool) {
 	return &id, true
 }
 
-// bind decodes the body into v and returns the keys it carried.
 func bind(c *gin.Context, v any) (map[string]bool, bool) {
 	raw, err := c.GetRawData()
 	if err == nil && len(raw) == 0 {
@@ -117,7 +115,6 @@ func mapError(c *gin.Context, err error) {
 	}
 }
 
-// GET /v1/budgets
 func (h *Handler) List(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {
@@ -142,7 +139,6 @@ func (h *Handler) List(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/budgets
 func (h *Handler) Create(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {
@@ -158,7 +154,6 @@ func (h *Handler) Create(c *gin.Context) {
 	reply(c, http.StatusCreated, out, err)
 }
 
-// GET /v1/budgets/:id
 func (h *Handler) Get(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -172,7 +167,6 @@ func (h *Handler) Get(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// PUT /v1/budgets/:id
 func (h *Handler) Update(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -188,7 +182,6 @@ func (h *Handler) Update(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// DELETE /v1/budgets/:id
 func (h *Handler) Delete(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -198,7 +191,6 @@ func (h *Handler) Delete(c *gin.Context) {
 	reply(c, http.StatusOK, gin.H{"id": id}, err)
 }
 
-// GET /v1/budgets/:id/periods
 func (h *Handler) Periods(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -209,7 +201,6 @@ func (h *Handler) Periods(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// PUT /v1/budgets/:id/periods/:period_id
 func (h *Handler) UpdatePeriod(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -230,7 +221,6 @@ func (h *Handler) UpdatePeriod(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// GET /v1/budgets/:id/items
 func (h *Handler) Items(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -252,7 +242,6 @@ func (h *Handler) Items(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/budgets/:id/close
 func (h *Handler) Close(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -262,7 +251,6 @@ func (h *Handler) Close(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/budgets/:id/archive
 func (h *Handler) Archive(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -272,7 +260,6 @@ func (h *Handler) Archive(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/budgets/:id/restore
 func (h *Handler) Restore(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {

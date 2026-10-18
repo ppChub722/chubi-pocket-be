@@ -10,22 +10,15 @@ import (
 
 type Service struct {
 	store *Store
-	// feeCategoryCheck — is this one of the user's expense categories?
-	// Wired in main (users can't import categories).
 	feeCategoryCheck func(ctx context.Context, userID, categoryID uuid.UUID) error
 }
 
-// WithFeeCategoryCheck sets how `fee_category_id` is validated.
 func (s *Service) WithFeeCategoryCheck(fn func(ctx context.Context, userID, categoryID uuid.UUID) error) {
 	s.feeCategoryCheck = fn
 }
 
-// ErrInvalidFeeCategory — fee_category_id isn't one of the user's expense
-// categories.
 var ErrInvalidFeeCategory = errors.New("fee_category_id must be one of your expense categories")
 
-// FeeCategoryID — the user's fee category, if set (not checked: it may
-// have been deleted since; callers verify).
 func (s *Service) FeeCategoryID(ctx context.Context, userID uuid.UUID) (*uuid.UUID, error) {
 	prof, err := s.store.GetProfile(ctx, userID)
 	if err != nil {
@@ -98,8 +91,6 @@ func (s *Service) Deactivate(ctx context.Context, id uuid.UUID) error {
 	return s.store.SetStatus(ctx, id, "inactive")
 }
 
-// Reactivate is one of the two endpoints accessible to non-active users.
-// Returns ErrAlreadyActive if the user's status is already 'active'.
 func (s *Service) Reactivate(ctx context.Context, id uuid.UUID, currentStatus string) error {
 	if currentStatus == "active" {
 		return ErrAlreadyActive

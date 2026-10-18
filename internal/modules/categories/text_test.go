@@ -8,8 +8,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
-// TestCreateAppendsToSiblings — a new category goes to the end of its
-// sibling group (same user, type, parent); spec 05 §3.1.
 func TestCreateAppendsToSiblings(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()
@@ -44,7 +42,6 @@ func TestCreateAppendsToSiblings(t *testing.T) {
 		t.Errorf("children sort_order = %d, %d; want 0, 1", child1.SortOrder, child2.SortOrder)
 	}
 
-	// After a reorder puts B first, the next new root still lands last.
 	if _, err := pool.Exec(ctx, `UPDATE categories SET sort_order = CASE id WHEN $1 THEN 0 ELSE 1 END
 		WHERE id IN ($1, $2)`, b.ID, a.ID); err != nil {
 		t.Fatal(err)
@@ -54,7 +51,6 @@ func TestCreateAppendsToSiblings(t *testing.T) {
 	}
 }
 
-// TestUpdateTextFields — see tags/text_test.go.
 func TestUpdateTextFields(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()

@@ -7,7 +7,6 @@ import (
 	"time"
 )
 
-// thaiMonths — abbreviations with dots and spaces removed.
 var thaiMonths = map[string]time.Month{
 	"มค": time.January, "กพ": time.February, "มีค": time.March,
 	"เมย": time.April, "พค": time.May, "มิย": time.June,
@@ -15,19 +14,15 @@ var thaiMonths = map[string]time.Month{
 	"ตค": time.October, "พย": time.November, "ธค": time.December,
 }
 
-// strayMarks — below-vowels and tone marks OCR sprinkles on a month
-// ("ต.ุค."). None of them belongs to a month abbreviation.
 var strayMarks = strings.NewReplacer(
 	"ุ", "", "ู", "", // ุ ู
 	"่", "", "้", "", "๊", "", "๋", "", // tone marks
 	"็", "", "์", "", "ั", "", // ็ ์ ั
 )
 
-// "9 ต.ค. 69 13:19 น." — day, month, 2- or 4-digit Buddhist year, time.
 var thaiDateTime = regexp.MustCompile(
 	`(\d{1,2})\s*([^\d\s:][^\d:]{0,10}?)\s*(\d{4}|\d{2})\s+(\d{1,2})[:.](\d{2})`)
 
-// parseThaiDateTime reads a slip's date line, in Bangkok time.
 func parseThaiDateTime(s string) (time.Time, bool) {
 	m := thaiDateTime.FindStringSubmatch(s)
 	if m == nil {
@@ -61,7 +56,6 @@ func parseThaiDateTime(s string) (time.Time, bool) {
 	return t, true
 }
 
-// "1,250.00 บาท" / "30,000.00 um" — the number only.
 var amountRe = regexp.MustCompile(`(?:^|[^\d,.])(\d{1,3}(?:,\d{3})+|\d+)\.(\d{2})(?:[^\d]|$)`)
 
 func parseAmount(s string) (float64, bool) {
@@ -73,12 +67,8 @@ func parseAmount(s string) (float64, bool) {
 	return v, err == nil
 }
 
-// maskedRe — a masked account / PromptPay number as OCR reads it:
-// "XXX-X-X2780-x", "XXX-XXX-4464", "X=-XXXX-XXXX7-45-5", "XXX-X-X2121-%".
 var maskedRe = regexp.MustCompile(`^[Xx×%=\d\-]+$`)
 
-// masked turns such a line into digits with `x` for hidden ones
-// ("xxxxx2780x"). False when the line isn't one.
 func masked(s string) (string, bool) {
 	t := skeleton(s)
 	if !maskedRe.MatchString(t) || !strings.Contains(t, "-") {

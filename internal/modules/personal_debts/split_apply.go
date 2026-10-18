@@ -13,8 +13,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 )
 
-// applySplitChangeTx makes the recipient's mirror match the change: a
-// re-amount sets it, a removal deletes it. Returns updated | deleted.
 func applySplitChangeTx(ctx context.Context, tx pgx.Tx, mirror *Entry, p notifications.SplitChangedPayload) (string, error) {
 	if p.Change == notifications.SplitChangeRemoved {
 		if err := removeDebtTx(ctx, tx, mirror); err != nil {
@@ -28,9 +26,6 @@ func applySplitChangeTx(ctx context.Context, tx pgx.Tx, mirror *Entry, p notific
 	return "updated", nil
 }
 
-// ApplySplitChange — "อัปเดตตาม" on a split_changed notification
-// (POST /v1/personal-debts/split-changes/:notification_id/apply). One shot:
-// a used, superseded or out-of-date change is refused.
 func (s *Service) ApplySplitChange(ctx context.Context, userID, notificationID uuid.UUID) (*SplitChangeResult, error) {
 	if s.notifs == nil {
 		return nil, errors.New("notifications module not wired")
@@ -114,7 +109,6 @@ func setDebtAmountTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, amount float6
 	return err
 }
 
-// removeDebtTx — a person taken off a split: the entry goes.
 func removeDebtTx(ctx context.Context, tx pgx.Tx, d *Entry) error {
 	_, err := tx.Exec(ctx, `DELETE FROM personal_debts WHERE id = $1`, d.ID)
 	return err

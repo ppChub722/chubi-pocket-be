@@ -51,13 +51,8 @@ func scanUser(row pgx.Row) (*User, error) {
 	return &u, nil
 }
 
-// Pool exposes the underlying connection pool to the Service so it can
-// orchestrate multi-store transactions (register flow composes user insert,
-// preferences insert, and the categories seed in one tx).
 func (s *Store) Pool() *pgxpool.Pool { return s.db }
 
-// InsertUserTx inserts the users row inside caller's tx. Does NOT insert
-// user_preferences — Service.Register composes that and the categories seed.
 func (s *Store) InsertUserTx(ctx context.Context, tx pgx.Tx, u *User) (*User, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -78,10 +73,7 @@ func (s *Store) InsertUserTx(ctx context.Context, tx pgx.Tx, u *User) (*User, er
 	return created, nil
 }
 
-// InsertPreferencesTx inserts the user_preferences row inside caller's tx
-// with Phase 0 defaults. created_by_user_id is left NULL (system-created).
 func (s *Store) InsertPreferencesTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
-	// money_style: new users see colour only (owner 2026-10-17).
 	const defaults = `{"timezone":"Asia/Bangkok","theme":"system","language":"th","money_style":"color_only"}`
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO user_preferences (user_id, preferences) VALUES ($1, $2::jsonb)`,
@@ -94,8 +86,6 @@ func (s *Store) InsertPreferencesTx(ctx context.Context, tx pgx.Tx, userID uuid.
 func mapInsertError(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-		// Constraint name distinguishes which uniqueness was violated.
-		// Index names from migration: idx_users_username, idx_users_email
 		if strings.Contains(pgErr.ConstraintName, "username") {
 			return ErrUsernameExists
 		}
@@ -106,8 +96,6 @@ func mapInsertError(err error) error {
 	return fmt.Errorf("db error: %w", err)
 }
 
-// GetByIdentifier finds a user by username or email (login).
-// API layer decides which by `@` presence; store accepts both.
 func (s *Store) GetByIdentifier(ctx context.Context, identifier string) (*User, error) {
 	q := `SELECT ` + userColumns + ` FROM users WHERE username = $1 OR email = $1 LIMIT 1`
 	u, err := scanUser(s.db.QueryRow(ctx, q, identifier))

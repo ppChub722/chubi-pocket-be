@@ -13,10 +13,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
-// PATCH /v1/accounts/reorder (contract §3). The order is the caller's own
-// (account_members.sort_order) — reordering a shared wallet never moves
-// it for the other members.
-
 var (
 	ErrReorderForbidden = errors.New("reorder lists a wallet the caller is not an active member of")
 	ErrReorderDuplicate = errors.New("reorder lists the same wallet twice")
@@ -31,7 +27,6 @@ type ReorderRequest struct {
 	Items []ReorderItem `json:"items" binding:"required,dive"`
 }
 
-// ReorderTx applies every item in one transaction, or none.
 func (s *Store) ReorderTx(ctx context.Context, userID uuid.UUID, items []ReorderItem) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -93,8 +88,6 @@ func (h *Handler) Reorder(c *gin.Context) {
 	}
 }
 
-// ReorderPage saves the caller's order and answers the active list (with its
-// totals) in the new order.
 func (s *Service) ReorderPage(ctx context.Context, userID uuid.UUID, items []ReorderItem) (*AccountList, error) {
 	seen := make(map[uuid.UUID]bool, len(items))
 	for _, it := range items {

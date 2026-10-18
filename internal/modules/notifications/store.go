@@ -25,8 +25,6 @@ func (s *Store) Pool() *pgxpool.Pool { return s.db }
 var (
 	ErrNotificationNotFound = errors.New("notification not found")
 	ErrNotForYou            = errors.New("notification is not addressed to caller")
-	// ErrStateConflict — dismissing an actioned row or actioning a
-	// dismissed one (contract §11 → 409).
 	ErrStateConflict = errors.New("notification already in the other terminal state")
 )
 
@@ -47,18 +45,6 @@ func scanNotification(row pgx.Row) (*Notification, error) {
 	return &n, err
 }
 
-// HasPendingByPayloadKey reports whether the recipient already has an
-// **unresolved** notification of [notifType] from [actorUserID] whose
-// payload contains [payloadKey] = [payloadValue].
-//
-// "Unresolved" = `actioned_at IS NULL AND dismissed_at IS NULL` —
-// matches the user-visible "still in the inbox awaiting action" state.
-// Read-but-not-acted rows still count as pending.
-//
-// Used by producers (e.g. contacts.RequestLink) to make their dispatch
-// idempotent without duplicating tile rows when the same trigger fires
-// twice. Hard-deleted rows are gone from the table, so a deletion
-// followed by a fresh request correctly creates a new notification.
 func (s *Store) HasPendingByPayloadKey(
 	ctx context.Context, notifType string,
 	recipientUserID, actorUserID uuid.UUID,
@@ -83,9 +69,6 @@ func (s *Store) HasPendingByPayloadKey(
 	return exists, nil
 }
 
-// InsertTx inserts one notification row inside the producer's tx. Returns
-// the created row's id; the producer rarely needs the full row so we keep
-// the call site small.
 func (s *Store) InsertTx(
 	ctx context.Context, tx pgx.Tx,
 	recipientUserID uuid.UUID, notifType string,
@@ -106,7 +89,6 @@ func (s *Store) InsertTx(
 	return id, nil
 }
 
-// List returns the caller's notification rows + unread count + total.
 func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Notification, int, int, error) {
 	whereClauses := []string{"n.recipient_user_id = $1"}
 	args := []any{userID}
@@ -227,8 +209,6 @@ func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Notificatio
 	return n, nil
 }
 
-// MarkRead is idempotent — returns the row whether or not it was already
-// read. Caller is identified for the audit column.
 func (s *Store) MarkRead(ctx context.Context, userID, id uuid.UUID) (*Notification, error) {
 	q := `UPDATE notifications SET
 		read_at = COALESCE(read_at, NOW()),
@@ -255,19 +235,14 @@ func (s *Store) MarkReadAll(ctx context.Context, userID uuid.UUID) (int, error) 
 	return int(tag.RowsAffected()), nil
 }
 
-// MarkActioned implies read.
 func (s *Store) MarkActioned(ctx context.Context, userID, id uuid.UUID) (*Notification, error) {
 	return s.markTerminal(ctx, userID, id, "actioned_at")
 }
 
-// MarkDismissed implies read.
 func (s *Store) MarkDismissed(ctx context.Context, userID, id uuid.UUID) (*Notification, error) {
 	return s.markTerminal(ctx, userID, id, "dismissed_at")
 }
 
-// MarkActionedTx is the tx-aware variant — used by producer modules
-// (contacts, projects) when accepting / rejecting a link-request notification
-// inside the same tx as the link-side change.
 func (s *Store) MarkActionedTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) (*Notification, error) {
 	return s.markTerminalTx(ctx, tx, userID, id, "actioned_at")
 }
@@ -276,10 +251,6 @@ func (s *Store) MarkDismissedTx(ctx context.Context, tx pgx.Tx, userID, id uuid.
 	return s.markTerminalTx(ctx, tx, userID, id, "dismissed_at")
 }
 
-// GetByIDForCallerTx fetches a notification under the caller's identity
-// inside a tx, returning ErrNotForYou if the row isn't addressed to them.
-// Used by accept-link-request flows that need to read the payload before
-// applying the link change.
 func (s *Store) GetByIDForCallerTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) (*Notification, error) {
 	q := `SELECT ` + notificationColumns + ` FROM notifications WHERE id = $1 FOR UPDATE`
 	n, err := scanNotification(tx.QueryRow(ctx, q, id))
@@ -307,8 +278,6 @@ func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	return nil
 }
 
-// --- Settings ---
-
 const settingsColumns = `user_id, muted_types, auto_types, default_account_id,
 	auto_resolve_own_in_projects, created_at, updated_at`
 
@@ -321,7 +290,6 @@ func scanSettings(row pgx.Row) (*Settings, error) {
 	return &s, err
 }
 
-// DefaultSettings mirrors the column defaults (migration 000045).
 func DefaultSettings(userID uuid.UUID) *Settings {
 	return &Settings{
 		UserID:     userID,
@@ -334,7 +302,6 @@ func (s *Store) GetSettings(ctx context.Context, userID uuid.UUID) (*Settings, e
 	return getSettingsOn(ctx, s.db, userID)
 }
 
-// GetSettingsTx reads inside a producer's transaction.
 func (s *Store) GetSettingsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) (*Settings, error) {
 	return getSettingsOn(ctx, tx, userID)
 }
@@ -343,8 +310,6 @@ func getSettingsOn(ctx context.Context, db rowQuerier, userID uuid.UUID) (*Setti
 	q := `SELECT ` + settingsColumns + ` FROM user_notification_settings WHERE user_id = $1`
 	row, err := scanSettings(db.QueryRow(ctx, q, userID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Defensive: seeded at registration + backfilled by migration, so
-		// this should be unreachable — fall back to the defaults.
 		return DefaultSettings(userID), nil
 	}
 	if err != nil {
@@ -353,8 +318,6 @@ func getSettingsOn(ctx context.Context, db rowQuerier, userID uuid.UUID) (*Setti
 	return row, nil
 }
 
-// SeedSettingsTx is the auth registration hook. Called inside the user
-// insert tx to atomically create the default settings row.
 func (s *Store) SeedSettingsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO user_notification_settings (user_id, created_by_user_id, updated_by_user_id)
@@ -393,9 +356,6 @@ func (s *Store) UpdateSettings(ctx context.Context, userID uuid.UUID, req Update
 	return row, nil
 }
 
-// LookupUserByEmail / ByUsername power the privacy-preserving link-request
-// flow. They run in both branches (hit and miss) so timing leaks don't
-// reveal whether a user exists.
 func (s *Store) LookupUserByEmail(ctx context.Context, email string) (*uuid.UUID, error) {
 	var id uuid.UUID
 	err := s.db.QueryRow(ctx,
@@ -424,7 +384,6 @@ func (s *Store) LookupUserByUsername(ctx context.Context, username string) (*uui
 	return &id, nil
 }
 
-// rowQuerier is satisfied by both *pgxpool.Pool and pgx.Tx.
 type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
@@ -437,9 +396,6 @@ func (s *Store) markTerminalTx(ctx context.Context, tx pgx.Tx, userID, id uuid.U
 	return markTerminalOn(ctx, tx, userID, id, col)
 }
 
-// markTerminalOn sets actioned_at or dismissed_at (idempotent). The two
-// are mutually exclusive (notifications_terminal_xor): asking for one when
-// the other is already set is ErrStateConflict (409), not a DB error.
 func markTerminalOn(ctx context.Context, db rowQuerier, userID, id uuid.UUID, col string) (*Notification, error) {
 	other := "dismissed_at"
 	if col == "dismissed_at" {
@@ -453,7 +409,6 @@ func markTerminalOn(ctx context.Context, db rowQuerier, userID, id uuid.UUID, co
 		RETURNING %[3]s`, col, other, notificationColumns)
 	n, err := scanNotification(db.QueryRow(ctx, q, userID, id))
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Missing / not ours → 404; exists with the other state → 409.
 		var exists bool
 		if err := db.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM notifications WHERE id = $1 AND recipient_user_id = $2)`,
@@ -471,7 +426,6 @@ func markTerminalOn(ctx context.Context, db rowQuerier, userID, id uuid.UUID, co
 	return n, nil
 }
 
-// IsActiveWalletMember — userID actively belongs to an active wallet.
 func (s *Store) IsActiveWalletMember(ctx context.Context, userID, accountID uuid.UUID) (bool, error) {
 	var ok bool
 	err := s.db.QueryRow(ctx, `
@@ -486,7 +440,6 @@ func (s *Store) IsActiveWalletMember(ctx context.Context, userID, accountID uuid
 	return ok, nil
 }
 
-// SupersedeSplitNoticesTx — see Service.SupersedeSplitNoticesTx.
 func (s *Store) SupersedeSplitNoticesTx(ctx context.Context, tx pgx.Tx, recipientUserID uuid.UUID, notifType string, splitID uuid.UUID) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE notifications SET payload = payload || '{"superseded": true}'::jsonb, updated_at = NOW()
@@ -498,7 +451,6 @@ func (s *Store) SupersedeSplitNoticesTx(ctx context.Context, tx pgx.Tx, recipien
 	return nil
 }
 
-// RefreshSplitCreatedTx — see Service.RefreshSplitCreatedTx.
 func (s *Store) RefreshSplitCreatedTx(ctx context.Context, tx pgx.Tx, recipientUserID, splitID uuid.UUID, amount float64) (bool, error) {
 	tag, err := tx.Exec(ctx, `
 		UPDATE notifications SET payload = jsonb_set(payload, '{amount}', to_jsonb($4::numeric)), updated_at = NOW()
@@ -511,9 +463,6 @@ func (s *Store) RefreshSplitCreatedTx(ctx context.Context, tx pgx.Tx, recipientU
 	return tag.RowsAffected() > 0, nil
 }
 
-// Restore brings a dismissed (hidden) notification back: dismissed_at is
-// cleared, read_at stays. Idempotent — a row that is not dismissed is
-// returned as is.
 func (s *Store) Restore(ctx context.Context, userID, id uuid.UUID) (*Notification, error) {
 	q := `UPDATE notifications SET dismissed_at = NULL, updated_by_user_id = $1
 		WHERE id = $2 AND recipient_user_id = $1

@@ -1,6 +1,3 @@
-// Package testdb gives store tests the local dev Postgres
-// (TEST_DATABASE_URL, default the compose db on :5433) and throwaway
-// users. Tests SKIP when the database is unreachable or not migrated.
 package testdb
 
 import (
@@ -15,7 +12,6 @@ import (
 
 const defaultDSN = "postgres://chubadmin:admin1234@localhost:5433/chubi_pocket_db?sslmode=disable"
 
-// Pool connects and checks migration 000051 (name / description / note).
 func Pool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -44,7 +40,6 @@ func Pool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-// User inserts a user and removes it (and its rows) when the test ends.
 func User(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 	t.Helper()
 	ctx := context.Background()
@@ -86,7 +81,6 @@ func User(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 	return id
 }
 
-// Account inserts an active THB bank wallet owned by userID.
 func Account(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID) uuid.UUID {
 	t.Helper()
 	id, _ := uuid.NewV7()
@@ -104,7 +98,6 @@ func Account(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID) uuid.UUID {
 	return id
 }
 
-// Category inserts a user expense category.
 func Category(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID, name string) uuid.UUID {
 	t.Helper()
 	id, _ := uuid.NewV7()
@@ -116,10 +109,8 @@ func Category(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID, name string) u
 	return id
 }
 
-// Str returns a pointer to s.
 func Str(s string) *string { return &s }
 
-// Text dereferences a nullable column for messages ("<nil>" when NULL).
 func Text(s *string) string {
 	if s == nil {
 		return "<nil>"
@@ -127,7 +118,6 @@ func Text(s *string) string {
 	return *s
 }
 
-// CheckText fails when description / note differ from want ("" = NULL).
 func CheckText(t *testing.T, step string, gotD, gotN *string, wantD, wantN string) {
 	t.Helper()
 	if Text(gotD) != orNil(wantD) || Text(gotN) != orNil(wantN) {
@@ -143,8 +133,8 @@ func orNil(s string) string {
 	return s
 }
 
-// Steps is the shared update script every module runs: a body without
-// the keys keeps both, null clears, "" clears, a value is trimmed.
+// Steps is the shared update script every module runs: a body without the keys keeps both, null
+// clears, "" clears, a value is trimmed.
 var Steps = []struct {
 	Body         string
 	WantD, WantN string
@@ -156,5 +146,4 @@ var Steps = []struct {
 	{`{"note":"N2"}`, "D2", "N2"},
 }
 
-// Float returns a pointer to f.
 func Float(f float64) *float64 { return &f }

@@ -20,7 +20,6 @@ func NewHandler(s *Service, log *slog.Logger) *Handler {
 	return &Handler{service: s, log: log}
 }
 
-// POST /v1/auth/register
 func (h *Handler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -44,7 +43,6 @@ func (h *Handler) Register(c *gin.Context) {
 	c.JSON(http.StatusCreated, resp)
 }
 
-// POST /v1/auth/login
 func (h *Handler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -55,9 +53,7 @@ func (h *Handler) Login(c *gin.Context) {
 	resp, err := h.service.Login(c.Request.Context(), req)
 	if err != nil {
 		// Never log the identifier verbatim (could be an email — PII).
-		// request_id is enough to correlate with the HTTP trace.
 		logger.FromCtx(c, h.log).Warn("auth login failed")
-		// Spec §3.8: never distinguish "user not found" vs "wrong password".
 		response.Fail(c, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Invalid credentials", nil)
 		return
 	}
@@ -66,14 +62,11 @@ func (h *Handler) Login(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// POST /v1/auth/logout — Phase 0 best-effort, client just discards.
 func (h *Handler) Logout(c *gin.Context) {
-	// FromCtx binds user_id — this is a protected route.
 	logger.FromCtx(c, h.log).Info("auth logout")
 	response.OK(c, "Logged out successfully", nil)
 }
 
-// PUT /v1/auth/password
 func (h *Handler) ChangePassword(c *gin.Context) {
 	userID, ok := UserIDFromContext(c)
 	if !ok {

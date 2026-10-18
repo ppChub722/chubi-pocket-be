@@ -1,19 +1,5 @@
 package projects
 
-// Taking a transaction out of its event (owner 2026-10-10). The personal
-// row is never deleted — it goes back to being a loose transaction.
-//
-//   - the tx is its board row's origin (I recorded the row and I'm its
-//     actor: a pulled bill, or my own copy of my own row) → the board row
-//     and its split children are deleted, and every personal row pointing
-//     at them (mine + other members' copies) is unlinked. A copy is just a
-//     copy: it stays in its owner's book as a plain loose transaction.
-//   - otherwise (my copy of someone else's row) → only my row is unlinked;
-//     the board row stays.
-//
-// Removal is always allowed (no project lock / membership check); only the
-// transaction's author can do it.
-
 import (
 	"context"
 	"errors"
@@ -26,11 +12,8 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
-// ErrBillNotInProject — the transaction isn't in this project
-// (404 TX_NOT_IN_PROJECT).
 var ErrBillNotInProject = errors.New("transaction is not in this project")
 
-// RemoveBill implements DELETE /v1/projects/:id/bills/:transaction_id.
 func (s *Service) RemoveBill(ctx context.Context, callerUserID, projectID, txID uuid.UUID) (*EventPatch, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -73,12 +56,6 @@ func (s *Service) RemoveBill(ctx context.Context, callerUserID, projectID, txID 
 	return s.patch(ctx, callerUserID, projectID, nil, removed, nil)
 }
 
-// detachBillTx takes the caller's transaction txID out of its project (see
-// the file comment). When txID is its board row's origin, the row's member
-// splits leave the board with it: restore = true puts them back on txID as
-// personal splits (a removal); false hands them back for the caller to
-// carry to another board (a move). Returns them (nil when txID was only a
-// copy, so nothing moved).
 func (s *Service) detachBillTx(
 	ctx context.Context, tx pgx.Tx, callerUserID, txID uuid.UUID, restore bool,
 ) ([]quickDebt, error) {
@@ -92,8 +69,6 @@ func (s *Service) detachBillTx(
 		return nil, fmt.Errorf("load bill %s: %w", txID, err)
 	}
 
-	// Personal splits pulled in before splits moved onto the board (old
-	// data) only drop their event tag.
 	if _, err := tx.Exec(ctx, `
 		UPDATE personal_debts SET project_id = NULL, updated_by_user_id = $1
 		WHERE user_id = $1 AND source_transaction_id = $2 AND project_id IS NOT NULL`,
@@ -132,8 +107,6 @@ func (s *Service) detachBillTx(
 	return nil, nil
 }
 
-// boardSplitsTx — board row ptID's member splits, as the people they are:
-// a linked member by user, an ad-hoc one by name.
 func boardSplitsTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) ([]quickDebt, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT pm.user_id, pm.display_name, c.amount
@@ -156,10 +129,6 @@ func boardSplitsTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) ([]quickDebt,
 	return out, rows.Err()
 }
 
-// restoreSplitsTx puts a board row's member splits back on the caller's
-// txID as personal splits: a linked member through my contact linked to
-// them when I have one, else by the member's name. The usual split rules
-// follow (a linked contact hears split_created).
 func (s *Service) restoreSplitsTx(
 	ctx context.Context, tx pgx.Tx, callerUserID, txID uuid.UUID, splits []quickDebt,
 ) error {
@@ -190,8 +159,6 @@ func (s *Service) restoreSplitsTx(
 	return s.txs.AddSplitsTx(ctx, tx, callerUserID, txID, inputs)
 }
 
-// isBoardOriginTx — ptID is a parent row the caller recorded with
-// themselves as the actor.
 func isBoardOriginTx(ctx context.Context, tx pgx.Tx, callerUserID, ptID uuid.UUID) (bool, error) {
 	var origin bool
 	err := tx.QueryRow(ctx, `
@@ -210,10 +177,6 @@ func isBoardOriginTx(ctx context.Context, tx pgx.Tx, callerUserID, ptID uuid.UUI
 	return origin, nil
 }
 
-// unlinkCopiesTx turns every personal row pointing at board row ptID or its
-// split children into a plain loose transaction. Must run before the board
-// row is deleted: the FK's SET NULL alone would leave project_id behind and
-// break CHECK transactions_project_id_implies_source.
 func unlinkCopiesTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE transactions SET project_id = NULL, source_project_transaction_id = NULL
@@ -226,10 +189,7 @@ func unlinkCopiesTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) error {
 	return nil
 }
 
-// deleteBoardRowTx unlinks the copies, deletes board row ptID (children
-// cascade) and tells its stakeholders (project_tx_changed, kind deleted).
 func (s *Service) deleteBoardRowTx(ctx context.Context, tx pgx.Tx, editorUserID, projectID, ptID uuid.UUID) error {
-	// Capture recipients BEFORE delete (FK cascade nukes the children).
 	recipients, _ := s.store.PTRecipientsForChange(ctx, ptID, editorUserID)
 
 	if err := unlinkCopiesTx(ctx, tx, ptID); err != nil {

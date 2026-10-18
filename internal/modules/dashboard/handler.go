@@ -20,7 +20,6 @@ func NewHandler(s *Service) *Handler {
 	return &Handler{service: s}
 }
 
-// GET /v1/dashboard?month=YYYY-MM
 func (h *Handler) Get(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {

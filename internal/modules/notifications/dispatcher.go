@@ -9,20 +9,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Delivery is what a producer does for one recipient (contract §5):
-//
-//   - Deliver false → the recipient muted this type: no notification and
-//     no auto-action, whatever their auto switch says.
-//   - Auto true → run the notification's action right away, then dispatch
-//     it already actioned ("ทำให้แล้ว").
-//   - otherwise → dispatch it pending; the inbox offers the action button.
 type Delivery struct {
 	Deliver bool
 	Auto    bool
 }
 
-// DeliveryFor reads the recipient's switches inside the producer's tx.
-// Self-targeted events never deliver (solo projects etc. stay quiet).
 func (s *Service) DeliveryFor(
 	ctx context.Context, tx pgx.Tx, recipientUserID uuid.UUID, actorUserID *uuid.UUID, notifType string,
 ) (Delivery, error) {
@@ -39,15 +30,10 @@ func (s *Service) DeliveryFor(
 	return Delivery{Deliver: st.Deliver(notifType), Auto: st.Auto(notifType)}, nil
 }
 
-// SettingsTx exposes the recipient's settings to producers (e.g. the
-// project auto-actions).
 func (s *Service) SettingsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) (*Settings, error) {
 	return s.store.GetSettingsTx(ctx, tx, userID)
 }
 
-// dispatchTx is the single in-tx insert path. It re-checks delivery, so a
-// producer that skips DeliveryFor still honours mutes and the self guard.
-// actioned = the auto-action already ran.
 func (s *Service) dispatchTx(
 	ctx context.Context, tx pgx.Tx,
 	notifType string, recipientUserID uuid.UUID, actorUserID *uuid.UUID,
@@ -64,9 +50,6 @@ func (s *Service) dispatchTx(
 	_, err = s.store.InsertTx(ctx, tx, recipientUserID, notifType, actorUserID, bytes, deepLink, actioned)
 	return err
 }
-
-// --- Typed wrappers (one per trigger). Producers call these from inside
-// their own action's tx. ---
 
 func (s *Service) DispatchSplitCreated(
 	ctx context.Context, tx pgx.Tx,
@@ -111,9 +94,6 @@ func (s *Service) DispatchContactLinkRequest(
 	return s.dispatchTx(ctx, tx, TypeContactLinkRequest, recipientUserID, &actorUserID, p, &deepLink, false)
 }
 
-// DispatchProjectAdded is informational only (no accept/reject actions) —
-// quick create auto-adds members whose consent is implied by the underlying
-// splits / shared wallet (spec §10/4.24).
 func (s *Service) DispatchProjectAdded(
 	ctx context.Context, tx pgx.Tx,
 	recipientUserID uuid.UUID, actorUserID uuid.UUID, p ProjectAddedPayload,
@@ -130,8 +110,8 @@ func (s *Service) DispatchAccountInvite(
 	return s.dispatchTx(ctx, tx, TypeAccountInvite, recipientUserID, &actorUserID, p, &deepLink, false)
 }
 
-// splitDeepLink opens the recipient's own debt row when they have one;
-// otherwise (split_created awaiting "add to my debts") the debts list.
+// splitDeepLink opens the recipient's own debt row when they have one; otherwise (split_created
+// awaiting "add to my debts") the debts list.
 func splitDeepLink(recipientDebtID *uuid.UUID) string {
 	if recipientDebtID != nil {
 		return fmt.Sprintf("/personal-debts/%s", *recipientDebtID)
@@ -139,9 +119,6 @@ func splitDeepLink(recipientDebtID *uuid.UUID) string {
 	return "/personal-debts"
 }
 
-// DispatchSplitChanged — a split the recipient mirrored changed. Older
-// pending split_changed for the same split are superseded first, so only
-// the newest one can still be applied.
 func (s *Service) DispatchSplitChanged(
 	ctx context.Context, tx pgx.Tx,
 	recipientUserID uuid.UUID, actorUserID uuid.UUID, p SplitChangedPayload, actioned bool,
@@ -153,15 +130,10 @@ func (s *Service) DispatchSplitChanged(
 	return s.dispatchTx(ctx, tx, TypeSplitChanged, recipientUserID, &actorUserID, p, &deepLink, actioned)
 }
 
-// SupersedeSplitNoticesTx marks the recipient's still-pending notices of
-// notifType about splitID superseded — their action no longer applies.
 func (s *Service) SupersedeSplitNoticesTx(ctx context.Context, tx pgx.Tx, recipientUserID uuid.UUID, notifType string, splitID uuid.UUID) error {
 	return s.store.SupersedeSplitNoticesTx(ctx, tx, recipientUserID, notifType, splitID)
 }
 
-// RefreshSplitCreatedTx keeps a still-pending split_created in step with
-// its split's new amount ("add to my debts" always uses the live amount;
-// this keeps the card's figure right). Reports whether one was pending.
 func (s *Service) RefreshSplitCreatedTx(ctx context.Context, tx pgx.Tx, recipientUserID, splitID uuid.UUID, amount float64) (bool, error) {
 	return s.store.RefreshSplitCreatedTx(ctx, tx, recipientUserID, splitID, amount)
 }

@@ -11,8 +11,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
-// TestInviteMember — invite a wallet member by picking a linked contact
-// (owner 2026-10-11), or by email (the older form).
 func TestInviteMember(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()
@@ -78,7 +76,6 @@ func TestInviteMember(t *testing.T) {
 		}
 	}
 
-	// Email still works.
 	var email string
 	if err := pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, other).Scan(&email); err != nil {
 		t.Fatal(err)

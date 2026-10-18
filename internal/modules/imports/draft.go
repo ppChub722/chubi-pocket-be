@@ -7,8 +7,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 )
 
-// DraftContext — the user's side of turning a slip into drafts: their
-// active wallets (with identifiers) and their fee category.
 type DraftContext struct {
 	Wallets       []Wallet
 	FeeCategoryID *uuid.UUID
@@ -20,15 +18,6 @@ const (
 	typeTransfer = "transfer"
 )
 
-// buildPending — a read slip → its pending drafts (spec 15 §5.3, §7).
-// Where our wallet shows up decides the sign:
-//
-//	sender only   → expense from it      (+ fee draft, we paid it)
-//	receiver only → income into it       (no fee draft, the sender paid)
-//	both          → transfer between     (+ fee draft from the sender)
-//	neither       → expense, no wallet   (+ fee draft)
-//
-// Incomplete slips get the main draft only.
 func buildPending(s *slip.Slip, transRef, bankCode string, ctx DraftContext) []PendingItem {
 	ref := SlipRef{
 		Type:       "slip",
@@ -44,7 +33,6 @@ func buildPending(s *slip.Slip, transRef, bankCode string, ctx DraftContext) []P
 	var from, to *uuid.UUID
 	if s.Sender != nil {
 		ref.SenderMasked = s.Sender.Masked
-		// The QR's bank is the sender's.
 		from = matchWallet(ctx.Wallets, s.Sender.Masked, senderKinds, bankCode)
 	}
 	if s.Receiver != nil {
@@ -61,7 +49,6 @@ func buildPending(s *slip.Slip, transRef, bankCode string, ctx DraftContext) []P
 		d := s.OccurredAt.In(slip.Bangkok).Format("2006-01-02")
 		date = &d
 	}
-	// What it was for = who got the money; the slip's memo is the note.
 	main := pending.Draft{Amount: s.Amount, Date: date}
 	if ref.Payee != "" {
 		payee := ref.Payee

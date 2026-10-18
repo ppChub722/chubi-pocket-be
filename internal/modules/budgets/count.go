@@ -1,17 +1,5 @@
 package budgets
 
-// What a budget counts, in ONE query per date range (owner 2026-10-13):
-//   - normal / recurring — my expense transactions (my share), not a debt
-//     entry's wallet side, not a system / non-report category, not a
-//     transaction an event bill was made from or a copy of my share of a
-//     bill (those count as the bill);
-//   - event — my share of event bills (payer: amount − every split; else my
-//     splits), events not cancelled; category / wallet / tags of my
-//     transaction behind the bill when there is one;
-//   - upcoming — recurring items not made yet (expected);
-//   - pending — pending drafts (expected).
-// Scope: everything, or a row matching ANY category / tag name / wallet.
-
 import (
 	"context"
 	"fmt"
@@ -23,7 +11,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// countRow — one counted thing.
 type countRow struct {
 	Kind        string
 	ID          uuid.UUID
@@ -39,8 +26,6 @@ type countRow struct {
 	ItemID      *uuid.UUID
 }
 
-// window — what to collect: used rows dated [From, To] (To nil = no end);
-// expected rows dated [ExpFrom, ExpTo] when Expected.
 type window struct {
 	From, To       time.Time
 	Expected       bool
@@ -120,7 +105,6 @@ FROM all_rows a
 WHERE $4 OR a.category_id = ANY($5) OR a.account_id = ANY($7)
    OR EXISTS (SELECT 1 FROM unnest(a.tags) n WHERE lower(n) = ANY($6))`
 
-// collect runs countSQL for budget b over w.
 func (s *Service) collect(ctx context.Context, b *Budget, w window) ([]countRow, error) {
 	cats, err := s.store.expandCategories(ctx, b.Categories)
 	if err != nil {

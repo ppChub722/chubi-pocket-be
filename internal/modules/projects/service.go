@@ -14,8 +14,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// --- Service / wiring ---
-
 type Service struct {
 	store  *Store
 	notifs *notifications.Service
@@ -28,15 +26,8 @@ func NewService(store *Store) *Service {
 
 func (s *Service) WithNotificationService(n *notifications.Service) { s.notifs = n }
 
-// WithTransactionsService wires the personal-book paths (quick create, bills,
-// copies, linked money). Direct import is safe — transactions does not
-// import projects.
 func (s *Service) WithTransactionsService(t *transactions.Service) { s.txs = t }
 
-// --- Event CRUD ---
-
-// Create — POST /projects: the event, my owner member row and my personal
-// tags in one tx; returns the page-ready detail.
 func (s *Service) Create(ctx context.Context, ownerUserID uuid.UUID, req CreateProjectRequest) (*EventDetail, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -56,7 +47,6 @@ func (s *Service) Create(ctx context.Context, ownerUserID uuid.UUID, req CreateP
 	return s.detail(ctx, ownerUserID, p.ID, 1, 20)
 }
 
-// createTx — the project + the caller's owner member row.
 func (s *Service) createTx(ctx context.Context, tx pgx.Tx, ownerUserID uuid.UUID, req CreateProjectRequest) (*Project, error) {
 	p, err := s.store.CreateInTx(ctx, tx, ownerUserID, req)
 	if err != nil {
@@ -74,7 +64,6 @@ func (s *Service) createTx(ctx context.Context, tx pgx.Tx, ownerUserID uuid.UUID
 	return p, nil
 }
 
-// List — GET /projects.
 func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*EventList, error) {
 	return s.list(ctx, userID, f, false)
 }
@@ -111,7 +100,6 @@ func (s *Service) list(ctx context.Context, userID uuid.UUID, f ListFilter, unli
 	return out, nil
 }
 
-// Get — GET /projects/:id (the Event row).
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Event, error) {
 	if _, err := s.store.GetByIDForCaller(ctx, userID, id); err != nil {
 		return nil, err
@@ -120,7 +108,6 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Event, error)
 	return &e, err
 }
 
-// Detail — GET /projects/:id/detail.
 func (s *Service) Detail(ctx context.Context, userID, id uuid.UUID, page, perPage int, withDeletePreview bool) (*EventDetail, error) {
 	d, err := s.detail(ctx, userID, id, page, perPage)
 	if err != nil || !withDeletePreview {
@@ -134,7 +121,6 @@ func (s *Service) Detail(ctx context.Context, userID, id uuid.UUID, page, perPag
 	return d, nil
 }
 
-// Summary — GET /projects/:id/summary.
 func (s *Service) Summary(ctx context.Context, userID, id uuid.UUID) (*EventSummary, error) {
 	if _, err := s.store.GetByIDForCaller(ctx, userID, id); err != nil {
 		return nil, err
@@ -147,8 +133,6 @@ func (s *Service) Summary(ctx context.Context, userID, id uuid.UUID) (*EventSumm
 	return &sum, err
 }
 
-// Update — PUT /projects/:id. The owner edits the event; MY tags (tag_ids)
-// are any member's own.
 func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateProjectRequest) (*EventPatch, error) {
 	p, err := s.store.GetByIDForCaller(ctx, userID, id)
 	if err != nil {
@@ -178,9 +162,6 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdatePr
 	return s.patch(ctx, userID, id, nil, nil, nil)
 }
 
-// Delete — DELETE /projects/:id (owner). Other members' personal
-// transactions stay in their books, unlinked; mine too unless deleteLinked
-// (owner 2026-10-13: "ยืนยันและลบ x รายการ"), then they go (balances back).
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked bool) (*EventDeleteResult, error) {
 	p, err := s.store.GetByIDForCaller(ctx, userID, id)
 	if err != nil {
@@ -214,7 +195,6 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked
 			ids = append(ids, tid)
 		}
 		rows.Close()
-		// Unlink first (the CHECK needs both columns cleared together).
 		if _, err := tx.Exec(ctx, `UPDATE transactions SET project_id = NULL, source_project_transaction_id = NULL
 			WHERE id = ANY($1)`, ids); err != nil {
 			return nil, fmt.Errorf("unlink: %w", err)
@@ -241,7 +221,6 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked
 	return out, nil
 }
 
-// Leave — POST /projects/:id/leave.
 func (s *Service) Leave(ctx context.Context, userID, projectID uuid.UUID) (*DeletedResult, error) {
 	p, err := s.store.GetByID(ctx, projectID)
 	if err != nil {
@@ -265,7 +244,6 @@ func (s *Service) Leave(ctx context.Context, userID, projectID uuid.UUID) (*Dele
 	return &DeletedResult{ID: projectID}, nil
 }
 
-// TransferOwnership — POST /projects/:id/transfer-ownership.
 func (s *Service) TransferOwnership(ctx context.Context, callerUserID, projectID, newOwnerUserID uuid.UUID) (*EventPatch, error) {
 	p, err := s.store.GetByID(ctx, projectID)
 	if err != nil {
@@ -288,8 +266,6 @@ func (s *Service) TransferOwnership(ctx context.Context, callerUserID, projectID
 	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
 }
 
-// --- Members ---
-
 func (s *Service) ListMembers(ctx context.Context, userID, projectID uuid.UUID) (*EventMemberList, error) {
 	if _, err := s.store.GetByIDForCaller(ctx, userID, projectID); err != nil {
 		return nil, err
@@ -301,8 +277,6 @@ func (s *Service) ListMembers(ctx context.Context, userID, projectID uuid.UUID) 
 	return &EventMemberList{Data: m}, nil
 }
 
-// AddMember — (a) ad_hoc + display_name; (b) email + display_name (invite).
-// Owner only.
 func (s *Service) AddMember(ctx context.Context, callerUserID, projectID uuid.UUID, req AddMemberRequest) (*EventPatch, error) {
 	p, err := s.store.GetByID(ctx, projectID)
 	if err != nil {
@@ -346,7 +320,6 @@ func (s *Service) addMemberByEmailTx(
 	ctx context.Context, tx pgx.Tx, projectID, callerUserID uuid.UUID,
 	displayName, email, role string, iconCode *shared.IconCode,
 ) (*ProjectMember, error) {
-	// Always-execute lookup. Privacy preservation.
 	var matchedUser *uuid.UUID
 	if s.notifs != nil {
 		var err error
@@ -375,7 +348,6 @@ func (s *Service) addMemberByEmailTx(
 	return member, nil
 }
 
-// UpdateMember changes role / icon. Owner-only operation.
 func (s *Service) UpdateMember(
 	ctx context.Context, callerUserID, projectID, memberID uuid.UUID, req UpdateMemberRequest,
 ) (*EventPatch, error) {
@@ -397,7 +369,6 @@ func (s *Service) UpdateMember(
 		return nil, ErrMemberNotInProject
 	}
 	if req.Role != nil {
-		// Contract §6b: the owner's own row can't be demoted here.
 		if target.Role == RoleOwner {
 			return nil, ErrCannotChangeOwner
 		}
@@ -413,7 +384,6 @@ func (s *Service) UpdateMember(
 	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
 }
 
-// RemoveMember soft-removes a member. Owner-only; cannot remove the owner.
 func (s *Service) RemoveMember(ctx context.Context, callerUserID, projectID, memberID uuid.UUID) (*EventPatch, error) {
 	p, err := s.store.GetByID(ctx, projectID)
 	if err != nil {
@@ -441,9 +411,6 @@ func (s *Service) RemoveMember(ctx context.Context, callerUserID, projectID, mem
 	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
 }
 
-// RequestLink — re-send a pending member's invite. Members carry no email
-// since migration 27, so there is nothing to re-send server-side: a pending
-// member is acknowledged, anything else is refused.
 func (s *Service) RequestLink(ctx context.Context, callerUserID, projectID, memberID uuid.UUID) error {
 	p, err := s.store.GetByID(ctx, projectID)
 	if err != nil {
@@ -465,11 +432,8 @@ func (s *Service) RequestLink(ctx context.Context, callerUserID, projectID, memb
 	return nil
 }
 
-// ErrNotPending — request-link on a member that isn't a pending invite.
 var ErrNotPending = errors.New("this member isn't waiting for an invite")
 
-// AcceptLinkRequest accepts a project_invite notification — the pending
-// member row becomes the caller's. Returns the event detail.
 func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID uuid.UUID) (*EventDetail, error) {
 	if s.notifs == nil {
 		return nil, errors.New("notifications module not wired")
@@ -528,8 +492,6 @@ func (s *Service) RejectLinkRequest(ctx context.Context, userID, notificationID 
 	if n.Type != notifications.TypeProjectInvite {
 		return ErrLinkRequestNotForYou
 	}
-	// Contract §6b: the invite's still-unlinked member row stops showing as
-	// "pending" — it becomes a left row (its history, if any, stays).
 	var p notifications.ProjectInvitePayload
 	if err := json.Unmarshal(n.Payload, &p); err == nil && p.ProjectMemberID != uuid.Nil {
 		if _, err := tx.Exec(ctx, `
@@ -545,19 +507,13 @@ func (s *Service) RejectLinkRequest(ctx context.Context, userID, notificationID 
 	return tx.Commit(ctx)
 }
 
-// --- Public exports for other modules ---
-
-// GetMember exposes the row to other modules.
 func (s *Service) GetMember(ctx context.Context, memberID uuid.UUID) (*ProjectMember, error) {
 	return s.store.GetMember(ctx, memberID)
 }
 
-// IsActiveMember is a fast yes/no for other modules.
 func (s *Service) IsActiveMember(ctx context.Context, projectID, userID uuid.UUID) (bool, error) {
 	return s.store.IsActiveMember(ctx, projectID, userID)
 }
-
-// --- Helpers ---
 
 func projectNameOrEmpty(ctx context.Context, tx pgx.Tx, projectID uuid.UUID) string {
 	var name string
@@ -571,9 +527,6 @@ func userDisplayOrEmpty(ctx context.Context, tx pgx.Tx, userID uuid.UUID) string
 	return name
 }
 
-// Derived list statuses (computed from the numbers, not stored): unsettled = I
-// still owe or am owed, receivable = someone owes me, ended = completed or
-// cancelled. Archived events never match.
 var derivedStatus = map[string]func(e *Event) bool{
 	"unsettled":  func(e *Event) bool { return e.MyReceivable > 0 || e.MyPayable > 0 },
 	"receivable": func(e *Event) bool { return e.MyReceivable > 0 },

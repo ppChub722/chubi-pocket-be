@@ -12,7 +12,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// SummaryMessage — the generated text for a person (spec DebtSummaryMessage).
 type SummaryMessage struct {
 	Text    string  `json:"text"`
 	Entries int     `json:"entries"`
@@ -21,7 +20,6 @@ type SummaryMessage struct {
 
 var thaiMonthsShort = [...]string{"ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."}
 
-// money — 1,234 / 1,234.50 (no trailing .00).
 func money(v float64) string {
 	v = math.Abs(round2(v))
 	s := fmt.Sprintf("%.2f", v)
@@ -48,9 +46,6 @@ func thaiDate(d string) string {
 	return fmt.Sprintf("%d %s", t.Day(), thaiMonthsShort[t.Month()-1])
 }
 
-// SummaryMessage — GET /personal-debts/people/:key/summary-message. The
-// entries are the CURRENT cycle, oldest first, each signed (+ they owe me /
-// − I owe them); the total is the person's net. Thai, both directions.
 func (s *Service) summaryMessage(ctx context.Context, userID uuid.UUID, k shared.DebtPersonKey, bal DebtPerson) (*SummaryMessage, error) {
 	items, _, err := s.store.listEntries(ctx, userID, k.Key(), EntryFilter{Cycle: "current", Sort: "date_asc", Page: 1, PerPage: 200})
 	if err != nil {

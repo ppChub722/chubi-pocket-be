@@ -10,8 +10,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
-// POST /v1/accounts/:id/members — invite a linked contact or an email
-// (notification pattern).
 func (h *Handler) InviteMember(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -34,7 +32,6 @@ func (h *Handler) InviteMember(c *gin.Context) {
 	h.membersResult(c, http.StatusCreated, userID, id)
 }
 
-// DELETE /v1/accounts/:id/members/:member_id — leave / remove (sets left_at).
 func (h *Handler) RemoveMember(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -54,11 +51,9 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 		mapServiceError(c, err)
 		return
 	}
-	// Leaving yourself answers {account: null, members: []}.
 	h.membersResult(c, http.StatusOK, userID, id)
 }
 
-// POST /v1/accounts/:id/transfer-ownership
 func (h *Handler) TransferOwnership(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -81,7 +76,6 @@ func (h *Handler) TransferOwnership(c *gin.Context) {
 	h.membersResult(c, http.StatusOK, userID, id)
 }
 
-// PUT /v1/accounts/:id/report-scope — caller's own membership row.
 func (h *Handler) UpdateReportScope(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -105,7 +99,6 @@ func (h *Handler) UpdateReportScope(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/accounts/invites/:notification_id/accept
 func (h *Handler) AcceptInvite(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -125,7 +118,6 @@ func (h *Handler) AcceptInvite(c *gin.Context) {
 	c.JSON(http.StatusOK, m)
 }
 
-// POST /v1/accounts/invites/:notification_id/reject
 func (h *Handler) RejectInvite(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -145,7 +137,6 @@ func (h *Handler) RejectInvite(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// membersResult answers a member write with the final state (MembersResult).
 func (h *Handler) membersResult(c *gin.Context, status int, userID, accountID uuid.UUID) {
 	out, err := h.service.MembersResult(c.Request.Context(), userID, accountID)
 	if err != nil {

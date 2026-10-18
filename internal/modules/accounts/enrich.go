@@ -11,10 +11,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// decorate fills the page-ready numbers of each wallet (0.4.0): this month's
-// cash in / out (income and expense rows of any author; transfers and the
-// opening / adjustment rows are not money in / out) and, for a card with a
-// due day, the next due date. Month and today follow the user's timezone.
 func (s *Service) decorate(ctx context.Context, userID uuid.UUID, accs []Account, tz string) error {
 	if len(accs) == 0 {
 		return nil
@@ -75,8 +71,6 @@ func (s *Service) decorate(ctx context.Context, userID uuid.UUID, accs []Account
 	return nil
 }
 
-// nextDayOfMonth — the first date on or after `today` whose day-of-month is
-// `day` (31 = the last day of a short month).
 func nextDayOfMonth(today time.Time, day int) time.Time {
 	pick := func(y int, m time.Month) time.Time {
 		last := time.Date(y, m+1, 0, 0, 0, 0, 0, time.UTC).Day()
@@ -94,7 +88,6 @@ func nextDayOfMonth(today time.Time, day int) time.Time {
 	return c
 }
 
-// getDecorated — one wallet with its page numbers.
 func (s *Service) getDecorated(ctx context.Context, userID, id uuid.UUID, tz string) (*Account, error) {
 	a, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {

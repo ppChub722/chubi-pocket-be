@@ -46,9 +46,6 @@ func scanAccountMember(row pgx.Row) (*AccountMember, error) {
 	return &m, nil
 }
 
-// InsertMemberTx inserts a membership row. status is derived from
-// joinedAt: nil = pending invite, set = active (used by the owner
-// auto-row on account create and by the migration-parity path).
 func (s *Store) InsertMemberTx(
 	ctx context.Context, tx pgx.Tx,
 	accountID, userID uuid.UUID, role, reportScope string,
@@ -75,7 +72,6 @@ func (s *Store) InsertMemberTx(
 	return m, nil
 }
 
-// GetMember loads a single membership row by id.
 func (s *Store) GetMember(ctx context.Context, memberID uuid.UUID) (*AccountMember, error) {
 	q := `SELECT ` + memberColumns + ` FROM account_members WHERE id = $1`
 	m, err := scanAccountMember(s.db.QueryRow(ctx, q, memberID))
@@ -88,7 +84,6 @@ func (s *Store) GetMember(ctx context.Context, memberID uuid.UUID) (*AccountMemb
 	return m, nil
 }
 
-// GetMemberTx is the tx-aware variant — locks the row for update.
 func (s *Store) GetMemberTx(ctx context.Context, tx pgx.Tx, memberID uuid.UUID) (*AccountMember, error) {
 	q := `SELECT ` + memberColumns + ` FROM account_members WHERE id = $1 FOR UPDATE`
 	m, err := scanAccountMember(tx.QueryRow(ctx, q, memberID))
@@ -101,8 +96,6 @@ func (s *Store) GetMemberTx(ctx context.Context, tx pgx.Tx, memberID uuid.UUID) 
 	return m, nil
 }
 
-// IsActiveMember reports whether userID holds an active (joined, not
-// left) membership on accountID.
 func (s *Store) IsActiveMember(ctx context.Context, accountID, userID uuid.UUID) (bool, error) {
 	var ok bool
 	err := s.db.QueryRow(ctx,
@@ -114,8 +107,6 @@ func (s *Store) IsActiveMember(ctx context.Context, accountID, userID uuid.UUID)
 	return ok, nil
 }
 
-// HasLiveMembership reports whether userID has any not-left row
-// (pending OR active) on accountID — the duplicate-invite gate.
 func (s *Store) HasLiveMembership(ctx context.Context, accountID, userID uuid.UUID) (bool, error) {
 	var ok bool
 	err := s.db.QueryRow(ctx, `
@@ -129,7 +120,6 @@ func (s *Store) HasLiveMembership(ctx context.Context, accountID, userID uuid.UU
 	return ok, nil
 }
 
-// CountActiveMembers returns the number of active members on the account.
 func (s *Store) CountActiveMembers(ctx context.Context, accountID uuid.UUID) (int, error) {
 	var n int
 	err := s.db.QueryRow(ctx, `
@@ -142,7 +132,6 @@ func (s *Store) CountActiveMembers(ctx context.Context, accountID uuid.UUID) (in
 	return n, nil
 }
 
-// CountActiveMembersTx — same, inside a caller tx.
 func (s *Store) CountActiveMembersTx(ctx context.Context, tx pgx.Tx, accountID uuid.UUID) (int, error) {
 	var n int
 	err := tx.QueryRow(ctx, `
@@ -155,10 +144,6 @@ func (s *Store) CountActiveMembersTx(ctx context.Context, tx pgx.Tx, accountID u
 	return n, nil
 }
 
-// GoverningMembership resolves the row whose report_scope governs
-// userID's aggregates on accountID: the active row when one exists,
-// else the most recent left row. Pending invites never count. Mirrors
-// shared.ReportScopePredicate's inner ORDER BY exactly.
 func (s *Store) GoverningMembership(ctx context.Context, accountID, userID uuid.UUID) (*AccountMember, error) {
 	q := `SELECT ` + memberColumns + ` FROM account_members
 		WHERE account_id = $1 AND user_id = $2 AND joined_at IS NOT NULL
@@ -174,7 +159,6 @@ func (s *Store) GoverningMembership(ctx context.Context, accountID, userID uuid.
 	return m, nil
 }
 
-// UpdateReportScope sets report_scope on one membership row.
 func (s *Store) UpdateReportScope(
 	ctx context.Context, memberID uuid.UUID, scope string, actorUserID uuid.UUID,
 ) (*AccountMember, error) {
@@ -191,9 +175,6 @@ func (s *Store) UpdateReportScope(
 	return m, nil
 }
 
-// SoftRemoveMember stamps left_at (never hard-deletes; spec §14/2 rule
-// 4) and caps report_scope at 'own' — ex-members lose the 'all' option
-// (spec §14/5).
 func (s *Store) SoftRemoveMember(
 	ctx context.Context, accountID, memberID uuid.UUID, actorUserID uuid.UUID,
 ) (*AccountMember, error) {
@@ -212,8 +193,6 @@ func (s *Store) SoftRemoveMember(
 	return m, nil
 }
 
-// ActivateMemberTx stamps joined_at on a pending row (invite accept).
-// New members always start at report_scope='none' (spec §14/4).
 func (s *Store) ActivateMemberTx(
 	ctx context.Context, tx pgx.Tx, memberID, actorUserID uuid.UUID,
 ) (*AccountMember, error) {
@@ -232,10 +211,6 @@ func (s *Store) ActivateMemberTx(
 	return m, nil
 }
 
-// ResetScopesToNoneTx is the conversion auto tick-out (spec §14/4): the
-// moment a wallet becomes shared, report_scope drops to 'none' for
-// EVERY live member (including the owner). Each member can turn it back
-// on for themselves afterwards.
 func (s *Store) ResetScopesToNoneTx(
 	ctx context.Context, tx pgx.Tx, accountID, actorUserID uuid.UUID,
 ) error {
@@ -248,8 +223,6 @@ func (s *Store) ResetScopesToNoneTx(
 	return nil
 }
 
-// VoidPendingMemberTx stamps left_at on a still-pending row (invite
-// reject / cancel) so a later re-invite passes the live-unique index.
 func (s *Store) VoidPendingMemberTx(
 	ctx context.Context, tx pgx.Tx, memberID, actorUserID uuid.UUID,
 ) error {
@@ -262,20 +235,15 @@ func (s *Store) VoidPendingMemberTx(
 	return nil
 }
 
-// TransferOwnershipTx swaps role between the current owner's and the new
-// owner's active member rows AND repoints accounts.user_id — the account
-// entity and the membership ledger must agree on who owns the wallet.
 func (s *Store) TransferOwnershipTx(
 	ctx context.Context, tx pgx.Tx, accountID, currentOwner, newOwner uuid.UUID,
 ) error {
-	// Demote current owner's active row.
 	if _, err := tx.Exec(ctx, `
 		UPDATE account_members SET role = 'member', updated_by_user_id = $1
 		WHERE account_id = $2 AND user_id = $1 AND role = 'owner' AND left_at IS NULL`,
 		currentOwner, accountID); err != nil {
 		return fmt.Errorf("demote owner: %w", err)
 	}
-	// Promote the target's active row.
 	tag, err := tx.Exec(ctx, `
 		UPDATE account_members SET role = 'owner', updated_by_user_id = $1
 		WHERE account_id = $2 AND user_id = $3
@@ -287,7 +255,6 @@ func (s *Store) TransferOwnershipTx(
 	if tag.RowsAffected() == 0 {
 		return ErrMemberNotFound
 	}
-	// Repoint the account entity.
 	if _, err := tx.Exec(ctx, `
 		UPDATE accounts SET user_id = $1, updated_by_user_id = $2
 		WHERE id = $3`,
@@ -297,11 +264,6 @@ func (s *Store) TransferOwnershipTx(
 	return nil
 }
 
-// ListMembersByAccount returns the full membership history of one account
-// for the members screen: active members first (owner leading), then
-// pending invites, then past members (most recent departure first).
-// Voided invites (joined_at NULL + left_at set — an invite that was
-// rejected or withdrawn, never an actual member) are excluded.
 func (s *Store) ListMembersByAccount(ctx context.Context, callerID, accountID uuid.UUID) ([]MemberHistoryView, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT am.id, am.user_id, u.display_name, u.icon_code, am.role,
@@ -348,9 +310,6 @@ func (s *Store) ListMembersByAccount(ctx context.Context, callerID, accountID uu
 	return out, nil
 }
 
-// fillMembers batch-loads the active members[] + my_report_scope +
-// is_shared for a page of accounts (pinned contract on GET /v1/accounts).
-// Single query; no N+1 against the page.
 func (s *Store) fillMembers(ctx context.Context, callerID uuid.UUID, accs []Account) error {
 	for i := range accs {
 		accs[i].Members = []MemberView{}
@@ -411,7 +370,6 @@ func (s *Store) fillMembers(ctx context.Context, callerID uuid.UUID, accs []Acco
 	for i := range accs {
 		accs[i].IsShared = len(accs[i].Members) > 1
 	}
-	// The caller's saving buckets in each wallet (goals v2).
 	savings, err := shared.LoadWalletSavings(ctx, s.db, callerID, ids)
 	if err != nil {
 		return err
@@ -431,8 +389,6 @@ func isMemberUniqueViolation(err error) bool {
 		strings.Contains(msg, "idx_account_members_live_unique")
 }
 
-// nextMemberSortOrder — SQL for "after the user's last wallet": a new or
-// newly joined wallet lands at the end of that member's own list (§3).
 func nextMemberSortOrder(userExpr string) string {
 	return fmt.Sprintf(`COALESCE((SELECT MAX(x.sort_order) + 1 FROM account_members x
 		WHERE x.user_id = %s AND x.left_at IS NULL), 0)`, userExpr)

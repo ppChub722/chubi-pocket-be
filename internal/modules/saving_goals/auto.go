@@ -1,10 +1,5 @@
 package saving_goals
 
-// Auto-saving (0.4.0): one setting per goal (and one for unallocated money,
-// goal_id NULL): amount, day of month (31 = the last day), and the wallet it
-// comes from or none. On the day the recurring due check makes a saving draft
-// (🐷) for the month; the user confirms it like any pending draft.
-
 import (
 	"context"
 	"errors"
@@ -17,16 +12,13 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// AutoSave — spec SavingAutoSave.
 type AutoSave struct {
 	Amount float64 `json:"amount"`
-	// Day of the month the draft is made on (31 = the last day of a short month).
 	Day      int                `json:"day"`
 	Wallet   *shared.AccountRef `json:"wallet"` // null = no source wallet
 	NextDate *string            `json:"next_date"`
 }
 
-// AutoSaveRequest — PUT /saving-goals/:id/auto-save (and /spare/auto-save).
 type AutoSaveRequest struct {
 	Amount    float64    `json:"amount"     binding:"required,gt=0"`
 	Day       int        `json:"day"        binding:"required,min=1,max=31"`
@@ -54,7 +46,6 @@ func (s *Store) getAuto(ctx context.Context, q querier, userID uuid.UUID, goalID
 	return &r, nil
 }
 
-// dayInMonth — `day` clamped to the month's length.
 func dayInMonth(first time.Time, day int) time.Time {
 	last := first.AddDate(0, 1, -1).Day()
 	if day > last {
@@ -63,8 +54,6 @@ func dayInMonth(first time.Time, day int) time.Time {
 	return time.Date(first.Year(), first.Month(), day, 0, 0, 0, 0, time.UTC)
 }
 
-// nextAutoDate — when the next draft is made: this month's day if its draft is
-// still to come, else next month's.
 func nextAutoDate(r *autoRow, today time.Time) time.Time {
 	first := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
 	made := r.LastMonth != nil && !r.LastMonth.Before(first)
@@ -75,7 +64,6 @@ func nextAutoDate(r *autoRow, today time.Time) time.Time {
 	return d
 }
 
-// autoViews — the auto-save of each goal (key uuid.Nil = unallocated) as views.
 func (s *Service) autoViews(ctx context.Context, userID uuid.UUID, today time.Time) (map[uuid.UUID]*AutoSave, error) {
 	rows, err := s.store.db.Query(ctx, `SELECT COALESCE(goal_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		amount::float8, day, account_id, last_month FROM saving_auto WHERE user_id = $1`, userID)
@@ -122,7 +110,6 @@ func (s *Service) autoViews(ctx context.Context, userID uuid.UUID, today time.Ti
 	return out, nil
 }
 
-// SetAutoSave — PUT: create or replace the setting. goalID nil = unallocated.
 func (s *Service) SetAutoSave(ctx context.Context, userID uuid.UUID, goalID *uuid.UUID, r AutoSaveRequest) error {
 	if r.Amount <= 0 || r.Day < 1 || r.Day > 31 {
 		return ErrValidation
@@ -143,7 +130,6 @@ func (s *Service) SetAutoSave(ctx context.Context, userID uuid.UUID, goalID *uui
 		}
 	}
 	id, _ := uuid.NewV7()
-	// A changed setting makes this month's draft again only if it was not made yet.
 	if _, err := tx.Exec(ctx, `INSERT INTO saving_auto (id, user_id, goal_id, amount, day, account_id)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (user_id, goal_id) DO UPDATE SET amount = EXCLUDED.amount, day = EXCLUDED.day,
@@ -154,14 +140,11 @@ func (s *Service) SetAutoSave(ctx context.Context, userID uuid.UUID, goalID *uui
 	return tx.Commit(ctx)
 }
 
-// ClearAutoSave — DELETE: stop auto-saving (idempotent).
 func (s *Service) ClearAutoSave(ctx context.Context, userID uuid.UUID, goalID *uuid.UUID) error {
 	_, err := s.store.db.Exec(ctx, `DELETE FROM saving_auto WHERE user_id = $1 AND goal_id IS NOT DISTINCT FROM $2`, userID, goalID)
 	return err
 }
 
-// AutoSaveGoal / AutoSaveSpare — the PUT / DELETE answers: the goal page /
-// the spare page after the change.
 func (s *Service) PutAutoSaveGoal(ctx context.Context, userID, goalID uuid.UUID, r AutoSaveRequest) (*GoalDetail, error) {
 	if err := s.SetAutoSave(ctx, userID, &goalID, r); err != nil {
 		return nil, err

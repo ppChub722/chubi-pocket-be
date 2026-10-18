@@ -9,15 +9,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Import log kinds (migration 50) — what slip import met and can't handle
-// yet. Written at once; read by hand (ops-runbook).
+// Import log kinds (migration 50) — what slip import met and can't handle yet.
 const (
 	LogUnknownProvider = "unknown_provider" // QR bank code not in payment_providers
 	LogUnsupportedBank = "unsupported_bank" // known bank, no slip rule set yet
 	LogIncomplete      = "incomplete"       // amount / date didn't read
 )
 
-// ImportLog — one row of import_logs. Never the slip's text or image.
 type ImportLog struct {
 	UserID   uuid.UUID
 	Kind     string
@@ -27,7 +25,6 @@ type ImportLog struct {
 	Details  map[string]any
 }
 
-// LogStore writes import_logs.
 type LogStore struct{ db *pgxpool.Pool }
 
 func NewLogStore(db *pgxpool.Pool) *LogStore { return &LogStore{db: db} }

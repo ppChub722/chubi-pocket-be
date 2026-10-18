@@ -1,11 +1,5 @@
 package shared
 
-// Shared reference shapes (API spec v2, internal/apidoc/openapi.yaml): what a
-// row shows about another record — a wallet, a category, an event, a tag, a
-// person — embedded in the row so the app never loads a whole list to look a
-// name / icon / colour up by id. Every list / detail / write response builds
-// them through the batch loaders below (one query per kind per page, no N+1).
-
 import (
 	"context"
 	"encoding/json"
@@ -16,13 +10,11 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Querier — satisfied by *pgxpool.Pool and pgx.Tx.
 type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// AccountRef — spec schema AccountRef (no balance: it changes).
 type AccountRef struct {
 	ID       uuid.UUID `json:"id"`
 	Name     string    `json:"name"`
@@ -34,7 +26,6 @@ type AccountRef struct {
 	Archived bool      `json:"archived"`
 }
 
-// AccountGroup — credit_card / pay_later are liabilities, the rest assets.
 func AccountGroup(accountType string) string {
 	switch accountType {
 	case "credit_card", "pay_later":
@@ -43,7 +34,6 @@ func AccountGroup(accountType string) string {
 	return "asset"
 }
 
-// CategoryRef — spec schema CategoryRef.
 type CategoryRef struct {
 	ID         uuid.UUID  `json:"id"`
 	Name       string     `json:"name"`
@@ -54,7 +44,6 @@ type CategoryRef struct {
 	ParentID   *uuid.UUID `json:"parent_id"`
 }
 
-// EventRef — spec schema EventRef.
 type EventRef struct {
 	ID       uuid.UUID `json:"id"`
 	Name     string    `json:"name"`
@@ -62,22 +51,18 @@ type EventRef struct {
 	Status   string    `json:"status"`
 }
 
-// TagRef — spec schema TagRef.
 type TagRef struct {
 	ID       uuid.UUID `json:"id"`
 	Name     string    `json:"name"`
 	IconCode *IconCode `json:"icon_code"`
 }
 
-// UserRef — an app user (shared-wallet author, linked partner).
 type UserRef struct {
 	UserID      uuid.UUID `json:"user_id"`
 	DisplayName string    `json:"display_name"`
 	IconCode    *IconCode `json:"icon_code"`
 }
 
-// PersonRef — a person on a split / debt / draft, name resolved by the one
-// name rule (PersonNameSQL).
 type PersonRef struct {
 	Name         string     `json:"name"`
 	ContactID    *uuid.UUID `json:"contact_id"`
@@ -86,7 +71,6 @@ type PersonRef struct {
 	LinkedUserID *uuid.UUID `json:"linked_user_id"`
 }
 
-// MemberRef — a member of an event.
 type MemberRef struct {
 	ID     uuid.UUID  `json:"id"`
 	UserID *uuid.UUID `json:"user_id"`
@@ -95,20 +79,16 @@ type MemberRef struct {
 	IsMe   bool       `json:"is_me"`
 }
 
-// WalletBalance — a wallet's balance right after a write. Every write that
-// moves money returns the balances of ALL wallets it touched.
 type WalletBalance struct {
 	AccountID uuid.UUID `json:"account_id"`
 	Balance   float64   `json:"balance"`
 }
 
-// Badges — the app-bar badges.
 type Badges struct {
 	UnreadNotifications int `json:"unread_notifications"`
 	PendingDrafts       int `json:"pending_drafts"`
 }
 
-// Page — the pagination block of a list.
 type Page struct {
 	Page       int `json:"page"`
 	PerPage    int `json:"per_page"`
@@ -116,7 +96,6 @@ type Page struct {
 	TotalPages int `json:"total_pages"`
 }
 
-// NewPage fills TotalPages.
 func NewPage(page, perPage, total int) Page {
 	pages := 0
 	if perPage > 0 {
@@ -125,7 +104,6 @@ func NewPage(page, perPage, total int) Page {
 	return Page{Page: page, PerPage: perPage, Total: total, TotalPages: pages}
 }
 
-// IconFromJSON decodes a jsonb icon_code column (nil / empty / "null" → nil).
 func IconFromJSON(b []byte) *IconCode {
 	if len(b) == 0 || string(b) == "null" {
 		return nil
@@ -137,15 +115,6 @@ func IconFromJSON(b []byte) *IconCode {
 	return &ic
 }
 
-// PersonNameSQL — THE person display-name rule, as one SQL expression
-// (owner 2026-10-12). contactAlias is a contacts row, linkedUserAlias the
-// users row it links to (LEFT JOINed; NULL when unlinked):
-//  1. nickname set AND show_nickname → the nickname
-//  2. else linked → the linked user's live profile name
-//  3. else the contact's display_name
-//
-// The stored snapshot (person_name) is only used when there is no contact:
-// wrap as COALESCE(<this>, snapshot).
 func PersonNameSQL(contactAlias, linkedUserAlias string) string {
 	return fmt.Sprintf(`(CASE
 		WHEN %[1]s.id IS NULL THEN NULL
@@ -154,14 +123,10 @@ func PersonNameSQL(contactAlias, linkedUserAlias string) string {
 		ELSE %[1]s.display_name END)`, contactAlias, linkedUserAlias)
 }
 
-// PersonIconSQL — the linked user's icon, else the contact's own.
 func PersonIconSQL(contactAlias, linkedUserAlias string) string {
 	return fmt.Sprintf(`COALESCE(%[2]s.icon_code, %[1]s.icon_code)`, contactAlias, linkedUserAlias)
 }
 
-// ───────────── batch loaders ─────────────
-
-// LoadAccountRefs resolves wallets by id (any status).
 func LoadAccountRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]AccountRef, error) {
 	out := map[uuid.UUID]AccountRef{}
 	ids = uniqueIDs(ids)
@@ -189,7 +154,6 @@ func LoadAccountRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.
 	return out, rows.Err()
 }
 
-// LoadCategoryRefs resolves categories by id (any status).
 func LoadCategoryRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]CategoryRef, error) {
 	out := map[uuid.UUID]CategoryRef{}
 	ids = uniqueIDs(ids)
@@ -216,7 +180,6 @@ func LoadCategoryRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid
 	return out, rows.Err()
 }
 
-// LoadEventRefs resolves events (projects) by id.
 func LoadEventRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]EventRef, error) {
 	out := map[uuid.UUID]EventRef{}
 	ids = uniqueIDs(ids)
@@ -242,7 +205,6 @@ func LoadEventRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UU
 	return out, rows.Err()
 }
 
-// LoadTagRefs resolves tags by id (the caller's own).
 func LoadTagRefs(ctx context.Context, q Querier, userID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]TagRef, error) {
 	out := map[uuid.UUID]TagRef{}
 	ids = uniqueIDs(ids)
@@ -268,15 +230,11 @@ func LoadTagRefs(ctx context.Context, q Querier, userID uuid.UUID, ids []uuid.UU
 	return out, rows.Err()
 }
 
-// PersonKey — what a row stores about its person: the contact (maybe) and the
-// typed snapshot name.
 type PersonKey struct {
 	ContactID *uuid.UUID
 	Snapshot  string
 }
 
-// LoadPersons resolves the callers's contacts by id into PersonRefs (the name
-// rule applied). Persons without a contact are built by ResolvePerson.
 func LoadPersons(ctx context.Context, q Querier, userID uuid.UUID, contactIDs []uuid.UUID) (map[uuid.UUID]PersonRef, error) {
 	out := map[uuid.UUID]PersonRef{}
 	contactIDs = uniqueIDs(contactIDs)
@@ -309,9 +267,6 @@ func LoadPersons(ctx context.Context, q Querier, userID uuid.UUID, contactIDs []
 	return out, rows.Err()
 }
 
-// ResolvePerson builds the PersonRef of one stored (contact, snapshot) pair
-// from a LoadPersons map: a known contact → the live name; otherwise (no
-// contact, or a contact that is gone) → the snapshot, a free name.
 func ResolvePerson(persons map[uuid.UUID]PersonRef, k PersonKey) PersonRef {
 	if k.ContactID != nil {
 		if p, ok := persons[*k.ContactID]; ok && p.Name != "" {

@@ -35,7 +35,6 @@ func newAccEnv(t *testing.T) *accEnv {
 	return &accEnv{t: t, pool: pool, svc: svc, h: NewHandler(svc)}
 }
 
-// seedCategories gives uid the system categories (adjust-balance needs them).
 func (e *accEnv) seedCategories(uid uuid.UUID) {
 	e.t.Helper()
 	ctx := context.Background()
@@ -118,8 +117,8 @@ func dec[T any](t *testing.T, raw []byte) T {
 	return out
 }
 
-// call sends one request and conforms the answer to opID (skip = "" to not
-// conform), failing unless the status is want.
+// call sends one request and conforms the answer to opID (skip = "" to not conform), failing unless
+// the status is want.
 func (e *accEnv) call(r *gin.Engine, opID, method, path string, body any, want int) []byte {
 	e.t.Helper()
 	status, raw := apitest.Do(e.t, r, method, path, body)
@@ -132,7 +131,6 @@ func (e *accEnv) call(r *gin.Engine, opID, method, path string, body any, want i
 	return raw
 }
 
-// errCode returns the error code of a failed call.
 func (e *accEnv) errCode(r *gin.Engine, method, path string, body any, wantStatus int) string {
 	e.t.Helper()
 	status, raw := apitest.Do(e.t, r, method, path, body)
@@ -165,8 +163,6 @@ func (e *accEnv) inviteNotification(uid uuid.UUID) uuid.UUID {
 	return id
 }
 
-// TestAccountCRUD: create / list (totals, archived_count) / get (include) /
-// update / identifiers / adjust-balance / archive / restore / reorder.
 func TestAccountCRUD(t *testing.T) {
 	e := newAccEnv(t)
 	ctx := context.Background()
@@ -175,7 +171,6 @@ func TestAccountCRUD(t *testing.T) {
 	e.seedCategories(owner)
 	r, rs := e.as(owner), e.as(stranger)
 
-	// createAccount: the server sets the user's currency (body ignored).
 	raw := e.call(r, "createAccount", "POST", "/api/v1/accounts",
 		map[string]any{"name": "Main", "type": "bank", "balance": 500, "currency": "USD"}, http.StatusCreated)
 	main := dec[aJSON](t, raw)
@@ -196,7 +191,6 @@ func TestAccountCRUD(t *testing.T) {
 	if cash.SortOrder <= card.SortOrder || card.SortOrder <= main.SortOrder {
 		t.Errorf("sort_order of new wallets should append: %d %d %d", main.SortOrder, card.SortOrder, cash.SortOrder)
 	}
-	// A legacy wallet in another currency is counted, not summed.
 	usd := testdb.Account(t, e.pool, owner)
 	if _, err := e.pool.Exec(ctx, `UPDATE accounts SET currency = 'USD', balance = 99, name = 'Dollars' WHERE id = $1`, usd); err != nil {
 		t.Fatal(err)
@@ -206,7 +200,6 @@ func TestAccountCRUD(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// listAccounts.
 	raw = e.call(r, "listAccounts", "GET", "/api/v1/accounts", nil, http.StatusOK)
 	list := dec[struct {
 		Data   []aJSON `json:"data"`
@@ -242,7 +235,6 @@ func TestAccountCRUD(t *testing.T) {
 		t.Errorf("bad status code %q", code)
 	}
 
-	// getAccount: include is opt-in; archived works.
 	raw = e.call(r, "getAccount", "GET", "/api/v1/accounts/"+main.ID.String(), nil, http.StatusOK)
 	plain := dec[struct {
 		Summary        json.RawMessage `json:"summary"`
@@ -286,7 +278,6 @@ func TestAccountCRUD(t *testing.T) {
 		t.Errorf("non-member get code %q", code)
 	}
 
-	// updateAccount: no balance, currency and status are not editable.
 	raw = e.call(r, "updateAccount", "PUT", "/api/v1/accounts/"+main.ID.String(),
 		map[string]any{"name": "Main renamed", "currency": "USD", "status": "archived", "note": "n"}, http.StatusOK)
 	upd := dec[aJSON](t, raw)
@@ -302,13 +293,11 @@ func TestAccountCRUD(t *testing.T) {
 	if code := e.errCode(r, "PUT", "/api/v1/accounts/"+uuid.NewString(), map[string]any{"name": "x"}, http.StatusNotFound); code != "NOT_FOUND" {
 		t.Errorf("unknown code %q", code)
 	}
-	// sort_order in the body moves the caller's own position.
 	upd = dec[aJSON](t, e.call(r, "updateAccount", "PUT", "/api/v1/accounts/"+cash.ID.String(), map[string]any{"sort_order": 0}, http.StatusOK))
 	if upd.SortOrder != 0 {
 		t.Errorf("sort_order after update = %d, want 0", upd.SortOrder)
 	}
 
-	// addAccountIdentifier.
 	raw = e.call(r, "addAccountIdentifier", "POST", "/api/v1/accounts/"+main.ID.String()+"/identifiers",
 		map[string]any{"kind": "bank_account", "value": "123-4-56789-0", "bank_code": "004"}, http.StatusOK)
 	idAcc := dec[aJSON](t, raw)
@@ -324,7 +313,6 @@ func TestAccountCRUD(t *testing.T) {
 		t.Errorf("invalid identifier code %q", code)
 	}
 
-	// adjustAccountBalance: conformed in full (the adjustment row is a Transaction).
 	raw = e.call(r, "adjustAccountBalance", "POST", "/api/v1/accounts/"+main.ID.String()+"/adjust-balance", map[string]any{"new_balance": 450, "note": "count"}, http.StatusOK)
 	adj := dec[struct {
 		Account     aJSON `json:"account"`
@@ -350,7 +338,6 @@ func TestAccountCRUD(t *testing.T) {
 		t.Errorf("non-member adjust code %q", code)
 	}
 
-	// archiveAccount / restoreAccount: owner only, state in the answer.
 	if code := e.errCode(rs, "POST", "/api/v1/accounts/"+old.String()+"/archive", nil, http.StatusNotFound); code != "NOT_FOUND" {
 		t.Errorf("stranger archive code %q", code)
 	}
@@ -375,7 +362,6 @@ func TestAccountCRUD(t *testing.T) {
 	if rest.Status != "active" {
 		t.Errorf("restored = %+v", rest)
 	}
-	// POST /archive again is idempotent, then restore.
 	if a := dec[aJSON](t, e.call(r, "archiveAccount", "POST", "/api/v1/accounts/"+old.String()+"/archive", nil, http.StatusOK)); a.Status != "archived" {
 		t.Errorf("POST archive = %+v", a)
 	}
@@ -384,7 +370,6 @@ func TestAccountCRUD(t *testing.T) {
 		t.Errorf("stranger restore code %q", code)
 	}
 
-	// reorderAccounts: the list comes back in the new order.
 	raw = e.call(r, "reorderAccounts", "PATCH", "/api/v1/accounts/reorder", map[string]any{"items": []map[string]any{
 		{"id": cash.ID, "sort_order": 2}, {"id": main.ID, "sort_order": 0}, {"id": card.ID, "sort_order": 1},
 		{"id": usd, "sort_order": 3}, {"id": old, "sort_order": 4},
@@ -401,8 +386,6 @@ func TestAccountCRUD(t *testing.T) {
 	}
 }
 
-// TestAccountMembers: invite -> accept / reject -> report scope -> transfer
-// -> remove / leave, every answer conformed, roles and owner-only rules.
 func TestAccountMembers(t *testing.T) {
 	e := newAccEnv(t)
 	ctx := context.Background()
@@ -412,7 +395,6 @@ func TestAccountMembers(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A contact of the owner linked to friend: invite by contact works too.
 	contact := uuid.New()
 	if _, err := e.pool.Exec(ctx, `INSERT INTO contacts (id, user_id, display_name, linked_user_id) VALUES ($1, $2, 'F', $3)`, contact, owner, third); err != nil {
 		t.Fatal(err)
@@ -426,7 +408,6 @@ func TestAccountMembers(t *testing.T) {
 	wallet := dec[aJSON](t, e.call(ro, "createAccount", "POST", "/api/v1/accounts", map[string]any{"name": "Shared", "type": "bank"}, http.StatusCreated)).ID
 	path := "/api/v1/accounts/" + wallet.String()
 
-	// inviteAccountMember: owner only; pending row in the history.
 	if code := e.errCode(rx, "POST", path+"/members", map[string]any{"email": e.email(friend)}, http.StatusForbidden); code != "NOT_MEMBER" {
 		t.Errorf("outsider invite code %q", code)
 	}
@@ -451,7 +432,6 @@ func TestAccountMembers(t *testing.T) {
 		t.Errorf("invite twice code %q", code)
 	}
 
-	// acceptAccountInvite: the friend joins; the wallet is shared now.
 	notif := e.inviteNotification(friend)
 	raw = e.call(rf, "acceptAccountInvite", "POST", "/api/v1/accounts/invites/"+notif.String()+"/accept", nil, http.StatusOK)
 	acc := dec[struct {
@@ -487,7 +467,6 @@ func TestAccountMembers(t *testing.T) {
 		t.Errorf("archive with members code %q", code)
 	}
 
-	// rejectAccountInvite: by contact; the notification is dismissed.
 	e.call(ro, "inviteAccountMember", "POST", path+"/members", map[string]any{"contact_id": contact}, http.StatusCreated)
 	notif3 := e.inviteNotification(third)
 	raw = e.call(rt, "rejectAccountInvite", "POST", "/api/v1/accounts/invites/"+notif3.String()+"/reject", nil, http.StatusOK)
@@ -503,7 +482,6 @@ func TestAccountMembers(t *testing.T) {
 		t.Errorf("rejected invitee sees the wallet: %q", code)
 	}
 
-	// updateAccountReportScope: the member's own scope, returned as Account.
 	acct := dec[aJSON](t, e.call(rf, "updateAccountReportScope", "PUT", path+"/report-scope", map[string]any{"report_scope": "own"}, http.StatusOK))
 	if acct.MyReportScope != "own" || acct.ID != wallet {
 		t.Errorf("scope = %+v", acct)
@@ -515,7 +493,6 @@ func TestAccountMembers(t *testing.T) {
 		t.Errorf("bad scope code %q", code)
 	}
 
-	// transferAccountOwnership: owner only; the new owner must be a member.
 	if code := e.errCode(rf, "POST", path+"/transfer-ownership", map[string]any{"new_owner_user_id": friend}, http.StatusForbidden); code != "NOT_OWNER" {
 		t.Errorf("member transfer code %q", code)
 	}
@@ -534,8 +511,6 @@ func TestAccountMembers(t *testing.T) {
 		t.Errorf("transfer = %s, want me demoted, friend first as owner", raw)
 	}
 
-	// removeAccountMember: the owner can't leave; others are removed by the
-	// owner; leaving yourself answers {account: null, members: []}.
 	friendRow := tr.Members[0].ID
 	ownerRow := tr.Members[1].ID
 	if code := e.errCode(rf, "DELETE", path+"/members/"+friendRow.String(), nil, http.StatusBadRequest); code != "OWNER_MUST_TRANSFER" {
@@ -569,7 +544,6 @@ func TestAccountMembers(t *testing.T) {
 	if rem.Account == nil || rem.Account.ID != wallet || len(rem.Account.Members) != 2 || left != 1 {
 		t.Errorf("remove = %s, want the wallet and third marked left", raw)
 	}
-	// The original owner (now a member) leaves.
 	raw = e.call(ro, "removeAccountMember", "DELETE", path+"/members/"+ownerRow.String(), nil, http.StatusOK)
 	if got := dec[struct {
 		Account json.RawMessage `json:"account"`
@@ -583,7 +557,6 @@ func TestAccountMembers(t *testing.T) {
 	if code := e.errCode(rf, "DELETE", path+"/members/"+uuid.NewString(), nil, http.StatusNotFound); code != "NOT_FOUND" {
 		t.Errorf("unknown member code %q", code)
 	}
-	// Now the friend is the only active member again: the delete works.
 	if out := dec[struct {
 		ID uuid.UUID `json:"id"`
 	}](t, e.call(rf, "deleteAccount", "DELETE", path, nil, http.StatusOK)); out.ID.String() != strings.TrimPrefix(path, "/api/v1/accounts/") {
@@ -594,9 +567,6 @@ func TestAccountMembers(t *testing.T) {
 	}
 }
 
-// TestAccountHardDelete — DELETE is real: the opening row goes, the other
-// rows (and the transfer twin) stay with no wallet, goal money is kept with
-// no wallet, the preview matches what the delete did.
 func TestAccountHardDelete(t *testing.T) {
 	e := newAccEnv(t)
 	ctx := context.Background()
@@ -700,9 +670,6 @@ func TestAccountHardDelete(t *testing.T) {
 	e.call(r, "", "DELETE", "/api/v1/accounts/"+doomed.String(), nil, http.StatusNotFound)
 }
 
-// TestAccountPageNumbers — the wallets page numbers (0.4.0): this month's
-// in / out (transfers and the opening row don't count), a card's next due
-// date, and the summary totals.
 func TestAccountPageNumbers(t *testing.T) {
 	e := newAccEnv(t)
 	ctx := context.Background()
@@ -767,7 +734,6 @@ func TestAccountPageNumbers(t *testing.T) {
 			}
 		}
 	}
-	// bank 1000 + 400 − 200 − 100 = 1100; card −2500 + 100 = −2400.
 	tt := tot.Totals
 	fv := func(k string) float64 { v, _ := tt[k].(float64); return v }
 	split, _ := tt["cash_split"].([]any)

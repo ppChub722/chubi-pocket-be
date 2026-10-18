@@ -20,10 +20,8 @@ import (
 
 const dateLayout = "2006-01-02"
 
-// ErrInvalidDraft — a draft field is malformed (not merely missing).
 var ErrInvalidDraft = errors.New("invalid draft")
 
-// submitErr — a draft isn't ready to submit (missing / inconsistent).
 type submitErr struct{ code, msg string }
 
 func (e *submitErr) Error() string { return e.msg }
@@ -38,10 +36,8 @@ type Service struct {
 	savings  *saving_goals.Service
 }
 
-// typeSaving — draft.type of a saving draft (kind saving).
 const typeSaving = transactions.TxType("saving")
 
-// WithSavings — saving drafts (goals v2) submit into the savings notebook.
 func (s *Service) WithSavings(sv *saving_goals.Service) { s.savings = sv }
 
 func NewService(store *Store, txs *transactions.Service, tg *tags.Service, debts *personal_debts.Service, prj *projects.Service) *Service {
@@ -59,7 +55,6 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID) (*ListResponse, er
 	return &ListResponse{Data: rows, Count: len(rows), Summary: summarize(rows)}, nil
 }
 
-// checkDraft — only shape errors; anything may still be missing.
 func checkDraft(d Draft) error {
 	if d.Type != nil {
 		switch transactions.TxType(*d.Type) {
@@ -79,7 +74,6 @@ func checkDraft(d Draft) error {
 	return nil
 }
 
-// Create adds manual drafts (kind create). All or nothing.
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateRequest) ([]PendingTransaction, error) {
 	for _, it := range req.Items {
 		if err := checkDraft(it.Draft); err != nil {
@@ -120,7 +114,6 @@ func (s *Service) resolveOne(ctx context.Context, userID uuid.UUID, p *PendingTr
 	return nil
 }
 
-// Delete discards one draft (ErrPendingNotFound when it isn't the caller's).
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (*DiscardResult, error) {
 	if err := s.store.Delete(ctx, userID, id); err != nil {
 		return nil, err
@@ -136,7 +129,6 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (*DiscardRes
 	return &DiscardResult{Discarded: []uuid.UUID{id}, Skipped: []uuid.UUID{}, RemainingCount: n, Summary: sum}, nil
 }
 
-// Discard removes many drafts; unknown / foreign ids are skipped.
 func (s *Service) Discard(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) (*DiscardResult, error) {
 	gone, err := s.store.DeleteMany(ctx, userID, ids)
 	if err != nil {
@@ -168,10 +160,6 @@ func (s *Service) Discard(ctx context.Context, userID uuid.UUID, ids []uuid.UUID
 	return out, nil
 }
 
-// Submit turns each draft into its real effect, independently: one that
-// fails stays pending with its reason; the others go through. The answer
-// carries the created rows, the post-submit balance of every wallet they
-// touched and the badges, so the page patches itself from it.
 func (s *Service) Submit(ctx context.Context, userID uuid.UUID, req SubmitRequest) (*SubmitResponse, error) {
 	out := &SubmitResponse{Submitted: []Submitted{}, Failed: []Failed{}}
 	var touched []uuid.UUID
@@ -230,8 +218,6 @@ func (s *Service) Submit(ctx context.Context, userID uuid.UUID, req SubmitReques
 	return out, nil
 }
 
-// accountsOfTarget — the wallets an update_tx draft's target sits on now
-// (the edit may move it off them, they still change).
 func (s *Service) accountsOfTarget(ctx context.Context, userID uuid.UUID, p *PendingTransaction) []uuid.UUID {
 	if p.Kind != KindUpdateTx || p.TargetTransactionID == nil {
 		return nil
@@ -250,8 +236,6 @@ func (s *Service) accountsOfTarget(ctx context.Context, userID uuid.UUID, p *Pen
 	return ids
 }
 
-// rowsOf — the created transaction in its final shape; a transfer returns
-// both rows, OUT first.
 func (s *Service) rowsOf(ctx context.Context, userID uuid.UUID, txID *uuid.UUID) ([]transactions.TransactionDetail, error) {
 	rows := []transactions.TransactionDetail{}
 	if txID == nil {
@@ -290,7 +274,6 @@ func (s *Service) submitOne(ctx context.Context, userID uuid.UUID, p *PendingTra
 	return nil, fmt.Errorf("unknown pending kind %q", p.Kind)
 }
 
-// createRequest — the draft as a full POST /transactions body.
 func createRequest(d Draft) (transactions.CreateRequest, error) {
 	if d.Type == nil {
 		return transactions.CreateRequest{}, &submitErr{"MISSING_TYPE", "type is required"}
@@ -301,8 +284,6 @@ func createRequest(d Draft) (transactions.CreateRequest, error) {
 	if d.Date == nil {
 		return transactions.CreateRequest{}, &submitErr{"MISSING_DATE", "date is required"}
 	}
-	// A draft saves any splits; the POST /transactions body rules (name
-	// required, amount > 0) apply here.
 	for _, sp := range d.Splits {
 		if name := strings.TrimSpace(sp.PersonName); name == "" || len([]rune(name)) > 100 {
 			return transactions.CreateRequest{}, &submitErr{"INVALID_SPLIT", "every split needs a person name (max 100 characters)"}
@@ -324,7 +305,6 @@ func createRequest(d Draft) (transactions.CreateRequest, error) {
 	}, nil
 }
 
-// submitCreate — transaction + tags + removing the draft, one DB tx.
 func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *PendingTransaction) (*uuid.UUID, error) {
 	req, err := createRequest(p.Draft)
 	if err != nil {
@@ -338,8 +318,6 @@ func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *Pending
 
 	var txID uuid.UUID
 	if p.Draft.ProjectID != nil {
-		// An event bill: the same path as "add a new bill to an event" —
-		// event rules (member, active), splits go onto the board.
 		if s.projects == nil {
 			return nil, errors.New("events not available")
 		}
@@ -356,7 +334,6 @@ func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *Pending
 		case *transactions.TransactionDetail:
 			txID = c.ID
 		case *transactions.TransferResponse:
-			// Tags go on the OUT row, like the regular form.
 			for _, r := range c.Rows {
 				if r.AccountID != nil && req.AccountID != nil && *r.AccountID == *req.AccountID {
 					txID = r.ID
@@ -383,8 +360,6 @@ func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *Pending
 	return &txID, nil
 }
 
-// submitSaving — a saving entry from the draft (wallet or none → goal / spare),
-// removing the draft, one DB tx. Returns the entry id.
 func (s *Service) submitSaving(ctx context.Context, userID uuid.UUID, p *PendingTransaction) (*uuid.UUID, error) {
 	if s.savings == nil {
 		return nil, errors.New("savings not available")
@@ -427,7 +402,6 @@ func (s *Service) submitSaving(ctx context.Context, userID uuid.UUID, p *Pending
 	return &id, nil
 }
 
-// submitSettle — a payment against TargetDebtID (wallet optional).
 func (s *Service) submitSettle(ctx context.Context, userID uuid.UUID, p *PendingTransaction) (*uuid.UUID, error) {
 	if s.debts == nil || p.TargetDebtID == nil {
 		return nil, errors.New("debt settle not available")
@@ -435,7 +409,6 @@ func (s *Service) submitSettle(ctx context.Context, userID uuid.UUID, p *Pending
 	if p.Draft.Amount == nil || *p.Draft.Amount <= 0 {
 		return nil, &submitErr{"MISSING_AMOUNT", "amount must be more than 0"}
 	}
-	// A new entry with the target's person, the other way round (repaying it).
 	res, err := s.debts.RepayEntry(ctx, userID, *p.TargetDebtID, *p.Draft.Amount, p.Draft.AccountID,
 		p.Draft.Date, p.Draft.Description, p.Draft.Note)
 	if err != nil {
@@ -448,7 +421,6 @@ func (s *Service) submitSettle(ctx context.Context, userID uuid.UUID, p *Pending
 	return nil, nil
 }
 
-// submitUpdate — writes the draft's values onto TargetTransactionID.
 func (s *Service) submitUpdate(ctx context.Context, userID uuid.UUID, p *PendingTransaction) (*uuid.UUID, error) {
 	if p.TargetTransactionID == nil {
 		return nil, errors.New("update target missing")
@@ -477,7 +449,6 @@ func (s *Service) submitUpdate(ctx context.Context, userID uuid.UUID, p *Pending
 	return p.TargetTransactionID, nil
 }
 
-// toSubmitError — a stable code + message the client can explain.
 func toSubmitError(err error) SubmitError {
 	var se *submitErr
 	if errors.As(err, &se) {
@@ -523,20 +494,12 @@ func toSubmitError(err error) SubmitError {
 	return SubmitError{Code: "SUBMIT_FAILED", Message: err.Error()}
 }
 
-// SubmitHook — called inside a submit's DB transaction once draft draftID
-// became record id (a transaction; a saving entry for kind saving), before
-// the draft is removed (a recurring item linked to the draft takes it).
 type SubmitHook func(ctx context.Context, tx pgx.Tx, userID, draftID, id uuid.UUID, kind string) error
 
 func (s *Service) WithSubmitHook(fn SubmitHook) { s.onSubmit = fn }
 
-// Store — the drafts store (the recurring module writes drafts in its own
-// DB transactions).
 func (s *Service) Store() *Store { return s.store }
 
-// SubmitReady — POST /pending-transactions/submit-ready: confirms every draft
-// that needs no input (one call for the page's "ยืนยันทั้งหมดที่พร้อม"). The
-// answer is the normal submit answer; nothing ready = empty lists.
 func (s *Service) SubmitReady(ctx context.Context, userID uuid.UUID) (*SubmitResponse, error) {
 	lst, err := s.List(ctx, userID)
 	if err != nil {

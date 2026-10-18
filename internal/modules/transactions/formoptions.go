@@ -1,11 +1,5 @@
 package transactions
 
-// GET /transactions/form-options (API spec v2, schema FormOptions):
-// everything the transaction form / draft editor needs in ONE call —
-// wallets, the preselected wallet, categories (flat, tree order), tags,
-// events and the fee category. Direct SQL (no imports of the accounts /
-// categories / tags / projects modules).
-
 import (
 	"context"
 	"errors"
@@ -19,7 +13,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// AccountOption — a wallet in the picker (spec AccountOption).
 type AccountOption struct {
 	shared.AccountRef
 	Balance   float64 `json:"balance"`
@@ -27,9 +20,6 @@ type AccountOption struct {
 	IsDefault bool    `json:"is_default"` // = default_account_id
 }
 
-// CategoryOption — a category in the picker (spec CategoryOption): active,
-// non-system, flat in tree display order; the tree is rebuilt from
-// parent_id.
 type CategoryOption struct {
 	shared.CategoryRef
 	SortOrder  int     `json:"sort_order"`
@@ -37,7 +27,6 @@ type CategoryOption struct {
 	ParentName *string `json:"parent_name"`
 }
 
-// TagOption — spec schema Tag (a tag with its usage count).
 type TagOption struct {
 	ID          uuid.UUID        `json:"id"`
 	Name        string           `json:"name"`
@@ -49,22 +38,17 @@ type TagOption struct {
 	UpdatedAt   time.Time        `json:"updated_at"`
 }
 
-// FormOptions — spec schema FormOptions.
 type FormOptions struct {
 	Accounts []AccountOption `json:"accounts"`
-	// The wallet of the caller's most recent expense / income (by entry
-	// time) among their active wallets, else the first wallet in their
-	// order, else null.
 	DefaultAccountID *uuid.UUID        `json:"default_account_id"`
 	Categories       []CategoryOption  `json:"categories"`
 	Tags             []TagOption       `json:"tags"`   // most used first, then by name
 	Events           []shared.EventRef `json:"events"` // active, caller is an active non-viewer member
-	// users' preference fee_category_id when it is one of the caller's
-	// active expense categories; null otherwise.
+	// users' preference fee_category_id when it is one of the caller's active expense categories; null
+	// otherwise.
 	FeeCategoryID *uuid.UUID `json:"fee_category_id"`
 }
 
-// FormOptions — GET /transactions/form-options.
 func (s *Service) FormOptions(ctx context.Context, userID uuid.UUID) (*FormOptions, error) {
 	db := s.store.db
 	out := &FormOptions{}
@@ -93,8 +77,6 @@ func (s *Service) FormOptions(ctx context.Context, userID uuid.UUID) (*FormOptio
 	return out, nil
 }
 
-// formAccounts — the caller's active wallets (active membership, status
-// active) in the caller's own order.
 func formAccounts(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]AccountOption, error) {
 	rows, err := q.Query(ctx, `
 		SELECT a.id, a.name, a.icon_code, a.logo_url, a.type, a.currency, a.balance, m.sort_order
@@ -124,8 +106,6 @@ func formAccounts(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]Ac
 	return out, rows.Err()
 }
 
-// formDefaultAccount — the wallet of the caller's most recent expense /
-// income among accounts, else the first of accounts, else nil.
 func formDefaultAccount(ctx context.Context, q shared.Querier, userID uuid.UUID, accounts []AccountOption) (*uuid.UUID, error) {
 	if len(accounts) == 0 {
 		return nil, nil
@@ -157,9 +137,6 @@ func formDefaultAccount(ctx context.Context, q shared.Querier, userID uuid.UUID,
 	return &first, nil
 }
 
-// formCategories — the caller's active non-system categories, depth-first
-// in display order: by type (expense, income), then siblings by
-// sort_order / created_at.
 func formCategories(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]CategoryOption, error) {
 	rows, err := q.Query(ctx, `
 		SELECT id, name, type, icon_code, is_system, system_kind, parent_id, sort_order
@@ -205,8 +182,6 @@ func formCategories(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]
 		}
 		roots = append(roots, n)
 	}
-	// The query order already sorts siblings; a stable sort by type keeps
-	// expense roots before income roots whatever their parents' order.
 	sort.SliceStable(roots, func(i, j int) bool { return roots[i].opt.Type < roots[j].opt.Type })
 
 	out := []CategoryOption{}
@@ -229,8 +204,6 @@ func formCategories(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]
 	return out, nil
 }
 
-// formTags — the caller's tags, most used first, then by name (the tags
-// list order).
 func formTags(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]TagOption, error) {
 	rows, err := q.Query(ctx, `
 		SELECT t.id, t.name, t.description, t.note, t.icon_code, t.created_at, t.updated_at,
@@ -257,8 +230,6 @@ func formTags(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]TagOpt
 	return out, rows.Err()
 }
 
-// formEvents — active events the caller can add bills to (an active
-// member, not a viewer), most recently updated first.
 func formEvents(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]shared.EventRef, error) {
 	rows, err := q.Query(ctx, `
 		SELECT p.id, p.name, p.icon_code, p.status
@@ -287,8 +258,6 @@ func formEvents(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]shar
 	return out, rows.Err()
 }
 
-// formFeeCategory — the fee_category_id preference when it still names one
-// of the caller's active, non-system expense categories.
 func formFeeCategory(ctx context.Context, q shared.Querier, userID uuid.UUID) (*uuid.UUID, error) {
 	rows, err := q.Query(ctx, `
 		SELECT c.id

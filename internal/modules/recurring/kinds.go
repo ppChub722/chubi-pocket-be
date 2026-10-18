@@ -1,14 +1,5 @@
 package recurring
 
-// The four KINDS of a recurring (0.4.0): what the user picks. `type` stays the
-// money direction (expense / income / transfer).
-//
-//	subscription  an expense that repeats (optionally a free trial until a date)
-//	installment   an expense with a COUNT of payments (paid / total / remaining)
-//	income        an income that repeats
-//	reminder      เตือนจ่าย: a nudge to pay; the amount may be unknown (0), the
-//	              draft made on the day has no amount until the user types it
-
 import (
 	"math"
 	"strings"
@@ -30,7 +21,6 @@ func validKind(k string) bool {
 	return false
 }
 
-// deriveKind — the kind of a request that only knows type (+ end).
 func deriveKind(typ, endKind string) string {
 	switch typ {
 	case "income":
@@ -44,7 +34,6 @@ func deriveKind(typ, endKind string) string {
 	return KindSubscription
 }
 
-// typeForKind — the money type a kind implies when none was sent.
 func typeForKind(k string) string {
 	if k == KindIncome {
 		return "income"
@@ -52,8 +41,6 @@ func typeForKind(k string) string {
 	return "expense"
 }
 
-// finishKind validates and settles r.Kind against its type / amount / end
-// (call after applyToRule and applyEnd). kind nil keeps / derives it.
 func (r *Rule) finishKind(kind *string) error {
 	switch {
 	case kind != nil:
@@ -87,7 +74,6 @@ func (r *Rule) finishKind(kind *string) error {
 	return nil
 }
 
-// setTrial — trial_until: "" / null clears, a date sets (subscription only).
 func (r *Rule) setTrial(v *string) error {
 	if v == nil || strings.TrimSpace(*v) == "" {
 		r.TrialUntil = nil
@@ -101,9 +87,6 @@ func (r *Rule) setTrial(v *string) error {
 	return nil
 }
 
-// yearlyCost — what the setting costs (or brings) in a year: its amount x the
-// times it happens in an average month x 12. Installments / limited settings
-// count only what is left of them (remaining x amount, never more than a year).
 func yearlyCost(r *Rule, today time.Time) float64 {
 	if r.Amount <= 0 {
 		return 0
@@ -122,7 +105,6 @@ func yearlyCost(r *Rule, today time.Time) float64 {
 	return math.Round(y*100) / 100
 }
 
-// amountPtr — a draft's amount: nil when unknown (0).
 func amountPtr(a float64) *float64 {
 	if a <= 0 {
 		return nil
@@ -145,8 +127,8 @@ func dstr(t *time.Time) *string {
 	return &s
 }
 
-// monthlyAmount — amount × the times it happens in an average month (what the
-// hero shows as "ต่อเดือน"); nil without an amount.
+// monthlyAmount — amount × the times it happens in an average month (what the hero shows as
+// "ต่อเดือน"); nil without an amount.
 func monthlyAmount(r *Rule, today time.Time) *float64 {
 	if r.Amount <= 0 {
 		return nil

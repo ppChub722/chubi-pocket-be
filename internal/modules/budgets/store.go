@@ -69,7 +69,6 @@ func scanBudget(row pgx.Row) (*Budget, error) {
 	return &b, nil
 }
 
-// loadScopes fills the categories / wallets of bs (one query each).
 func (s *Store) loadScopes(ctx context.Context, q shared.Querier, bs []*Budget) error {
 	if len(bs) == 0 {
 		return nil
@@ -140,7 +139,6 @@ func (s *Store) get(ctx context.Context, q pgx.Tx, userID, id uuid.UUID, lock bo
 	return b, nil
 }
 
-// listAll — every budget of the user (the list filters by state in Go).
 func (s *Store) listAll(ctx context.Context, userID uuid.UUID) ([]*Budget, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+budgetColumns+` FROM budgets WHERE user_id = $1 ORDER BY created_at, id`, userID)
 	if err != nil {
@@ -162,7 +160,6 @@ func (s *Store) listAll(ctx context.Context, userID uuid.UUID) ([]*Budget, error
 	return out, s.loadScopes(ctx, s.db, out)
 }
 
-// save inserts (ID Nil) or updates the row and replaces its scope lists.
 func (s *Store) save(ctx context.Context, tx pgx.Tx, b *Budget) error {
 	var icon []byte
 	if b.IconCode != nil {
@@ -215,8 +212,6 @@ func (s *Store) save(ctx context.Context, tx pgx.Tx, b *Budget) error {
 	return nil
 }
 
-// --- periods ---
-
 const periodColumns = `id, seq, start_date, end_date, amount::float8, overridden, note`
 
 func scanPeriod(row pgx.Row) (*periodRow, error) {
@@ -256,9 +251,6 @@ func (s *Store) baseSeq(ctx context.Context, q rowQuerier, b *Budget) (int, erro
 	return n, err
 }
 
-// syncPeriods writes the periods that have started (from the anchor; the
-// rows before it stay as they are): new ones take the base amount, kept
-// ones keep their amount / note, ones that no longer exist go.
 func (s *Store) syncPeriods(ctx context.Context, tx pgx.Tx, b *Budget, today time.Time) error {
 	base, err := s.baseSeq(ctx, tx, b)
 	if err != nil {
@@ -308,8 +300,6 @@ func sameDate(a, b *time.Time) bool {
 	return a.Equal(*b)
 }
 
-// --- validation ---
-
 func (s *Store) checkScope(ctx context.Context, q pgx.Tx, userID uuid.UUID, b *Budget) error {
 	if len(b.Categories) > 0 {
 		ids := make([]uuid.UUID, len(b.Categories))
@@ -337,8 +327,6 @@ func (s *Store) checkScope(ctx context.Context, q pgx.Tx, userID uuid.UUID, b *B
 	return nil
 }
 
-// expandCategories — the scope's category ids, sub-categories included
-// where asked.
 func (s *Store) expandCategories(ctx context.Context, cats []scopeCat) ([]uuid.UUID, error) {
 	var direct, deep []uuid.UUID
 	for _, c := range cats {

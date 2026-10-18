@@ -5,10 +5,6 @@ import (
 	"strings"
 )
 
-// redactKeys — any JSON key containing one of these substrings
-// (case-insensitive) gets its value replaced. From logging-plan.md
-// component 3. When unsure, add to this list: adding fields later is easy,
-// un-leaking a token is not.
 var redactKeys = []string{
 	"password",
 	"passwd",
@@ -26,14 +22,10 @@ var redactKeys = []string{
 
 const redactedPlaceholder = "[REDACTED]"
 
-// nonJSONPlaceholder is returned for anything that doesn't parse as JSON —
-// bodies we can't walk are never logged raw.
+// nonJSONPlaceholder is returned for anything that doesn't parse as JSON — bodies we can't walk
+// are never logged raw.
 var nonJSONPlaceholder = []byte(`"[NON-JSON BODY SKIPPED]"`)
 
-// RedactJSON walks arbitrary JSON and replaces every value whose key matches
-// the redact list with "[REDACTED]". Nested objects and arrays are walked
-// recursively. Non-JSON input returns a placeholder instead of the input —
-// fail closed, never leak.
 func RedactJSON(b []byte) []byte {
 	var v any
 	if err := json.Unmarshal(b, &v); err != nil {

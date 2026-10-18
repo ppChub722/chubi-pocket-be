@@ -55,8 +55,6 @@ func scanCategory(row pgx.Row) (*Category, error) {
 	return &c, nil
 }
 
-// --- Read ---
-
 func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Category, error) {
 	q := `SELECT ` + categoryColumns + ` FROM categories WHERE id = $1 AND user_id = $2`
 	c, err := scanCategory(s.db.QueryRow(ctx, q, id, userID))
@@ -69,7 +67,6 @@ func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Category, e
 	return c, nil
 }
 
-// ListFilter mirrors the GET /v1/categories query params.
 type ListFilter struct {
 	Type          *string // "income" | "expense" | nil
 	IncludeSystem bool
@@ -86,9 +83,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Cat
 	if !f.IncludeSystem {
 		q += " AND is_system = FALSE"
 	}
-	// Stable client-side ordering: type → parent group → user's manual sort
-	// (sort_order ASC) → fall back to creation time when sort_order ties.
-	// Clients reconstruct the tree from this flat list and trust the order.
 	q += " ORDER BY type, COALESCE(parent_id::text, ''), sort_order, created_at"
 
 	rows, err := s.db.Query(ctx, q, args...)
@@ -108,7 +102,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Cat
 	return out, rows.Err()
 }
 
-// CountChildren returns the number of active categories whose parent is `id`.
 func (s *Store) CountChildren(ctx context.Context, id uuid.UUID) (int, error) {
 	var n int
 	err := s.db.QueryRow(ctx,
@@ -117,8 +110,6 @@ func (s *Store) CountChildren(ctx context.Context, id uuid.UUID) (int, error) {
 	return n, err
 }
 
-// Depth returns 1 for a root, 2 for a child of a root, 3 for a grandchild.
-// Walks `parent_id` chain; safe (assumes no cycle, which the cycle check enforces).
 func (s *Store) DepthFromParent(ctx context.Context, parentID *uuid.UUID) (int, error) {
 	if parentID == nil {
 		return 1, nil
@@ -144,13 +135,10 @@ func (s *Store) DepthFromParent(ctx context.Context, parentID *uuid.UUID) (int, 
 	return depth, nil
 }
 
-// IsDescendant returns true if `candidate` is `ancestor` or anywhere in
-// `ancestor`'s subtree. Used for cycle detection on PUT (parent change).
 func (s *Store) IsDescendant(ctx context.Context, ancestor, candidate uuid.UUID) (bool, error) {
 	if ancestor == candidate {
 		return true, nil
 	}
-	// Walk children breadth-first. With a 3-deep tree the subtree is tiny.
 	frontier := []uuid.UUID{ancestor}
 	for len(frontier) > 0 {
 		rows, err := s.db.Query(ctx,
@@ -180,8 +168,6 @@ func (s *Store) IsDescendant(ctx context.Context, ancestor, candidate uuid.UUID)
 	return false, nil
 }
 
-// LookupSystem returns the category ID for (userID, kind) — used by other
-// modules' auto-assignment paths (transfers, opening balance, adjust balance).
 func (s *Store) LookupSystem(ctx context.Context, userID uuid.UUID, kind SystemKind) (*Category, error) {
 	q := `SELECT ` + categoryColumns + `
 		FROM categories
@@ -196,8 +182,6 @@ func (s *Store) LookupSystem(ctx context.Context, userID uuid.UUID, kind SystemK
 	return c, nil
 }
 
-// --- Write ---
-
 func (s *Store) Create(ctx context.Context, c *Category) (*Category, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -205,15 +189,6 @@ func (s *Store) Create(ctx context.Context, c *Category) (*Category, error) {
 	}
 	c.ID = id
 
-	// Resolve next sort_order. A new category goes to the END of its
-	// sibling group (sort_order = MAX+1, spec 05 §3.1; owner 2026-10-11).
-	// The first one in a group gets 0, like the seeded ones.
-	//
-	// Done as a separate query rather than inlined as a subquery in the
-	// INSERT VALUES list: inlining caused Postgres prepared-statement
-	// parameter inference to fail (SQLSTATE 42P08) because the same
-	// positional param appeared in both an INSERT column position and a
-	// subquery comparison.
 	var nextSort int
 	err = s.db.QueryRow(ctx, `
 		SELECT COALESCE(MAX(sort_order), -1) + 1
@@ -249,19 +224,6 @@ func (s *Store) Create(ctx context.Context, c *Category) (*Category, error) {
 	return created, nil
 }
 
-// Update applies a partial update. Caller (service layer) does cycle / depth
-// / duplicate checks.
-//
-// `parentChange = false` means leave parent_id alone; when true, `parentID`
-// is the new value (nil → set NULL / make root).
-//
-// For icon / color: nil = leave unchanged; non-nil = set to that string
-// (empty string clears the column). Spec §3.4 allows partial updates; this
-// pragmatic 1a convention avoids adding more presence flags for fields that
-// are rarely cleared.
-// UpdateFields carries the partial-update payload for a single row. Pointer
-// fields encode "leave alone" (nil) vs "set to value"; the *Change bools
-// distinguish "leave alone" from "explicitly clear" for nullable columns.
 type UpdateFields struct {
 	Name              *string
 	ParentID          *uuid.UUID
@@ -325,7 +287,6 @@ func (s *Store) Update(
 	return c, nil
 }
 
-// HardDelete removes the row. Caller (service) must reparent children first.
 func (s *Store) HardDelete(ctx context.Context, userID, id uuid.UUID) error {
 	tag, err := s.db.Exec(ctx,
 		`DELETE FROM categories WHERE id = $1 AND user_id = $2`, id, userID)
@@ -338,8 +299,6 @@ func (s *Store) HardDelete(ctx context.Context, userID, id uuid.UUID) error {
 	return nil
 }
 
-// ReparentChildren shifts all direct children of `id` to `id`'s parent
-// (grandparent-shift). Used on hard delete to avoid orphans.
 func (s *Store) ReparentChildren(ctx context.Context, userID, id uuid.UUID) error {
 	_, err := s.db.Exec(ctx, `
 		UPDATE categories
@@ -352,16 +311,6 @@ func (s *Store) ReparentChildren(ctx context.Context, userID, id uuid.UUID) erro
 	return nil
 }
 
-// --- Reorder (PATCH /v1/categories/reorder) ---
-
-// ReorderTx applies a batch of (parent_id, sort_order) updates atomically.
-// All entries belong to one user; the caller (Service) is responsible for
-// validating ownership, depth, cycles, and same-type parents BEFORE calling
-// this. Store-side this is just the write — wrap in a tx so a partial apply
-// never leaks.
-//
-// Returns the user's full active category list (post-reorder) so the client
-// can replace its cache without a follow-up GET.
 func (s *Store) ReorderTx(ctx context.Context, userID uuid.UUID, entries []ReorderEntry) ([]Category, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -379,14 +328,10 @@ func (s *Store) ReorderTx(ctx context.Context, userID uuid.UUID, entries []Reord
 			return nil, fmt.Errorf("reorder %s: %w", e.ID, err)
 		}
 		if tag.RowsAffected() == 0 {
-			// Either the row doesn't exist, isn't owned by user, or is archived.
-			// All of these are spec-§3.13 errors; Service layer already prevalidated
-			// so reaching here means the tree shifted underneath us.
 			return nil, ErrCategoryNotFound
 		}
 	}
 
-	// Re-read inside the same tx so the response reflects the post-write state.
 	rows, err := tx.Query(ctx, `SELECT `+categoryColumns+`
 		FROM categories
 		WHERE user_id = $1
@@ -414,18 +359,6 @@ func (s *Store) ReorderTx(ctx context.Context, userID uuid.UUID, entries []Reord
 	return out, nil
 }
 
-// --- Seed (called inside auth.Service.Register tx) ---
-
-// SeedForUser inserts the 6 system + starter user categories for a freshly
-// registered user. Caller passes a pgx.Tx so it composes with the user insert.
-//
-// `sort_order` is sequential within each (type, parent_id) sibling group:
-// system rows first (0..N), then starter roots, then per-parent children
-// from 0. `Store.Create` later inserts new user-created rows at MIN-1 of
-// the visible group, surfacing them at the top.
-//
-// Icon / color / description / include_in_report mirror the Flutter mock
-// seed 1:1 — see [seed.go] for the shared catalog data.
 func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
 	const insertCategory = `
 		INSERT INTO categories
@@ -435,8 +368,6 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11,
 			$12)`
 
-	// 1. System cats — parent_id = NULL, no description. created_by_user_id
-	// is NULL because system rows are app-owned, not user-owned.
 	systemSortByType := map[string]int{"income": 0, "expense": 0}
 	for _, sc := range systemCatalog {
 		id, err := uuid.NewV7()
@@ -459,9 +390,6 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 		systemSortByType[sc.Type]++
 	}
 
-	// 2. Starter expense roots + their children. Root sort_order continues
-	// from where system rows left off so system rows surface above starters
-	// when both are visible (e.g. transaction picker with include_system=true).
 	rootSortExpense := systemSortByType["expense"]
 	for _, root := range starterCatalog {
 		rootID, err := uuid.NewV7()
@@ -487,7 +415,6 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 			if err != nil {
 				return fmt.Errorf("uuid: %w", err)
 			}
-			// Children inherit root's background color; only icon differs.
 			childIconJSON, err := json.Marshal(seedIconCode(child.Icon, root.Color))
 			if err != nil {
 				return fmt.Errorf("marshal icon_code: %w", err)
@@ -503,8 +430,6 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 		}
 	}
 
-	// 3. Starter income — flat (no parents). Sort order continues from
-	// system income rows.
 	incomeSort := systemSortByType["income"]
 	for _, in := range starterIncomeCatalog {
 		id, err := uuid.NewV7()
@@ -529,9 +454,6 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 	return nil
 }
 
-// seedIconCode converts old-style Icon (art ID) + Color (hex bg) seed fields
-// into an IconCode JSONB value. Color is the circle background; icon is always
-// white on the colored background, matching the legacy app rendering.
 func seedIconCode(icon, color string) shared.IconCode {
 	white := "#FFFFFF"
 	ic := shared.IconCode{
@@ -550,21 +472,14 @@ func seedIconCode(icon, color string) shared.IconCode {
 	return ic
 }
 
-// --- Helpers ---
-
 func mapInsertError(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-		// Unique violation. The two relevant indexes are:
-		//   idx_categories_name        — sibling-name uniqueness
-		//   idx_categories_system_kind — system kind uniqueness
 		return ErrDuplicateName
 	}
 	return fmt.Errorf("db error: %w", err)
 }
 
-// CountBudgets — budgets that track this category (a delete takes it out
-// of their scope).
 func (s *Store) CountBudgets(ctx context.Context, id uuid.UUID) (int, error) {
 	var n int
 	err := s.db.QueryRow(ctx,
@@ -572,8 +487,6 @@ func (s *Store) CountBudgets(ctx context.Context, id uuid.UUID) (int, error) {
 	return n, err
 }
 
-// IsFeeCategory - this category is the user's fee category
-// (user_preferences.preferences->>'fee_category_id').
 func (s *Store) IsFeeCategory(ctx context.Context, userID, id uuid.UUID) (bool, error) {
 	var is bool
 	err := s.db.QueryRow(ctx,
@@ -585,7 +498,6 @@ func (s *Store) IsFeeCategory(ctx context.Context, userID, id uuid.UUID) (bool, 
 	return is, err
 }
 
-// ChildIDs returns the ids of every direct child (all rows).
 func (s *Store) ChildIDs(ctx context.Context, userID, id uuid.UUID) ([]uuid.UUID, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT id FROM categories WHERE parent_id = $1 AND user_id = $2 ORDER BY sort_order, created_at`, id, userID)
@@ -604,7 +516,6 @@ func (s *Store) ChildIDs(ctx context.Context, userID, id uuid.UUID) ([]uuid.UUID
 	return out, rows.Err()
 }
 
-// ByIDs returns the caller's categories by id, in the order of ids.
 func (s *Store) ByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]Category, error) {
 	out := make([]Category, 0, len(ids))
 	if len(ids) == 0 {
@@ -635,8 +546,6 @@ func (s *Store) ByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([
 	return out, nil
 }
 
-// TreeNames loads (id -> name, parent) of all the user's categories (any
-// status) in one query, for depth / path computation.
 func (s *Store) TreeNames(ctx context.Context, userID uuid.UUID) (map[uuid.UUID]TreeNode, error) {
 	rows, err := s.db.Query(ctx, `SELECT id, name, parent_id, icon_code FROM categories WHERE user_id = $1`, userID)
 	if err != nil {
@@ -659,7 +568,6 @@ func (s *Store) TreeNames(ctx context.Context, userID uuid.UUID) (map[uuid.UUID]
 	return out, rows.Err()
 }
 
-// TreeNode - a category's name and parent.
 type TreeNode struct {
 	Name     string
 	ParentID *uuid.UUID

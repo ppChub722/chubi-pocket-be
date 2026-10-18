@@ -59,10 +59,6 @@ func (s *Service) today(ctx context.Context, userID uuid.UUID) (time.Time, error
 	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC), nil
 }
 
-// --- figures ---
-
-// monthlyNets — the net saved per month (YYYY-MM) into each goal (key) and
-// the spare bucket (key uuid.Nil when spare).
 func (s *Service) monthlyNets(ctx context.Context, q shared.Querier, userID uuid.UUID, goalIDs []uuid.UUID, spare bool) (map[uuid.UUID]map[string]float64, error) {
 	if goalIDs == nil {
 		goalIDs = []uuid.UUID{}
@@ -102,7 +98,6 @@ func (s *Service) monthlyNets(ctx context.Context, q shared.Querier, userID uuid
 
 func monthKey(t time.Time) string { return t.Format("2006-01") }
 
-// firstMonth — the earliest month with an entry, else `fallback`.
 func firstMonth(nets map[string]float64, fallback time.Time) time.Time {
 	first := time.Date(fallback.Year(), fallback.Month(), 1, 0, 0, 0, 0, time.UTC)
 	for m := range nets {
@@ -113,8 +108,6 @@ func firstMonth(nets map[string]float64, fallback time.Time) time.Time {
 	return first
 }
 
-// history — month by month from the first entry (or `since`) to today's
-// month: the balance at each month's end.
 func history(nets map[string]float64, since, today time.Time, plan *float64, target float64) []HistoryPoint {
 	out := []HistoryPoint{}
 	cur := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
@@ -130,8 +123,6 @@ func history(nets map[string]float64, since, today time.Time, plan *float64, tar
 	return out
 }
 
-// paceOf — the net saved per month over the last 3 months, this month
-// included (fewer when younger); nil when nothing was saved.
 func paceOf(nets map[string]float64, since, today time.Time) *float64 {
 	first := firstMonth(nets, since)
 	cur := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
@@ -157,8 +148,6 @@ func monthsBetween(a, b time.Time) int {
 	return (b.Year()-a.Year())*12 + int(b.Month()) - int(a.Month())
 }
 
-// goalView — the page-ready goal. A goal with no target (open-ended) has
-// no %, remaining, milestones, needed monthly, ETA or pace (0.4.0-1).
 func goalView(g *Goal, saved float64, nets map[string]float64, today time.Time, currency string) GoalView {
 	v := GoalView{
 		ID: g.ID, Name: g.Name, Description: g.Description, Note: g.Note, IconCode: g.IconCode,
@@ -222,14 +211,11 @@ func goalView(g *Goal, saved float64, nets map[string]float64, today time.Time, 
 	empty := saved < 0.005
 	v.Actions = Actions{
 		Save: active, Withdraw: active && !empty, Move: active && !empty, Close: active,
-		// Archive with money is fine (0.4.0-1): an archived goal's money is left
-		// out of every total until it is restored.
 		Archive: g.Status != StateArchived, Restore: g.Status != StateActive, Delete: empty,
 	}
 	return v
 }
 
-// shares — a bucket's balance per wallet, largest first.
 func (s *Service) shares(ctx context.Context, per map[uuid.UUID]float64) ([]WalletShare, float64, error) {
 	var total float64
 	ids := make([]uuid.UUID, 0, len(per))
@@ -280,7 +266,6 @@ func (s *Service) spare(ctx context.Context, q shared.Querier, userID uuid.UUID)
 	return Spare{Amount: total, ByWallet: by}, nil
 }
 
-// goalViews — page-ready goals (one balances + one nets query).
 func (s *Service) goalViews(ctx context.Context, userID uuid.UUID, goals []*Goal, today time.Time) ([]GoalView, error) {
 	out := make([]GoalView, 0, len(goals))
 	if len(goals) == 0 {
@@ -341,8 +326,6 @@ func (s *Service) goalViews(ctx context.Context, userID uuid.UUID, goals []*Goal
 	}
 	return out, nil
 }
-
-// --- entries ---
 
 func (s *Service) entryViews(ctx context.Context, rows []*entryRow) ([]Entry, error) {
 	out := make([]Entry, 0, len(rows))
@@ -450,7 +433,6 @@ func (s *Service) entryViews(ctx context.Context, rows []*entryRow) ([]Entry, er
 	return out, nil
 }
 
-// entryPage — entries matching where (newest first), one page.
 func (s *Service) entryPage(ctx context.Context, userID uuid.UUID, where string, page, perPage int, args ...any) (EntryList, error) {
 	if page < 1 {
 		page = 1
@@ -482,7 +464,6 @@ const (
 	whereSpare = `AND (from_bucket = 'spare' OR to_bucket = 'spare')`
 )
 
-// Entries — GET /saving-entries.
 func (s *Service) Entries(ctx context.Context, userID uuid.UUID, goalID *uuid.UUID, spare bool, accountID *uuid.UUID, page, perPage int) (*EntryList, error) {
 	var (
 		where string
@@ -499,8 +480,6 @@ func (s *Service) Entries(ctx context.Context, userID uuid.UUID, goalID *uuid.UU
 	out, err := s.entryPage(ctx, userID, where, page, perPage, args...)
 	return &out, err
 }
-
-// --- reads ---
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy string) (*GoalList, error) {
 	today, err := s.today(ctx, userID)
@@ -535,8 +514,6 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy str
 	out.Summary.Saved, out.Summary.InGoals, out.Summary.Spare = t.Saved, t.InGoals, t.Spare
 	out.Summary.SavedTotal, out.Summary.Unallocated = t.Saved, t.Spare
 	for _, v := range out.Data {
-		// Open-ended goals stay out of the card's month numbers ("เดือนนี้ขาด"
-		// and its bar): they have no plan to fall short of (0.4.0-1).
 		if v.TargetAmount == nil {
 			continue
 		}
@@ -579,7 +556,6 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int, wi
 	if err != nil {
 		return nil, err
 	}
-	// The plan line climbs to the target; an open-ended goal has none.
 	plan, target := out.Goal.MonthPlan, 0.0
 	if g.TargetAmount != nil {
 		target = *g.TargetAmount
@@ -600,7 +576,6 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int, wi
 	return out, nil
 }
 
-// Spare — GET /saving-goals/spare.
 func (s *Service) Spare(ctx context.Context, userID uuid.UUID, perPage int) (*SpareDetail, error) {
 	today, err := s.today(ctx, userID)
 	if err != nil {
@@ -626,12 +601,10 @@ func (s *Service) Spare(ctx context.Context, userID uuid.UUID, perPage int) (*Sp
 	return out, nil
 }
 
-// Totals — Home / More (shared).
 func (s *Service) Totals(ctx context.Context, userID uuid.UUID) (*shared.SavingTotals, error) {
 	return shared.LoadSavingTotals(ctx, s.store.db, userID)
 }
 
-// walletKey — a stable sort key of a share ("" for the no-wallet share).
 func walletKey(w WalletShare) string {
 	if w.Wallet == nil {
 		return ""
@@ -639,8 +612,6 @@ func walletKey(w WalletShare) string {
 	return w.Wallet.ID.String()
 }
 
-// Goal list sorts: created (default, as stored), deadline (nearest first, none
-// last), progress (most done first), remaining (least left first), name.
 var goalSorts = map[string]bool{"": true, "created": true, "deadline": true, "progress": true, "remaining": true, "name": true}
 
 func sortGoals(v []GoalView, by string) {
@@ -651,7 +622,6 @@ func sortGoals(v []GoalView, by string) {
 			}
 			return a.Deadline != nil && *a.Deadline < *b.Deadline
 		},
-		// Open-ended goals (no % / remaining) go last.
 		"progress": func(a, b *GoalView) bool {
 			if (a.ProgressPct == nil) != (b.ProgressPct == nil) {
 				return a.ProgressPct != nil

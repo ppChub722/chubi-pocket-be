@@ -55,7 +55,6 @@ func newContactEnv(t *testing.T) *contactEnv {
 	return &contactEnv{t: t, pool: pool, svc: svc, h: NewHandler(svc)}
 }
 
-// as returns an engine whose every request is authenticated as uid.
 func (e *contactEnv) as(uid uuid.UUID) *gin.Engine {
 	h := e.h
 	return apitest.Engine(uid, func(g *gin.RouterGroup) {
@@ -99,8 +98,6 @@ func (e *contactEnv) create(r *gin.Engine, body map[string]any) cJSON {
 	}](e.t, raw).Contact
 }
 
-// TestContactAPI: CRUD, the name rule (nickname on / off, linked profile),
-// list order and search, include=unlinked_names, absorb, delete.
 func TestContactAPI(t *testing.T) {
 	e := newContactEnv(t)
 	ctx := context.Background()
@@ -112,7 +109,6 @@ func TestContactAPI(t *testing.T) {
 	}
 	r := e.as(uid)
 
-	// createContact: nickname on by default; name = nickname.
 	ann := e.create(r, map[string]any{"display_name": "Ann Real", "nickname": "  Annie ", "email": "ann@example.com"})
 	if ann.Name != "Annie" || !ann.ShowNickname || ann.DisplayName != "Ann Real" || ann.Nickname == nil || *ann.Nickname != "Annie" {
 		t.Errorf("created = %+v, want name Annie (trimmed), show_nickname true", ann)
@@ -135,8 +131,6 @@ func TestContactAPI(t *testing.T) {
 		t.Errorf("empty display_name status = %d, want 400", status)
 	}
 
-	// updateContact: show_nickname off -> name falls back; absent = unchanged;
-	// null / "" clears; the linked profile name wins over display_name.
 	put := func(id uuid.UUID, body map[string]any) cJSON {
 		t.Helper()
 		status, raw := apitest.Do(t, r, "PUT", "/api/v1/contacts/"+id.String(), body)
@@ -168,7 +162,6 @@ func TestContactAPI(t *testing.T) {
 		t.Errorf("update unknown = %d, want 404", status)
 	}
 
-	// Linked profile: name = the user's live profile name; nickname still wins.
 	if _, err := e.pool.Exec(ctx, `UPDATE contacts SET linked_user_id = $1, email = 'stored@example.com' WHERE id = $2`, friend, bob.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +207,6 @@ func TestContactAPI(t *testing.T) {
 		t.Errorf("get unknown = %d, want 404", status)
 	}
 
-	// listContacts: active first, then resolved name case-insensitive.
 	if status, raw = apitest.Do(t, r, "POST", "/api/v1/contacts/"+cat.ID.String()+"/archive", nil); status != http.StatusOK {
 		t.Fatalf("archive: %d %s", status, raw)
 	}
@@ -237,7 +229,6 @@ func TestContactAPI(t *testing.T) {
 		}
 		return out
 	}
-	// Names now: Annie2 (ann), Renamed Profile (bob), Dan; Cat archived (name Cat).
 	if got := strings.Join(names("?status=all"), ","); got != "Annie2,Dan,Renamed Profile,Cat" {
 		t.Errorf("order (status=all) = %s, want Annie2,Dan,Renamed Profile,Cat (active first, then by name)", got)
 	}
@@ -256,8 +247,6 @@ func TestContactAPI(t *testing.T) {
 			t.Errorf("list %s = %q, want %q", q, got, want)
 		}
 	}
-	// Search also reaches the linked user's email and the contact's own name
-	// behind a hidden nickname.
 	var friendEmail string
 	_ = e.pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, friend).Scan(&friendEmail)
 	if got := names("?search=" + friendEmail[:12]); len(got) != 1 || got[0] != "Renamed Profile" {
@@ -267,7 +256,6 @@ func TestContactAPI(t *testing.T) {
 		t.Errorf("search display_name behind hidden nickname = %v", got)
 	}
 
-	// restore, unlink, absorb, unlinked-names.
 	status, raw = apitest.Do(t, r, "POST", "/api/v1/contacts/"+cat.ID.String()+"/restore", nil)
 	apitest.Conform(t, "restoreContact", status, raw)
 	if got := decode[cJSON](t, raw); got.Status != "active" {
@@ -295,7 +283,6 @@ func TestContactAPI(t *testing.T) {
 	status, raw = apitest.Do(t, r, "GET", "/api/v1/contacts/unlinked-names", nil)
 	apitest.Conform(t, "listUnlinkedNames", status, raw)
 
-	// deleteContact -> {id, splits_restored}.
 	status, raw = apitest.Do(t, r, "DELETE", "/api/v1/contacts/"+cat.ID.String(), nil)
 	apitest.Conform(t, "deleteContact", status, raw)
 	if got := decode[struct {
@@ -309,8 +296,6 @@ func TestContactAPI(t *testing.T) {
 	}
 }
 
-// linkRequest makes sender a contact carrying recipient's email and sends the
-// link request; returns the contact and the recipient's notification.
 func (e *contactEnv) linkRequest(sender, recipient uuid.UUID) (contactID, notifID uuid.UUID) {
 	e.t.Helper()
 	ctx := context.Background()
@@ -342,13 +327,10 @@ type linkResult struct {
 	} `json:"badges"`
 }
 
-// TestContactLinkRequests: request -> sender profile -> accept ->
-// create-linked / link-existing / reject, all conformed to the spec.
 func TestContactLinkRequests(t *testing.T) {
 	e := newContactEnv(t)
 	ctx := context.Background()
 	a, b, c, d, f := testdb.User(t, e.pool), testdb.User(t, e.pool), testdb.User(t, e.pool), testdb.User(t, e.pool), testdb.User(t, e.pool)
-	// Contacts link users to each other: drop them before the users go.
 	t.Cleanup(func() {
 		_, _ = e.pool.Exec(ctx, `DELETE FROM contacts WHERE user_id = ANY($1)`, []uuid.UUID{a, b, c, d, f})
 	})
@@ -358,7 +340,6 @@ func TestContactLinkRequests(t *testing.T) {
 		}
 	}
 
-	// a asks b: b reads the sender, accepts, then makes a linked contact.
 	contactA, notif := e.linkRequest(a, b)
 	rb := e.as(b)
 	status, raw := apitest.Do(t, rb, "GET", "/api/v1/contacts/link-requests/"+notif.String()+"/sender-profile", nil)
@@ -405,7 +386,6 @@ func TestContactLinkRequests(t *testing.T) {
 		t.Errorf("sender profile contact_id = %v, want the new contact", sp.ContactID)
 	}
 
-	// c rejects a's request: dismissed, no contact, sender stays unlinked.
 	contactA2, notif2 := e.linkRequest(a, c)
 	status, raw = apitest.Do(t, e.as(c), "POST", "/api/v1/contacts/link-requests/"+notif2.String()+"/reject", nil)
 	apitest.Conform(t, "rejectContactLinkRequest", status, raw)
@@ -418,7 +398,6 @@ func TestContactLinkRequests(t *testing.T) {
 		t.Errorf("rejected request linked the contact to %v", *linkedTo)
 	}
 
-	// f asks d; d accepts, then links an EXISTING contact of theirs.
 	_, notif3 := e.linkRequest(f, d)
 	rd := e.as(d)
 	if status, _ = apitest.Do(t, rd, "POST", "/api/v1/contacts/link-requests/"+notif3.String()+"/link-existing-contact/"+uuid.NewString(), nil); status != http.StatusConflict && status != http.StatusNotFound {

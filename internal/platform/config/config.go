@@ -9,7 +9,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// Config holds all configuration for the application
 type Config struct {
 	App      AppConfig
 	Database DatabaseConfig
@@ -19,31 +18,18 @@ type Config struct {
 	Version  AppVersionConfig
 }
 
-// AppConfig contains application-level configuration
 type AppConfig struct {
 	Name string
 	Env  string
 	Port string
 
-	// RegistrationOpen gates POST /v1/auth/register. When false the
-	// endpoint runs the full flow but SKIPS the DB write and returns a
-	// decoy success (no user row, no token that can be used) — closed
-	// registration that doesn't reveal itself. Default true (dev).
 	RegistrationOpen bool
 
-	// LogLevel is the minimum app log level: debug|info|warn|error.
-	// Empty/unknown falls back to debug in development, info otherwise
-	// (parsed by logger.ParseLevel). Phase dial: closed beta=debug,
-	// wider beta=info, prod=warn — see logging-plan.md.
 	LogLevel string
 
-	// LogBodies enables request/response body capture in the HTTP log
-	// (redacted, 4KB cap, JSON only). Closed beta ONLY — default false;
-	// must stay false from wider beta onward.
 	LogBodies bool
 }
 
-// DatabaseConfig contains database connection configuration
 type DatabaseConfig struct {
 	Host     string
 	Port     string
@@ -53,26 +39,20 @@ type DatabaseConfig struct {
 	SSLMode  string
 }
 
-// JWTConfig contains JWT authentication configuration
 type JWTConfig struct {
 	Secret           string
 	ExpirationHours  int
 	ExpirationTime   time.Duration
 }
 
-// OCRConfig — slip OCR (0.3.1): the tesseract CLI, see imports/ocr.
 type OCRConfig struct {
 	Bin         string        // OCR_TESSERACT_BIN (default "tesseract")
 	Lang        string        // OCR_LANG (default "tha+eng")
 	Timeout     time.Duration // OCR_TIMEOUT seconds per slip (default 30)
 	Concurrency int           // OCR_CONCURRENCY reads at once (default 1)
-	// Dump — OCR_DUMP=1: re-read every scanned slip in all modes and dump
-	// the results (mode comparison; see imports/ocr_dump.go). Off in prod.
 	Dump bool
 }
 
-// AppVersionConfig — the app version check (see modules/appversion). Read
-// at start; changing it needs a restart.
 type AppVersionConfig struct {
 	MinBuild    int    // MIN_APP_BUILD — older builds get 426 APP_OUTDATED (default 0 = off)
 	LatestBuild int    // LATEST_APP_BUILD — newest build out there (default 0 = not set)
@@ -81,16 +61,13 @@ type AppVersionConfig struct {
 	MessageEN   string // APP_UPDATE_MESSAGE_EN
 }
 
-// ServerConfig contains HTTP server configuration
 type ServerConfig struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
 }
 
-// Load reads configuration from environment variables
 func Load() (*Config, error) {
-	// Try to load .env file (ignore error if it doesn't exist)
 	_ = godotenv.Load()
 
 	config := &Config{
@@ -135,10 +112,8 @@ func Load() (*Config, error) {
 		},
 	}
 
-	// Set JWT expiration time
 	config.JWT.ExpirationTime = time.Duration(config.JWT.ExpirationHours) * time.Hour
 
-	// Validate required fields
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -146,7 +121,6 @@ func Load() (*Config, error) {
 	return config, nil
 }
 
-// Validate checks if all required configuration values are present
 func (c *Config) Validate() error {
 	if c.Database.Host == "" {
 		return fmt.Errorf("DB_HOST is required")
@@ -168,7 +142,6 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// GetDatabaseURL returns the PostgreSQL connection string
 func (c *Config) GetDatabaseURL() string {
 	return fmt.Sprintf(
 		"postgres://%s:%s@%s:%s/%s?sslmode=%s",
@@ -181,7 +154,6 @@ func (c *Config) GetDatabaseURL() string {
 	)
 }
 
-// getEnv reads an environment variable or returns a default value
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -189,7 +161,6 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-// getEnvAsInt reads an environment variable as int or returns a default value
 func getEnvAsInt(key string, defaultValue int) int {
 	valueStr := getEnv(key, "")
 	if value, err := strconv.Atoi(valueStr); err == nil {

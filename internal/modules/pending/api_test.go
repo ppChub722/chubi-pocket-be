@@ -1,9 +1,5 @@
 package pending
 
-// Handler tests (spec v2): every pending operation is driven through the
-// real handler and checked against openapi.yaml with apitest.Conform, plus
-// behaviour assertions (resolved refs, balances, discard skips).
-
 import (
 	"context"
 	"encoding/json"
@@ -85,7 +81,6 @@ func (e *apiEnv) balance(t *testing.T, id uuid.UUID) float64 {
 	return b
 }
 
-// call sends a request, conforms the response to opID and decodes it into out.
 func (e *apiEnv) call(t *testing.T, opID, method, path string, body any, wantStatus int, out any) {
 	t.Helper()
 	status, raw := apitest.Do(t, e.r, method, "/api/v1"+path, body)
@@ -156,7 +151,6 @@ func TestCreateAndListResolved(t *testing.T) {
 		t.Fatalf("missing: %v", c.Resolved.Missing)
 	}
 
-	// A live contact name follows a nickname change.
 	e.exec(t, `UPDATE contacts SET nickname = 'Mimi', show_nickname = TRUE WHERE id = $1`, contact)
 	var list PendingList
 	e.call(t, "listPending", "GET", "/pending-transactions", nil, http.StatusOK, &list)
@@ -164,7 +158,6 @@ func TestCreateAndListResolved(t *testing.T) {
 		t.Fatalf("nickname not followed: %+v", list.Data)
 	}
 
-	// Dangling ids: null + listed in missing.
 	e.exec(t, `DELETE FROM categories WHERE id = $1`, e.cat)
 	e.exec(t, `DELETE FROM tags WHERE id = $1`, tagID)
 	e.exec(t, `DELETE FROM contacts WHERE id = $1`, contact)
@@ -181,7 +174,6 @@ func TestCreateAndListResolved(t *testing.T) {
 	}
 }
 
-// PendingList is the list answer (decode target).
 type PendingList = ListResponse
 
 func TestCreateValidation(t *testing.T) {
@@ -246,7 +238,6 @@ func TestSubmitReturnsRowsAndBalances(t *testing.T) {
 	if rows[0].TransferPeer == nil || rows[0].TransferPeer.Direction != "out" {
 		t.Fatalf("first row not OUT: %+v", rows[0].TransferPeer)
 	}
-	// One entry per wallet, post-submit values: 1000 - 100 - 300, and +300.
 	got := map[uuid.UUID]float64{}
 	for _, b := range sub.AccountBalances {
 		got[b.AccountID] = b.Balance
@@ -292,7 +283,6 @@ func TestDiscard(t *testing.T) {
 	if len(res.Discarded) != 2 || len(res.Skipped) != 1 || res.Skipped[0] != foreign || res.RemainingCount != 1 {
 		t.Fatalf("discard: %+v", res)
 	}
-	// Empty ids: 400 (the spec lists no 400 for discardPending — spec question).
 	if status, _ := apitest.Do(t, e.r, "POST", "/api/v1/pending-transactions/discard", map[string]any{"ids": []uuid.UUID{}}); status != http.StatusBadRequest {
 		t.Fatalf("empty ids: %d", status)
 	}
@@ -304,8 +294,6 @@ func TestDiscard(t *testing.T) {
 	e.call(t, "deletePending", "DELETE", "/pending-transactions/"+ps[2].ID.String(), nil, http.StatusNotFound, nil)
 }
 
-// An update_tx draft: the row comes back in the final shape with the
-// wallet's new balance.
 func TestSubmitUpdateTx(t *testing.T) {
 	e := newAPIEnv(t)
 	made := e.create(t, e.expense(100))[0]
@@ -328,9 +316,6 @@ func TestSubmitUpdateTx(t *testing.T) {
 	}
 }
 
-// TestNeedsInputSummaryAndSubmitReady — what a draft still misses, the list
-// summary, and the bulk / per-draft confirm: an amount-less เตือนจ่าย draft is
-// valid but can't be confirmed; submit-ready takes only the ready ones.
 func TestNeedsInputSummaryAndSubmitReady(t *testing.T) {
 	e := newAPIEnv(t)
 	ready := e.create(t, e.expense(100))[0]
@@ -353,25 +338,21 @@ func TestNeedsInputSummaryAndSubmitReady(t *testing.T) {
 		t.Errorf("summary = %+v", s)
 	}
 
-	// The amount-less one is refused (and stays), per-draft confirm.
 	var sub SubmitResponse
 	e.call(t, "submitOnePending", "POST", "/pending-transactions/"+reminder.ID.String()+"/submit", nil, http.StatusOK, &sub)
 	if len(sub.Failed) != 1 || sub.Failed[0].Error.Code != "MISSING_AMOUNT" || len(sub.Submitted) != 0 {
 		t.Fatalf("reminder confirm = %+v", sub)
 	}
-	// Bulk: only the ready one goes through.
 	e.call(t, "submitReadyPending", "POST", "/pending-transactions/submit-ready", nil, http.StatusOK, &sub)
 	if len(sub.Submitted) != 1 || sub.Submitted[0].ID != ready.ID || len(sub.Failed) != 0 {
 		t.Fatalf("submit-ready = %+v", sub)
 	}
-	// Fill the amount: now it is confirmable.
 	d := draftBody{"type": "expense", "date": "2026-10-12", "account_id": e.acct, "amount": 25, "category_id": e.cat}
 	e.call(t, "updatePending", "PUT", "/pending-transactions/"+reminder.ID.String(), map[string]any{"draft": d}, http.StatusOK, nil)
 	e.call(t, "submitOnePending", "POST", "/pending-transactions/"+reminder.ID.String()+"/submit", nil, http.StatusOK, &sub)
 	if len(sub.Submitted) != 1 || sub.Submitted[0].ID != reminder.ID {
 		t.Fatalf("confirm after amount = %+v", sub)
 	}
-	// Nothing ready left but the wallet-less one (needs input): submit-ready is a no-op.
 	e.call(t, "submitReadyPending", "POST", "/pending-transactions/submit-ready", nil, http.StatusOK, &sub)
 	if len(sub.Submitted) != 0 || len(sub.Failed) != 0 {
 		t.Errorf("empty submit-ready = %+v", sub)

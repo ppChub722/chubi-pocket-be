@@ -17,9 +17,6 @@ const (
 	ctxKeyUser   = "user"
 )
 
-// Middleware verifies the JWT, loads the user from DB, enforces the
-// `status = inactive` carve-out (spec 02-users §3.5: only GET /v1/users/me
-// and POST /v1/users/me/reactivate are allowed for non-active users).
 func Middleware(cfg *config.Config, store *Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
@@ -62,7 +59,6 @@ func Middleware(cfg *config.Config, store *Store) gin.HandlerFunc {
 	}
 }
 
-// Routes that an inactive user can still hit. Hard-coded; only two per spec.
 func inactiveAllowed(c *gin.Context) bool {
 	method, path := c.Request.Method, c.Request.URL.Path
 	if method == http.MethodGet && path == "/api/v1/users/me" {

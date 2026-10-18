@@ -32,7 +32,6 @@ func caller(c *gin.Context) (uuid.UUID, bool) {
 	return userID, ok
 }
 
-// GET /v1/personal-debts/people — one page of people + the header totals.
 func (h *Handler) People(c *gin.Context) {
 	userID, ok := caller(c)
 	if !ok {
@@ -60,7 +59,6 @@ func (h *Handler) People(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// GET /v1/personal-debts/people/:key — the person page.
 func (h *Handler) Person(c *gin.Context) {
 	userID, ok := caller(c)
 	if !ok {
@@ -75,7 +73,6 @@ func (h *Handler) Person(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// GET /v1/personal-debts/people/:key/entries
 func (h *Handler) Entries(c *gin.Context) {
 	userID, ok := caller(c)
 	if !ok {
@@ -135,7 +132,6 @@ func (h *Handler) Entries(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/personal-debts/people/:key/entries — the one debt write.
 func (h *Handler) CreateEntry(c *gin.Context) {
 	userID, ok := caller(c)
 	if !ok {
@@ -154,7 +150,6 @@ func (h *Handler) CreateEntry(c *gin.Context) {
 	c.JSON(http.StatusCreated, out)
 }
 
-// GET /v1/personal-debts/:id — the entry, page-ready (tx detail in debt mode).
 func (h *Handler) Get(c *gin.Context) {
 	userID, ok := caller(c)
 	if !ok {
@@ -172,7 +167,6 @@ func (h *Handler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// PUT /v1/personal-debts/:id
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := caller(c)
 	if !ok {
@@ -195,7 +189,6 @@ func (h *Handler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// DELETE /v1/personal-debts/:id
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := caller(c)
 	if !ok {
@@ -272,8 +265,6 @@ func atoiOr(s string, dflt int) int {
 	return n
 }
 
-// POST /v1/personal-debts/split-requests/:notification_id/accept —
-// "add to my debts" on a split_created notification (contract §5).
 func (h *Handler) AcceptSplitRequest(c *gin.Context) {
 	userID, ok := caller(c)
 	if !ok {
@@ -303,8 +294,6 @@ func (h *Handler) AcceptSplitRequest(c *gin.Context) {
 	}
 }
 
-// POST /v1/personal-debts/split-changes/:notification_id/apply —
-// "อัปเดตตาม" on a split_changed notification (one shot).
 func (h *Handler) ApplySplitChange(c *gin.Context) {
 	userID, ok := caller(c)
 	if !ok {

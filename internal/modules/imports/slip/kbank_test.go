@@ -11,8 +11,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports/ocr"
 )
 
-// Fixtures: real K PLUS slips read with psm 11 (layout, junk lines and
-// misreads kept), with names, account digits and refs replaced.
 func loadFixture(t *testing.T, name string) *ocr.Result {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", "kbank", name+".json"))
@@ -32,7 +30,7 @@ func TestKBankFixtures(t *testing.T) {
 	cases := []struct {
 		file     string
 		kind     Kind
-		at       string // "2006-01-02 15:04", Bangkok
+		at       string
 		amount   *float64
 		fee      *float64
 		sender   Party
@@ -76,28 +74,24 @@ func TestKBankFixtures(t *testing.T) {
 			receiver: Party{Kind: ReceiverBankAccount, Name: "นาย สมชาย ใจดีมาก", Bank: "ธ.กสิกรไทย", Masked: "xxxxx5678x"},
 		},
 		{
-			// Shop name wraps onto a second line; ต.ค. read as "ต.ุค.".
 			file: "payment_merchant_wrap", kind: KindPayment, at: "2026-10-07 15:35",
 			amount: f(70), fee: f(0),
 			sender:   Party{Name: "นาย สมชาย ใ", Bank: "ธ.กสิกรไทย", Masked: "xxxxx1234x"},
 			receiver: Party{Kind: ReceiverMerchant, Name: "คาเฟอเมซอน พหลโยธิน เพลส พลาซา", Company: "บจก. ตัวอย่าง", Ref1: "202610071969785"},
 		},
 		{
-			// The shop's logo reads as a junk line left of the column.
 			file: "payment_merchant_logo", kind: KindPayment, at: "2026-10-08 16:34",
 			amount: f(40), fee: f(0),
 			sender:   Party{Name: "นาย สมชาย ใ", Bank: "ธ.กสิกรไทย", Masked: "xxxxx1234x"},
 			receiver: Party{Kind: ReceiverMerchant, Name: "ร้านเวนดิ้งบายบุญเติม", Company: "บมจ. ฟอร์ท สมาร์ท เซอร์วิส", Ref1: "202610082188915"},
 		},
 		{
-			// Card bill: Ref 1 is the card number. The fee's value didn't read.
 			file: "bill_card", kind: KindBill, at: "2026-10-08 15:30",
 			amount: f(19241.95), fee: nil,
 			sender:   Party{Name: "นาย สมชาย ใ", Bank: "ธ.กสิกรไทย", Masked: "xxxxx1234x"},
 			receiver: Party{Kind: ReceiverBiller, Name: "AYUDHYA CAPIT", Ref1: "4000123412341234", Masked: "4000123412341234"},
 		},
 		{
-			// เลขที่รายการ comes before จำนวน on this layout.
 			file: "bill_repayment", kind: KindBill, at: "2026-10-03 16:00",
 			amount: f(11336.20), fee: f(0),
 			sender:   Party{Name: "นาย สมชาย ใ", Bank: "ธ.กสิกรไทย", Masked: "xxxxx1234x"},

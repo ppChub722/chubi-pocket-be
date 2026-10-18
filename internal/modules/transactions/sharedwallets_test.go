@@ -1,13 +1,5 @@
 package transactions
 
-// Shared-wallets integration tests (spec §14). They run against the
-// local dev Postgres (docker compose db, migrations 000039+ applied) and
-// SKIP when it is unreachable — same DB the dev stack uses; every
-// fixture row is created fresh and torn down in t.Cleanup, no existing
-// data is touched.
-//
-// Override the DSN with TEST_DATABASE_URL when needed.
-
 import (
 	"context"
 	"encoding/json"
@@ -52,8 +44,6 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-// swFixture builds the §14 cast: an owner, an active co-member, an
-// ex-member (joined + left, with one historical row), and an outsider.
 type swFixture struct {
 	pool *pgxpool.Pool
 	svc  *Service
@@ -133,8 +123,8 @@ func (f *swFixture) newCategory(t *testing.T, userID uuid.UUID, name string) uui
 	return id
 }
 
-// insertRawTx inserts a historical transactions row directly (used for
-// the ex-member's pre-leave row — the API would rightly refuse it now).
+// insertRawTx inserts a historical transactions row directly (used for the ex-member's pre-leave
+// row — the API would rightly refuse it now).
 func (f *swFixture) insertRawTx(t *testing.T, userID, accountID, categoryID uuid.UUID, amount float64) uuid.UUID {
 	t.Helper()
 	id := mustV7(t)
@@ -150,8 +140,8 @@ func (f *swFixture) insertRawTx(t *testing.T, userID, accountID, categoryID uuid
 func (f *swFixture) cleanup(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	// FK-safe order; account_members.account_id cascades with accounts but
-	// user FKs don't, so clear memberships before users.
+	// FK-safe order; account_members.account_id cascades with accounts but user FKs don't, so clear
+	// memberships before users.
 	for _, q := range []string{
 		`DELETE FROM transactions WHERE user_id = ANY($1)`,
 		`DELETE FROM notifications WHERE recipient_user_id = ANY($1) OR actor_user_id = ANY($1)`,
@@ -215,14 +205,10 @@ func updateReq(t *testing.T, body string) UpdateRequest {
 	return req
 }
 
-// TestSharedWalletAuthzMatrix covers the §14/2 co-ownership matrix:
-// owner / member / ex-member / non-member × create / read / edit-own /
-// edit-others / edit-others-category / delete.
 func TestSharedWalletAuthzMatrix(t *testing.T) {
 	f := newSWFixture(t)
 	ctx := context.Background()
 
-	// --- create ---
 	rowO, err := createExpense(t, f, f.owner, f.ownerCat, 100)
 	if err != nil {
 		t.Fatalf("owner create: %v", err)
@@ -238,7 +224,6 @@ func TestSharedWalletAuthzMatrix(t *testing.T) {
 		t.Errorf("ex-member create: want ErrAccountForbidden, got %v", err)
 	}
 
-	// Shared-wallet decorations on the create response.
 	if rowM.CreatedBy == nil || rowM.CreatedBy.UserID != f.member {
 		t.Errorf("create response: created_by = %+v, want member author", rowM.CreatedBy)
 	}
@@ -246,14 +231,12 @@ func TestSharedWalletAuthzMatrix(t *testing.T) {
 		t.Errorf("create response: can_edit_category should be true for the author")
 	}
 
-	// --- read ---
 	if _, err := f.svc.Get(ctx, f.member, rowO.ID); err != nil {
 		t.Errorf("member reads owner's row: %v", err)
 	}
 	if _, err := f.svc.Get(ctx, f.outsider, rowO.ID); !errors.Is(err, ErrTxNotFound) {
 		t.Errorf("outsider reads owner's row: want ErrTxNotFound, got %v", err)
 	}
-	// Ex-member still sees their own history (read-only for them).
 	got, err := f.svc.Get(ctx, f.exMember, f.exRow)
 	if err != nil {
 		t.Fatalf("ex-member reads own old row: %v", err)
@@ -262,8 +245,6 @@ func TestSharedWalletAuthzMatrix(t *testing.T) {
 		t.Errorf("ex-member's own old row: is_locked=%v can_edit_category=%v, want true/false",
 			got.IsLocked, got.CanEditCategory)
 	}
-	// A co-member sees the owner's row with its author and the owner's
-	// category, read-only for them.
 	seen, err := f.svc.Get(ctx, f.member, rowO.ID)
 	if err != nil {
 		t.Fatalf("member reads owner's row: %v", err)
@@ -275,7 +256,6 @@ func TestSharedWalletAuthzMatrix(t *testing.T) {
 			seen.CreatedBy, seen.Category, seen.CanEditCategory, seen.IsLocked)
 	}
 
-	// Ledger view: ?account_id=wallet shows ALL authors to a member.
 	list, err := f.svc.List(ctx, f.member, ListFilter{AccountID: &f.wallet, Page: 1, PerPage: 50})
 	if err != nil {
 		t.Fatalf("member list: %v", err)
@@ -291,12 +271,10 @@ func TestSharedWalletAuthzMatrix(t *testing.T) {
 		t.Errorf("outsider sees %d wallet rows, want 0", outList.Pagination.Total)
 	}
 
-	// --- edit own ---
 	if _, err := f.svc.Update(ctx, f.member, rowM.ID, updateReq(t, `{"amount": 45}`)); err != nil {
 		t.Errorf("member edits own row: %v", err)
 	}
 
-	// --- edit others (allowed except category) ---
 	if _, err := f.svc.Update(ctx, f.member, rowO.ID, updateReq(t, `{"note": "edited by member"}`)); err != nil {
 		t.Errorf("member edits owner's note: %v", err)
 	}
@@ -305,7 +283,6 @@ func TestSharedWalletAuthzMatrix(t *testing.T) {
 		t.Errorf("member edits owner's category: want ErrCategoryAuthorOnly, got %v", err)
 	}
 
-	// --- ex-member's own old rows are locked ---
 	if _, err := f.svc.Update(ctx, f.exMember, f.exRow, updateReq(t, `{"amount": 30}`)); !errors.Is(err, ErrRowLocked) {
 		t.Errorf("ex-member edits own old row: want ErrRowLocked, got %v", err)
 	}
@@ -313,7 +290,6 @@ func TestSharedWalletAuthzMatrix(t *testing.T) {
 		t.Errorf("ex-member deletes own old row: want ErrRowLocked, got %v", err)
 	}
 
-	// --- outsider mutations 404 ---
 	if _, err := f.svc.Update(ctx, f.outsider, rowM.ID, updateReq(t, `{"amount": 1}`)); !errors.Is(err, ErrTxNotFound) {
 		t.Errorf("outsider edit: want ErrTxNotFound, got %v", err)
 	}
@@ -321,25 +297,18 @@ func TestSharedWalletAuthzMatrix(t *testing.T) {
 		t.Errorf("outsider delete: want ErrTxNotFound, got %v", err)
 	}
 
-	// --- delete others (allowed for active members) ---
 	if err := f.svc.Delete(ctx, f.member, rowO.ID); err != nil {
 		t.Errorf("member deletes owner's row: %v", err)
 	}
-	// Remaining members may still edit the ex-member's locked row.
 	if _, err := f.svc.Update(ctx, f.owner, f.exRow, updateReq(t, `{"note": "kept by owner"}`)); err != nil {
 		t.Errorf("owner edits ex-member's row: %v", err)
 	}
 }
 
-// TestReportScopePredicateSummary pins the §14/5 predicate through the
-// transactions summary endpoint: 1 shared wallet, 2 users, rows by both
-// + a personal-account row, verified under none / own / all.
 func TestReportScopePredicateSummary(t *testing.T) {
 	f := newSWFixture(t)
 	ctx := context.Background()
 
-	// Personal account for the owner (own book, scope 'all' like the
-	// migration backfill).
 	personal := f.newAccount(t, f.owner, "Owner personal")
 	f.addMember(t, personal, f.owner, "owner", "all", true, false)
 
@@ -374,7 +343,6 @@ func TestReportScopePredicateSummary(t *testing.T) {
 		return resp.TotalExpense
 	}
 
-	// Wallet rows: owner 100 + member 40 + ex-member 25 (fixture).
 	cases := []struct {
 		scope string
 		want  float64
@@ -390,7 +358,6 @@ func TestReportScopePredicateSummary(t *testing.T) {
 		}
 	}
 
-	// Member has no personal account: own = their 40; none = 0.
 	setScope(f.member, "none")
 	if got := summarize(f.member); got != 0 {
 		t.Errorf("member scope=none: total_expense = %.2f, want 0", got)
@@ -404,12 +371,9 @@ func TestReportScopePredicateSummary(t *testing.T) {
 		t.Errorf("member scope=all: total_expense = %.2f, want 165", got)
 	}
 
-	// Ex-member: capped ledger — their left row is scope 'own', so their
-	// old wallet row still shows in their personal report.
 	if got := summarize(f.exMember); got != 25 {
 		t.Errorf("ex-member scope=own: total_expense = %.2f, want 25", got)
 	}
-	// Flip the ex-member's left row to 'none' → hidden.
 	if _, err := f.pool.Exec(ctx, `
 		UPDATE account_members SET report_scope = 'none'
 		WHERE account_id = $1 AND user_id = $2`, f.wallet, f.exMember); err != nil {

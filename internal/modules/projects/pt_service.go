@@ -13,8 +13,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// CreateProjectTransaction — a board-only bill (no wallet) plus its splits
-// and event tags, atomically. Returns the patch.
 func (s *Service) CreateProjectTransaction(
 	ctx context.Context, callerUserID, projectID uuid.UUID, req CreateProjectTransactionRequest,
 ) (*EventPatch, error) {
@@ -46,15 +44,11 @@ func (s *Service) CreateProjectTransaction(
 	if pt, err = s.store.GetPTTx(ctx, tx, pt.ID); err != nil {
 		return nil, err
 	}
-	// Contract §5. My own row → my personal copy when I switched that on
-	// (no notification: I did it). Someone else recorded it as mine →
-	// project_tx_recorded_for_you, whose auto copies it for me.
 	if s.notifs != nil && member.UserID != nil {
 		if *member.UserID == callerUserID {
 			if s.txs != nil {
 				st, err := s.notifs.SettingsTx(ctx, tx, callerUserID)
 				if err == nil && st.AutoResolveOwnInProjects {
-					// Fully split to others → no share, no copy.
 					if _, err := s.copyToPersonalTx(ctx, tx, callerUserID, member.ID, pt); err != nil &&
 						!errors.Is(err, ErrNoShareToCopy) {
 						return nil, err
@@ -71,9 +65,6 @@ func (s *Service) CreateProjectTransaction(
 	return s.patch(ctx, callerUserID, projectID, &pt.ID, nil, nil)
 }
 
-// originTx — the personal transaction bill ptID was made from
-// (project_transactions.linked_transaction_id), locked; nil when the bill is
-// board-only or its transaction is gone.
 type originTx struct {
 	id        uuid.UUID
 	userID    uuid.UUID
@@ -94,12 +85,6 @@ func linkedOriginTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) (*originTx, 
 	return &o, nil
 }
 
-// UpdateProjectTransaction edits a bill and (optionally) full-replaces its
-// splits / tags. Any member with rights edits a bill's money (the event is a
-// shared book, owner 2026-10-13). A linked bill's transaction is linked by
-// PROMPT: it changes only when its owner edits with also_update_link (the
-// wallet moves); another member's edit reaches the owner as
-// project_tx_changed with "อัปเดตตาม" (applyBillEditTx).
 func (s *Service) UpdateProjectTransaction(
 	ctx context.Context, callerUserID, projectID, ptID uuid.UUID, req UpdateProjectTransactionRequest,
 ) (*EventPatch, error) {
@@ -116,7 +101,6 @@ func (s *Service) UpdateProjectTransaction(
 	if current.ParentProjectTransactionID != nil {
 		return nil, ErrPTIsChild
 	}
-	// Members can edit any bill (full edit rights, see plan §1).
 	if _, err := s.store.AssertCanWrite(ctx, projectID, callerUserID); err != nil {
 		return nil, err
 	}
@@ -157,8 +141,6 @@ func (s *Service) UpdateProjectTransaction(
 	return s.patch(ctx, callerUserID, projectID, &updated.ID, nil, touched)
 }
 
-// applyBillEditTx writes the edit and tells the bill's stakeholders
-// (project_tx_changed, their own switches decide the copy update).
 func (s *Service) applyBillEditTx(
 	ctx context.Context, tx pgx.Tx, editorUserID, projectID uuid.UUID, current *ProjectTransaction,
 	req UpdateProjectTransactionRequest,
@@ -184,10 +166,6 @@ func (s *Service) applyBillEditTx(
 	return updated, nil
 }
 
-// SyncBillFromTxTx — the transactions.EventBillSyncer hook: the owner edited
-// the personal transaction a bill was made from and asked to update the bill
-// too (also_update_link); the bill takes the new amount / date. Inside the
-// edit's DB transaction.
 func (s *Service) SyncBillFromTxTx(ctx context.Context, tx pgx.Tx, userID, ptID uuid.UUID, amount float64, date string) error {
 	current, err := s.store.GetPTTx(ctx, tx, ptID)
 	if err != nil {
@@ -202,17 +180,13 @@ func (s *Service) SyncBillFromTxTx(ctx context.Context, tx pgx.Tx, userID, ptID 
 	if _, err := s.applyBillEditTx(ctx, tx, userID, current.ProjectID, current,
 		UpdateProjectTransactionRequest{Amount: &amount, Date: &date}); err != nil {
 		if errors.Is(err, ErrSplitsExceedParent) {
-			return transactions.ErrSplitsExceedAmount // the board splits no longer fit
+			return transactions.ErrSplitsExceedAmount
 		}
 		return err
 	}
 	return nil
 }
 
-// DeleteBillOfTxTx — transactions.EventBillDeleter: the bill made from
-// transaction txID goes with it when userID may edit the event (an active
-// non-viewer member, the event not cancelled / archived); otherwise it
-// stays, unlinked. Inside the delete's DB transaction, before the row goes.
 func (s *Service) DeleteBillOfTxTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (*uuid.UUID, error) {
 	var ptID, projectID uuid.UUID
 	err := tx.QueryRow(ctx, `SELECT id, project_id FROM project_transactions
@@ -235,8 +209,6 @@ func (s *Service) DeleteBillOfTxTx(ctx context.Context, tx pgx.Tx, userID, txID 
 	return &ptID, nil
 }
 
-// DeleteProjectTransaction removes a parent (FK-cascading its children) or
-// a single child split row.
 func (s *Service) DeleteProjectTransaction(
 	ctx context.Context, callerUserID, projectID, ptID uuid.UUID,
 ) (*EventPatch, error) {
@@ -259,9 +231,6 @@ func (s *Service) DeleteProjectTransaction(
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	// My own bill's row (I recorded it, I'm its actor): its member splits go
-	// back onto my bill, same as removing the bill from the event. Anyone
-	// else deleting it only unlinks — never write another user's book.
 	var originTxID uuid.UUID
 	err = tx.QueryRow(ctx, `SELECT id FROM transactions
 		WHERE source_project_transaction_id = $1 AND user_id = $2
@@ -297,7 +266,6 @@ func (s *Service) DeleteProjectTransaction(
 	return s.patch(ctx, callerUserID, projectID, nil, &ptID, nil)
 }
 
-// ListPT — GET /projects/:id/transactions (the board).
 func (s *Service) ListPT(ctx context.Context, callerUserID, projectID uuid.UUID, f BoardFilter) (*BoardRowList, error) {
 	if _, err := s.store.GetByIDForCaller(ctx, callerUserID, projectID); err != nil {
 		return nil, err
@@ -314,8 +282,6 @@ func (s *Service) ListPT(ctx context.Context, callerUserID, projectID uuid.UUID,
 	return &BoardRowList{Data: rows, Pagination: shared.NewPage(f.Page, f.PerPage, total)}, nil
 }
 
-// ToggleMark adds / removes the caller's member id on the row's marks
-// (idempotent). The patch's row is the bill (a split's parent).
 func (s *Service) ToggleMark(
 	ctx context.Context, callerUserID, projectID, ptID uuid.UUID, marked bool,
 ) (*EventPatch, error) {
@@ -343,8 +309,6 @@ func (s *Service) ToggleMark(
 	return s.patch(ctx, callerUserID, projectID, &rowID, nil, nil)
 }
 
-// buildDiff produces a small map of changed numeric/string fields for the
-// project_tx_changed payload. Only fields that actually changed are included.
 func buildDiff(before, after *ProjectTransaction) map[string][2]interface{} {
 	diff := make(map[string][2]interface{})
 	if before.Amount != after.Amount {

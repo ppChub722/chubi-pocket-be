@@ -61,7 +61,6 @@ func optionalID(c *gin.Context, name string) (*uuid.UUID, bool) {
 	return &id, true
 }
 
-// bind decodes the body into v and returns the keys it carried.
 func bind(c *gin.Context, v any) (map[string]bool, bool) {
 	raw, err := c.GetRawData()
 	if err == nil && len(raw) == 0 {
@@ -121,7 +120,6 @@ func mapError(c *gin.Context, err error) {
 	}
 }
 
-// GET /v1/saving-goals
 func (h *Handler) List(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {
@@ -141,7 +139,6 @@ func (h *Handler) List(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/saving-goals
 func (h *Handler) Create(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {
@@ -157,7 +154,6 @@ func (h *Handler) Create(c *gin.Context) {
 	reply(c, http.StatusCreated, out, err)
 }
 
-// GET /v1/saving-goals/spare
 func (h *Handler) Spare(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {
@@ -167,7 +163,6 @@ func (h *Handler) Spare(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// GET /v1/saving-goals/:id
 func (h *Handler) Get(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -177,7 +172,6 @@ func (h *Handler) Get(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// PUT /v1/saving-goals/:id
 func (h *Handler) Update(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -193,7 +187,6 @@ func (h *Handler) Update(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// DELETE /v1/saving-goals/:id
 func (h *Handler) Delete(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -203,7 +196,6 @@ func (h *Handler) Delete(c *gin.Context) {
 	reply(c, http.StatusOK, gin.H{"id": id}, err)
 }
 
-// POST /v1/saving-goals/:id/close
 func (h *Handler) Close(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -217,7 +209,6 @@ func (h *Handler) Close(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/saving-goals/:id/archive
 func (h *Handler) Archive(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -227,7 +218,6 @@ func (h *Handler) Archive(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/saving-goals/:id/restore
 func (h *Handler) Restore(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -237,7 +227,6 @@ func (h *Handler) Restore(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// GET /v1/saving-entries
 func (h *Handler) Entries(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {
@@ -261,7 +250,6 @@ func (h *Handler) Entries(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// POST /v1/saving-entries
 func (h *Handler) CreateEntry(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {
@@ -275,7 +263,6 @@ func (h *Handler) CreateEntry(c *gin.Context) {
 	reply(c, http.StatusCreated, out, err)
 }
 
-// PUT /v1/saving-entries/:id
 func (h *Handler) UpdateEntry(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -291,7 +278,6 @@ func (h *Handler) UpdateEntry(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// DELETE /v1/saving-entries/:id
 func (h *Handler) DeleteEntry(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -301,7 +287,6 @@ func (h *Handler) DeleteEntry(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// PUT /v1/saving-goals/:id/auto-save
 func (h *Handler) PutAutoSave(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -315,7 +300,6 @@ func (h *Handler) PutAutoSave(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// DELETE /v1/saving-goals/:id/auto-save
 func (h *Handler) DeleteAutoSave(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -325,7 +309,6 @@ func (h *Handler) DeleteAutoSave(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// PUT /v1/saving-goals/spare/auto-save
 func (h *Handler) PutAutoSaveSpare(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {
@@ -339,7 +322,6 @@ func (h *Handler) PutAutoSaveSpare(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// DELETE /v1/saving-goals/spare/auto-save
 func (h *Handler) DeleteAutoSaveSpare(c *gin.Context) {
 	uid, ok := user(c)
 	if !ok {

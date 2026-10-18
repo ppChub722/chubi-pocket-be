@@ -31,7 +31,6 @@ func TestResponseConformance(t *testing.T) {
 }
 
 func TestAllOfIsMerged(t *testing.T) {
-	// AccountDetail = Account + summary / members_history: a bare {id} is not one.
 	if err := Response("getAccount", 200, []byte(`{"id":"x"}`)); err == nil {
 		t.Errorf("a bare {id} must not conform to AccountDetail")
 	}

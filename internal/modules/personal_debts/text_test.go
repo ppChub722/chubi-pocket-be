@@ -10,9 +10,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
-// TestUpdateTextFields — see tags/text_test.go: absent keeps, null / ""
-// clears. An entry's wallet transaction carries the same texts (one
-// record); splits give the entry the bill's description.
 func TestUpdateTextFields(t *testing.T) {
 	pool := testdb.Pool(t)
 	ctx := context.Background()

@@ -1,10 +1,5 @@
 package transactions_test
 
-// Handler tests for the 9 transaction operations (API spec v2): the real
-// service + handler over HTTP (apitest), every body checked against the
-// spec (Conform) and the behaviour asserted (balances, tags, live person
-// names, transfer twins, form options order).
-
 import (
 	"context"
 	"encoding/json"
@@ -57,9 +52,6 @@ func routes(h *transactions.Handler) func(g *gin.RouterGroup) {
 	}
 }
 
-// newHFix — me (system categories seeded), wallets A / B, a Food category,
-// three tags, a linked contact Bee (→ partner "Partner Live") and an
-// unlinked contact Cee.
 func newHFix(t *testing.T, seed bool) *hfix {
 	t.Helper()
 	pool := testdb.Pool(t)
@@ -99,8 +91,6 @@ func newHFix(t *testing.T, seed bool) *hfix {
 	f.exec(`INSERT INTO contacts (id, user_id, display_name, linked_user_id, status)
 		VALUES ($1, $2, 'Bee', $3, 'active'), ($4, $2, 'Cee', NULL, 'active')`,
 		f.beeID, f.me, f.partner, f.ceeID)
-	// Runs before the users' own cleanups: debts point at each other
-	// (mirror) and my contact points at the partner.
 	t.Cleanup(func() {
 		_, _ = pool.Exec(f.ctx, `DELETE FROM personal_debts WHERE user_id = ANY($1)`, []uuid.UUID{f.me, f.partner})
 		_, _ = pool.Exec(f.ctx, `DELETE FROM contacts WHERE user_id = ANY($1)`, []uuid.UUID{f.me, f.partner})
@@ -132,7 +122,6 @@ func (f *hfix) balance(id uuid.UUID) float64 {
 	return b
 }
 
-// call sends a request as me and checks the status (and the spec).
 func (f *hfix) call(op, method, path string, body any, want int) []byte {
 	f.t.Helper()
 	return callAs(f.t, f.r, op, method, path, body, want)
@@ -199,12 +188,9 @@ func splitByName(d transactions.TransactionDetail) map[string]transactions.Split
 	return out
 }
 
-// TestCreateGetListHandlers — createTransaction / getTransaction /
-// listTransactions.
 func TestCreateGetListHandlers(t *testing.T) {
 	f := newHFix(t, true)
 
-	// An expense with a split on a linked contact, a free-name split and a tag.
 	body := map[string]any{
 		"type": "expense", "account_id": f.walletA, "category_id": f.food, "amount": 300,
 		"date": "2026-10-12", "description": "Dinner", "tag_ids": []uuid.UUID{f.tagA},
@@ -246,8 +232,6 @@ func TestCreateGetListHandlers(t *testing.T) {
 		t.Errorf("free-name split = %+v", aom)
 	}
 
-	// The person name is live: nickname shown → nickname; hidden → the
-	// linked user's profile name, which follows their profile.
 	f.exec(`UPDATE contacts SET nickname = 'Beebee', show_nickname = TRUE WHERE id = $1`, f.beeID)
 	got := decode[transactions.TransactionDetail](t,
 		f.call("getTransaction", "GET", "/api/v1/transactions/"+bill.ID.String(), nil, http.StatusOK))
@@ -262,7 +246,6 @@ func TestCreateGetListHandlers(t *testing.T) {
 		t.Errorf("after profile rename: splits %v, want Partner Renamed", splitByName(got))
 	}
 
-	// A transfer A → B: both rows, OUT first, each pointing at its twin.
 	tr := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
 		"type": "transfer", "account_id": f.walletA, "transfer_to_account_id": f.walletB,
 		"amount": 50, "date": "2026-10-12", "tag_ids": []uuid.UUID{f.tagB},
@@ -292,8 +275,7 @@ func TestCreateGetListHandlers(t *testing.T) {
 		t.Errorf("transfer balances = %+v, want A -350 / B 50", tr.AccountBalances)
 	}
 
-	// Errors: someone else's tag (nothing is written), project_id, a
-	// transfer without a destination.
+	// Errors: someone else's tag (nothing is written), project_id, a transfer without a destination.
 	e := f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
 		"type": "expense", "account_id": f.walletA, "amount": 10, "date": "2026-10-12",
 		"tag_ids": []uuid.UUID{f.otherTag},
@@ -308,7 +290,6 @@ func TestCreateGetListHandlers(t *testing.T) {
 		"type": "transfer", "account_id": f.walletA, "amount": 10, "date": "2026-10-12",
 	}, http.StatusBadRequest)
 
-	// List: page-ready rows, splits null, totals over the set.
 	raw := f.call("listTransactions", "GET", "/api/v1/transactions?per_page=2", nil, http.StatusOK)
 	var page struct {
 		Data []map[string]json.RawMessage `json:"data"`
@@ -343,13 +324,11 @@ func TestCreateGetListHandlers(t *testing.T) {
 	}
 	f.call("listTransactions", "GET", "/api/v1/transactions?type=bogus", nil, http.StatusBadRequest)
 
-	// Get: 404 for unknown / someone else's row.
 	f.call("getTransaction", "GET", "/api/v1/transactions/"+uuid.New().String(), nil, http.StatusNotFound)
 	other := apitest.Engine(f.partner, routes(f.h))
 	callAs(t, other, "getTransaction", "GET", "/api/v1/transactions/"+bill.ID.String(), nil, http.StatusNotFound)
 }
 
-// TestUpdateDeleteHandlers — updateTransaction / deleteTransaction.
 func TestUpdateDeleteHandlers(t *testing.T) {
 	f := newHFix(t, true)
 	created := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
@@ -359,8 +338,6 @@ func TestUpdateDeleteHandlers(t *testing.T) {
 	id := created.Rows[0].ID
 	path := "/api/v1/transactions/" + id.String()
 
-	// Move to wallet B with a new amount and a new tag set: both wallets in
-	// account_balances.
 	body := map[string]any{"amount": 120, "account_id": f.walletB, "tag_ids": []uuid.UUID{f.tagB, f.tagC}}
 	apitest.ConformRequest(t, "updateTransaction", body)
 	res := decode[writeResult](t, f.call("updateTransaction", "PUT", path, body, http.StatusOK))
@@ -376,7 +353,6 @@ func TestUpdateDeleteHandlers(t *testing.T) {
 	if got := tagNames(row); len(got) != 2 || got[0] != "beta" || got[1] != "gamma" {
 		t.Errorf("tags after replace = %v, want [beta gamma]", got)
 	}
-	// tag_ids absent = unchanged; [] clears.
 	res = decode[writeResult](t, f.call("updateTransaction", "PUT", path, map[string]any{"note": "n"}, http.StatusOK))
 	if len(res.Rows[0].Tags) != 2 || res.Rows[0].Note == nil || *res.Rows[0].Note != "n" {
 		t.Errorf("note-only edit: tags %v note %v", tagNames(res.Rows[0]), res.Rows[0].Note)
@@ -392,8 +368,6 @@ func TestUpdateDeleteHandlers(t *testing.T) {
 	f.call("updateTransaction", "PUT", "/api/v1/transactions/"+uuid.New().String(),
 		map[string]any{"amount": 1}, http.StatusNotFound)
 
-	// A transfer edited from its IN row: both rows back (OUT first), both
-	// wallets' balances.
 	tr := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
 		"type": "transfer", "account_id": f.walletA, "transfer_to_account_id": f.walletB,
 		"amount": 30, "date": "2026-10-12",
@@ -412,7 +386,6 @@ func TestUpdateDeleteHandlers(t *testing.T) {
 	f.call("updateTransaction", "PUT", inPath,
 		map[string]any{"account_id": nil, "transfer_to_account_id": nil}, http.StatusBadRequest)
 
-	// Delete: the id and the touched wallet(s) after the delete.
 	del := decode[transactions.DeleteResult](t, f.call("deleteTransaction", "DELETE", path, nil, http.StatusOK))
 	if del.ID != id || len(del.AccountBalances) != 1 || del.AccountBalances[0].AccountID != f.walletB ||
 		del.AccountBalances[0].Balance != 40 {
@@ -426,9 +399,6 @@ func TestUpdateDeleteHandlers(t *testing.T) {
 	f.call("deleteTransaction", "DELETE", path, nil, http.StatusNotFound)
 }
 
-// TestEditSplitsHandler — editSplits: a sent person_name is ignored on a
-// split with a contact, free names rename in place, a new contact split
-// takes the contact's name; the response is the Transaction.
 func TestEditSplitsHandler(t *testing.T) {
 	f := newHFix(t, true)
 	created := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
@@ -470,7 +440,6 @@ func TestEditSplitsHandler(t *testing.T) {
 	if beeSnap != "Typed" || ceeSnap != "Cee" {
 		t.Errorf("stored snapshots = %q / %q, want Typed (unchanged) / Cee (the contact's name)", beeSnap, ceeSnap)
 	}
-	// The name stays live after the edit.
 	f.exec(`UPDATE contacts SET nickname = 'C-nick' WHERE id = $1`, f.ceeID)
 	got = decode[transactions.TransactionDetail](t,
 		f.call("getTransaction", "GET", "/api/v1/transactions/"+bill.ID.String(), nil, http.StatusOK))
@@ -488,7 +457,6 @@ func TestEditSplitsHandler(t *testing.T) {
 		t.Errorf("dropped contact = %v, want a free name C-nick on the same debt", splitByName(got))
 	}
 
-	// Errors.
 	e := f.call("editSplits", "PUT", path, map[string]any{"splits": []map[string]any{
 		{"person_name": "Big", "owed_amount": 400},
 	}}, http.StatusBadRequest)
@@ -497,8 +465,6 @@ func TestEditSplitsHandler(t *testing.T) {
 	}
 	f.call("editSplits", "PUT", "/api/v1/transactions/"+uuid.New().String()+"/splits",
 		map[string]any{"splits": []any{}}, http.StatusNotFound)
-	// A co-member of the wallet sees the row (with its author) but may not
-	// edit its splits.
 	mid, _ := uuid.NewV7()
 	f.exec(`INSERT INTO account_members (id, account_id, user_id, role, report_scope, joined_at)
 		VALUES ($1, $2, $3, 'member', 'none', NOW())`, mid, f.walletA, f.partner)
@@ -516,7 +482,6 @@ func TestEditSplitsHandler(t *testing.T) {
 	}
 }
 
-// TestSetTagsHandler — setTransactionTags replaces the caller's tags only.
 func TestSetTagsHandler(t *testing.T) {
 	f := newHFix(t, true)
 	created := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
@@ -525,7 +490,6 @@ func TestSetTagsHandler(t *testing.T) {
 	}, http.StatusCreated))
 	id := created.Rows[0].ID
 	path := "/api/v1/transactions/" + id.String() + "/tags"
-	// The partner (a co-member) tags the same row with their own tag.
 	mid, _ := uuid.NewV7()
 	f.exec(`INSERT INTO account_members (id, account_id, user_id, role, report_scope, joined_at)
 		VALUES ($1, $2, $3, 'member', 'none', NOW())`, mid, f.walletA, f.partner)
@@ -563,19 +527,13 @@ func TestSetTagsHandler(t *testing.T) {
 		map[string]any{"tag_ids": []uuid.UUID{}}, http.StatusNotFound)
 }
 
-// TestFormOptionsHandler — getTransactionFormOptions: wallets in the
-// caller's order with the default, categories flat in tree order, tags by
-// use, events the caller can add bills to, the fee category.
 func TestFormOptionsHandler(t *testing.T) {
 	f := newHFix(t, false)
-	// B first in my order; an archived wallet is left out.
 	f.exec(`UPDATE account_members SET sort_order = 1 WHERE account_id = $1`, f.walletA)
 	f.exec(`UPDATE account_members SET sort_order = 0 WHERE account_id = $1`, f.walletB)
 	archived := testdb.Account(t, f.pool, f.me)
 	f.exec(`UPDATE accounts SET status = 'archived' WHERE id = $1`, archived)
 
-	// Categories: Food (sort 1) > Lunch > Noodles; Home (sort 0); Salary
-	// (income); a system one is left out.
 	cat := func(name, typ string, parent *uuid.UUID, sortOrder int) uuid.UUID {
 		id, _ := uuid.NewV7()
 		f.exec(`INSERT INTO categories (id, user_id, name, type, is_system, parent_id, sort_order)
@@ -591,8 +549,6 @@ func TestFormOptionsHandler(t *testing.T) {
 	f.exec(`INSERT INTO categories (id, user_id, name, type, is_system, system_kind)
 		VALUES ($1, $2, 'Adjust', 'income', TRUE, 'ADJUST_IN')`, sysID, f.me)
 
-	// Events: an active one I contribute to; one where I'm a viewer and a
-	// completed one are left out.
 	event := func(name, status, role string) uuid.UUID {
 		pid, _ := uuid.NewV7()
 		f.exec(`INSERT INTO projects (id, owner_user_id, name, status) VALUES ($1, $2, $3, $4)`, pid, f.me, name, status)
@@ -605,7 +561,6 @@ func TestFormOptionsHandler(t *testing.T) {
 	event("Watching", "active", "viewer")
 	event("Done", "completed", "owner")
 
-	// fee_category_id: unset → null.
 	opts := decode[transactions.FormOptions](t,
 		f.call("getTransactionFormOptions", "GET", "/api/v1/transactions/form-options", nil, http.StatusOK))
 	if len(opts.Accounts) != 2 || opts.Accounts[0].ID != f.walletB || opts.Accounts[1].ID != f.walletA {
@@ -640,8 +595,6 @@ func TestFormOptionsHandler(t *testing.T) {
 		t.Errorf("events = %+v, want [Trip]", opts.Events)
 	}
 
-	// After an expense on A (with gamma), A is the default and gamma leads
-	// the tags; a valid fee preference comes back.
 	f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
 		"type": "expense", "account_id": f.walletA, "amount": 5, "date": "2026-10-12",
 		"tag_ids": []uuid.UUID{f.tagC},
@@ -659,7 +612,6 @@ func TestFormOptionsHandler(t *testing.T) {
 	if opts.FeeCategoryID == nil || *opts.FeeCategoryID != home {
 		t.Errorf("fee_category_id = %v, want Home", opts.FeeCategoryID)
 	}
-	// A preference that is not one of my expense categories → null.
 	f.exec(`UPDATE user_preferences SET preferences = jsonb_build_object('fee_category_id', $2::text) WHERE user_id = $1`,
 		f.me, salary.String())
 	opts = decode[transactions.FormOptions](t,
@@ -669,7 +621,6 @@ func TestFormOptionsHandler(t *testing.T) {
 	}
 }
 
-// TestSummaryHandler — getTransactionSummary: groups carry their refs.
 func TestSummaryHandler(t *testing.T) {
 	f := newHFix(t, true)
 	lunch, _ := uuid.NewV7()
@@ -728,11 +679,6 @@ func TestSummaryHandler(t *testing.T) {
 	f.call("getTransactionSummary", "GET", "/api/v1/transactions/summary?to=2026-10-31", nil, http.StatusBadRequest)
 }
 
-// TestTransferWalletlessLeg — a transfer whose IN leg lost its wallet (the
-// wallet was deleted: the row keeps living with account_id NULL): the twin
-// shows account null, the OUT leg still edits / moves its own balance, the
-// empty leg can be given a wallet again but a leg with a wallet can't be
-// cleared, and the pair deletes cleanly.
 func TestTransferWalletlessLeg(t *testing.T) {
 	f := newHFix(t, true)
 	tr := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
@@ -741,7 +687,6 @@ func TestTransferWalletlessLeg(t *testing.T) {
 	}, http.StatusCreated))
 	outID, inID := tr.Rows[0].ID, tr.Rows[1].ID
 	outPath, inPath := "/api/v1/transactions/"+outID.String(), "/api/v1/transactions/"+inID.String()
-	// What deleting wallet B does to the leg.
 	f.exec(`UPDATE transactions SET account_id = NULL WHERE id = $1`, inID)
 
 	got := decode[transactions.TransactionDetail](t, f.call("getTransaction", "GET", outPath, nil, http.StatusOK))
@@ -754,7 +699,6 @@ func TestTransferWalletlessLeg(t *testing.T) {
 		t.Errorf("IN row = account %v peer %+v", got.Account, got.TransferPeer)
 	}
 
-	// Amount edit moves only A (-100 → -60); B is untouched.
 	bBefore := f.balance(f.walletB)
 	res := decode[writeResult](t, f.call("updateTransaction", "PUT", inPath, map[string]any{"amount": 60}, http.StatusOK))
 	if a, _ := balanceOf(res.AccountBalances, f.walletA); a != -60 || f.balance(f.walletB) != bBefore {
@@ -772,7 +716,6 @@ func TestTransferWalletlessLeg(t *testing.T) {
 		t.Errorf("IN row after re-file = %+v", res.Rows[1].Account)
 	}
 
-	// Delete a pair whose IN leg is wallet-less again.
 	f.exec(`UPDATE transactions SET account_id = NULL WHERE id = $1`, inID)
 	f.call("deleteTransaction", "DELETE", inPath, nil, http.StatusOK)
 	if f.balance(f.walletA) != 0 {
@@ -781,9 +724,6 @@ func TestTransferWalletlessLeg(t *testing.T) {
 	f.call("getTransaction", "GET", outPath, nil, http.StatusNotFound)
 }
 
-// TestArchivedWalletIsIgnoredAndReadOnly — archiving a wallet takes its rows
-// out of every calculation and the default list, and refuses writes on it
-// (409 ACCOUNT_ARCHIVED) until it is restored.
 func TestArchivedWalletIsIgnoredAndReadOnly(t *testing.T) {
 	f := newHFix(t, true)
 	mk := func(acc uuid.UUID, amount float64) uuid.UUID {
@@ -839,8 +779,6 @@ func TestArchivedWalletIsIgnoredAndReadOnly(t *testing.T) {
 	f.call("updateTransaction", "PUT", path, map[string]any{"amount": 90}, http.StatusOK)
 }
 
-// TestListDailySeriesAndAverage — the list's date range gives a zero-filled
-// daily series and the average daily spend over the days that happened.
 func TestListDailySeriesAndAverage(t *testing.T) {
 	f := newHFix(t, true)
 	mk := func(typ string, amount float64, date string) {
@@ -864,11 +802,9 @@ func TestListDailySeriesAndAverage(t *testing.T) {
 	if d := out.Daily[2]; d.Income != 400 || d.Expense != 0 {
 		t.Errorf("Jan 3 = %+v", d)
 	}
-	// 180 spent over the 31 days of January (all in the past): 5.81 a day.
 	if out.AvgDailySpend != 5.81 || out.Totals.Expense != 180 || out.Totals.Income != 400 {
 		t.Errorf("avg %v totals %+v", out.AvgDailySpend, out.Totals)
 	}
-	// No range: the current month, a series of that month.
 	now := decode[transactions.ListResponse](t, f.call("listTransactions", "GET", "/api/v1/transactions", nil, http.StatusOK))
 	if len(now.Daily) < 28 || len(now.Daily) > 31 {
 		t.Errorf("current month series = %d points", len(now.Daily))

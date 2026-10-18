@@ -1,12 +1,5 @@
 package transactions
 
-// Recurring items (0.3.1-10). A transaction may be the linked side of a
-// recurring item (the item holds the link, like an event bill). The
-// transactions table only holds what really happened: a date after today
-// makes an UPCOMING item instead (create), or moves the row out (edit).
-// Wired from the recurring module in main.go (recurring imports
-// transactions, not the other way).
-
 import (
 	"context"
 	"errors"
@@ -17,25 +10,16 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// ErrFutureDateNotAllowed — a debt entry's transaction, an event bill's
-// transaction or a transfer edit can't move to a future date.
+// ErrFutureDateNotAllowed — a debt entry's transaction, an event bill's transaction or a transfer
+// edit can't move to a future date.
 var ErrFutureDateNotAllowed = errors.New("this transaction can't move to a future date")
 
-// RecurringLinks — the recurring module's side.
 type RecurringLinks interface {
-	// Today — the user's calendar date (YYYY-MM-DD).
 	Today(ctx context.Context, userID uuid.UUID) (string, error)
-	// CreateUpcomingTx writes a one-off upcoming item from a create body.
 	CreateUpcomingTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, req CreateRequest) (uuid.UUID, error)
-	// MoveToUpcomingTx — row txID (deleted right after) moved to a future date:
-	// its linked item takes req (and loses the link), else a one-off item.
 	MoveToUpcomingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, req CreateRequest) (uuid.UUID, error)
-	// TxEditedTx — also_update_link: the linked item takes the row's values.
 	TxEditedTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, row *Transaction, tagIDs []uuid.UUID, tagsSet bool) error
-	// TxDeletingTx — row txID is about to be deleted with also_delete_link:
-	// its linked item goes too. Returns the item id (nil: none).
 	TxDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (*uuid.UUID, error)
-	// ItemView — the page-ready item (spec RecurringItem), after commit.
 	ItemView(ctx context.Context, userID, itemID uuid.UUID) (any, error)
 }
 
@@ -53,7 +37,6 @@ func (s *Service) isFuture(ctx context.Context, userID uuid.UUID, date string) (
 	return date > today, nil
 }
 
-// createUpcoming — POST /transactions dated after today.
 func (s *Service) createUpcoming(ctx context.Context, userID uuid.UUID, req CreateRequest) (*WriteResult, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -74,8 +57,6 @@ func (s *Service) createUpcoming(ctx context.Context, userID uuid.UUID, req Crea
 	return &WriteResult{Rows: []TransactionDetail{}, AccountBalances: []shared.WalletBalance{}, Upcoming: item}, nil
 }
 
-// moveToUpcoming — PUT /transactions/:id with a date after today: the row
-// leaves transactions (its money comes back) and becomes an upcoming item.
 func (s *Service) moveToUpcoming(ctx context.Context, userID uuid.UUID, current *Transaction, req UpdateRequest) (*WriteResult, error) {
 	if current.Type == TypeTransfer || current.SourcePersonalDebtID != nil || current.ProjectID != nil ||
 		current.UserID != userID {
@@ -91,7 +72,6 @@ func (s *Service) moveToUpcoming(ctx context.Context, userID uuid.UUID, current 
 	} else if bill != nil {
 		return nil, ErrFutureDateNotAllowed
 	}
-	// The row with the edit applied, as a create body.
 	body := CreateRequest{
 		Type: current.Type, AccountID: current.AccountID, Amount: current.Amount, CategoryID: current.CategoryID,
 		Date: *req.Date, Description: current.Description, Note: current.Note,

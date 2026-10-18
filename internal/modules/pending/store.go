@@ -75,7 +75,6 @@ func (s *Store) Get(ctx context.Context, userID, id uuid.UUID) (*PendingTransact
 	return p, err
 }
 
-// Insert adds one draft (any kind / source — the service decides).
 func (s *Store) Insert(
 	ctx context.Context, userID uuid.UUID, source, kind string, d Draft,
 	targetDebtID, targetTxID *uuid.UUID, sourceRef json.RawMessage,
@@ -100,7 +99,6 @@ func (s *Store) Insert(
 		id, userID, source, kind, draft, targetDebtID, targetTxID, ref))
 }
 
-// UpdateDraft replaces the draft and clears the last submit error.
 func (s *Store) UpdateDraft(ctx context.Context, userID, id uuid.UUID, d Draft) (*PendingTransaction, error) {
 	draft, err := json.Marshal(d)
 	if err != nil {
@@ -142,7 +140,6 @@ func (s *Store) DeleteTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) e
 	return err
 }
 
-// Newest — the first `limit` drafts, newest first (the Home block).
 func (s *Store) Newest(ctx context.Context, userID uuid.UUID, limit int) ([]PendingTransaction, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+pendingColumns+` FROM pending_transactions
 		WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2`, userID, limit)
@@ -161,15 +158,12 @@ func (s *Store) Newest(ctx context.Context, userID uuid.UUID, limit int) ([]Pend
 	return out, rows.Err()
 }
 
-// Count — how many drafts the user has.
 func (s *Store) Count(ctx context.Context, userID uuid.UUID) (int, error) {
 	var n int
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM pending_transactions WHERE user_id = $1`, userID).Scan(&n)
 	return n, err
 }
 
-// DeleteMany removes the caller's drafts among ids; returns the ids that
-// existed (and are now gone).
 func (s *Store) DeleteMany(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]uuid.UUID, error) {
 	rows, err := s.db.Query(ctx, `DELETE FROM pending_transactions
 		WHERE id = ANY($1) AND user_id = $2 RETURNING id`, ids, userID)
@@ -188,8 +182,6 @@ func (s *Store) DeleteMany(ctx context.Context, userID uuid.UUID, ids []uuid.UUI
 	return out, rows.Err()
 }
 
-// InsertTx — Insert inside the caller's DB transaction (the recurring due
-// check writes its drafts with the items' links in one go).
 func (s *Store) InsertTx(
 	ctx context.Context, tx pgx.Tx, userID uuid.UUID, source, kind string, d Draft, sourceRef json.RawMessage,
 ) (*PendingTransaction, error) {
@@ -212,7 +204,6 @@ func (s *Store) InsertTx(
 		id, userID, source, kind, draft, ref))
 }
 
-// UpdateDraftTx — UpdateDraft inside the caller's DB transaction.
 func (s *Store) UpdateDraftTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, d Draft) error {
 	draft, err := json.Marshal(d)
 	if err != nil {

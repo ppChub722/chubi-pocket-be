@@ -1,8 +1,5 @@
 package projects
 
-// 0.4.0 numbers for the event pages: my paid / share / receivable / payable
-// on every event row, and the list summary card.
-
 import (
 	"context"
 	"fmt"
@@ -12,9 +9,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// EventListSummary — EventList.summary: over the caller's own events (member,
-// not archived), the same whatever the list's filter. The three totals are
-// over the ACTIVE events.
 type EventListSummary struct {
 	MyShareTotal    float64     `json:"my_share_total"`
 	PaidTotal       float64     `json:"paid_total"`
@@ -22,17 +16,12 @@ type EventListSummary struct {
 	Counts          EventCounts `json:"counts"`
 }
 
-// EventCounts — active events, events where money is still open for me
-// (my receivable / payable ≠ 0, active or ended) and ended ones
-// (completed / cancelled).
 type EventCounts struct {
 	Active    int `json:"active"`
 	Unsettled int `json:"unsettled"`
 	Ended     int `json:"ended"`
 }
 
-// fillMyNumbers sets MyPaid / MyShare / MyReceivable / MyPayable / Remaining
-// on the events (called by loadEvents after the base rows).
 func fillMyNumbers(ctx context.Context, q shared.Querier, callerID uuid.UUID, events map[uuid.UUID]Event, ids []uuid.UUID) error {
 	rows, err := q.Query(ctx, `
 		SELECT p.id,
@@ -84,7 +73,6 @@ func fillMyNumbers(ctx context.Context, q shared.Querier, callerID uuid.UUID, ev
 	return nil
 }
 
-// listSummary — the events list's summary card.
 func (s *Service) listSummary(ctx context.Context, userID uuid.UUID) (EventListSummary, error) {
 	var out EventListSummary
 	rows, err := s.store.db.Query(ctx, `SELECT p.id FROM projects p

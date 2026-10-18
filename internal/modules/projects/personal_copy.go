@@ -13,18 +13,8 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
-// Personal copies of project rows (contract §5). A project row lives in the
-// project's own book; a member's "personal copy" is an ordinary transaction
-// in their book linked by source_project_transaction_id. Copies are always
-// floating (no wallet) — the user moves them into a wallet later — and the
-// category is matched by name against the user's own categories.
-//
-// Amount basis: the actor (whose money moved) copies the full amount; a
-// split member copies their own share (their split row).
-
 var ErrNoShareToCopy = errors.New("you have no part in this project row to copy")
 
-// personalCopyTx — the user's existing copy of a project row, if any.
 func personalCopyTx(ctx context.Context, tx pgx.Tx, userID, ptID uuid.UUID) (id uuid.UUID, amount float64, ok bool) {
 	err := tx.QueryRow(ctx, `
 		SELECT id, amount FROM transactions
@@ -33,8 +23,6 @@ func personalCopyTx(ctx context.Context, tx pgx.Tx, userID, ptID uuid.UUID) (id 
 	return id, amount, err == nil
 }
 
-// splitSharesTx — Σ split rows per member under a parent. Taken before and
-// after an edit (children are replaced wholesale on update).
 func splitSharesTx(ctx context.Context, tx pgx.Tx, parentID uuid.UUID) map[uuid.UUID]float64 {
 	out := map[uuid.UUID]float64{}
 	rows, err := tx.Query(ctx, `
@@ -62,10 +50,6 @@ func sumShares(m map[uuid.UUID]float64) float64 {
 	return t
 }
 
-// copyAmountTx — what memberID's copy of parent pt should be: their share
-// (owner 2026-10-10, project-as-separate-book §2 "I spent"). The actor's
-// share is the amount minus the other members' splits; a split member's
-// is their split.
 func copyAmountTx(ctx context.Context, tx pgx.Tx, pt *ProjectTransaction, memberID uuid.UUID) (float64, error) {
 	var share float64
 	var err error
@@ -88,8 +72,6 @@ func copyAmountTx(ctx context.Context, tx pgx.Tx, pt *ProjectTransaction, member
 	return share, nil
 }
 
-// copyToPersonalTx creates userID's floating copy of parent pt (idempotent:
-// an existing copy is returned as is).
 func (s *Service) copyToPersonalTx(
 	ctx context.Context, tx pgx.Tx, userID, memberID uuid.UUID, pt *ProjectTransaction,
 ) (uuid.UUID, error) {
@@ -100,9 +82,6 @@ func (s *Service) copyToPersonalTx(
 	if err != nil {
 		return uuid.Nil, err
 	}
-	// A tag named like one of the user's categories files the copy there
-	// (earlier tags win); the user's personal tags with the same names are
-	// attached (claim rule, owner 2026-10-12).
 	var categoryID *uuid.UUID
 	var tagIDs []uuid.UUID
 	if len(pt.TagNames) > 0 {
@@ -144,8 +123,6 @@ func (s *Service) copyToPersonalTx(
 	return d.ID, nil
 }
 
-// CopyToPersonal — POST /projects/:id/project-transactions/:pt_id/copy:
-// the "add to my book" button on project_tx_recorded_for_you.
 func (s *Service) CopyToPersonal(ctx context.Context, userID, projectID, ptID uuid.UUID) (*EventCopyResult, error) {
 	member, err := s.store.MemberByUserID(ctx, projectID, userID)
 	if err != nil {
@@ -184,8 +161,6 @@ func (s *Service) CopyToPersonal(ctx context.Context, userID, projectID, ptID uu
 	return &EventCopyResult{EventPatch: *p, Transaction: d}, nil
 }
 
-// notifyRecordedTx — project_tx_recorded_for_you to the row's actor when
-// someone else recorded it. Auto = copy it into their book now.
 func (s *Service) notifyRecordedTx(
 	ctx context.Context, tx pgx.Tx, actorUserID, actorMemberID, recorderUserID uuid.UUID, pt *ProjectTransaction,
 ) error {
@@ -219,9 +194,6 @@ func (s *Service) notifyRecordedTx(
 		}, copyID != nil)
 }
 
-// suggestedUpdate — new values for recipient's copy after `before` became
-// `after`. The amount keeps the copy's basis (full → new full, share →
-// new share); a copy the user edited to something else keeps its amount.
 func suggestedUpdate(
 	copyAmount, beforeFull, beforeShare, afterFull, afterShare float64, after *ProjectTransaction,
 ) *notifications.PersonalUpdate {
@@ -237,12 +209,6 @@ func suggestedUpdate(
 	}
 }
 
-// notifyChangedTx — project_tx_changed ("edited") to one recipient. When
-// they have a personal copy the payload carries the suggested update (the
-// "update to match" button); auto applies it now. No copy → informational.
-//
-// Basis per recipient: the actor's copy is "full" (or the actor's own
-// share = full − others' splits); a split member's copy is their split.
 func (s *Service) notifyChangedTx(
 	ctx context.Context, tx pgx.Tx, recipientUserID, editorUserID uuid.UUID,
 	before, after *ProjectTransaction, beforeShares, afterShares map[uuid.UUID]float64,

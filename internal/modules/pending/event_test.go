@@ -1,11 +1,5 @@
 package pending
 
-// Pending drafts with an event (project_id): saved as JSON, validated only
-// on submit, and confirmed through the "add a new bill to an event" path.
-// Runs against the local dev Postgres and SKIPS when it is unreachable (same
-// convention as projects/quick_test.go); every fixture row is created fresh
-// and removed in t.Cleanup. Override the DSN with TEST_DATABASE_URL.
-
 import (
 	"context"
 	"fmt"
@@ -31,9 +25,9 @@ type evFixture struct {
 	prj  *projects.Service
 
 	owner, other uuid.UUID
-	acct         uuid.UUID // owner's wallet, balance 1000
-	cat          uuid.UUID // owner's expense category
-	event        uuid.UUID // owner's active event
+	acct         uuid.UUID
+	cat          uuid.UUID
+	event        uuid.UUID
 
 	userIDs []uuid.UUID
 }
@@ -83,7 +77,6 @@ func newEvFixture(t *testing.T) *evFixture {
 	t.Cleanup(pool.Close)
 	f := &evFixture{pool: pool}
 
-	// Same wiring as main.go.
 	catSvc := categories.NewService(categories.NewStore(pool))
 	txSvc := transactions.NewService(transactions.NewStore(pool), catSvc)
 	pdSvc := personal_debts.NewService(personal_debts.NewStore(pool), txSvc)
@@ -139,7 +132,6 @@ func (f *evFixture) newEvent(t *testing.T, owner uuid.UUID, name string) uuid.UU
 	return p.Event.ID
 }
 
-// draft — a complete expense draft; mutate the result per case.
 func (f *evFixture) draft(project *uuid.UUID) Draft {
 	return Draft{
 		Type:       ptr("expense"),
@@ -188,8 +180,6 @@ func (f *evFixture) balance(t *testing.T) float64 {
 	return b
 }
 
-// assertFailed — the draft stayed pending with this LastError code, and
-// nothing leaked: no transaction, no balance move.
 func (f *evFixture) assertFailed(t *testing.T, id uuid.UUID, res *SubmitResponse, code string) {
 	t.Helper()
 	if len(res.Submitted) != 0 || len(res.Failed) != 1 || res.Failed[0].Error.Code != code {
@@ -224,7 +214,6 @@ func TestDraftKeepsProjectID(t *testing.T) {
 		t.Fatalf("list: %+v, %v", list, err)
 	}
 
-	// PUT replaces the whole draft: a new event, then none.
 	e2 := f.newEvent(t, f.owner, "Dinner")
 	up, err := f.svc.Update(ctx, f.owner, saved.ID, UpdateRequest{Draft: f.draft(&e2)})
 	if err != nil || up.Draft.ProjectID == nil || *up.Draft.ProjectID != e2 {
@@ -235,7 +224,6 @@ func TestDraftKeepsProjectID(t *testing.T) {
 		t.Fatalf("update without event: %+v, %v", up, err)
 	}
 
-	// An event that doesn't exist is not rejected at save (checked on submit).
 	ghost := evV7(t)
 	if _, err := f.svc.Update(ctx, f.owner, saved.ID, UpdateRequest{Draft: f.draft(&ghost)}); err != nil {
 		t.Errorf("unknown event at save should be accepted: %v", err)
@@ -254,7 +242,6 @@ func TestSubmitDraftIntoEvent(t *testing.T) {
 	}
 	txID := *res.Submitted[0].TransactionID
 
-	// The bill is a normal transaction (balance moved) linked to the event.
 	if b := f.balance(t); b != 850 {
 		t.Errorf("balance = %.2f, want 850", b)
 	}
@@ -262,14 +249,12 @@ func TestSubmitDraftIntoEvent(t *testing.T) {
 		WHERE id = $1 AND project_id = $2 AND source_project_transaction_id IS NOT NULL`, txID, f.event); n != 1 {
 		t.Errorf("transaction not linked to the event")
 	}
-	// Splits live on the board (parent + child), not as personal debts.
 	if n := f.count(t, `SELECT COUNT(*) FROM project_transactions WHERE project_id = $1`, f.event); n != 2 {
 		t.Errorf("board rows = %d, want parent + 1 split child", n)
 	}
 	if n := f.count(t, `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1`, f.owner); n != 0 {
 		t.Errorf("%d personal debts, want none (splits moved to the board)", n)
 	}
-	// The draft is gone.
 	if _, err := f.svc.store.Get(context.Background(), f.owner, saved.ID); err == nil {
 		t.Errorf("confirmed draft should be deleted")
 	}
@@ -294,12 +279,10 @@ func TestSubmitDraftWithoutEventUnchanged(t *testing.T) {
 func TestSubmitEventNotAllowed(t *testing.T) {
 	f := newEvFixture(t)
 
-	// Event gone.
 	ghost := evV7(t)
 	d := f.save(t, f.draft(&ghost))
 	f.assertFailed(t, d.ID, f.submit(t, d.ID), "PROJECT_NOT_FOUND")
 
-	// Closed / cancelled / archived.
 	for status, code := range map[string]string{
 		projects.StatusCompleted: "PROJECT_NOT_ACTIVE",
 		projects.StatusCancelled: "PROJECT_LOCKED",
@@ -311,7 +294,6 @@ func TestSubmitEventNotAllowed(t *testing.T) {
 		f.assertFailed(t, d.ID, f.submit(t, d.ID), code)
 	}
 
-	// Someone else's event (not a member).
 	theirs := f.newEvent(t, f.other, "Theirs")
 	d = f.save(t, f.draft(&theirs))
 	f.assertFailed(t, d.ID, f.submit(t, d.ID), "PROJECT_NOT_MEMBER")
@@ -335,8 +317,6 @@ func TestSubmitEventNotAllowed(t *testing.T) {
 	f.assertFailed(t, d.ID, f.submit(t, d.ID), "TX_NOT_BILLABLE")
 }
 
-// A failed confirm keeps the draft; fixing it (moving it to a good event)
-// lets the next confirm go through.
 func TestSubmitRetryAfterFixingEvent(t *testing.T) {
 	f := newEvFixture(t)
 	ghost := evV7(t)
@@ -352,7 +332,6 @@ func TestSubmitRetryAfterFixingEvent(t *testing.T) {
 	}
 }
 
-// Drafts save with any splits; confirm validates like a transaction create.
 func TestSubmitBadSplitsOnEventDraft(t *testing.T) {
 	f := newEvFixture(t)
 

@@ -1,8 +1,5 @@
 package users
 
-// Handler tests for the Me operations of the API spec v2, driven over HTTP
-// with apitest and checked against openapi.yaml.
-
 import (
 	"context"
 	"encoding/json"
@@ -79,7 +76,6 @@ func TestGetMe(t *testing.T) {
 		t.Errorf("me = %v", out)
 	}
 	prefs := out["preferences"].(map[string]any)
-	// money_style null = a user from before it (reads as plus_minus).
 	if len(prefs) != 6 || prefs["timezone"] != "Asia/Bangkok" || prefs["theme"] != "system" ||
 		prefs["language"] != "th" || prefs["fee_category_id"] != nil || prefs["money_style"] != nil ||
 		prefs["money_decimals"] != nil {
@@ -116,13 +112,11 @@ func TestUpdateMe(t *testing.T) {
 		t.Errorf("stored currency = %q (%v)", cur, err)
 	}
 
-	// null clears a preference.
 	out = f.do(t, "PUT", "/api/v1/users/me", `{"preferences":{"fee_category_id":null}}`, "updateMe", http.StatusOK)
 	if out["preferences"].(map[string]any)["fee_category_id"] != nil {
 		t.Errorf("fee_category_id not cleared: %v", out["preferences"])
 	}
 
-	// The money style (owner 2026-10-17): one of five.
 	out = f.do(t, "PUT", "/api/v1/users/me", `{"preferences":{"money_style":"parentheses_plain"}}`, "updateMe", http.StatusOK)
 	if out["preferences"].(map[string]any)["money_style"] != "parentheses_plain" {
 		t.Errorf("money_style = %v", out["preferences"])
@@ -134,7 +128,6 @@ func TestUpdateMe(t *testing.T) {
 	}
 	f.do(t, "PUT", "/api/v1/users/me", map[string]any{"preferences": map[string]any{"money_decimals": "some"}}, "updateMe", http.StatusBadRequest)
 
-	// Errors.
 	f.do(t, "PUT", "/api/v1/users/me", map[string]any{"display_name": ""}, "updateMe", http.StatusBadRequest)
 	f.do(t, "PUT", "/api/v1/users/me", map[string]any{"preferences": map[string]any{"colour": "red"}}, "updateMe", http.StatusBadRequest)
 	f.do(t, "PUT", "/api/v1/users/me", map[string]any{"preferences": map[string]any{"fee_category_id": uuid.NewString()}}, "updateMe", http.StatusBadRequest)
@@ -156,7 +149,6 @@ func TestDeactivateReactivate(t *testing.T) {
 	if out["status"] != "active" {
 		t.Errorf("reactivated = %v", out["status"])
 	}
-	// Already active: not in the spec's response list for this operation.
 	f.do(t, "POST", "/api/v1/users/me/reactivate", nil, "", http.StatusBadRequest)
 }
 
@@ -168,7 +160,6 @@ func TestListMyPacks(t *testing.T) {
 	}
 }
 
-// TestMeSettings — default wallet and "copy my own event bills" live on /users/me.
 func TestMeSettings(t *testing.T) {
 	f := newFix(t)
 	acc := testdb.Account(t, f.pool, f.uid)
@@ -181,11 +172,9 @@ func TestMeSettings(t *testing.T) {
 	if da == nil || da["id"] != acc.String() || out["auto_copy_own_event_bills"] != true {
 		t.Errorf("after set = %v", out)
 	}
-	// Someone else's wallet / an unknown id is refused.
 	other := testdb.User(t, f.pool)
 	foreign := testdb.Account(t, f.pool, other)
 	f.do(t, "PUT", "/api/v1/users/me", map[string]any{"default_account_id": foreign}, "", http.StatusBadRequest)
-	// Absent leaves it; null clears it.
 	out = f.do(t, "PUT", "/api/v1/users/me", map[string]any{"display_name": "X"}, "updateMe", http.StatusOK)
 	if out["default_account"] == nil {
 		t.Errorf("an absent key cleared the default wallet")

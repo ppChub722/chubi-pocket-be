@@ -29,7 +29,6 @@ var (
 	ErrEmailExists   = errors.New("email already registered to another account")
 )
 
-// GetProfile joins users + user_preferences for the GET /v1/users/me payload.
 func (s *Store) GetProfile(ctx context.Context, id uuid.UUID) (*Profile, error) {
 	q := `
 		SELECT u.id, u.username, u.email, u.email_verified_at, u.display_name,
@@ -73,8 +72,6 @@ func (s *Store) GetProfile(ctx context.Context, id uuid.UUID) (*Profile, error) 
 	return &prof, nil
 }
 
-// UpdateProfile applies a partial update to users + user_preferences in one tx.
-// Preferences are JSONB-merged (`||`), so only provided keys change.
 func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfileRequest) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -116,7 +113,6 @@ func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfi
 
 	if req.Currency != nil {
 		cur := strings.ToUpper(*req.Currency)
-		// Relabel only: the column follows the setting, amounts are untouched.
 		for _, q := range []string{
 			`UPDATE users SET currency = $2, updated_by_user_id = $1 WHERE id = $1`,
 			`UPDATE accounts SET currency = $2 WHERE user_id = $1`,

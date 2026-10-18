@@ -14,18 +14,13 @@ import (
 	"time"
 )
 
-// Config for the Tesseract reader.
 type Config struct {
 	Bin     string        // binary name or path ("tesseract")
 	Lang    string        // "tha+eng"
 	Timeout time.Duration // per read, waiting for a slot included
-	// Slots — reads allowed at once. Each is CPU-bound on one core
-	// (OMP_THREAD_LIMIT=1) and the VPS has two, shared with other apps.
 	Slots int
 }
 
-// Tesseract runs the tesseract CLI: the image goes in on stdin, the text
-// (txt) and word boxes (tsv) come back as files in a temp dir.
 type Tesseract struct {
 	cfg   Config
 	slots chan struct{}
@@ -47,8 +42,6 @@ func NewTesseract(cfg Config) *Tesseract {
 	return &Tesseract{cfg: cfg, slots: make(chan struct{}, cfg.Slots)}
 }
 
-// Check reports whether the binary can be found — called at startup so a
-// missing install shows up in the log, not on the first slip.
 func (t *Tesseract) Check() error {
 	if _, err := exec.LookPath(t.cfg.Bin); err != nil {
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
@@ -100,9 +93,6 @@ func (t *Tesseract) Read(ctx context.Context, img []byte, opt Options) (*Result,
 	)
 	cmd.Stdin = bytes.NewReader(p.data)
 	cmd.Env = append(os.Environ(), "OMP_THREAD_LIMIT=1")
-	// Alpine's tesseract is built with OpenCL: it profiles the device and
-	// saves the result in the working dir. /app isn't writable, so it would
-	// re-profile on every slip — /tmp keeps it after the first.
 	cmd.Dir = os.TempDir()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -140,13 +130,6 @@ func (t *Tesseract) Read(ctx context.Context, img []byte, opt Options) (*Result,
 	}, nil
 }
 
-// parseTSV groups Tesseract's word rows (level 5) into lines. Boxes are
-// divided by scale to land back on the uploaded image. Words are joined
-// with a space only where there's a real gap between them — Tesseract
-// splits Thai into "words" that sit right next to each other.
-//
-// Columns: level page_num block_num par_num line_num word_num
-// left top width height conf text
 func parseTSV(tsv string, scale float64) ([]Line, float64) {
 	if scale <= 0 {
 		scale = 1
@@ -204,7 +187,6 @@ func parseTSV(tsv string, scale float64) ([]Line, float64) {
 		prevRight := -1
 		for _, w := range g.words {
 			if prevRight >= 0 {
-				// Gap wider than ~a third of the word height → a space.
 				if w.x-prevRight > w.h/3 {
 					sb.WriteByte(' ')
 				}
@@ -240,17 +222,10 @@ func parseTSV(tsv string, scale float64) ([]Line, float64) {
 	return lines, conf
 }
 
-// thaiFix — Tesseract writes sara am (ำ) as nikhahit + sara aa (ํา): it
-// looks the same but "จํานวน" ≠ "จำนวน" for anything matching on it.
 var thaiFix = strings.NewReplacer("\u0e4d\u0e32", "\u0e33")
 
 func normalizeThai(s string) string { return thaiFix.Replace(s) }
 
-// useTxtSpacing swaps each line's text for the same line from the txt
-// output when they match ignoring spaces. TSV words carry no spacing, so
-// a line rebuilt from them gets stray spaces inside Thai words ("ต .ค .",
-// "รหัสพร้อม เพย์"); the txt renderer, with preserve_interword_spaces,
-// spaces them like the slip does.
 func useTxtSpacing(lines []Line, txt string) {
 	bySkeleton := map[string]string{}
 	for _, t := range strings.Split(normalizeThai(txt), "\n") {
@@ -258,7 +233,6 @@ func useTxtSpacing(lines []Line, txt string) {
 		if t == "" {
 			continue
 		}
-		// Runs of spaces in txt are layout (columns), not word gaps.
 		t = strings.Join(strings.Fields(t), " ")
 		bySkeleton[skeleton(t)] = t
 	}
@@ -269,6 +243,4 @@ func useTxtSpacing(lines []Line, txt string) {
 	}
 }
 
-// skeleton — no spaces, sara am rejoined: the key two readings of one
-// line share however OCR spaced them ("จํ า" vs "จำ").
 func skeleton(s string) string { return normalizeThai(strings.Join(strings.Fields(s), "")) }

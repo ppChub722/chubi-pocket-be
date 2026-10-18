@@ -12,7 +12,6 @@ import (
 	"sync"
 )
 
-// ANSI Color Codes
 const (
 	Reset   = "\033[0m"
 	Red     = "\033[31m"
@@ -24,32 +23,22 @@ const (
 	Gray    = "\033[90m"
 )
 
-// New builds the app logger. `level` comes from the LOG_LEVEL env var (read
-// by the config package and passed through main.go — config.Load() already
-// runs before logger construction, so no direct os.Getenv here). Accepted
-// values: debug|info|warn|error. Empty/unknown falls back to debug in
-// development, info otherwise (logging-plan.md, component 1).
 func New(env, level string) *slog.Logger {
 	minLevel := ParseLevel(level, env)
 
 	var handler slog.Handler
 	if env == "production" {
-		// Prod: JSON format (Machine readable)
 		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 			Level:     minLevel,
 			AddSource: true,
 		})
 	} else {
-		// Dev: Custom Pretty Logger
 		handler = NewDevLogger(os.Stdout, minLevel)
 	}
 
 	return slog.New(handler)
 }
 
-// ParseLevel maps a LOG_LEVEL string to a slog.Level. Unknown or empty
-// values default per environment: debug when APP_ENV=development, info
-// otherwise.
 func ParseLevel(level, env string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "debug":
@@ -67,10 +56,6 @@ func ParseLevel(level, env string) slog.Level {
 		return slog.LevelInfo
 	}
 }
-
-// ---------------------------------------------------------
-// Custom Development Logger
-// ---------------------------------------------------------
 
 type DevLogHandler struct {
 	out   io.Writer
@@ -92,7 +77,6 @@ func (h *DevLogHandler) Handle(ctx context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// 1. Colorize the Level
 	levelColor := Reset
 	levelLabel := r.Level.String()
 
@@ -111,21 +95,15 @@ func (h *DevLogHandler) Handle(ctx context.Context, r slog.Record) error {
 		levelLabel = "ERRO"
 	}
 
-	// 2. Format Time (Dimmed)
-	// Format: 15:04:05 (We don't need the date in dev usually, just time)
 	timeStr := fmt.Sprintf("%s%s%s", Gray, r.Time.Format("15:04:05"), Reset)
 
-	// 3. Format Source (Minimal: "main.go:50")
 	sourceStr := ""
 	if r.PC != 0 {
 		fs := runtime.CallersFrames([]uintptr{r.PC})
 		f, _ := fs.Next()
-		// Only take the filename and line number
 		sourceStr = fmt.Sprintf("%s%s:%d%s", Gray, filepath.Base(f.File), f.Line, Reset)
 	}
 
-	// 4. Print Log Line
-	// Format: TIME | LEVEL | SOURCE > Message key=value
 	fmt.Fprintf(h.out, "%s | %s%s%s | %-15s > %s",
 		timeStr,
 		levelColor, levelLabel, Reset,
@@ -133,8 +111,6 @@ func (h *DevLogHandler) Handle(ctx context.Context, r slog.Record) error {
 		r.Message,
 	)
 
-	// 5. Print Attributes (Dimmed keys). Pre-bound attrs (Logger.With — e.g.
-	// request_id from FromCtx) first, then the record's own attrs.
 	for _, a := range h.attrs {
 		h.printAttr(a)
 	}

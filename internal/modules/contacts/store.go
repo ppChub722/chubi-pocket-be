@@ -31,21 +31,15 @@ var (
 	ErrAlreadyLinked   = errors.New("contact is already linked")
 	ErrNotLinked       = errors.New("contact is not linked")
 	ErrCannotLinkSelf  = errors.New("cannot link a contact to yourself")
-	// Link-request notification gates (mapped to 404 / 409 by the handler).
 	ErrNotLinkRequest  = errors.New("notification is not a contact_link_request")
 	ErrRequestRejected = errors.New("link request was rejected")
 	ErrNotAccepted     = errors.New("link request has not been accepted")
 )
 
-// rowQuerier - satisfied by *pgxpool.Pool and pgx.Tx.
 type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// contactSelect reads a contact with everything resolved in one statement:
-// name by the one person-name rule (shared.PersonNameSQL), email / icon from
-// the linked user when linked, and the linked_user block. The linked user's
-// row comes from the LEFT JOIN, so writes re-read through it (no RETURNING).
 var contactSelect = `SELECT c.id, c.user_id,
 	COALESCE(` + shared.PersonNameSQL("c", "lu") + `, c.display_name),
 	c.nickname, c.show_nickname, c.display_name,
@@ -135,9 +129,6 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, req CreateContactR
 	return s.get(ctx, s.db, userID, id)
 }
 
-// CreateLinkedTx inserts a new contact already linked to [linkedUserID]
-// inside the producer's tx (the recipient creates a contact for the
-// requesting user). Display name is the sender's, frozen as the snapshot.
 func (s *Store) CreateLinkedTx(
 	ctx context.Context, tx pgx.Tx,
 	userID, linkedUserID uuid.UUID,
@@ -174,9 +165,6 @@ func (s *Store) GetByIDTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) 
 	return s.get(ctx, tx, userID, id)
 }
 
-// ListFilter mirrors the query params. status="" means active-only by spec
-// default; status="all" matches both. linked is *bool to distinguish "filter
-// unset" from "filter linked=false".
 type ListFilter struct {
 	Status string
 	Linked *bool
@@ -194,9 +182,7 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Con
 	case "archived":
 		q += ` AND c.status = 'archived'`
 	case "all":
-		// no filter
 	default:
-		// Treat unknown values as default (active) rather than 500-ing.
 		q += ` AND c.status = 'active'`
 	}
 
@@ -208,8 +194,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Con
 		}
 	}
 
-	// Search: the resolved name, nickname, own name, email (own or the linked
-	// user's) - and phone digits when the query has digits.
 	if s := strings.TrimSpace(f.Search); s != "" {
 		args = append(args, "%"+shared.EscapeLike(strings.ToLower(s))+"%")
 		n := len(args)
@@ -226,7 +210,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Con
 		q += ` AND (` + cond + `)`
 	}
 
-	// Active first, then by the resolved name, case-insensitive.
 	q += ` ORDER BY (c.status = 'active') DESC, LOWER(` + resolved + `), c.id`
 
 	rows, err := s.db.Query(ctx, q, args...)
@@ -246,8 +229,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Con
 	return out, rows.Err()
 }
 
-// Update applies a partial patch. Only present fields in req are written.
-// Returns the refreshed row.
 func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateContactRequest) (*Contact, error) {
 	q := `UPDATE contacts SET updated_by_user_id = $1`
 	args := []any{userID}
@@ -302,9 +283,6 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCont
 	return s.get(ctx, s.db, userID, id)
 }
 
-// SetStatus flips active <-> archived. Returns ErrAlreadyArchived /
-// ErrNotArchived if the requested transition is a no-op so the handler
-// can map to a 400.
 func (s *Store) SetStatus(ctx context.Context, userID, id uuid.UUID, target string) (*Contact, error) {
 	current, err := s.GetByID(ctx, userID, id)
 	if err != nil {
@@ -323,8 +301,6 @@ func (s *Store) SetStatus(ctx context.Context, userID, id uuid.UUID, target stri
 	return s.get(ctx, s.db, userID, id)
 }
 
-// SetLinkedUserIDTx sets contacts.linked_user_id inside the caller's tx.
-// Used by the link-request accept flow.
 func (s *Store) SetLinkedUserIDTx(
 	ctx context.Context, tx pgx.Tx, ownerUserID, contactID, linkedUserID uuid.UUID,
 ) (*Contact, error) {
@@ -339,8 +315,6 @@ func (s *Store) SetLinkedUserIDTx(
 	return s.get(ctx, tx, ownerUserID, contactID)
 }
 
-// ClearLinkedUserID is the unlink path. Returns ErrNotLinked if the contact
-// wasn't linked to begin with. The contact keeps its stored display_name.
 func (s *Store) ClearLinkedUserID(ctx context.Context, userID, contactID uuid.UUID) (*Contact, error) {
 	current, err := s.GetByID(ctx, userID, contactID)
 	if err != nil {
@@ -356,8 +330,6 @@ func (s *Store) ClearLinkedUserID(ctx context.Context, userID, contactID uuid.UU
 	return s.get(ctx, s.db, userID, contactID)
 }
 
-// ContactLinkedTo returns the caller's contact that links to linkedUserID
-// (nil when none).
 func (s *Store) ContactLinkedTo(ctx context.Context, userID, linkedUserID uuid.UUID) (*uuid.UUID, error) {
 	var id uuid.UUID
 	err := s.db.QueryRow(ctx, `SELECT id FROM contacts WHERE user_id = $1 AND linked_user_id = $2
@@ -371,11 +343,6 @@ func (s *Store) ContactLinkedTo(ctx context.Context, userID, linkedUserID uuid.U
 	return &id, nil
 }
 
-// LinkExistsBetween returns true if EITHER:
-//   - userA already has any contact with linked_user_id = userB, OR
-//   - userB already has any contact with linked_user_id = userA.
-//
-// Used by link-request accept to enforce uniqueness in both directions.
 func (s *Store) LinkExistsBetween(ctx context.Context, tx pgx.Tx, userA, userB uuid.UUID) (bool, error) {
 	var n int
 	err := tx.QueryRow(ctx, `
@@ -389,7 +356,6 @@ func (s *Store) LinkExistsBetween(ctx context.Context, tx pgx.Tx, userA, userB u
 	return n > 0, nil
 }
 
-// Delete hard-deletes the contact.
 func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	tag, err := s.db.Exec(ctx,
 		`DELETE FROM contacts WHERE id = $1 AND user_id = $2`, id, userID)
@@ -402,7 +368,6 @@ func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	return nil
 }
 
-// onlyDigits keeps 0-9 - phone search compares digits only (contract 8).
 func onlyDigits(s string) string {
 	var b strings.Builder
 	for _, r := range s {

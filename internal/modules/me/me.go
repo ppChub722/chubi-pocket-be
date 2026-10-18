@@ -1,5 +1,3 @@
-// Package me serves the caller's shell data: GET /me/counts (badges + the
-// counts and figures the More hub shows), in one round trip.
 package me
 
 import (
@@ -19,8 +17,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// DebtsSummary / BudgetsSummary / RecurringCount — the figures the More
-// tiles show next to the counts (the same numbers as the Home tiles).
 type DebtsSummary = personal_debts.DebtTotals
 
 type BudgetsSummary struct {
@@ -35,7 +31,6 @@ type RecurringCount struct {
 	UpcomingCount int `json:"upcoming_count"`
 }
 
-// Counts is spec schema MeCounts.counts.
 type Counts struct {
 	Categories   int                 `json:"categories"`
 	Tags         int                 `json:"tags"`
@@ -48,18 +43,14 @@ type Counts struct {
 	DebtsSummary   DebtsSummary   `json:"debts_summary"`
 	BudgetsSummary BudgetsSummary `json:"budgets_summary"`
 	Recurring      RecurringCount `json:"recurring"`
-	// Archived — how many archived things there are in total (the ที่เก็บถาวร row);
-	// the lists are GET /me/archived.
 	Archived int `json:"archived"`
 }
 
-// MeCounts is spec schema MeCounts.
 type MeCounts struct {
 	Badges shared.Badges `json:"badges"`
 	Counts Counts        `json:"counts"`
 }
 
-// upcomingDays — the Home dashboard's look-ahead window.
 const upcomingDays = 14
 
 type Service struct {
@@ -69,28 +60,13 @@ type Service struct {
 	due     shared.DueChecker
 }
 
-// WithDueCheck runs the recurring due check before the counts (the boot call).
 func (s *Service) WithDueCheck(fn shared.DueChecker) *Service { s.due = fn; return s }
 
 func NewService(db *pgxpool.Pool) *Service { return &Service{db: db} }
 
-// WithBudgets / WithDebts wire the services whose numbers the More tiles
-// reuse (the same rules as the Home dashboard tiles).
 func (s *Service) WithBudgets(b *budgets.Service) *Service      { s.budgets = b; return s }
 func (s *Service) WithDebts(d *personal_debts.Service) *Service { s.debts = d; return s }
 
-// Rules (each mirrors the page it labels):
-//   - categories: active, non-system
-//   - tags: all
-//   - contacts: active
-//   - active_events: status active, caller owns it or is an active member
-//   - open_debts: people with something open (debts_summary.open_count)
-//   - budgets: active personal (scope user) budgets (the Home budgets tile)
-//   - goals: active goals; progress = sum(min(current,target)) / sum(target)
-//     with current = linked account balance * allocation_pct / 100
-//   - debts_summary / budgets_summary: the Home debts / budgets tile numbers
-//   - recurring: active recurring settings, and upcoming items within the Home
-//     window (overdue included)
 var countsSQL = `SELECT
 	(SELECT COUNT(*) FROM categories WHERE user_id = $1 AND is_system = FALSE),
 	(SELECT COUNT(*) FROM tags WHERE user_id = $1),
@@ -124,14 +100,12 @@ func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string)
 		return nil, err
 	}
 	out.Counts.Archived = arch.Total
-	// Savings: the same numbers as the Home tile.
 	goals, err := shared.LoadSavingTotals(ctx, s.db, userID)
 	if err != nil {
 		return nil, err
 	}
 	out.Counts.Goals = *goals
 
-	// Debts: the same totals as the Home debts tile.
 	if s.debts != nil {
 		t, err := s.debts.Totals(ctx, userID)
 		if err != nil {
@@ -139,7 +113,6 @@ func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string)
 		}
 		out.Counts.DebtsSummary = t
 	}
-	// Budgets: every active personal budget at its own current period.
 	today := time.Now()
 	if s.budgets != nil {
 		r, err := s.budgets.Totals(ctx, userID, headerTZ)
@@ -154,7 +127,6 @@ func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string)
 			today = today.In(loc)
 		}
 	}
-	// Recurring: active settings, and upcoming items within the Home window.
 	todayStr := today.Format("2006-01-02")
 	until := today.AddDate(0, 0, upcomingDays).Format("2006-01-02")
 	if err := s.db.QueryRow(ctx, `SELECT
@@ -175,7 +147,6 @@ type Handler struct {
 
 func NewHandler(s *Service) *Handler { return &Handler{service: s} }
 
-// GET /v1/me/counts — getMyCounts.
 func (h *Handler) Counts(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {

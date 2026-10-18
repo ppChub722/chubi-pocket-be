@@ -2,26 +2,11 @@ package shared
 
 import "fmt"
 
-// EventBillPredicate — the transaction aliased txAlias is an event bill's
-// source: a board bill was made from it (project_transactions.
-// linked_transaction_id, migration 056). The board's member splits come off
-// its share; splits added on it later are a separate layer on that share
-// (owner 2026-10-10).
 func EventBillPredicate(txAlias string) string {
 	return fmt.Sprintf(`EXISTS (SELECT 1 FROM project_transactions ep
 		WHERE ep.linked_transaction_id = %[1]s.id AND ep.parent_project_transaction_id IS NULL)`, txAlias)
 }
 
-// ShareAmountExpr — "my share" of the transaction aliased txAlias (spec 12
-// §4.5: accounts stay cash-basis, reports compute share-basis). The cash
-// amount minus what others owe on it:
-//   - the bill's own split entries in its author's book;
-//   - for an event bill (EventBillPredicate), the other members' board
-//     splits too (both layers come off). A copy already at its share basis
-//     only loses its own splits.
-//
-// Floored at 0. Every spending aggregate (summary, list totals, budgets,
-// a wallet's summary) and the `my_share` field go through this fragment.
 func ShareAmountExpr(txAlias string) string {
 	return fmt.Sprintf(`GREATEST(%[1]s.amount
 		- COALESCE((SELECT SUM(sd.amount) FROM personal_debts sd

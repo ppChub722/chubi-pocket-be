@@ -45,7 +45,6 @@ func mapError(c *gin.Context, err error) {
 	}
 }
 
-// GET /v1/pending-transactions
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := bindUser(c)
 	if !ok {
@@ -59,7 +58,6 @@ func (h *Handler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/pending-transactions — one or many manual drafts.
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := bindUser(c)
 	if !ok {
@@ -83,7 +81,6 @@ func (h *Handler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"data": out, "summary": sum})
 }
 
-// PUT /v1/pending-transactions/:id — replace the draft.
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := bindUser(c)
 	if !ok {
@@ -111,7 +108,6 @@ func (h *Handler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, UpdateResponse{PendingTransaction: out, Summary: sum})
 }
 
-// DELETE /v1/pending-transactions/:id — discard.
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := bindUser(c)
 	if !ok {
@@ -129,7 +125,6 @@ func (h *Handler) Delete(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/pending-transactions/discard — many at once; unknown ids are skipped.
 func (h *Handler) Discard(c *gin.Context) {
 	userID, ok := bindUser(c)
 	if !ok {
@@ -148,7 +143,6 @@ func (h *Handler) Discard(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/pending-transactions/submit — each draft independently.
 func (h *Handler) Submit(c *gin.Context) {
 	userID, ok := bindUser(c)
 	if !ok {
@@ -167,8 +161,6 @@ func (h *Handler) Submit(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/pending-transactions/:id/submit — confirm one draft (same answer as
-// the bulk submit, with that one id).
 func (h *Handler) SubmitOne(c *gin.Context) {
 	userID, ok := bindUser(c)
 	if !ok {
@@ -187,7 +179,6 @@ func (h *Handler) SubmitOne(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/pending-transactions/submit-ready — confirm every draft that needs no input.
 func (h *Handler) SubmitReady(c *gin.Context) {
 	userID, ok := bindUser(c)
 	if !ok {

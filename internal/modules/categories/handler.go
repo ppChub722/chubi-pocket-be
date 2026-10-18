@@ -19,7 +19,6 @@ func NewHandler(s *Service) *Handler {
 	return &Handler{service: s}
 }
 
-// POST /v1/categories
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -41,7 +40,6 @@ func (h *Handler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, cat)
 }
 
-// GET /v1/categories
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -69,7 +67,6 @@ func (h *Handler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, ListResponse{Data: cats})
 }
 
-// GET /v1/categories/:id
 func (h *Handler) Get(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -89,7 +86,6 @@ func (h *Handler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, detail)
 }
 
-// PUT /v1/categories/:id
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -115,7 +111,6 @@ func (h *Handler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, cat)
 }
 
-// DELETE /v1/categories/:id
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -135,8 +130,6 @@ func (h *Handler) Delete(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// PATCH /v1/categories/reorder — bulk-rewrites (parent_id, sort_order) for
-// the user's category tree atomically. Spec §3.13.
 func (h *Handler) Reorder(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -158,8 +151,6 @@ func (h *Handler) Reorder(c *gin.Context) {
 	c.JSON(http.StatusOK, ListResponse{Data: updated})
 }
 
-// --- Helpers ---
-
 func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -174,7 +165,6 @@ func mapServiceError(c *gin.Context, err error) {
 	case errors.Is(err, ErrCategoryNotFound):
 		response.NotFound(c, "NOT_FOUND", "Category not found")
 	case errors.Is(err, ErrDuplicateName):
-		// 422 with the field, so a form shows it under the name input.
 		response.Fail(c, http.StatusUnprocessableEntity, "CATEGORY_NAME_DUPLICATE", err.Error(), map[string]string{"field": "name"})
 	case errors.Is(err, ErrInvalidParent):
 		response.BadRequest(c, "INVALID_PARENT", err.Error(), nil)

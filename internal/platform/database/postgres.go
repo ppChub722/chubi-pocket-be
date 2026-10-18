@@ -27,7 +27,6 @@ func New(connString string, log *slog.Logger) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("unable to ping database: %w", err)
 	}
 
-	// ✅ IMPROVEMENT: Log specific details
 	log.Info("✅ Database Connected", 
 		"host", config.ConnConfig.Host,
 		"db_name", config.ConnConfig.Database,

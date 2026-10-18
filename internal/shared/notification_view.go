@@ -1,9 +1,5 @@
 package shared
 
-// The display-ready notification (spec schema Notification), built in ONE
-// place so the inbox, the Home "ต้องจัดการ" block and every action response
-// (read / dismiss / link-request / invite …) return the same shape.
-
 import (
 	"context"
 	"encoding/json"
@@ -13,7 +9,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// NotificationView — spec schema Notification.
 type NotificationView struct {
 	ID           uuid.UUID       `json:"id"`
 	Type         string          `json:"type"`
@@ -28,7 +23,6 @@ type NotificationView struct {
 	CreatedAt    time.Time       `json:"created_at"`
 }
 
-// NotificationState — actioned > dismissed > read > unread.
 func NotificationState(readAt, actionedAt, dismissedAt *time.Time) string {
 	switch {
 	case actionedAt != nil:
@@ -41,12 +35,6 @@ func NotificationState(readAt, actionedAt, dismissedAt *time.Time) string {
 	return "unread"
 }
 
-// AwaitsAnswer — the row still waits for the user (owner / FE rule): not
-// actioned, not dismissed, and its type asks something of the user:
-// contact_link_request / account_invite / project_invite / recurring_ending (ต่ออีก / ปล่อยให้จบ), or a one-tap action type —
-// split_created / split_changed (unless payload.superseded),
-// project_tx_recorded_for_you, project_tx_changed (only when
-// payload.personal_transaction_id AND payload.suggested are set).
 func AwaitsAnswer(typ string, actionedAt, dismissedAt *time.Time, payload json.RawMessage) bool {
 	if actionedAt != nil || dismissedAt != nil {
 		return false
@@ -70,8 +58,6 @@ func AwaitsAnswer(typ string, actionedAt, dismissedAt *time.Time, payload json.R
 	return false
 }
 
-// LoadNotificationViews builds the views of the caller's notifications by id
-// (any state), in the order of ids; unknown ids are skipped.
 func LoadNotificationViews(ctx context.Context, q Querier, userID uuid.UUID, ids []uuid.UUID) ([]NotificationView, error) {
 	ids = uniqueIDs(ids)
 	out := make([]NotificationView, 0, len(ids))
@@ -119,8 +105,6 @@ func LoadNotificationViews(ctx context.Context, q Querier, userID uuid.UUID, ids
 	return out, nil
 }
 
-// LoadNotificationView — one notification, or (nil, nil) when it isn't the
-// caller's.
 func LoadNotificationView(ctx context.Context, q Querier, userID, id uuid.UUID) (*NotificationView, error) {
 	vs, err := LoadNotificationViews(ctx, q, userID, []uuid.UUID{id})
 	if err != nil || len(vs) == 0 {

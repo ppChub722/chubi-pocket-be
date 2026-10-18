@@ -27,7 +27,6 @@ var (
 	ErrInsufficientSaving = errors.New("not enough saved there")
 )
 
-// InsufficientError — ErrInsufficientSaving with what the source holds.
 type InsufficientError struct{ Available float64 }
 
 func (e *InsufficientError) Error() string { return ErrInsufficientSaving.Error() }
@@ -131,8 +130,6 @@ func (s *Store) saveGoal(ctx context.Context, q querier, g *Goal) error {
 	return nil
 }
 
-// --- entries ---
-
 const entryColumns = `id, user_id, group_id, kind, account_id, from_bucket, from_goal_id, to_bucket, to_goal_id,
 	amount::float8, date, note, source, created_at`
 
@@ -204,14 +201,11 @@ func (s *Store) insertEntry(ctx context.Context, q querier, e *entryRow) error {
 	return nil
 }
 
-// lockUser serialises a user's saving writes (balances are sums).
 func lockUser(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
 	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('saving:' || $1::text))`, userID)
 	return err
 }
 
-// bucketBalances — userID's balance of one bucket (spare: goalID nil) per
-// wallet.
 func bucketBalances(ctx context.Context, q shared.Querier, userID uuid.UUID, goalID *uuid.UUID) (map[uuid.UUID]float64, error) {
 	var (
 		bals []shared.SavingBalance
@@ -232,8 +226,6 @@ func bucketBalances(ctx context.Context, q shared.Querier, userID uuid.UUID, goa
 	return out, nil
 }
 
-// checkNoNegative — no bucket of the wallet below 0 (after a write);
-// uuid.Nil checks the buckets of the money that has no wallet.
 func checkNoNegative(ctx context.Context, q shared.Querier, userID, accountID uuid.UUID) error {
 	var (
 		bals []shared.SavingBalance
@@ -255,7 +247,6 @@ func checkNoNegative(ctx context.Context, q shared.Querier, userID, accountID uu
 	return nil
 }
 
-// checkWallet — an active wallet of the caller that tracks its balance.
 func checkWallet(ctx context.Context, q querier, userID, accountID uuid.UUID) error {
 	var active, tracked bool
 	err := q.QueryRow(ctx, `SELECT a.status = 'active' AND `+shared.ActiveMembershipPredicate("a.id", "$2")+`, a.track_balance

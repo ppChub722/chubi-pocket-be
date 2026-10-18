@@ -11,8 +11,6 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-// argon2id parameters. Tuned for ~100ms hash time on modern dev hardware.
-// Phase 3 should benchmark on production VPS and aim for ~250ms (per 01-auth.md §3.4).
 const (
 	argonMemory      = 64 * 1024 // 64 MiB
 	argonIterations  = 3
@@ -23,8 +21,6 @@ const (
 
 var ErrInvalidHashFormat = errors.New("invalid argon2id hash format")
 
-// HashPassword returns a PHC-encoded argon2id hash:
-// $argon2id$v=19$m=65536,t=3,p=2$<salt>$<hash>
 func HashPassword(password string) (string, error) {
 	salt := make([]byte, argonSaltLength)
 	if _, err := rand.Read(salt); err != nil {
@@ -49,8 +45,6 @@ func HashPassword(password string) (string, error) {
 	), nil
 }
 
-// CheckPasswordHash verifies a password against a PHC-encoded argon2id hash.
-// Returns false on any decoding error so callers can treat all failures uniformly.
 func CheckPasswordHash(password, encoded string) bool {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" {

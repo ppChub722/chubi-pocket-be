@@ -34,10 +34,6 @@ func NewService(db *pgxpool.Pool, txs *transactions.Service, p *pending.Service,
 	return &Service{db: db, txs: txs, pending: p, notifs: n}
 }
 
-// --- today ---
-
-// today — the user's calendar date: X-Timezone header → preference →
-// Asia/Bangkok.
 func (s *Service) today(ctx context.Context, userID uuid.UUID, headerTZ string) (time.Time, error) {
 	var stored *string
 	err := s.db.QueryRow(ctx, `SELECT preferences->>'timezone' FROM user_preferences WHERE user_id = $1`, userID).Scan(&stored)
@@ -63,15 +59,11 @@ func (s *Service) today(ctx context.Context, userID uuid.UUID, headerTZ string) 
 	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC), nil
 }
 
-// Today — transactions.RecurringLinks.
 func (s *Service) Today(ctx context.Context, userID uuid.UUID) (string, error) {
 	t, err := s.today(ctx, userID, shared.HeaderTZ(ctx))
 	return t.Format(dateLayout), err
 }
 
-// --- generation ---
-
-// draftFromRule — the values an item of r starts with.
 func draftFromRule(r *Rule) pending.Draft {
 	d := pending.Draft{
 		Type: ptr(r.Type), Amount: amountPtr(r.Amount), AccountID: r.AccountID, CategoryID: r.CategoryID,
@@ -90,8 +82,6 @@ func draftFromRule(r *Rule) pending.Draft {
 	return d
 }
 
-// generateTx writes the rule's items dated `from` or later, up to its end /
-// horizon (idempotent per date).
 func (s *Service) generateTx(ctx context.Context, tx pgx.Tx, r *Rule, from time.Time) error {
 	if r.GeneratedUntil == nil {
 		return nil
@@ -114,20 +104,14 @@ func (s *Service) generateTx(ctx context.Context, tx pgx.Tx, r *Rule, from time.
 	return nil
 }
 
-// dropUnproducedTx removes a rule's items that were never produced (paused /
-// rebuilt settings produce nothing). Archived and manual items stay.
+// dropUnproducedTx removes a rule's items that were never produced (paused / rebuilt settings
+// produce nothing).
 func dropUnproducedTx(ctx context.Context, tx pgx.Tx, ruleID uuid.UUID) error {
 	_, err := tx.Exec(ctx, `DELETE FROM recurring_items WHERE rule_id = $1 AND produced_at IS NULL
 		AND pending_id IS NULL AND transaction_id IS NULL AND NOT archived AND NOT manual`, ruleID)
 	return err
 }
 
-// --- the due check ---
-
-// DueCheck produces the due items (dated today or earlier, of ACTIVE
-// settings or one-off) into one pending draft each — exactly once — then
-// one grouped recurring_due notice, and recurring_ending for settings with
-// 2 or fewer upcoming items left. Safe on concurrent opens (row locks).
 func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ string) error {
 	today, err := s.today(ctx, userID, headerTZ)
 	if err != nil {
@@ -139,7 +123,6 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 	}
 	defer tx.Rollback(ctx)
 
-	// An archived wallet pauses its settings.
 	rows, err := tx.Query(ctx, `UPDATE recurring_rules SET status = 'paused'
 		WHERE user_id = $1 AND status = 'active'
 		  AND (account_id IN (SELECT id FROM accounts WHERE status = 'archived')
@@ -201,7 +184,6 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 		}
 	}
 
-	// Ending soon: 2 or fewer upcoming left, told once (extend re-arms it).
 	rows, err = tx.Query(ctx, `SELECT r.id, r.name, to_char(r.start_date, 'YYYY-MM-DD'), r.end_kind, to_char(r.end_date, 'YYYY-MM-DD'), r.end_count, (SELECT COUNT(*) FROM recurring_items i
 			WHERE i.rule_id = r.id AND i.produced_at IS NULL AND i.pending_id IS NULL
 			  AND i.transaction_id IS NULL AND NOT i.archived)
@@ -247,7 +229,6 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 	return tx.Commit(ctx)
 }
 
-// produceTx — one item into a pending draft (its link), now.
 func (s *Service) produceTx(ctx context.Context, tx pgx.Tx, it *itemRow) error {
 	ref := sourceRef{ItemID: it.ID, Seq: it.Seq}
 	source := "upcoming"
@@ -283,9 +264,6 @@ func (s *Service) produceTx(ctx context.Context, tx pgx.Tx, it *itemRow) error {
 	return saveItemTx(ctx, tx, it)
 }
 
-// --- views ---
-
-// itemViews — page-ready items for userID (one query + the shared resolver).
 func (s *Service) itemViews(ctx context.Context, q shared.Querier, userID uuid.UUID, today time.Time, where string, args ...any) ([]Item, error) {
 	rows, err := q.Query(ctx, `SELECT i.id, i.rule_id, r.name, r.icon_code, i.seq, r.total_count, i.date,
 			`+statusSQL+`, i.edited, i.manual, i.draft, i.pending_id, i.transaction_id, i.saving_entry_id, t.description, t.account_id,
@@ -391,7 +369,6 @@ func (s *Service) itemViews(ctx context.Context, q shared.Querier, userID uuid.U
 	return out, nil
 }
 
-// ItemView — transactions.RecurringLinks (after commit).
 func (s *Service) ItemView(ctx context.Context, userID, itemID uuid.UUID) (any, error) {
 	return s.itemView(ctx, userID, itemID)
 }
@@ -411,7 +388,6 @@ func (s *Service) itemView(ctx context.Context, userID, itemID uuid.UUID) (*Item
 	return &items[0], nil
 }
 
-// recurringViews — page-ready settings (one query each for counts / refs).
 func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today time.Time, rules []*Rule) ([]Recurring, error) {
 	out := make([]Recurring, 0, len(rules))
 	if len(rules) == 0 {
@@ -489,7 +465,6 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 	if err != nil {
 		return nil, err
 	}
-	// The next occurrence's amount (the earliest upcoming item that has one).
 	nextAmt := map[uuid.UUID]*float64{}
 	nrows, err := s.db.Query(ctx, `SELECT DISTINCT ON (i.rule_id) i.rule_id, NULLIF((i.draft->>'amount')::numeric, 0)::float8
 		FROM recurring_items i
@@ -648,8 +623,6 @@ func (s *Service) ruleItems(ctx context.Context, userID, ruleID uuid.UUID, today
 	return &ItemList{Data: items, Pagination: shared.NewPage(page, perPage, total)}, nil
 }
 
-// --- reads ---
-
 func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType string, hint PickerHint, kind string, page, perPage int, tz string) (*RecurringList, error) {
 	return s.list(ctx, userID, status, q, forType, hint, kind, page, perPage, tz, false)
 }
@@ -784,7 +757,6 @@ func (s *Service) RuleItems(ctx context.Context, userID, id uuid.UUID, tab strin
 	return s.ruleItems(ctx, userID, id, today, tab, page, perPage)
 }
 
-// Items — GET /recurring-items.
 func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, month string, page, perPage int, tz string) (*ItemList, error) {
 	if err := s.DueCheck(ctx, userID, tz); err != nil {
 		return nil, err
@@ -841,7 +813,6 @@ func (s *Service) GetItem(ctx context.Context, userID, id uuid.UUID) (*Item, err
 	return s.itemView(ctx, userID, id)
 }
 
-// PickerHint — the transaction a recurring picker is for (all optional).
 type PickerHint struct {
 	CategoryID *uuid.UUID
 	Amount     *float64
@@ -854,8 +825,8 @@ func (h PickerHint) likely(catID *uuid.UUID, amount *float64) bool {
 	return h.Amount != nil && *h.Amount > 0 && amount != nil && math.Abs(*amount-*h.Amount) <= *h.Amount*0.05+0.004
 }
 
-// settingOf — the setting view the items of a write belong to (no re-fetch after
-// a write): nil unless every given rule id is the same one.
+// settingOf — the setting view the items of a write belong to (no re-fetch after a write): nil
+// unless every given rule id is the same one.
 func (s *Service) settingOf(ctx context.Context, userID uuid.UUID, ruleIDs ...*uuid.UUID) *Recurring {
 	var id *uuid.UUID
 	for _, r := range ruleIDs {

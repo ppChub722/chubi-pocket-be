@@ -1,13 +1,5 @@
 package projects
 
-// Quick-create-from-bills integration tests (spec §10/4.24). They run
-// against the local dev Postgres (docker compose db, migrations 000041+
-// applied) and SKIP when it is unreachable — same convention as
-// transactions/sharedwallets_test.go: every fixture row is created fresh
-// and torn down in t.Cleanup, no existing data is touched.
-//
-// Override the DSN with TEST_DATABASE_URL when needed.
-
 import (
 	"context"
 	"errors"
@@ -56,19 +48,16 @@ func qcTestPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-// qcFixture builds the §4.24 cast: owner A, linked friend B (A's contact
-// with linked_user_id), shared-wallet mate C, an ad-hoc "Grandma", one
-// personal account and one shared wallet, plus two loose bills with debts.
 type qcFixture struct {
 	pool *pgxpool.Pool
 	svc  *Service
 	txs  *transactions.Service
 
 	owner, friend, mate uuid.UUID
-	acctPersonal        uuid.UUID // owner-only wallet, balance 1000
-	acctShared          uuid.UUID // owner + mate active, balance 1000
-	cat                 uuid.UUID // owner's expense category
-	contactB            uuid.UUID // owner's contact linked to friend
+	acctPersonal        uuid.UUID
+	acctShared          uuid.UUID
+	cat                 uuid.UUID
+	contactB            uuid.UUID
 
 	bill1, bill2            uuid.UUID // loose bills: 300 on personal, 200 on shared
 	debtB1, debtGr1, debtB2 uuid.UUID
@@ -145,8 +134,6 @@ func (f *qcFixture) newContact(t *testing.T, userID uuid.UUID, name string, link
 	return id
 }
 
-// insertBill inserts a historical loose bill directly (raw SQL — the API
-// path is exercised by the quick create's own new_transaction).
 func (f *qcFixture) insertBill(t *testing.T, userID, accountID, categoryID uuid.UUID, amount float64, date string) uuid.UUID {
 	t.Helper()
 	id := qcMustV7(t)
@@ -179,9 +166,8 @@ func (f *qcFixture) insertDebt(
 func (f *qcFixture) cleanup(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	// FK-safe order: transactions reference projects/project_transactions
-	// (SET NULL) but users FKs don't cascade, so clear rows before users.
-	// Deleting projects cascades project_members + project_transactions.
+	// FK-safe order: transactions reference projects/project_transactions (SET NULL) but users FKs
+	// don't cascade, so clear rows before users.
 	for _, q := range []string{
 		`DELETE FROM personal_debts WHERE user_id = ANY($1)`,
 		`DELETE FROM project_my_tags WHERE user_id = ANY($1)`,
@@ -207,8 +193,8 @@ func newQCFixture(t *testing.T) *qcFixture {
 	pool := qcTestPool(t)
 	f := &qcFixture{pool: pool}
 
-	// Same wiring as main.go: the transactions create path used inside
-	// quick create must produce personal_debts from splits.
+	// Same wiring as main.go: the transactions create path used inside quick create must produce
+	// personal_debts from splits.
 	catSvc := categories.NewService(categories.NewStore(pool))
 	txSvc := transactions.NewService(transactions.NewStore(pool), catSvc)
 	pdSvc := personal_debts.NewService(personal_debts.NewStore(pool), txSvc)
@@ -239,13 +225,10 @@ func newQCFixture(t *testing.T) *qcFixture {
 	f.cat = f.newCategory(t, f.owner, "Food")
 	f.contactB = f.newContact(t, f.owner, "Bee", &f.friend)
 
-	// Bill 1 (personal wallet, ฿300): split with linked Bee and ad-hoc
-	// Grandma, nothing repaid (a repaid split blocks the pull).
 	f.bill1 = f.insertBill(t, f.owner, f.acctPersonal, f.cat, 300, "2026-09-01")
 	f.debtB1 = f.insertDebt(t, f.owner, &f.contactB, "Bee", f.bill1, 100, 0, "open")
 	f.debtGr1 = f.insertDebt(t, f.owner, nil, "Grandma", f.bill1, 100, 0, "open")
 
-	// Bill 2 (shared wallet, ฿200): split with Bee again (dedupe check).
 	f.bill2 = f.insertBill(t, f.owner, f.acctShared, f.cat, 200, "2026-09-05")
 	f.debtB2 = f.insertDebt(t, f.owner, &f.contactB, "Bee", f.bill2, 50, 0, "open")
 
@@ -294,7 +277,6 @@ func TestQuickCreateHappyPath(t *testing.T) {
 		t.Fatalf("quick create: %v", err)
 	}
 
-	// --- Project shell ---
 	if len(resp.Detail.Board.Data) != 3 {
 		t.Errorf("linked_count = %d, want 3", len(resp.Detail.Board.Data))
 	}
@@ -305,7 +287,6 @@ func TestQuickCreateHappyPath(t *testing.T) {
 		t.Errorf("owner_user_id = %s, want caller", resp.Detail.Event.OwnerUserID)
 	}
 
-	// --- Members: owner + Bee(linked) + Grandma(ad-hoc) + Chai(wallet) ---
 	if resp.Detail.Event.MembersCount != 4 {
 		t.Errorf("members_count = %d, want 4 (deduped)", resp.Detail.Event.MembersCount)
 	}
@@ -356,7 +337,6 @@ func TestQuickCreateHappyPath(t *testing.T) {
 		t.Errorf("Grandma should be a single ad-hoc member, got %+v", grMember)
 	}
 
-	// --- Board: 3 parents, 4 children, personal rows linked back ---
 	if n := f.countRows(t, `
 		SELECT COUNT(*) FROM project_transactions
 		WHERE project_id = $1 AND parent_project_transaction_id IS NULL`, resp.Detail.Event.ID); n != 3 {
@@ -411,8 +391,7 @@ func TestQuickCreateHappyPath(t *testing.T) {
 	checkLinked(f.bill2, 200, 1)
 	checkLinked(newTxID, 150, 1)
 
-	// Bill1's Bee child must be attributed to Bee's member row with the
-	// debt's amount.
+	// Bill1's Bee child must be attributed to Bee's member row with the debt's amount.
 	if n := f.countRows(t, `
 		SELECT COUNT(*) FROM project_transactions pt
 		JOIN transactions tr ON tr.source_project_transaction_id = pt.parent_project_transaction_id
@@ -421,15 +400,12 @@ func TestQuickCreateHappyPath(t *testing.T) {
 		t.Errorf("bill1 Bee split child rows = %d, want 1", n)
 	}
 
-	// --- The splits MOVED onto the board: no debt lives in both books
-	// (owner 2026-10-10); the new bill's split never became a debt. ---
 	if n := f.countRows(t, `
 		SELECT COUNT(*) FROM personal_debts WHERE source_transaction_id = ANY($1)`,
 		[]uuid.UUID{f.bill1, f.bill2, newTxID}); n != 0 {
 		t.Errorf("personal split debts left = %d, want 0 (moved to the board)", n)
 	}
 
-	// --- Balance moved only for the new bill ---
 	if b := f.accountBalance(t, f.acctPersonal); b != 850 {
 		t.Errorf("personal balance = %.2f, want 850 (only the new ฿150 bill moves money)", b)
 	}
@@ -437,7 +413,6 @@ func TestQuickCreateHappyPath(t *testing.T) {
 		t.Errorf("shared balance = %.2f, want 1000 (untouched)", b)
 	}
 
-	// --- project_added notifications for Bee + Chai, none for the owner ---
 	for _, uid := range []uuid.UUID{f.friend, f.mate} {
 		if n := f.countRows(t, `
 			SELECT COUNT(*) FROM notifications
@@ -467,7 +442,6 @@ func TestQuickCreateAtomicRollback(t *testing.T) {
 		}
 	}
 
-	// First call succeeds and claims bill1.
 	first, err := f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{
 		Name:           "First",
 		NewTransaction: newTx(10),
@@ -489,8 +463,8 @@ func TestQuickCreateAtomicRollback(t *testing.T) {
 	}
 	projBefore, txBefore, notifBefore, balBefore := snapshot()
 
-	// Second call lists a valid loose bill (bill2) AND the already-claimed
-	// bill1 → 409, and NOTHING must persist (bill2 processed first).
+	// Second call lists a valid loose bill (bill2) AND the already-claimed bill1 → 409, and NOTHING
+	// must persist (bill2 processed first).
 	_, err = f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{
 		Name:           "Second",
 		NewTransaction: newTx(20),
@@ -521,11 +495,9 @@ func TestQuickCreateAtomicRollback(t *testing.T) {
 	if n := f.countRows(t, `
 		SELECT COUNT(*) FROM project_members pm JOIN projects p ON p.id = pm.project_id
 		WHERE p.owner_user_id = $1`, f.owner); n != 3 {
-		// First project: owner + Bee + Grandma. Nothing from the rollback.
 		t.Errorf("member rows = %d, want 3 (first project only)", n)
 	}
 
-	// Unknown id → 404 TX_NOT_FOUND, still nothing persisted.
 	_, err = f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{
 		Name:           "Ghost",
 		NewTransaction: newTx(30),

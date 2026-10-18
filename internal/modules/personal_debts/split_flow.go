@@ -12,24 +12,10 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 )
 
-// Linked splits between two users (contract §5). Principle: each user's
-// book is their own — the other side gets a notification with a one-tap
-// action, and their own switches decide what happens:
-//
-//   - split_created → "add to my debts" (creates my mirror entry)
-//   - split_changed → "อัปเดตตาม" (split_edit.go)
-//
-// Muted = nothing at all; auto = the action runs on arrival and the
-// notification lands already actioned. The pair of entries points at each
-// other through counterpart_debt_id. Nothing is sent on pay / receive (owner
-// rule: notify on split creation and split edits only).
-
 var (
 	ErrNotSplitRequest = errors.New("notification is not a split you can add")
 )
 
-// WithNotifications wires the notifications module (cross-module, set in
-// main). Without it splits behave as before: mirror always, no notices.
 func (s *Service) WithNotifications(n *notifications.Service) { s.notifs = n }
 
 func displayNameTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) string {
@@ -41,11 +27,7 @@ func displayNameTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) string {
 	return name
 }
 
-// createMirrorTx inserts the partner's side of the splitter's entry (the
-// opposite direction: the splitter paid for me = I received) and links the
-// pair both ways.
 func (s *Service) createMirrorTx(ctx context.Context, tx pgx.Tx, splitter *Entry, partnerUserID uuid.UUID) (*Entry, error) {
-	// The partner's own contact for the splitter, else the splitter's name.
 	var partnerContactID *uuid.UUID
 	var personName string
 	var pcID uuid.UUID
@@ -77,7 +59,6 @@ func (s *Service) createMirrorTx(ctx context.Context, tx pgx.Tx, splitter *Entry
 	return mirror, nil
 }
 
-// splitToPartnerTx — the partner side of one linked split.
 func (s *Service) splitToPartnerTx(ctx context.Context, tx pgx.Tx, splitter *Entry, partnerUserID, parentTxID uuid.UUID) error {
 	if s.notifs == nil { // not wired (tests) — mirror directly
 		_, err := s.createMirrorTx(ctx, tx, splitter, partnerUserID)
@@ -109,8 +90,6 @@ func (s *Service) splitToPartnerTx(ctx context.Context, tx pgx.Tx, splitter *Ent
 	}, d.Auto)
 }
 
-// AcceptSplitRequest — "add to my debts" on a split_created notification.
-// Idempotent: an already-mirrored split returns the existing entry.
 func (s *Service) AcceptSplitRequest(ctx context.Context, userID, notificationID uuid.UUID) (*WriteResult, error) {
 	if s.notifs == nil {
 		return nil, errors.New("notifications module not wired")
@@ -137,7 +116,7 @@ func (s *Service) AcceptSplitRequest(ctx context.Context, userID, notificationID
 	}
 	splitter, err := getAnyEntryTx(ctx, tx, p.SplitID)
 	if errors.Is(err, ErrEntryNotFound) {
-		return nil, ErrSplitChangeStale // removed since
+		return nil, ErrSplitChangeStale
 	}
 	if err != nil {
 		return nil, err

@@ -1,11 +1,5 @@
 package shared
 
-// Savings v2 (0.3.1-10): a saving entry moves an amount of ONE wallet
-// between buckets — the wallet's available money, the spare bucket
-// ("ยังไม่จัดสรร") or a goal. A (bucket, wallet) balance is the sum of what
-// came in minus what went out; saved money always knows its wallet. Read
-// here because wallets, the dashboard, /me and the goals module all show it.
-
 import (
 	"context"
 	"fmt"
@@ -14,14 +8,12 @@ import (
 	"github.com/google/uuid"
 )
 
-// SavingGoalRef — spec schema SavingGoalRef.
 type SavingGoalRef struct {
 	ID       uuid.UUID `json:"id"`
 	Name     string    `json:"name"`
 	IconCode *IconCode `json:"icon_code"`
 }
 
-// SavingBucket — one non-zero bucket of a wallet (WalletSavings.buckets).
 type SavingBucket struct {
 	Type     string     `json:"type"` // goal | spare
 	ID       *uuid.UUID `json:"id"`
@@ -30,7 +22,6 @@ type SavingBucket struct {
 	Amount   float64    `json:"amount"`
 }
 
-// WalletSavings — spec schema WalletSavings.
 type WalletSavings struct {
 	Balance             float64        `json:"balance"`
 	Saved               float64        `json:"saved"`
@@ -41,7 +32,6 @@ type WalletSavings struct {
 	Buckets             []SavingBucket `json:"buckets"`
 }
 
-// SavingTotals — spec schema SavingTotals (Home / More).
 type SavingTotals struct {
 	Count     int     `json:"count"`
 	Saved     float64 `json:"saved"`
@@ -50,7 +40,6 @@ type SavingTotals struct {
 	Available float64 `json:"available"`
 }
 
-// SavingBalance — one (wallet, bucket) balance (AccountID uuid.Nil = money with no wallet).
 type SavingBalance struct {
 	AccountID uuid.UUID // uuid.Nil = no wallet (unallocated)
 	Bucket    string     // spare | goal
@@ -58,9 +47,6 @@ type SavingBalance struct {
 	Amount    float64
 }
 
-// SavingBalancesSQL — the (wallet, bucket, goal) balances of user $1 (non-
-// zero), optionally narrowed by `where` on alias m (account_id, bucket,
-// goal_id).
 func SavingBalancesSQL(where string) string {
 	if where == "" {
 		where = "TRUE"
@@ -75,12 +61,8 @@ func SavingBalancesSQL(where string) string {
 	GROUP BY 1, 2, 3 HAVING ABS(SUM(m.amount)) > 0.004`
 }
 
-// CountedSavings — the SavingBalancesSQL filter that leaves out the money of
-// archived goals (0.4.0-1): an archived goal keeps its money, but it counts
-// in no total (savings, wallets' saved / available) until it is restored.
 const CountedSavings = `NOT EXISTS (SELECT 1 FROM saving_goals sg WHERE sg.id = m.goal_id AND sg.status = 'archived')`
 
-// LoadSavingBalances runs SavingBalancesSQL.
 func LoadSavingBalances(ctx context.Context, q Querier, userID uuid.UUID, where string, args ...any) ([]SavingBalance, error) {
 	rows, err := q.Query(ctx, SavingBalancesSQL(where), append([]any{userID}, args...)...)
 	if err != nil {
@@ -103,7 +85,6 @@ func LoadSavingBalances(ctx context.Context, q Querier, userID uuid.UUID, where 
 	return out, rows.Err()
 }
 
-// LoadSavingGoalRefs — goal refs by id.
 func LoadSavingGoalRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]SavingGoalRef, error) {
 	out := map[uuid.UUID]SavingGoalRef{}
 	ids = uniqueIDs(ids)
@@ -129,8 +110,6 @@ func LoadSavingGoalRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uu
 	return out, rows.Err()
 }
 
-// LoadWalletSavings — userID's savings in each of the wallets (every id
-// gets an entry, zeros included). Archived goals' money is left out.
 func LoadWalletSavings(ctx context.Context, q Querier, userID uuid.UUID, accountIDs []uuid.UUID) (map[uuid.UUID]WalletSavings, error) {
 	out := map[uuid.UUID]WalletSavings{}
 	accountIDs = uniqueIDs(accountIDs)
@@ -216,9 +195,6 @@ func LoadWalletSavings(ctx context.Context, q Querier, userID uuid.UUID, account
 	return out, nil
 }
 
-// LoadSavingTotals — the Home / More numbers: active goals, everything
-// saved (goals + spare; archived goals' money left out) and the money left available in the wallets that
-// track their balance (the caller's active ones).
 func LoadSavingTotals(ctx context.Context, q Querier, userID uuid.UUID) (*SavingTotals, error) {
 	out := &SavingTotals{}
 	bals, err := LoadSavingBalances(ctx, q, userID, CountedSavings)

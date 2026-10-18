@@ -1,9 +1,5 @@
 package imports
 
-// Spec conformance (API spec v2) of the import operations: every body is
-// checked against openapi.yaml with apitest.Conform. Plain gin engines (the
-// scan is multipart, outside apitest.Do).
-
 import (
 	"bytes"
 	"context"
@@ -25,7 +21,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
-// kbankSlip — a K PLUS transfer: sender xxxxx1234x, receiver xxxxx5678x, fee 5.
 func kbankSlip() *ocr.Result {
 	return &ocr.Result{Width: 1328, Lines: []ocr.Line{
 		{Text: "โอนเงินสำเร็จ", Box: ocr.Box{X: 224, Y: 66}},
@@ -103,14 +98,12 @@ func TestScanSlipConformsAndResolves(t *testing.T) {
 		t.Fatalf("resolved: %+v", first.Resolved)
 	}
 
-	// Unsupported bank: no drafts, strings still present.
 	status, body = scanAt(r, map[string]string{"bank_code": "014"})
 	apitest.Conform(t, "scanSlip", status, body)
 	if !strings.Contains(string(body), `"file_key":""`) || !strings.Contains(string(body), `"slip":null`) {
 		t.Fatalf("unknown values: %s", body)
 	}
 
-	// No image: 400.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/pending-transactions/scan-slip", strings.NewReader(""))
 	req.Header.Set("Content-Type", "multipart/form-data; boundary=x")
 	w := httptest.NewRecorder()
@@ -167,8 +160,6 @@ func TestSlipHistoryConforms(t *testing.T) {
 	}
 }
 
-// The providers handler is not in this package; this only checks its answer
-// against the spec.
 func TestListPaymentProvidersConforms(t *testing.T) {
 	pool := testdb.Pool(t)
 	h := providers.NewHandler(providers.NewStore(pool))

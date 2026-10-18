@@ -13,7 +13,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
-// eventsEngine registers every event route as `as`.
 func eventsEngine(f *qcFixture, as uuid.UUID) http.Handler {
 	h := NewHandler(f.svc)
 	return apitest.Engine(as, func(g *gin.RouterGroup) {
@@ -57,7 +56,6 @@ type evClient struct {
 	r http.Handler
 }
 
-// do sends a request, checks the status and (with op) the spec.
 func (c evClient) do(method, path string, body any, op string, want int) map[string]any {
 	c.t.Helper()
 	status, raw := apitest.Do(c.t, c.r, method, "/api/v1"+path, body)
@@ -113,9 +111,6 @@ func (f *qcFixture) personalTag(t *testing.T, userID uuid.UUID, name string) uui
 	return id
 }
 
-// TestEventsAPI — every event route against the spec, and the 0.3.1-10
-// rules: one-call create with my tags, event tags, the linked money of a
-// pulled bill, my tags private to me, patches on every write.
 func TestEventsAPI(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
@@ -124,7 +119,6 @@ func TestEventsAPI(t *testing.T) {
 	trip := f.personalTag(t, f.owner, "Trip")
 	taxi := f.personalTag(t, f.owner, "Taxi")
 
-	// Create in one call.
 	me.code("POST", "/projects", map[string]any{"name": "Bad", "start_date": "2026-10-10", "end_date": "2026-10-01"},
 		http.StatusBadRequest, "INVALID_DATE_RANGE")
 	created := me.do("POST", "/projects", map[string]any{
@@ -144,7 +138,6 @@ func TestEventsAPI(t *testing.T) {
 	}
 	me.do("GET", "/projects/"+id, nil, "getProject", http.StatusOK)
 
-	// Members: a typed person; bad input is 400.
 	me.code("POST", "/projects/"+id+"/members", map[string]any{"role": "viewer"}, http.StatusBadRequest, "VALIDATION_ERROR")
 	added := me.do("POST", "/projects/"+id+"/members", map[string]any{"ad_hoc": true, "display_name": "Grandma"},
 		"addProjectMember", http.StatusCreated)
@@ -156,13 +149,11 @@ func TestEventsAPI(t *testing.T) {
 	}
 	myMember := ev["my_member_id"].(string)
 
-	// Event tags.
 	food := m(me.do("POST", "/projects/"+id+"/tags", map[string]any{"name": "Food"}, "createProjectTag", http.StatusCreated), "tag")
 	me.code("POST", "/projects/"+id+"/tags", map[string]any{"name": " food "}, http.StatusConflict, "TAG_NAME_TAKEN")
 	me.do("PUT", "/projects/"+id+"/tags/"+food["id"].(string), map[string]any{"icon_code": map[string]any{"icon": "ramen", "iconColors": []string{"#FFFFFF"}, "background": "solid", "bgColors": []string{"#138F2D"}, "border": "none", "borderColors": []string{}, "shape": "circle"}},
 		"updateProjectTag", http.StatusOK)
 
-	// A board bill with a split and a tag.
 	bill := me.do("POST", "/projects/"+id+"/project-transactions", map[string]any{
 		"transaction_member_id": myMember, "type": "expense", "amount": 300, "date": "2026-10-02",
 		"tag_ids": []string{food["id"].(string)}, "splits": []map[string]any{{"member_id": gran, "amount": 100}},
@@ -175,7 +166,6 @@ func TestEventsAPI(t *testing.T) {
 	if pos := m(bill, "summary", "my_position"); n(pos, "net") != 100 || n(pos, "share") != 200 {
 		t.Errorf("my position = %v (paid 300, share 200, net 100)", pos)
 	}
-	// 0.4.0 numbers: paid 300, share 200 → receivable 100; plan 1000 − 300 = 700 left; the list summary.
 	if got := me.do("GET", "/projects", nil, "listProjects", http.StatusOK); true {
 		e0 := list(got, "data")[0].(map[string]any)
 		if n(e0, "my_paid") != 300 || n(e0, "my_share") != 200 || n(e0, "my_receivable") != 100 || n(e0, "my_payable") != 0 || n(e0, "remaining") != 700 {
@@ -205,8 +195,6 @@ func TestEventsAPI(t *testing.T) {
 		t.Errorf("mark = %v", m(marked, "row"))
 	}
 
-	// Pull a personal transaction in: its tags become event tags (copied),
-	// the money stays linked, Bee joins from its split.
 	billTx, err := f.txs.Create(ctx, f.owner, transactions.CreateRequest{
 		Type: transactions.TypeExpense, AccountID: &f.acctPersonal, Amount: 200, CategoryID: &f.cat, Date: "2026-10-03",
 		TagIDs: []uuid.UUID{taxi},
@@ -228,9 +216,7 @@ func TestEventsAPI(t *testing.T) {
 		t.Errorf("tx event_bill = %+v", d.EventBill)
 	}
 
-	// Bee (now a member) sees the bill linked, without my transaction. She
-	// may change its money (a shared book): my transaction stays, I get
-	// "อัปเดตตาม" (project_tx_changed with a suggestion for my tx).
+	// Bee (now a member) sees the bill linked, without my transaction.
 	beeBoard := bee.do("GET", "/projects/"+id+"/transactions?mine=true", nil, "listBoardRows", http.StatusOK)
 	if rows := list(beeBoard, "data"); len(rows) != 1 || rows[0].(map[string]any)["source_tx"] != nil || rows[0].(map[string]any)["linked"] != true {
 		t.Errorf("Bee's board = %v", rows)
@@ -260,7 +246,6 @@ func TestEventsAPI(t *testing.T) {
 	if len(list(up, "account_balances")) != 1 || f.accountBalance(t, f.acctPersonal) != before-50 {
 		t.Errorf("linked edit: balances %v, wallet %v → %v", up["account_balances"], before, f.accountBalance(t, f.acctPersonal))
 	}
-	// My transaction: the bill follows only when asked.
 	amt := 230.0
 	if _, err := f.txs.UpdateWrite(ctx, f.owner, billTxID, transactions.UpdateRequest{Amount: &amt}); err != nil {
 		t.Fatalf("edit the source tx: %v", err)
@@ -276,7 +261,6 @@ func TestEventsAPI(t *testing.T) {
 		t.Errorf("the bill didn't follow its transaction")
 	}
 
-	// Tags: import into my personal tags (Taxi is mine already).
 	imp := me.do("POST", "/projects/"+id+"/tags/import", map[string]any{}, "importProjectTags", http.StatusOK)
 	if c := list(imp, "created"); len(c) != 1 || c[0].(map[string]any)["name"] != "Food" {
 		t.Errorf("imported = %v", imp["created"])
@@ -288,7 +272,6 @@ func TestEventsAPI(t *testing.T) {
 	bee.code("PUT", "/projects/"+id, map[string]any{"name": "Hijack"}, http.StatusForbidden, "FORBIDDEN_ROLE")
 	me.do("PUT", "/projects/"+id, map[string]any{"end_date": nil, "planned_amount": nil}, "updateProject", http.StatusOK)
 
-	// Reads.
 	detail := me.do("GET", "/projects/"+id+"/detail", nil, "getProjectDetail", http.StatusOK)
 	if len(list(m(detail, "board"), "data")) != 2 || len(list(detail, "members")) != 3 {
 		t.Errorf("detail board / members = %v / %v", m(detail, "board")["data"], detail["members"])
@@ -296,13 +279,11 @@ func TestEventsAPI(t *testing.T) {
 	me.do("GET", "/projects/"+id+"/members", nil, "listProjectMembers", http.StatusOK)
 	me.do("GET", "/projects/"+id+"/summary", nil, "getProjectSummary", http.StatusOK)
 
-	// Bee copies her share of the pulled bill into her book.
 	cp := bee.do("POST", "/projects/"+id+"/project-transactions/"+pulledID+"/copy", nil, "copyProjectTransactionToPersonal", http.StatusCreated)
 	if n(m(cp, "transaction"), "amount") != 50 {
 		t.Errorf("Bee's copy = %v", m(cp, "transaction"))
 	}
 
-	// Delete a tag, a split row, a bill; take my transaction back out.
 	me.do("DELETE", "/projects/"+id+"/tags/"+food["id"].(string), nil, "deleteProjectTag", http.StatusOK)
 	var child string
 	for _, r := range list(m(detail, "board"), "data") {
@@ -325,7 +306,6 @@ func TestEventsAPI(t *testing.T) {
 		t.Errorf("remove bill: removed_row_id = %v", out["removed_row_id"])
 	}
 
-	// Members: invite by email, the invitee accepts; another rejects.
 	var beeEmail, chaiEmail string
 	_ = f.pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, f.friend).Scan(&beeEmail)
 	_ = f.pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, f.mate).Scan(&chaiEmail)
@@ -352,13 +332,11 @@ func TestEventsAPI(t *testing.T) {
 	me.do("PUT", "/projects/"+id+"/members/"+gran, map[string]any{"role": "viewer"}, "updateProjectMember", http.StatusOK)
 	me.do("DELETE", "/projects/"+id+"/members/"+gran, nil, "removeProjectMember", http.StatusOK)
 
-	// Hand over, leave, delete.
 	me.do("POST", "/projects/"+id+"/transfer-ownership", map[string]any{"new_owner_user_id": f.friend},
 		"transferProjectOwnership", http.StatusOK)
 	me.do("POST", "/projects/"+id+"/leave", nil, "leaveProject", http.StatusOK)
 	bee.do("DELETE", "/projects/"+id, nil, "deleteProject", http.StatusOK)
 
-	// A second invite, rejected.
 	second := me.do("POST", "/projects", map[string]any{"name": "Other"}, "createProject", http.StatusCreated)
 	sid := m(second, "event")["id"].(string)
 	me.do("POST", "/projects/"+sid+"/members", map[string]any{"email": chaiEmail, "display_name": "Chai"}, "addProjectMember", http.StatusCreated)
@@ -369,8 +347,6 @@ func TestEventsAPI(t *testing.T) {
 	chai.do("POST", "/projects/link-requests/"+nid.String()+"/reject", nil, "rejectProjectLinkRequest", http.StatusOK)
 }
 
-// TestQuickCreateAndAddBillsAccountBalances — the money-moving writes carry
-// the wallet balances.
 func TestQuickCreateAndAddBillsAccountBalances(t *testing.T) {
 	f := newQCFixture(t)
 	me := evClient{t, eventsEngine(f, f.owner)}
@@ -407,7 +383,6 @@ func TestQuickCreateAndAddBillsAccountBalances(t *testing.T) {
 	}
 }
 
-// The board shows members by their live names.
 func TestBoardRowsCarryTransactionMember(t *testing.T) {
 	f := newQCFixture(t)
 	me := evClient{t, eventsEngine(f, f.owner)}
@@ -435,7 +410,6 @@ func TestBoardRowsCarryTransactionMember(t *testing.T) {
 	}
 }
 
-// Deleting an event: my linked transactions stay (unlinked) or go with it.
 func TestDeleteEventWithLinkedTxs(t *testing.T) {
 	f := newQCFixture(t)
 	me := evClient{t, eventsEngine(f, f.owner)}
@@ -469,8 +443,8 @@ func TestDeleteEventWithLinkedTxs(t *testing.T) {
 	}
 }
 
-// DELETE /transactions ?also_delete_link: the bill made from the row goes
-// with it; without it the bill stays, unlinked.
+// DELETE /transactions ?also_delete_link: the bill made from the row goes with it; without it the
+// bill stays, unlinked.
 func TestDeleteTxWithLinkedBill(t *testing.T) {
 	f := newQCFixture(t)
 	me := evClient{t, eventsEngine(f, f.owner)}
@@ -505,8 +479,6 @@ func TestDeleteTxWithLinkedBill(t *testing.T) {
 	}
 }
 
-// TestEventArchiveRestore — archive hides the event (default list), restore
-// brings it back; only the owner may.
 func TestEventArchiveRestore(t *testing.T) {
 	f := newQCFixture(t)
 	me := evClient{t, eventsEngine(f, f.owner)}

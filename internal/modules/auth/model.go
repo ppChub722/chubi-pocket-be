@@ -8,8 +8,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// User is the canonical identity object. Owned by the auth module per
-// design/spec/01-auth.md; the users module reads/writes the editable subset.
 type User struct {
 	ID              uuid.UUID        `json:"id"`
 	Username        string           `json:"username"`
@@ -52,8 +50,6 @@ type TokenInfo struct {
 	ExpiresIn   int    `json:"expires_in"`
 }
 
-// AuthUser is the spec schema AuthUser (the user inside a register / login
-// response). Status is the API enum: active | deactivated.
 type AuthUser struct {
 	ID              uuid.UUID        `json:"id"`
 	Username        string           `json:"username"`
@@ -67,7 +63,6 @@ type AuthUser struct {
 	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
-// APIStatus maps the stored users.status to the API enum.
 func APIStatus(stored string) string {
 	if stored == "active" {
 		return "active"
@@ -75,7 +70,6 @@ func APIStatus(stored string) string {
 	return "deactivated"
 }
 
-// AuthView is the API shape of the user.
 func (u *User) AuthView() AuthUser {
 	return AuthUser{
 		ID: u.ID, Username: u.Username, Email: u.Email, EmailVerifiedAt: u.EmailVerifiedAt,

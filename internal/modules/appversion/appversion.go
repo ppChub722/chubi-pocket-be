@@ -1,7 +1,3 @@
-// Package appversion — the app version check (owner 2026-10-10). The app
-// sends its build number in X-App-Build on every call; builds older than
-// MIN_APP_BUILD get 426 APP_OUTDATED with where to download the new one.
-// GET /v1/app/version tells the app the same up front.
 package appversion
 
 import (
@@ -15,13 +11,10 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
-// Header carries the app's build number (an integer, e.g. 42).
 const Header = "X-App-Build"
 
-// CodeOutdated — the error code on the 426.
 const CodeOutdated = "APP_OUTDATED"
 
-// Info — GET /v1/app/version's data, and the 426's details.
 type Info struct {
 	MinBuild    int    `json:"min_build"`    // 0 = check off
 	LatestBuild int    `json:"latest_build"` // 0 = not set
@@ -43,9 +36,6 @@ func (h *Handler) Version(c *gin.Context) {
 	c.JSON(http.StatusOK, h.info.view())
 }
 
-// Middleware blocks builds older than MinBuild. No header, or one that
-// isn't a number (web, Postman, scripts), passes. `exempt` paths (full
-// paths, e.g. "/api/v1/app/version") always pass.
 func (h *Handler) Middleware(exempt ...string) gin.HandlerFunc {
 	skip := make(map[string]bool, len(exempt))
 	for _, p := range exempt {
@@ -68,8 +58,6 @@ func (h *Handler) Middleware(exempt ...string) gin.HandlerFunc {
 	}
 }
 
-// VersionInfo is the spec schema VersionInfo (bare body of GET /app/version):
-// every key present, message_* null when empty.
 type VersionInfo struct {
 	MinBuild    int     `json:"min_build"`
 	LatestBuild int     `json:"latest_build"`

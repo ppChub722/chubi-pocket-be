@@ -81,7 +81,6 @@ func newDebtHFix(t *testing.T) *debtHFix {
 		VALUES ($1, $2, 'Bee old', $3, 'active')`, f.contact, f.me, f.partner)
 	f.tag = uuid.New()
 	f.exec(`INSERT INTO tags (id, user_id, name) VALUES ($1, $2, 'family')`, f.tag, f.me)
-	// Runs before the users' own cleanups (my contact links the partner).
 	t.Cleanup(func() {
 		_, _ = pool.Exec(ctx, `DELETE FROM personal_debts WHERE user_id = ANY($1)`, []uuid.UUID{f.me, f.partner})
 		_, _ = pool.Exec(ctx, `DELETE FROM contacts WHERE user_id = ANY($1)`, []uuid.UUID{f.me, f.partner})
@@ -89,7 +88,6 @@ func newDebtHFix(t *testing.T) *debtHFix {
 	return f
 }
 
-// call sends a request as me, checks the status and (with op) the spec.
 func (f *debtHFix) call(method, path string, body any, op string, want int) map[string]any {
 	f.t.Helper()
 	status, raw := apitest.Do(f.t, f.r, method, path, body)
@@ -143,13 +141,9 @@ func entriesPath(key string) string {
 	return "/api/v1/personal-debts/people/" + url.PathEscape(key) + "/entries"
 }
 
-// TestDebtCreateTransactionWithoutWallet — a debt entry can be a transaction
-// with no wallet (create_transaction): it counts as income / expense, takes
-// tags, and moves no wallet balance; switching it off removes the transaction.
 func TestDebtCreateTransactionWithoutWallet(t *testing.T) {
 	f := newDebtHFix(t)
 
-	// A transaction with no wallet, tagged.
 	made := f.call("POST", entriesPath("n:Mom"), map[string]any{
 		"direction": "paid", "amount": 120, "date": "2026-10-04", "create_transaction": true,
 		"tag_ids": []uuid.UUID{f.tag},
@@ -169,7 +163,6 @@ func TestDebtCreateTransactionWithoutWallet(t *testing.T) {
 		t.Errorf("wallet = %v, want 1000 (no wallet moved)", f.balance())
 	}
 
-	// Ledger-only takes neither a wallet nor tags.
 	f.code("POST", entriesPath("n:Mom"), map[string]any{
 		"direction": "paid", "amount": 5, "create_transaction": false, "account_id": f.wallet,
 	}, http.StatusBadRequest, "LEDGER_ONLY_NO_WALLET")
@@ -183,7 +176,6 @@ func TestDebtCreateTransactionWithoutWallet(t *testing.T) {
 		t.Errorf("ledger-only transaction = %v", ledger["transaction"])
 	}
 
-	// Give the wallet-less transaction a wallet, then take the wallet off again.
 	moved := f.call("PUT", "/api/v1/personal-debts/"+entryID, map[string]any{
 		"create_transaction": true, "account_id": f.wallet,
 	}, "", http.StatusOK)
@@ -197,14 +189,12 @@ func TestDebtCreateTransactionWithoutWallet(t *testing.T) {
 		t.Errorf("after un-wallet: tx = %v, wallet = %v, want 1000", unwalleted["transaction"], f.balance())
 	}
 
-	// create_transaction false removes the transaction, the entry stays.
 	gone := f.call("PUT", "/api/v1/personal-debts/"+entryID, map[string]any{
 		"create_transaction": false,
 	}, "", http.StatusOK)
 	if gone["transaction"] != nil || obj(gone, "entry")["id"] != entryID {
 		t.Errorf("after create_transaction false: %v", gone)
 	}
-	// ...and true makes one again, with no wallet.
 	again := f.call("PUT", "/api/v1/personal-debts/"+entryID, map[string]any{
 		"create_transaction": true,
 	}, "", http.StatusOK)
@@ -213,13 +203,9 @@ func TestDebtCreateTransactionWithoutWallet(t *testing.T) {
 	}
 }
 
-// TestDebtLedgerFlow — the person ledger end to end: entries with and
-// without a wallet, the people list, the person page, edits and deletes
-// keeping the entry and its wallet transaction one record.
 func TestDebtLedgerFlow(t *testing.T) {
 	f := newDebtHFix(t)
 
-	// I paid Mom 200 from the wallet, tagged: the wallet tx is written.
 	lend := f.call("POST", entriesPath("n:Mom"), map[string]any{
 		"direction": "paid", "amount": 200, "account_id": f.wallet, "date": "2026-10-01",
 		"description": "Lunch money", "tag_ids": []uuid.UUID{f.tag},
@@ -243,12 +229,10 @@ func TestDebtLedgerFlow(t *testing.T) {
 		t.Errorf("wallet = %v, want 800", f.balance())
 	}
 
-	// Tags need a wallet.
 	f.code("POST", entriesPath("n:mom"), map[string]any{
 		"direction": "received", "amount": 50, "tag_ids": []uuid.UUID{f.tag},
 	}, http.StatusBadRequest, "TAGS_NEED_WALLET")
 
-	// Mom paid me 50 back, ledger only, and the loan is labelled paid.
 	back := f.call("POST", entriesPath("n:mom"), map[string]any{
 		"direction": "received", "amount": 50, "date": "2026-10-02", "mark_paid_ids": []string{lendID},
 	}, "createDebtEntry", http.StatusCreated)
@@ -260,7 +244,6 @@ func TestDebtLedgerFlow(t *testing.T) {
 		"direction": "received", "amount": 1, "mark_paid_ids": []uuid.UUID{uuid.New()},
 	}, http.StatusBadRequest, "ENTRY_NOT_FOUND")
 
-	// A contact person: the linked user's live name.
 	bee := f.call("POST", entriesPath("c:"+f.contact.String()), map[string]any{
 		"direction": "paid", "amount": 100, "date": "2026-10-03",
 	}, "createDebtEntry", http.StatusCreated)
@@ -272,7 +255,6 @@ func TestDebtLedgerFlow(t *testing.T) {
 	f.code("POST", entriesPath("x:nope"), map[string]any{"direction": "paid", "amount": 1},
 		http.StatusBadRequest, "INVALID_PERSON_KEY")
 
-	// People: one list, |net| first; the totals ignore the filters.
 	people := f.call("GET", "/api/v1/personal-debts/people", nil, "listDebtPeople", http.StatusOK)
 	rows, _ := people["data"].([]any)
 	if len(rows) != 2 || rows[0].(map[string]any)["key"] != "n:mom" {
@@ -290,7 +272,6 @@ func TestDebtLedgerFlow(t *testing.T) {
 		t.Errorf("side=i_owe = %v", got)
 	}
 
-	// The person page.
 	mom := f.call("GET", "/api/v1/personal-debts/people/n:mom", nil, "getDebtPerson", http.StatusOK)
 	if num(mom, "net") != 150 || num(mom, "counts", "entries") != 2 || num(mom, "counts", "money") != 1 || len(mom["items"].([]any)) != 2 {
 		t.Errorf("person page = %v", mom)
@@ -304,7 +285,6 @@ func TestDebtLedgerFlow(t *testing.T) {
 		t.Errorf("contact without entries = %v", p)
 	}
 
-	// Entries: filters and sort.
 	for q, want := range map[string]int{"money=true": 1, "direction=received": 1, "paid=false": 1, "q=lunch": 1} {
 		got := f.call("GET", entriesPath("n:mom")+"?"+q, nil, "listDebtEntries", http.StatusOK)
 		if n := len(got["data"].([]any)); n != want {
@@ -316,7 +296,6 @@ func TestDebtLedgerFlow(t *testing.T) {
 		t.Errorf("amount_asc first = %v", first)
 	}
 
-	// Entry detail = the tx-detail page in debt mode.
 	d := f.call("GET", "/api/v1/personal-debts/"+lendID, nil, "getDebtEntry", http.StatusOK)
 	if obj(d, "entry")["paid"] != true || obj(d, "transaction")["id"] == nil || num(d, "person_balance", "net") != 150 {
 		t.Errorf("entry detail = %v", d)
@@ -324,7 +303,6 @@ func TestDebtLedgerFlow(t *testing.T) {
 	txID := uuid.MustParse(obj(d, "transaction")["id"].(string))
 	f.code("GET", "/api/v1/personal-debts/"+uuid.NewString(), nil, http.StatusNotFound, "NOT_FOUND")
 
-	// Edit the entry: the wallet tx follows (one record).
 	up := f.call("PUT", "/api/v1/personal-debts/"+lendID, map[string]any{
 		"amount": 300, "description": "Rent help",
 	}, "updateDebtEntry", http.StatusOK)
@@ -336,7 +314,6 @@ func TestDebtLedgerFlow(t *testing.T) {
 		t.Errorf("account_balances = %v", up["account_balances"])
 	}
 
-	// Edit the tx: the entry follows, and the write carries the person's balance.
 	amt := 250.0
 	w, err := f.txs.UpdateWrite(f.ctx, f.me, txID, transactions.UpdateRequest{Amount: &amt})
 	if err != nil {
@@ -353,24 +330,20 @@ func TestDebtLedgerFlow(t *testing.T) {
 		t.Errorf("a debt tx's category must stay")
 	}
 
-	// Ledger-only: the tx goes, the money comes back.
 	lo := f.call("PUT", "/api/v1/personal-debts/"+lendID, map[string]any{"account_id": nil}, "updateDebtEntry", http.StatusOK)
 	if lo["transaction"] != nil || f.balance() != 1000 {
 		t.Errorf("ledger-only: %v (wallet %v)", lo["transaction"], f.balance())
 	}
-	// ... and back onto the wallet.
 	re := f.call("PUT", "/api/v1/personal-debts/"+lendID, map[string]any{"account_id": f.wallet}, "updateDebtEntry", http.StatusOK)
 	if re["transaction"] == nil || f.balance() != 750 {
 		t.Errorf("wallet again: %v (wallet %v)", re["transaction"], f.balance())
 	}
 
-	// Move the entry to another person: both balances come back.
 	mv := f.call("PUT", "/api/v1/personal-debts/"+backID, map[string]any{"key": "c:" + f.contact.String()}, "updateDebtEntry", http.StatusOK)
 	if num(mv, "person_balance", "net") != 50 || num(mv, "previous_person_balance", "net") != 250 {
 		t.Errorf("moved: now %v, before %v", mv["person_balance"], mv["previous_person_balance"])
 	}
 
-	// Delete: the entry and its tx.
 	del := f.call("DELETE", "/api/v1/personal-debts/"+lendID, nil, "deleteDebtEntry", http.StatusOK)
 	if del["transaction_id"] == nil || f.balance() != 1000 || num(del, "person_balance", "net") != 0 {
 		t.Errorf("delete: %v (wallet %v)", del, f.balance())
@@ -381,7 +354,6 @@ func TestDebtLedgerFlow(t *testing.T) {
 		t.Errorf("%d debt txs left after the delete", txLeft)
 	}
 
-	// Deleting the tx side deletes the entry too.
 	again := f.call("POST", entriesPath("n:mom"), map[string]any{
 		"direction": "paid", "amount": 40, "account_id": f.wallet,
 	}, "createDebtEntry", http.StatusCreated)
@@ -393,8 +365,6 @@ func TestDebtLedgerFlow(t *testing.T) {
 	f.code("GET", "/api/v1/personal-debts/"+dr.DebtEntryID.String(), nil, http.StatusNotFound, "NOT_FOUND")
 }
 
-// TestSplitSourcedEntries — a split on my bill is an entry the bill owns:
-// only description / note / paid change here.
 func TestSplitSourcedEntries(t *testing.T) {
 	f := newDebtHFix(t)
 	created, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
@@ -422,7 +392,6 @@ func TestSplitSourcedEntries(t *testing.T) {
 	if obj(ok, "entry")["paid"] != true || obj(ok, "entry")["note"] != "cash at home" || num(ok, "entry", "amount") != 100 {
 		t.Errorf("label + note = %v", ok["entry"])
 	}
-	// Deleting it takes the split off the bill.
 	f.call("DELETE", "/api/v1/personal-debts/"+id, nil, "deleteDebtEntry", http.StatusOK)
 	after, _ := f.txs.Get(f.ctx, f.me, bill.ID)
 	if after.SplitCount != 0 || after.MyShare == nil || *after.MyShare != 300 {
@@ -430,7 +399,6 @@ func TestSplitSourcedEntries(t *testing.T) {
 	}
 }
 
-// The split-identity rule is enforced by the hook itself.
 func TestSplitIdentityRuleInHook(t *testing.T) {
 	f := newSplitEditFixture(t)
 	s := f.splits(t)
@@ -448,7 +416,6 @@ func TestSplitIdentityRuleInHook(t *testing.T) {
 		return n
 	}
 
-	// Same contact + a different name: ignored (no in-place rename).
 	e := keep(partner, 100)
 	e.PersonName, e.ContactID, e.ContactIDSet = "Hacked", &f.partnerContact, true
 	if err := f.edit(t, keep(s["Beam"], 100), e); err != nil {
@@ -458,7 +425,6 @@ func TestSplitIdentityRuleInHook(t *testing.T) {
 		t.Errorf("stored name = %q, want it unchanged", n)
 	}
 
-	// New contact: its resolved name wins over any sent name.
 	zed := uuid.New()
 	if _, err := f.pool.Exec(f.ctx, `INSERT INTO contacts (id, user_id, display_name, status) VALUES ($1, $2, 'Zed', 'active')`, zed, f.me); err != nil {
 		t.Fatal(err)
@@ -472,8 +438,6 @@ func TestSplitIdentityRuleInHook(t *testing.T) {
 		t.Errorf("new contact's name = %q, want Zed (the sent name is ignored)", n)
 	}
 
-	// A free-name split still renames in place (Beam was dropped back to a
-	// free name first).
 	back := keep(s["Beam"], 100)
 	back.PersonName, back.ContactID, back.ContactIDSet = "Beam", nil, true
 	if err := f.edit(t, back, keep(partner, 100)); err != nil {
@@ -489,8 +453,6 @@ func TestSplitIdentityRuleInHook(t *testing.T) {
 	}
 }
 
-// TestTransactionFilters — GET /transactions?counterparty_key (a person's
-// wallet sides) and ?can_join_event (the event bill picker).
 func TestTransactionFilters(t *testing.T) {
 	f := newDebtHFix(t)
 	entry, err := f.svc.CreateEntry(f.ctx, f.me, "n:mom", CreateEntryRequest{
@@ -540,10 +502,6 @@ func TestTransactionFilters(t *testing.T) {
 	}
 }
 
-// TestContactsAndDebtsAreIndependent — archiving a contact only hides it:
-// new entries (a debt and a repayment) with it still work and still bump
-// last_used_at; deleting the contact drops every record back to a typed
-// name (name kept, contact id NULL, amounts unchanged).
 func TestContactsAndDebtsAreIndependent(t *testing.T) {
 	f := newDebtHFix(t)
 	key := "c:" + f.contact.String()
@@ -561,7 +519,6 @@ func TestContactsAndDebtsAreIndependent(t *testing.T) {
 		t.Errorf("last_used_at = %v (%v), want bumped", used, err)
 	}
 
-	// Delete the contact (as the contacts module does: snapshot, then delete).
 	tx, err := f.pool.Begin(f.ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -592,10 +549,6 @@ func TestContactsAndDebtsAreIndependent(t *testing.T) {
 	}
 }
 
-// TestDebtCyclesAndSummary — a person's cycle ends where the balance hit 0:
-// entries split into current / earlier, days_outstanding counts the current
-// cycle's oldest open entry, the totals count people per side and the ones
-// open for over 30 days, and the summary message lists the current cycle.
 func TestDebtCyclesAndSummary(t *testing.T) {
 	f := newDebtHFix(t)
 	day := func(n int) string { return time.Now().AddDate(0, 0, n).Format("2006-01-02") }

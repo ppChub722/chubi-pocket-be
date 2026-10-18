@@ -9,10 +9,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// decorateMonth fills month_spent / month_count: this month's money in the
-// category and its sub-categories (my share, the same rule as reports and
-// budgets; income categories sum income) and how many transactions it was.
-// Month = the user's timezone (header, else stored, else Asia/Bangkok).
 func (s *Service) decorateMonth(ctx context.Context, userID uuid.UUID, cats []Category, tz string) error {
 	if len(cats) == 0 {
 		return nil

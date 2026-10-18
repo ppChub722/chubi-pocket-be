@@ -1,9 +1,5 @@
 package recurring
 
-// Recurrence (Google Calendar style) and its limits (owner 2026-10-13):
-// a set end ≤ 2 years after the start; no end = a bounded horizon (daily /
-// weekly 3 months, monthly / yearly 1 year) extended by "ต่ออีก".
-
 import (
 	"errors"
 	"sort"
@@ -13,7 +9,6 @@ import (
 var (
 	// ErrInvalidRule — the rule can't produce dates (400 INVALID_RULE).
 	ErrInvalidRule = errors.New("invalid recurrence rule")
-	// ErrEndTooFar — the end is more than 2 years after the start.
 	ErrEndTooFar = errors.New("the end must be at most 2 years after the start")
 )
 
@@ -27,7 +22,6 @@ func lastDay(y int, m time.Month) int {
 	return time.Date(y, m+1, 0, 0, 0, 0, 0, time.UTC).Day()
 }
 
-// isoWeekday — 1 = Monday … 7 = Sunday.
 func isoWeekday(t time.Time) int {
 	wd := int(t.Weekday())
 	if wd == 0 {
@@ -36,8 +30,6 @@ func isoWeekday(t time.Time) int {
 	return wd
 }
 
-// nthWeekday — the nth (1..5, -1 = last) ISO weekday of y/m; ok=false when
-// the month has no such day.
 func nthWeekday(y int, m time.Month, nth, weekday int) (time.Time, bool) {
 	if nth == -1 {
 		d := time.Date(y, m, lastDay(y, m), 0, 0, 0, 0, time.UTC)
@@ -54,8 +46,6 @@ func nthWeekday(y int, m time.Month, nth, weekday int) (time.Time, bool) {
 	return d, d.Month() == m
 }
 
-// occurrences — the rule's dates from its start, up to `until` (inclusive)
-// and at most `limit` of them (0 = no count limit). Sorted; seq = index+1.
 func (r *Rule) occurrences(until time.Time, limit int) []time.Time {
 	out := []time.Time{}
 	add := func(d time.Time) bool {
@@ -148,7 +138,6 @@ func (r *Rule) occurrences(until time.Time, limit int) []time.Time {
 	return out
 }
 
-// horizonSpan — how far a no-end setting is written ahead.
 func (r *Rule) horizonSpan(from time.Time) time.Time {
 	switch r.Freq {
 	case "daily", "weekly":
@@ -157,11 +146,8 @@ func (r *Rule) horizonSpan(from time.Time) time.Time {
 	return from.AddDate(1, 0, 0)
 }
 
-// maxEnd — the latest date a set end may reach.
 func (r *Rule) maxEnd() time.Time { return r.StartDate.AddDate(2, 0, 0) }
 
-// limits computes total_count and generated_until for the rule, from today
-// (the horizon of a no-end rule starts at max(today, start)).
 func (r *Rule) limits(today time.Time) error {
 	switch r.Freq {
 	case "dates":
@@ -220,7 +206,6 @@ func (r *Rule) limits(today time.Time) error {
 	return nil
 }
 
-// applyRule copies an API rule onto the row (validated).
 func (r *Rule) applyRule(in RecurrenceRule) error {
 	switch in.Freq {
 	case "daily", "weekly", "monthly", "yearly", "dates":
@@ -274,7 +259,6 @@ func (r *Rule) applyRule(in RecurrenceRule) error {
 	return nil
 }
 
-// applyEnd copies an API end onto the row.
 func (r *Rule) applyEnd(in *RecurrenceEnd) error {
 	if in == nil {
 		r.EndKind, r.EndDate, r.EndCount = "none", nil, nil
@@ -304,7 +288,6 @@ func (r *Rule) applyEnd(in *RecurrenceEnd) error {
 	return nil
 }
 
-// apiRule / apiEnd — the row as the spec shapes.
 func (r *Rule) apiRule() RecurrenceRule {
 	out := RecurrenceRule{Freq: r.Freq, Interval: r.Interval, Weekdays: []int{}, Dates: []string{}}
 	out.Weekdays = append(out.Weekdays, r.Weekdays...)

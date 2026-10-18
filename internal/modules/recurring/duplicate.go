@@ -8,9 +8,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// Duplicate — POST /recurring/:id/duplicate: a new active setting with the
-// same values (name + " (สำเนา)"), starting today, the same end; its items
-// are generated like a new setting's. Answers with the new setting's page.
 func (s *Service) Duplicate(ctx context.Context, userID, id uuid.UUID, tz string) (*Detail, error) {
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
@@ -33,7 +30,6 @@ func (s *Service) Duplicate(ctx context.Context, userID, id uuid.UUID, tz string
 	cp.Name = copyName(src.Name)
 	cp.Weekdays = append([]int(nil), src.Weekdays...)
 	cp.TagIDs = append([]uuid.UUID(nil), src.TagIDs...)
-	// "dates" settings keep only the dates still to come.
 	if cp.Freq == "dates" {
 		var keep []string
 		cp.Dates = nil
@@ -74,7 +70,6 @@ func copyName(n string) string {
 	return string(r) + suffix
 }
 
-// POST /v1/recurring/:id/duplicate
 func (h *Handler) Duplicate(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {

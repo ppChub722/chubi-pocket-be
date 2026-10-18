@@ -131,8 +131,6 @@ func errCode(raw []byte) string {
 	return e.Error.Code
 }
 
-// The mockup: a trip goal in 2 wallets, a car goal, spare money; move
-// largest-first, the red over-balance state, close back to the wallets.
 func TestSavingsNotebook(t *testing.T) {
 	f := newGoalFix(t)
 	dl := f.today.AddDate(0, 5, 0).Format(dateLayout)
@@ -165,7 +163,6 @@ func TestSavingsNotebook(t *testing.T) {
 		t.Errorf("spare = %+v", w.Spare)
 	}
 
-	// Saving into a wallet that doesn't track its balance.
 	raw := f.call("POST", "/saving-entries", "", map[string]any{"kind": "save", "amount": 10, "wallet_id": f.untrack}, http.StatusBadRequest, nil)
 	if errCode(raw) != "WALLET_NOT_TRACKED" {
 		t.Errorf("untracked = %s", raw)
@@ -187,7 +184,6 @@ func TestSavingsNotebook(t *testing.T) {
 		t.Errorf("trip figures = %+v history %+v", d.Goal, d.History)
 	}
 
-	// Move 45,000 trip → car, largest-first: KBank 40,000 + SCB 5,000.
 	f.call("POST", "/saving-entries", "createSavingEntry", map[string]any{
 		"kind": "move", "amount": 45000, "goal_id": trip, "to_goal_id": car,
 	}, http.StatusCreated, &w)
@@ -195,7 +191,6 @@ func TestSavingsNotebook(t *testing.T) {
 		w.Entries[1].Amount != 5000 || len(w.Goals) != 2 {
 		t.Fatalf("move = %+v", w.Entries)
 	}
-	// Too much / a wrong split.
 	raw = f.call("POST", "/saving-entries", "createSavingEntry", map[string]any{
 		"kind": "withdraw", "amount": 9000, "goal_id": trip,
 	}, http.StatusConflict, nil)
@@ -208,7 +203,6 @@ func TestSavingsNotebook(t *testing.T) {
 	if errCode(raw) != "SPLIT_MISMATCH" {
 		t.Errorf("split mismatch = %s", raw)
 	}
-	// Withdraw from spare back to KBank.
 	f.call("POST", "/saving-entries", "createSavingEntry", map[string]any{
 		"kind": "withdraw", "amount": 500, "goal_id": nil, "note": "coffee",
 	}, http.StatusCreated, &w)
@@ -234,13 +228,9 @@ func TestSavingsNotebook(t *testing.T) {
 		t.Errorf("edit = %+v", w.Entries)
 	}
 
-	// Delete while it holds money → close first.
 	if raw := f.call("DELETE", "/saving-goals/"+car.String(), "", nil, http.StatusConflict, nil); errCode(raw) != "GOAL_HAS_SAVINGS" {
 		t.Errorf("delete car = %s", raw)
 	}
-	// Archive while it holds money is fine (0.4.0-1): the goal keeps its money,
-	// which counts in no total (savings, wallets' saved / available) until it
-	// is restored.
 	var before, after GoalList
 	f.call("GET", "/saving-goals", "listSavingGoals", nil, http.StatusOK, &before)
 	walletsBefore, _ := shared.LoadWalletSavings(f.ctx, f.pool, f.me, []uuid.UUID{f.kbank, f.scb})
@@ -269,7 +259,6 @@ func TestSavingsNotebook(t *testing.T) {
 	if d.Goal.State != StateActive || after.Summary.Saved != before.Summary.Saved {
 		t.Errorf("restored: %s, saved %v (want %v)", d.Goal.State, after.Summary.Saved, before.Summary.Saved)
 	}
-	// Close the car back to the wallets: each part to its own wallet.
 	f.call("POST", "/saving-goals/"+car.String()+"/close", "closeSavingGoal", map[string]any{"to": "wallets"}, http.StatusOK, &w)
 	if len(w.Entries) != 2 || len(w.Goals) != 1 || w.Goals[0].State != StateCompleted || w.Goals[0].SavedAmount != 0 {
 		t.Fatalf("close = %+v / %+v", w.Entries, w.Goals)
@@ -291,7 +280,6 @@ func TestSavingsNotebook(t *testing.T) {
 	if sp.Spare.Amount != 8000 || sp.Entries.Pagination.Total != 2 {
 		t.Errorf("spare page = %+v", sp.Spare)
 	}
-	// A deleted goal (empty) stays in the other side's history, name null.
 	f.call("DELETE", "/saving-goals/"+car.String(), "deleteSavingGoal", nil, http.StatusOK, nil)
 	f.call("GET", "/saving-entries?goal_id="+trip.String(), "listSavingEntries", nil, http.StatusOK, &el)
 	for _, e := range el.Data {
@@ -301,7 +289,6 @@ func TestSavingsNotebook(t *testing.T) {
 	}
 }
 
-// Pace / needed / ETA from dated entries.
 func TestSavingGoalFigures(t *testing.T) {
 	f := newGoalFix(t)
 	dl := f.today.AddDate(0, 3, 0).Format(dateLayout)
@@ -318,11 +305,9 @@ func TestSavingGoalFigures(t *testing.T) {
 	var d GoalDetail
 	f.call("GET", "/saving-goals/"+g.String(), "getSavingGoal", nil, http.StatusOK, &d)
 	gv := d.Goal
-	// 12,000 saved; the last 3 months (this one included) 9,000 → 3,000 / month.
 	if gv.SavedAmount != 12000 || gv.PaceMonthly == nil || *gv.PaceMonthly != 3000 {
 		t.Fatalf("pace = %+v", gv)
 	}
-	// 23,000 left / 3,000 → 8 months → after the deadline: late.
 	if gv.EtaDate == nil || gv.Pace != "late" || gv.LateMonths == nil || *gv.LateMonths != 5 || gv.NeededMonthly == nil {
 		t.Errorf("eta = %v pace %s late %v needed %v", gv.EtaDate, gv.Pace, gv.LateMonths, gv.NeededMonthly)
 	}
@@ -331,10 +316,6 @@ func TestSavingGoalFigures(t *testing.T) {
 	}
 }
 
-// TestSavingsWithoutWallet — goal money may have no wallet: a save with no
-// wallet_id stays wallet-less (the default wallet is NOT used);
-// wallet-less money counts for the goal and for no wallet; deleting
-// a wallet keeps its goal money, unlinked.
 func TestSavingsWithoutWallet(t *testing.T) {
 	f := newGoalFix(t)
 	goal := f.goal("Japan", 80000, nil)
@@ -344,7 +325,6 @@ func TestSavingsWithoutWallet(t *testing.T) {
 		return w
 	}
 
-	// No wallet_id = NO wallet, even when the user has a default wallet.
 	f.exec(`INSERT INTO user_notification_settings (user_id, default_account_id) VALUES ($1, $2)
 		ON CONFLICT (user_id) DO UPDATE SET default_account_id = EXCLUDED.default_account_id`, f.me, f.kbank)
 	w := post(map[string]any{"kind": "save", "amount": 1000, "goal_id": goal})
@@ -358,7 +338,6 @@ func TestSavingsWithoutWallet(t *testing.T) {
 		t.Errorf("by_wallet = %+v", w.GoalPage)
 	}
 
-	// An explicit wallet_id still puts the money in that wallet.
 	w = post(map[string]any{"kind": "save", "amount": 2000, "goal_id": goal, "wallet_id": f.kbank})
 	if w.Entries[0].Wallet == nil || w.Entries[0].Wallet.ID != f.kbank {
 		t.Fatalf("explicit-wallet entry = %+v", w.Entries[0].Wallet)
@@ -370,8 +349,8 @@ func TestSavingsWithoutWallet(t *testing.T) {
 		t.Errorf("goal saved = %v, want 3000", w.Goals[0].SavedAmount)
 	}
 
-	// Withdraw 2500: largest-first takes the wallet's 2000 and 500 of the
-	// wallet-less money; the wallet-less pool can't go below 0 on its own.
+	// Withdraw 2500: largest-first takes the wallet's 2000 and 500 of the wallet-less money; the
+	// wallet-less pool can't go below 0 on its own.
 	var out WriteResult
 	f.call("POST", "/saving-entries", "createSavingEntry", map[string]any{"kind": "withdraw", "amount": 2500, "goal_id": goal},
 		http.StatusCreated, &out)
@@ -381,7 +360,6 @@ func TestSavingsWithoutWallet(t *testing.T) {
 	raw := f.call("POST", "/saving-entries", "", map[string]any{"kind": "withdraw", "amount": 600, "goal_id": goal}, http.StatusConflict, nil)
 	_ = raw
 
-	// The wallet's deletion keeps goal money (FK SET NULL).
 	f.exec(`UPDATE saving_entries SET account_id = NULL WHERE account_id = $1`, f.kbank)
 	var g GoalDetail
 	f.call("GET", "/saving-goals/"+goal.String(), "getSavingGoal", nil, http.StatusOK, &g)
@@ -390,8 +368,6 @@ func TestSavingsWithoutWallet(t *testing.T) {
 	}
 }
 
-// TestGoalMonthNumbersAndAutoSave — the goal's month plan / saved / short and
-// status, the list summary, and the auto-save endpoints.
 func TestGoalMonthNumbersAndAutoSave(t *testing.T) {
 	f := newGoalFix(t)
 	dl := f.today.AddDate(0, 5, 0).Format(dateLayout)
@@ -404,7 +380,6 @@ func TestGoalMonthNumbersAndAutoSave(t *testing.T) {
 	if g.MonthSaved != 10000 || g.MonthPlan == nil || g.MonthShort == nil || *g.MonthShort != round2(*g.MonthPlan-10000) && *g.MonthShort != 0 || g.AutoSave != nil {
 		t.Fatalf("goal month numbers = %+v", g)
 	}
-	// An auto-saving amount becomes the plan.
 	f.call("PUT", "/saving-goals/"+goal.String()+"/auto-save", "setGoalAutoSave",
 		map[string]any{"amount": 15000, "day": 31, "account_id": f.kbank}, http.StatusOK, &d)
 	g = d.Goal
@@ -433,8 +408,6 @@ func TestGoalMonthNumbersAndAutoSave(t *testing.T) {
 	}
 }
 
-// A goal with no target (open-ended, 0.4.0-1): no %, remaining, milestones,
-// ETA or status; its plan comes only from auto-saving and it is never short.
 func TestOpenEndedGoal(t *testing.T) {
 	f := newGoalFix(t)
 	var d GoalDetail
@@ -458,7 +431,6 @@ func TestOpenEndedGoal(t *testing.T) {
 			t.Errorf("history plan line = %+v", p)
 		}
 	}
-	// A goal with a target next to it: only that one counts in the month card.
 	dl := f.today.AddDate(0, 5, 0).Format(dateLayout)
 	trip := f.goal("Trip", 50000, &dl)
 	var l GoalList
@@ -471,7 +443,6 @@ func TestOpenEndedGoal(t *testing.T) {
 		t.Errorf("summary leaves open-ended out = %+v", l.Summary)
 	}
 	_ = trip
-	// A target turns it into a normal goal; null clears it again.
 	f.call("PUT", "/saving-goals/"+kid.String(), "updateSavingGoal", map[string]any{"target_amount": 10000}, http.StatusOK, &d)
 	if d.Goal.TargetAmount == nil || *d.Goal.ProgressPct != 20 || d.Goal.Group != nil || d.Goal.MonthShort == nil {
 		t.Errorf("with a target = %+v", d.Goal)

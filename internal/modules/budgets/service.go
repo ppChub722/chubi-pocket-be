@@ -27,8 +27,6 @@ type Service struct {
 
 func NewService(store *Store) *Service { return &Service{store: store} }
 
-// ResolveTimezone — X-Timezone header → user_preferences.timezone →
-// Asia/Bangkok (also used by the dashboard and /me).
 func (s *Service) ResolveTimezone(ctx context.Context, userID uuid.UUID, headerTZ string) (*time.Location, string, error) {
 	stored, err := s.store.userTimezone(ctx, userID)
 	if err != nil {
@@ -69,10 +67,6 @@ func dstr(t *time.Time) *string {
 	return &s
 }
 
-// --- periods ---
-
-// loadPeriods — the budget's stored periods, oldest first; writes the
-// ones that started since (a new period begins on read).
 func (s *Service) loadPeriods(ctx context.Context, b *Budget, today time.Time) ([]*periodRow, error) {
 	rows, err := s.store.periods(ctx, s.store.db, b.ID, `ORDER BY start_date`)
 	if err != nil {
@@ -100,8 +94,6 @@ func (s *Service) loadPeriods(ctx context.Context, b *Budget, today time.Time) (
 	return s.store.periods(ctx, s.store.db, b.ID, `ORDER BY start_date`)
 }
 
-// currentIndex — the period the budget is shown at: today's (active), the
-// last (ended / archived), the first (not started).
 func currentIndex(rows []*periodRow, state string, today time.Time) int {
 	if len(rows) == 0 {
 		return -1
@@ -120,7 +112,6 @@ func currentIndex(rows []*periodRow, state string, today time.Time) int {
 	return len(rows) - 1
 }
 
-// periodIndexOf — the period containing d (-1: none).
 func periodIndexOf(rows []*periodRow, d time.Time) int {
 	for i := len(rows) - 1; i >= 0; i-- {
 		r := rows[i]
@@ -134,14 +125,11 @@ func periodIndexOf(rows []*periodRow, d time.Time) int {
 	return -1
 }
 
-// figures — the counted rows of one period.
 type figures struct {
 	used, expected float64
 	rows           []countRow
 }
 
-// forecastOf — the period dashboard (current & active only; else the
-// history fields alone).
 func forecastOf(r *periodRow, f figures, today time.Time, live bool) (Forecast, bool) {
 	out := Forecast{RemainingAfterExpected: round2(r.Amount - f.used - f.expected), Available: round2(r.Amount - f.used)}
 	if !live {
@@ -172,7 +160,6 @@ func forecastOf(r *periodRow, f figures, today time.Time, live bool) (Forecast, 
 		return dstr(&d)
 	}
 	if r.End == nil {
-		// Open-ended: averages and when it runs out.
 		out.AvgMonthly = fptr(round2(avg * 30))
 		out.ForecastOverDate = overDate(nil)
 		var month float64
@@ -204,7 +191,6 @@ func forecastOf(r *periodRow, f figures, today time.Time, live bool) (Forecast, 
 	return out, end > r.Amount+0.005
 }
 
-// periodView — the API period.
 func periodView(b *Budget, r *periodRow, f figures, current bool, today time.Time, pace bool) Period {
 	p := Period{
 		ID: r.ID, Seq: r.Seq, Start: r.Start.Format(dateLayout), End: dstr(r.End), Amount: r.Amount,
@@ -235,8 +221,6 @@ func periodView(b *Budget, r *periodRow, f figures, current bool, today time.Tim
 	}
 	return p
 }
-
-// --- views ---
 
 type refs struct {
 	cats    map[uuid.UUID]shared.CategoryRef
@@ -373,7 +357,6 @@ func itemView(c countRow, rf *refs, reason func(countRow) string) Item {
 	return it
 }
 
-// sortItems — expected first (soonest first), then used (newest first).
 func sortItems(rows []countRow) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
@@ -397,8 +380,6 @@ func sortItems(rows []countRow) {
 	})
 }
 
-// periodFigures collects the rows of periods [lo, hi] (indexes into rows)
-// in one query and buckets them; expected only for period `cur` when live.
 func (s *Service) periodFigures(ctx context.Context, b *Budget, prs []*periodRow, lo, hi, cur int, live bool, today time.Time) (map[int]*figures, error) {
 	w := window{From: prs[lo].Start}
 	if prs[hi].End != nil {
@@ -445,8 +426,6 @@ func (s *Service) periodFigures(ctx context.Context, b *Budget, prs []*periodRow
 	}
 	return out, nil
 }
-
-// --- reads ---
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, health, tz string) (*List, error) {
 	today, err := s.today(ctx, userID, tz)
@@ -568,7 +547,6 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, he
 	return out, nil
 }
 
-// Totals — the Home tile / More budgets_summary.
 func (s *Service) Totals(ctx context.Context, userID uuid.UUID, tz string) (*Totals, error) {
 	l, err := s.List(ctx, userID, "active", "", "", tz)
 	if err != nil {
@@ -593,7 +571,6 @@ func (s *Service) Totals(ctx context.Context, userID uuid.UUID, tz string) (*Tot
 	return out, nil
 }
 
-// detail — the page at period periodID (nil = the current one).
 func (s *Service) detail(ctx context.Context, b *Budget, periodID *uuid.UUID, today time.Time) (*Detail, error) {
 	base, err := s.store.baseSeq(ctx, s.store.db, b)
 	if err != nil {
@@ -617,7 +594,6 @@ func (s *Service) detail(ctx context.Context, b *Budget, periodID *uuid.UUID, to
 			return nil, ErrPeriodNotFound
 		}
 	}
-	// One query: the recent periods, the viewed one and the ones before it.
 	lo := len(prs) - recentPeriods
 	if v := view - historyPeriods; v < lo {
 		lo = v
@@ -655,7 +631,6 @@ func (s *Service) detail(ctx context.Context, b *Budget, periodID *uuid.UUID, to
 		Budget:   budgetView(b, state, periodView(b, prs[view], f, view == cur, today, pace), rf),
 		Forecast: fc, BySource: []SourceRow{}, ByCategory: []CategoryRow{},
 	}
-	// By source / by category.
 	src := map[string]*SourceRow{}
 	cats := map[uuid.UUID]*CategoryRow{}
 	var noCat *CategoryRow
@@ -706,7 +681,6 @@ func (s *Service) detail(ctx context.Context, b *Budget, periodID *uuid.UUID, to
 			out.ByCategory[i].Pct = int(math.Round(out.ByCategory[i].Amount / f.used * 100))
 		}
 	}
-	// The newest periods.
 	out.Periods.Data = []Period{}
 	for i := len(prs) - 1; i >= 0 && len(out.Periods.Data) < recentPeriods; i-- {
 		g := figs[i]
@@ -720,7 +694,6 @@ func (s *Service) detail(ctx context.Context, b *Budget, periodID *uuid.UUID, to
 		out.Periods.Data = append(out.Periods.Data, periodView(b, prs[i], *g, i == cur, today, pace))
 	}
 	out.Periods.HasMore = len(prs) > recentPeriods
-	// The first page of items.
 	reason, err := s.reasoner(ctx, b)
 	if err != nil {
 		return nil, err
@@ -790,7 +763,6 @@ func (s *Service) Periods(ctx context.Context, userID, id uuid.UUID, page, perPa
 	}
 	cur := currentIndex(prs, state, today)
 	out := &PeriodList{Data: []Period{}, Pagination: shared.NewPage(page, perPage, len(prs))}
-	// Newest first: page p covers indexes [n-p*pp, n-(p-1)*pp).
 	hi := len(prs) - 1 - (page-1)*perPage
 	lo := hi - perPage + 1
 	if lo < 0 {
@@ -880,12 +852,8 @@ func (s *Service) Items(ctx context.Context, userID, id uuid.UUID, periodID *uui
 	return &out, nil
 }
 
-// --- writes ---
-
 func parseDate(s string) (time.Time, error) { return time.Parse(dateLayout, s) }
 
-// apply copies the request onto b (validated). Returns whether the amount
-// and the time setup changed.
 func apply(b *Budget, r *Request, creating bool) (amount, timing bool, err error) {
 	if creating || r.has("name") {
 		if r.Name == nil {
@@ -963,7 +931,6 @@ func apply(b *Budget, r *Request, creating bool) (amount, timing bool, err error
 			return false, false, ErrValidation
 		}
 	}
-	// Time.
 	if creating || r.has("recurring") {
 		rec := r.Recurring != nil && *r.Recurring
 		timing = timing || rec != b.Recurring
@@ -1103,7 +1070,6 @@ func (s *Service) write(ctx context.Context, userID, id uuid.UUID, tz string, fn
 	return s.Get(ctx, userID, id, periodID, tz, false)
 }
 
-// Update — PUT /budgets/:id (the setup).
 func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, r *Request, tz string) (*Detail, error) {
 	if r.Apply != "" && r.Apply != "following" && r.Apply != "all" {
 		return nil, ErrValidation
@@ -1114,8 +1080,6 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, r *Request, 
 		if err != nil {
 			return nil, err
 		}
-		// "ทุกรอบ" with a rule: every period from the start, even when an
-		// earlier "this and following" already changed the rule.
 		timing = timing || (r.has("rule") && r.Apply == "all")
 		if r.has("scope") {
 			if err := s.store.checkScope(ctx, tx, userID, b); err != nil {
@@ -1123,7 +1087,6 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, r *Request, 
 			}
 		}
 		all := r.Apply == "all" || !b.Recurring || !old.Recurring
-		// Where "this and following" starts: the period shown now.
 		base, err := s.store.baseSeq(ctx, tx, &old)
 		if err != nil {
 			return nil, err
@@ -1159,7 +1122,6 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, r *Request, 
 	})
 }
 
-// UpdatePeriod — PUT /budgets/:id/periods/:period_id ("เฉพาะรอบนี้").
 func (s *Service) UpdatePeriod(ctx context.Context, userID, id, periodID uuid.UUID, r *PeriodRequest, tz string) (*Detail, error) {
 	return s.write(ctx, userID, id, tz, func(tx pgx.Tx, b *Budget, _ time.Time) (*uuid.UUID, error) {
 		p, err := scanPeriod(tx.QueryRow(ctx, `SELECT `+periodColumns+` FROM budget_periods WHERE id = $1 AND budget_id = $2 FOR UPDATE`,
@@ -1200,7 +1162,6 @@ func (s *Service) transition(ctx context.Context, userID, id uuid.UUID, tz strin
 	})
 }
 
-// Close — ปิดงบ: counting stops after today.
 func (s *Service) Close(ctx context.Context, userID, id uuid.UUID, tz string) (*Detail, error) {
 	return s.transition(ctx, userID, id, tz, func(b *Budget, state string, today time.Time) error {
 		if state != StateActive {
@@ -1242,8 +1203,6 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	return nil
 }
 
-// healthMatches — the list's `health` filter on a period status: normal =
-// ok or pace, near = warn, over = over ("" = everything).
 func healthMatches(health, status string) bool {
 	switch health {
 	case "normal":

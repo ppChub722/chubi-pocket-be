@@ -1,17 +1,5 @@
 package budgets
 
-// Budgets v2 (0.3.1-10, owner mockup 2026-10-13). A budget is a NAMED
-// personal tracker:
-//   - SCOPE (free; budgets may overlap): everything, or any mix of
-//     categories (± sub-categories), tag NAMES and wallets — a row counts
-//     when it matches ANY of them;
-//   - TIME: recurring ("งบระยะยาว", periods from a rule; each period is an
-//     instance with its own amount / note) or one range (fixed, or open
-//     until ปิดงบ);
-//   - WHAT COUNTS (expense side, my share): USED = my transactions (normal /
-//     recurring-linked) + my share of event bills (once); EXPECTED (current
-//     period only) = upcoming recurring items + pending drafts.
-
 import (
 	"time"
 
@@ -22,13 +10,11 @@ import (
 
 const dateLayout = "2006-01-02"
 
-// Status values (stored).
 const (
 	StatusActive   = "active"
 	StatusArchived = "archived"
 )
 
-// States (derived).
 const (
 	StateUpcoming = "upcoming"
 	StateActive   = "active"
@@ -36,7 +22,6 @@ const (
 	StateArchived = "archived"
 )
 
-// Period statuses.
 const (
 	PeriodOK   = "ok"
 	PeriodPace = "pace"
@@ -44,7 +29,6 @@ const (
 	PeriodOver = "over"
 )
 
-// Sources of what a budget counts.
 const (
 	SourceNormal    = "normal"
 	SourceRecurring = "recurring"
@@ -55,13 +39,11 @@ const (
 
 const defaultWarnPct = 80
 
-// scopeCat — one category of the scope.
 type scopeCat struct {
 	ID              uuid.UUID
 	IncludeChildren bool
 }
 
-// Budget — the budgets row + its scope lists.
 type Budget struct {
 	ID          uuid.UUID
 	UserID      uuid.UUID
@@ -89,7 +71,6 @@ type Budget struct {
 	Wallets     []uuid.UUID
 }
 
-// periodRow — a budget_periods row.
 type periodRow struct {
 	ID         uuid.UUID
 	Seq        int
@@ -100,14 +81,11 @@ type periodRow struct {
 	Note       *string
 }
 
-// --- API shapes (spec schemas Budget*) ---
-
 type ScopeCategory struct {
 	Category        shared.CategoryRef `json:"category"`
 	IncludeChildren bool               `json:"include_children"`
 }
 
-// Scope — spec BudgetScope.
 type Scope struct {
 	All        bool                `json:"all"`
 	Categories []ScopeCategory     `json:"categories"`
@@ -115,20 +93,17 @@ type Scope struct {
 	Wallets    []shared.AccountRef `json:"wallets"`
 }
 
-// Rule — spec BudgetRule.
 type Rule struct {
 	Freq     string `json:"freq"`
 	Interval int    `json:"interval"`
 }
 
-// End — spec RecurrenceEnd.
 type End struct {
 	Kind  string  `json:"kind"`
 	Date  *string `json:"date"`
 	Count *int    `json:"count"`
 }
 
-// Period — spec BudgetPeriod.
 type Period struct {
 	ID         uuid.UUID `json:"id"`
 	Seq        int       `json:"seq"`
@@ -147,12 +122,7 @@ type Period struct {
 	Status     string    `json:"status"`
 	Tone       string    `json:"tone"`
 	DaysLeft   *int      `json:"days_left"`
-	// PacePct — elapsed / total days of the current dated period (the pace tick);
-	// null for an open-ended or non-current period.
 	PacePct *int `json:"pace_pct"`
-	// OnPace — the forecast says this period will end over its amount (the
-	// "on pace to exceed" row badge); independent of status (a warn period can
-	// be on pace too).
 	OnPace bool `json:"on_pace_to_exceed"`
 }
 
@@ -163,7 +133,6 @@ type Actions struct {
 	Restore bool `json:"restore"`
 }
 
-// View — spec Budget.
 type View struct {
 	ID          uuid.UUID        `json:"id"`
 	Name        string           `json:"name"`
@@ -185,7 +154,6 @@ type View struct {
 	UpdatedAt   time.Time        `json:"updated_at"`
 }
 
-// ListSummary — spec BudgetListSummary.
 type ListSummary struct {
 	ActiveCount   int `json:"active_count"`
 	OverCount     int `json:"over_count"`
@@ -194,8 +162,6 @@ type ListSummary struct {
 	EndedCount    int `json:"ended_count"`
 	ArchivedCount int `json:"archived_count"`
 
-	// The summary card (spec BudgetListSummary): over the active budgets, each at
-	// its current period; used counts a transaction once across overlapping budgets.
 	TotalLimit     float64      `json:"total_limit"`
 	TotalUsed      float64      `json:"total_used"`
 	TotalRemaining float64      `json:"total_remaining"`
@@ -203,13 +169,11 @@ type ListSummary struct {
 	Counts         HealthCounts `json:"counts"`
 }
 
-// List — spec BudgetList.
 type List struct {
 	Summary ListSummary `json:"summary"`
 	Data    []View      `json:"data"`
 }
 
-// Forecast — spec BudgetForecast.
 type Forecast struct {
 	ElapsedDays            *int     `json:"elapsed_days"`
 	TotalDays              *int     `json:"total_days"`
@@ -223,16 +187,12 @@ type Forecast struct {
 	ThisMonth              *float64 `json:"this_month"`
 	HistoryAvg             *float64 `json:"history_avg"`
 	HistoryCount           int      `json:"history_count"`
-	// 0.4.0 detail numbers: available = limit − used; projected_end = forecast_end;
-	// days_left (today included) and pace_pct = elapsed / total days (the pace
-	// tick); the last three are null for an open-ended or non-current period.
 	Available    float64  `json:"available"`
 	ProjectedEnd *float64 `json:"projected_end"`
 	DaysLeft     *int     `json:"days_left"`
 	PacePct      *int     `json:"pace_pct"`
 }
 
-// SourceRow — spec BudgetSourceRow.
 type SourceRow struct {
 	Source   string  `json:"source"`
 	CountsAs string  `json:"counts_as"`
@@ -240,14 +200,12 @@ type SourceRow struct {
 	Amount   float64 `json:"amount"`
 }
 
-// CategoryRow — spec BudgetCategoryRow.
 type CategoryRow struct {
 	Category *shared.CategoryRef `json:"category"`
 	Amount   float64             `json:"amount"`
 	Pct      int                 `json:"pct"`
 }
 
-// Item — spec BudgetItem.
 type Item struct {
 	Kind        string                    `json:"kind"`
 	ID          uuid.UUID                 `json:"id"`
@@ -261,7 +219,6 @@ type Item struct {
 	Tags        []string                  `json:"tags"`
 	Event       *shared.EventRef          `json:"event"`
 	Recurring   *shared.RecurringItemLink `json:"recurring"`
-	// Reason — why the row counts here: all | category | sub_category | tag | wallet.
 	Reason string `json:"reason"`
 }
 
@@ -280,7 +237,6 @@ type RecentPeriods struct {
 	HasMore bool     `json:"has_more"`
 }
 
-// Detail — spec BudgetDetail.
 type Detail struct {
 	Budget     View          `json:"budget"`
 	Forecast   Forecast      `json:"forecast"`
@@ -288,12 +244,9 @@ type Detail struct {
 	ByCategory []CategoryRow `json:"by_category"`
 	Periods    RecentPeriods `json:"periods"`
 	Items      ItemList      `json:"items"`
-	// DeletePreview — only with ?include=delete_preview, else null.
 	DeletePreview *DeletePreview `json:"delete_preview"`
 }
 
-// Totals — the Home budgets tile / More budgets_summary: every active,
-// started budget at its current period.
 type Totals struct {
 	Count          int
 	TotalBudget    float64
@@ -302,14 +255,11 @@ type Totals struct {
 	OverLimitCount int
 }
 
-// --- requests ---
-
 type ScopeCategoryInput struct {
 	ID              uuid.UUID `json:"id"`
 	IncludeChildren *bool     `json:"include_children"`
 }
 
-// ScopeInput — spec BudgetScopeInput.
 type ScopeInput struct {
 	All        bool                 `json:"all"`
 	Categories []ScopeCategoryInput `json:"categories"`
@@ -322,8 +272,6 @@ type RuleInput struct {
 	Interval int    `json:"interval"`
 }
 
-// Request — create / update body (spec BudgetCreateRequest /
-// BudgetUpdateRequest); presence filled by the handler.
 type Request struct {
 	Name        *string          `json:"name"`
 	Description *string          `json:"description"`
@@ -343,7 +291,6 @@ type Request struct {
 
 func (r *Request) has(k string) bool { return r.present[k] }
 
-// PeriodRequest — spec BudgetPeriodUpdateRequest.
 type PeriodRequest struct {
 	Amount *float64 `json:"amount"`
 	Note   *string  `json:"note"`
@@ -351,7 +298,6 @@ type PeriodRequest struct {
 	present map[string]bool
 }
 
-// HealthCounts — ok + near + over = all (the active budgets).
 type HealthCounts struct {
 	All  int `json:"all"`
 	OK   int `json:"ok"`
@@ -359,7 +305,6 @@ type HealthCounts struct {
 	Over int `json:"over"`
 }
 
-// DeletePreview — what deleting the budget removes. Transactions are never touched.
 type DeletePreview struct {
 	Periods           int `json:"periods"`
 	OverriddenPeriods int `json:"overridden_periods"` // periods with their own amount

@@ -23,7 +23,6 @@ func NewHandler(s *Service) *Handler {
 	return &Handler{service: s}
 }
 
-// POST /v1/accounts
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -45,7 +44,6 @@ func (h *Handler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, a)
 }
 
-// GET /v1/accounts
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -68,7 +66,6 @@ func (h *Handler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// GET /v1/accounts/:id
 func (h *Handler) Get(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -92,7 +89,6 @@ func (h *Handler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, a)
 }
 
-// PUT /v1/accounts/:id
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -104,9 +100,6 @@ func (h *Handler) Update(c *gin.Context) {
 		return
 	}
 
-	// Reject `balance` in body explicitly per spec §3.4. ShouldBindBodyWith
-	// caches the body so we can probe for the field name and then bind to
-	// the typed struct without re-reading the request.
 	var peek map[string]any
 	if err := c.ShouldBindBodyWith(&peek, binding.JSON); err != nil {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
@@ -130,8 +123,6 @@ func (h *Handler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, a)
 }
 
-// POST /v1/accounts/:id/identifiers — append one identifier
-// ({kind, value, bank_code?}); answers the whole account. Owner only.
 func (h *Handler) AddIdentifier(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -155,7 +146,6 @@ func (h *Handler) AddIdentifier(c *gin.Context) {
 	c.JSON(http.StatusOK, a)
 }
 
-// POST /v1/accounts/:id/adjust-balance
 func (h *Handler) AdjustBalance(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -185,7 +175,6 @@ func (h *Handler) AdjustBalance(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
-// POST /v1/accounts/:id/restore (owner only)
 func (h *Handler) Restore(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -203,8 +192,6 @@ func (h *Handler) Restore(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, a)
 }
-
-// --- Helpers ---
 
 func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 	id, err := uuid.Parse(c.Param("id"))
@@ -266,7 +253,6 @@ func mapServiceError(c *gin.Context, err error) {
 	}
 }
 
-// DELETE /v1/accounts/:id (0.3.3: a real delete; archive = POST /archive)
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -285,8 +271,6 @@ func (h *Handler) Delete(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/accounts/:id/archive (owner only) — hides the wallet, takes it
-// out of every calculation and makes it read-only until restored.
 func (h *Handler) Archive(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {

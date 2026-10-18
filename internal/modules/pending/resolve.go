@@ -8,7 +8,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// Missing keys (spec DraftResolved.missing).
 const (
 	missingAccount    = "account_id"
 	missingTransferTo = "transfer_to_account_id"
@@ -19,10 +18,6 @@ const (
 	missingGoal       = "goal_id"
 )
 
-// ResolveDrafts resolves the ids of every draft with ONE query per kind
-// (wallets, categories, events, tags, contacts), whatever the number of
-// drafts. out[i] belongs to drafts[i]. A dangling id is null in the result
-// and its draft key is listed in Missing.
 func ResolveDrafts(ctx context.Context, q shared.Querier, userID uuid.UUID, drafts []Draft) ([]DraftResolved, error) {
 	var accIDs, catIDs, eventIDs, tagIDs, contactIDs, goalIDs []uuid.UUID
 	for _, d := range drafts {
@@ -142,7 +137,6 @@ func ResolveDrafts(ctx context.Context, q shared.Querier, userID uuid.UUID, draf
 	return out, nil
 }
 
-// ResolveRows fills Resolved on every row (one batch for the whole slice).
 func ResolveRows(ctx context.Context, q shared.Querier, userID uuid.UUID, rows []PendingTransaction) error {
 	drafts := make([]Draft, len(rows))
 	for i := range rows {
@@ -159,14 +153,10 @@ func ResolveRows(ctx context.Context, q shared.Querier, userID uuid.UUID, rows [
 	return nil
 }
 
-// Resolver — resolves drafts for a user against a pool; what the slip /
-// text import (another package) uses for its `resolved` blocks.
 type Resolver struct{ db shared.Querier }
 
-// NewResolver — db is the pool.
 func NewResolver(db shared.Querier) *Resolver { return &Resolver{db: db} }
 
-// Resolve — see ResolveDrafts.
 func (r *Resolver) Resolve(ctx context.Context, userID uuid.UUID, drafts []Draft) ([]DraftResolved, error) {
 	return ResolveDrafts(ctx, r.db, userID, drafts)
 }

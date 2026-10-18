@@ -23,7 +23,6 @@ func NewHandler(s *Service) *Handler {
 	return &Handler{service: s}
 }
 
-// POST /v1/contacts
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -45,7 +44,6 @@ func (h *Handler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, res)
 }
 
-// GET /v1/contacts?status=&linked=&search=
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -74,7 +72,6 @@ func (h *Handler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, ListResponse{Data: out})
 }
 
-// GET /v1/contacts/:id
 func (h *Handler) Get(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -93,7 +90,6 @@ func (h *Handler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// PUT /v1/contacts/:id
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -117,7 +113,6 @@ func (h *Handler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/contacts/:id/archive
 func (h *Handler) Archive(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -136,7 +131,6 @@ func (h *Handler) Archive(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/contacts/:id/restore
 func (h *Handler) Restore(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -155,7 +149,6 @@ func (h *Handler) Restore(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// DELETE /v1/contacts/:id
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -174,7 +167,6 @@ func (h *Handler) Delete(c *gin.Context) {
 	c.JSON(http.StatusOK, DeleteContactResult{ID: id, SplitsRestored: splitsRestored})
 }
 
-// POST /v1/contacts/:id/absorb
 func (h *Handler) Absorb(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -198,7 +190,6 @@ func (h *Handler) Absorb(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/contacts/:id/request-link
 func (h *Handler) RequestLink(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -217,7 +208,6 @@ func (h *Handler) RequestLink(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/contacts/link-requests/:notification_id/accept
 func (h *Handler) AcceptLinkRequest(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -237,7 +227,6 @@ func (h *Handler) AcceptLinkRequest(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/contacts/link-requests/:notification_id/reject
 func (h *Handler) RejectLinkRequest(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -257,11 +246,6 @@ func (h *Handler) RejectLinkRequest(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// GET /v1/contacts/link-requests/:notification_id/sender-profile
-//
-// Returns the sender's public profile (display_name, email, icon_code)
-// for pre-filling the create-contact form during the inbox tap flow.
-// Gated to "caller is the recipient and the request is still pending".
 func (h *Handler) SenderProfile(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -281,12 +265,6 @@ func (h *Handler) SenderProfile(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/contacts/link-requests/:notification_id/create-linked-contact
-//
-// Post-accept "no existing contact, create one" path. The notification
-// must already be actioned (Accept was tapped). BE pulls display_name +
-// email from the sender so the contact's snapshot stays correct as a
-// fallback if it's later unlinked.
 func (h *Handler) CreateLinkedContact(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -313,13 +291,6 @@ func (h *Handler) CreateLinkedContact(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/contacts/link-requests/:notification_id/link-existing-contact/:contact_id
-//
-// Post-accept "I already have a contact for them, just wire the link"
-// path. The notification must be actioned; the contact must be caller-
-// owned. display_name + email are NOT touched on the contact (those
-// project from the linked user once linked); phone / description / note / icon are
-// optional B-side updates.
 func (h *Handler) LinkExistingContact(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -351,7 +322,6 @@ func (h *Handler) LinkExistingContact(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// POST /v1/contacts/:id/unlink
 func (h *Handler) Unlink(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -370,7 +340,6 @@ func (h *Handler) Unlink(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// GET /v1/contacts/unlinked-names
 func (h *Handler) UnlinkedNames(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -424,7 +393,6 @@ func mapServiceError(c *gin.Context, err error) {
 	}
 }
 
-// includes reports whether the comma-separated ?include= list has name.
 func includes(c *gin.Context, name string) bool {
 	for _, p := range strings.Split(c.Query("include"), ",") {
 		if strings.TrimSpace(p) == name {

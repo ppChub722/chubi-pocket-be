@@ -22,7 +22,6 @@ func mustDoc(t *testing.T) map[string]any {
 	return doc
 }
 
-// lookup walks "#/a/b/c" in doc.
 func lookup(doc map[string]any, ref string) bool {
 	if !strings.HasPrefix(ref, "#/") {
 		return false
@@ -102,8 +101,8 @@ func TestSpecIsValidEnough(t *testing.T) {
 			if tags, _ := op["tags"].([]any); len(tags) == 0 {
 				t.Errorf("%s: no tags", label)
 			}
-			// x-used-by is optional now (the hub reads the FE page-flow registry);
-			// when present it must be well formed.
+			// x-used-by is optional now (the hub reads the FE page-flow registry); when present it must be
+			// well formed.
 			used, _ := op["x-used-by"].([]any)
 			for _, u := range used {
 				m, ok := u.(map[string]any)
@@ -166,8 +165,6 @@ func TestRequiredKeysAreDeclared(t *testing.T) {
 
 var routeLine = regexp.MustCompile(`(?:api|protected)\.(GET|POST|PUT|PATCH|DELETE)\("([^"]+)"`)
 
-// TestCoverage logs the registered routes that have no entry in the spec yet
-// (informational — the coverage note in ai/inbox/be.md is built from it).
 func TestCoverage(t *testing.T) {
 	src, err := os.ReadFile("../../cmd/api/main.go")
 	if err != nil {
@@ -203,13 +200,10 @@ func TestCoverage(t *testing.T) {
 	}
 }
 
-// normID — spec paths use {id} for every single-id path.
 func normID(key string) string {
 	return regexp.MustCompile(`\{[a-z_]+\}`).ReplaceAllStringFunc(key, func(s string) string { return "{id}" })
 }
 
-// TestListOperations logs every operation (method path operationId [tag]) —
-// the list FE-A's page-flow registry is checked against.
 func TestListOperations(t *testing.T) {
 	doc := mustDoc(t)
 	var lines []string
@@ -233,9 +227,6 @@ func TestListOperations(t *testing.T) {
 	}
 }
 
-// TestSpecRoutesAreRegistered — every operation in the spec is a route main.go
-// registers (the spec is the source of truth: a documented endpoint that does
-// not exist is a bug in the code).
 func TestSpecRoutesAreRegistered(t *testing.T) {
 	src, err := os.ReadFile("../../cmd/api/main.go")
 	if err != nil {

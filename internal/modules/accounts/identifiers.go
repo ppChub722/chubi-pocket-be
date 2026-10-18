@@ -7,15 +7,9 @@ import (
 	"strings"
 )
 
-// Identifier — a number a wallet is known by on bank slips (spec 15 §5):
-// its bank account, PromptPay, card. A slip's masked numbers are matched
-// against these to pick the wallet and the direction of the draft.
 type Identifier struct {
 	Kind string `json:"kind"`
-	// Digits, with `x` for digits not known — a full number the user typed,
-	// or a masked one saved from a slip ("xxxxx2780x").
 	Value string `json:"value"`
-	// Bank (3-digit code, e.g. "004" KBank), when known.
 	BankCode string `json:"bank_code,omitempty"`
 }
 
@@ -31,7 +25,6 @@ var identifierKinds = map[string]bool{
 	IdentifierCard: true, IdentifierOther: true,
 }
 
-// MaxIdentifiers per wallet.
 const MaxIdentifiers = 10
 
 var (
@@ -40,14 +33,10 @@ var (
 )
 
 var (
-	// What a user may type: digits, x for hidden ones, and separators.
 	identifierValueRe = regexp.MustCompile(`^[0-9xX×*•\-\s.]+$`)
 	bankCodeRe        = regexp.MustCompile(`^\d{3}$`)
 )
 
-// NormalizeIdentifierValue — separators dropped, every hidden-digit mark
-// (x X × * •) becomes `x`: "123-4-52780-6" → "1234527806",
-// "xxx-x-x2780-x" → "xxxxx2780x".
 func NormalizeIdentifierValue(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -61,9 +50,6 @@ func NormalizeIdentifierValue(s string) string {
 	return b.String()
 }
 
-// NormalizeIdentifiers validates and cleans a wallet's list: known kind,
-// value with at least 4 digits (at most 32 characters), optional 3-digit
-// bank code; identical entries collapse to one. Order is kept.
 func NormalizeIdentifiers(in []Identifier) ([]Identifier, error) {
 	out := make([]Identifier, 0, len(in))
 	seen := map[string]bool{}

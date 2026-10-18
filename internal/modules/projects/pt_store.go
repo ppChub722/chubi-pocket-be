@@ -33,13 +33,6 @@ func scanPT(row pgx.Row) (*ProjectTransaction, error) {
 	return &pt, nil
 }
 
-// InsertPTTx inserts a parent board row plus its split children and tags,
-// atomically. Children inherit type / currency / date / note from the parent.
-//
-// Validation enforced here:
-//   - each split.member_id belongs to the same project, never the payer
-//   - sum(splits.amount) <= parent.amount
-//   - tag_ids are this event's tags (TagNames are found / created by name)
 func (s *Store) InsertPTTx(
 	ctx context.Context, tx pgx.Tx, projectID, recordUserID uuid.UUID,
 	req CreateProjectTransactionRequest,
@@ -108,15 +101,13 @@ func validateSplits(parentMemberID uuid.UUID, parentAmount float64, splits []Pro
 		}
 		sum += s.Amount
 	}
-	// Allow tiny floating-point slack (1 cent).
 	if sum-parentAmount > 0.005 {
 		return ErrSplitsExceedParent
 	}
 	return nil
 }
 
-// assertMembersInProject — every memberID must exist in project_members for
-// the given projectID.
+// assertMembersInProject — every memberID must exist in project_members for the given projectID.
 func (s *Store) assertMembersInProject(
 	ctx context.Context, tx pgx.Tx, projectID uuid.UUID, memberIDs []uuid.UUID,
 ) error {
@@ -165,7 +156,6 @@ func (s *Store) GetPT(ctx context.Context, ptID uuid.UUID) (*ProjectTransaction,
 	return getPT(ctx, s.db, ptID, false)
 }
 
-// GetPTTx locks the row for update.
 func (s *Store) GetPTTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) (*ProjectTransaction, error) {
 	return getPT(ctx, tx, ptID, true)
 }
@@ -204,8 +194,6 @@ func getPT(ctx context.Context, q rowQuerier, ptID uuid.UUID, lock bool) (*Proje
 	return pt, rows.Err()
 }
 
-// UpdatePTTx applies scalar field updates and, when present, full-replaces
-// the children / the tags. Returns the refreshed parent row.
 func (s *Store) UpdatePTTx(
 	ctx context.Context, tx pgx.Tx, projectID, ptID, actorUserID uuid.UUID,
 	req UpdateProjectTransactionRequest,
@@ -238,7 +226,6 @@ func (s *Store) UpdatePTTx(
 	if err != nil {
 		return nil, fmt.Errorf("update PT: %w", err)
 	}
-	// Children follow the parent's date / type (they are the same money).
 	if req.Date != nil {
 		if _, err := tx.Exec(ctx, `UPDATE project_transactions SET date = $2::date
 			WHERE parent_project_transaction_id = $1`, parent.ID, parent.Date); err != nil {
@@ -268,7 +255,6 @@ func (s *Store) UpdatePTTx(
 			}
 		}
 	} else if req.Amount != nil {
-		// The amount shrank under the existing splits.
 		var sum float64
 		if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM project_transactions
 			WHERE parent_project_transaction_id = $1`, parent.ID).Scan(&sum); err != nil {
@@ -281,8 +267,6 @@ func (s *Store) UpdatePTTx(
 	return getPT(ctx, tx, parent.ID, false)
 }
 
-// ToggleMark adds (marked=true) or removes (marked=false) projectMemberID
-// from the marks array. Idempotent in both directions.
 func (s *Store) ToggleMark(
 	ctx context.Context, projectID, ptID, projectMemberID uuid.UUID, marked bool,
 ) error {
@@ -298,9 +282,6 @@ func (s *Store) ToggleMark(
 	return nil
 }
 
-// PTRecipientsForChange returns the linked users with a stake in the given
-// PT (the actor on the parent + all split debtors), MINUS editorUserID.
-// Used to fan-out project_tx_changed notifications.
 func (s *Store) PTRecipientsForChange(
 	ctx context.Context, ptID, editorUserID uuid.UUID,
 ) ([]uuid.UUID, error) {
@@ -327,8 +308,6 @@ func (s *Store) PTRecipientsForChange(
 	return out, rows.Err()
 }
 
-// MemberByUserID resolves the project_member row matching (projectID, userID).
-// Returns ErrNotMember if the caller isn't a member of the project.
 func (s *Store) MemberByUserID(ctx context.Context, projectID, userID uuid.UUID) (*ProjectMember, error) {
 	q := `SELECT ` + memberColumns + ` FROM project_members
 		WHERE project_id = $1 AND user_id = $2`
@@ -342,9 +321,6 @@ func (s *Store) MemberByUserID(ctx context.Context, projectID, userID uuid.UUID)
 	return m, nil
 }
 
-// LoadMemberRefs resolves project members into the shared MemberRef: a
-// linked member shows the user's live profile name / icon, an ad-hoc member
-// its own; is_me = the member is callerUserID.
 func LoadMemberRefs(ctx context.Context, q shared.Querier, callerUserID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]shared.MemberRef, error) {
 	out := map[uuid.UUID]shared.MemberRef{}
 	if len(ids) == 0 {

@@ -7,19 +7,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// DeletePreview — what deleting a wallet does (GET /accounts/:id/delete-preview):
-// the page shows it before the confirm.
 type DeletePreview struct {
-	// Rows that stay in the books, with no wallet (transfers counted apart).
 	Transactions int `json:"transactions"`
-	// Transfer legs on this wallet; the other leg and its wallet are untouched.
 	Transfers int `json:"transfers"`
-	// Opening-balance / adjustment rows: they only drive this wallet, so
-	// they are deleted with it.
 	SystemRowsDeleted int `json:"system_rows_deleted"`
-	// Recurring settings that lose this wallet (they keep running, wallet-less).
 	Recurring int `json:"recurring"`
-	// Goal money moved through this wallet: kept, unlinked from any wallet.
 	SavingEntries SavingEntriesPreview `json:"saving_entries"`
 }
 
@@ -28,7 +20,6 @@ type SavingEntriesPreview struct {
 	Amount float64 `json:"amount"`
 }
 
-// DeleteResult — DELETE /accounts/:id.
 type DeleteResult struct {
 	ID      uuid.UUID     `json:"id"`
 	Deleted DeletePreview `json:"deleted"`
@@ -37,7 +28,6 @@ type DeleteResult struct {
 const systemRowsSQL = `SELECT t.id FROM transactions t JOIN categories c ON c.id = t.category_id
 	WHERE t.account_id = $1 AND c.is_system AND c.system_kind IN ('OPENING_IN', 'OPENING_OUT', 'ADJUST_IN', 'ADJUST_OUT')`
 
-// owned loads the wallet for an owner-only action.
 func (s *Service) ownedForDelete(ctx context.Context, userID, id uuid.UUID) error {
 	a, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
@@ -79,7 +69,6 @@ func (s *Service) previewOn(ctx context.Context, id uuid.UUID) (*DeletePreview, 
 	return p, nil
 }
 
-// DeletePreview — owner only; the same guards as the delete.
 func (s *Service) DeletePreview(ctx context.Context, userID, id uuid.UUID) (*DeletePreview, error) {
 	if err := s.ownedForDelete(ctx, userID, id); err != nil {
 		return nil, err
@@ -87,11 +76,6 @@ func (s *Service) DeletePreview(ctx context.Context, userID, id uuid.UUID) (*Del
 	return s.previewOn(ctx, id)
 }
 
-// Delete removes the wallet for real (owner only, no other active members):
-// its opening / adjustment rows go with it; every other row of every author
-// (both legs of a transfer too) stays with no wallet; recurring settings,
-// goal money and the default-wallet setting lose the link (FK SET NULL);
-// budget wallet scopes and memberships cascade.
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (*DeleteResult, error) {
 	if err := s.ownedForDelete(ctx, userID, id); err != nil {
 		return nil, err
