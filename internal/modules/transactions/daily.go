@@ -55,6 +55,7 @@ func (s *Store) dailySeries(ctx context.Context, where string, args []any, from,
 			COALESCE(SUM(`+share+`) FILTER (WHERE t.type = 'expense'), 0)::float8
 		FROM transactions t
 		WHERE `+where+fmt.Sprintf(` AND t.date BETWEEN $%d AND $%d`, len(a)-1, len(a))+`
+		  AND t.date <= `+shared.TodaySQL("$1")+`
 		GROUP BY t.date`, a...)
 	if err != nil {
 		return nil, fmt.Errorf("daily series: %w", err)

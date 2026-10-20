@@ -569,7 +569,7 @@ func (s *Service) writeResult(ctx context.Context, userID uuid.UUID, entryIDs, g
 		if err != nil {
 			return nil, err
 		}
-		if out.Goals, err = s.goalViews(ctx, userID, goals, today); err != nil {
+		if out.Goals, err = s.goalViews(ctx, userID, goals, today, ""); err != nil {
 			return nil, err
 		}
 	}

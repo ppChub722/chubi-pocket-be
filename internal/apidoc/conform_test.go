@@ -7,7 +7,7 @@ import (
 
 func TestResponseConformance(t *testing.T) {
 	badges := `{"unread_notifications":3,"pending_drafts":0}`
-	counts := `{"categories":1,"tags":1,"contacts":1,"active_events":1,"open_debts":1,"budgets":1,"goals":{"count":1,"saved":10,"in_goals":8,"spare":2,"available":5},"archived":0,"debts_summary":{"owed_to_me":1,"i_owe":0,"net":1,"open_count":1,"owed_to_me_people":1,"i_owe_people":0,"over_30_days_people":0},"budgets_summary":{"total_budget":1,"total_spent":0,"utilization_pct":0,"over_limit_count":0},"recurring":{"active_count":1,"upcoming_count":0}}`
+	counts := `{"categories":1,"tags":1,"contacts":1,"active_events":1,"open_debts":1,"budgets":1,"goals":{"count":1,"saved":10,"in_goals":8,"spare":2,"available":5},"archived":0,"debts_summary":{"owed_to_me":1,"i_owe":0,"net":1,"open_count":1,"owed_to_me_people":1,"i_owe_people":0,"over_30_days_people":0},"budgets_summary":{"total_budget":1,"total_spent":0,"utilization_pct":0,"over_limit_count":0},"recurring":{"active_count":1,"upcoming_count":0,"due_count":0,"needs_amount_count":0}}`
 	if err := Response("getMyCounts", 200, []byte(`{"badges":`+badges+`,"counts":`+counts+`}`)); err != nil {
 		t.Fatalf("valid body rejected: %v", err)
 	}

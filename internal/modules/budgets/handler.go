@@ -232,7 +232,7 @@ func (h *Handler) Items(c *gin.Context) {
 	}
 	source := c.Query("source")
 	switch source {
-	case "", SourceNormal, SourceRecurring, SourceEvent, SourceUpcoming, SourcePending:
+	case "", SourceNormal, SourceRecurring, SourceEvent, SourceUpcoming, SourcePending, SourceFutureTx:
 	default:
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid source", nil)
 		return

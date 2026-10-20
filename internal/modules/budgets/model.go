@@ -35,6 +35,8 @@ const (
 	SourceEvent     = "event"
 	SourceUpcoming  = "upcoming"
 	SourcePending   = "pending"
+	// SourceFutureTx — a future-dated transaction: รอจ่าย until its day.
+	SourceFutureTx = "future_tx"
 )
 
 const defaultWarnPct = 80
@@ -206,20 +208,41 @@ type CategoryRow struct {
 	Pct      int                 `json:"pct"`
 }
 
+// ItemTag is a tag name on a budget item; icon_code is null for a name that is
+// not one of the user's tags (an event or recurring tag).
+type ItemTag struct {
+	Name     string           `json:"name"`
+	IconCode *shared.IconCode `json:"icon_code"`
+}
+
+// ItemRecurring links a budget item to its recurring setting. item_id is null
+// while the occurrence is only computed (no stored row yet).
+type ItemRecurring struct {
+	ItemID    *uuid.UUID           `json:"item_id"`
+	Recurring *shared.RecurringRef `json:"recurring"`
+	Seq       *int                 `json:"seq"`
+	Total     *int                 `json:"total"`
+}
+
 type Item struct {
-	Kind        string                    `json:"kind"`
-	ID          uuid.UUID                 `json:"id"`
-	Source      string                    `json:"source"`
-	CountsAs    string                    `json:"counts_as"`
-	Date        *string                   `json:"date"`
-	Amount      float64                   `json:"amount"`
-	Description *string                   `json:"description"`
-	Category    *shared.CategoryRef       `json:"category"`
-	Account     *shared.AccountRef        `json:"account"`
-	Tags        []string                  `json:"tags"`
-	Event       *shared.EventRef          `json:"event"`
-	Recurring   *shared.RecurringItemLink `json:"recurring"`
-	Reason string `json:"reason"`
+	Kind        string              `json:"kind"`
+	ID          uuid.UUID           `json:"id"`
+	Source      string              `json:"source"`
+	CountsAs    string              `json:"counts_as"`
+	Date        *string             `json:"date"`
+	Amount      float64             `json:"amount"`
+	Description *string             `json:"description"`
+	Category    *shared.CategoryRef `json:"category"`
+	Account     *shared.AccountRef  `json:"account"`
+	Tags        []string            `json:"tags"`
+	TagRefs     []ItemTag           `json:"tag_refs"` // the same tags with their icon
+	Event       *shared.EventRef    `json:"event"`
+	Recurring   *ItemRecurring      `json:"recurring"`
+	// RuleID / Slot name a recurring occurrence (the id of its setting and its
+	// original date); set for the รอจ่าย rows read from computed occurrences.
+	RuleID *uuid.UUID `json:"rule_id"`
+	Slot   *string    `json:"slot"`
+	Reason string     `json:"reason"`
 }
 
 type ItemList struct {

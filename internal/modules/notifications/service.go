@@ -48,6 +48,7 @@ func (s *Service) GetSettings(ctx context.Context, userID uuid.UUID) (*Settings,
 var (
 	mutableTypes = map[string]bool{
 		TypeSplitCreated: true, TypeRecurringDue: true, TypeRecurringEnding: true,
+		TypeRecurringAutoCreated: true,
 		TypeProjectTxRecordedForYou: true, TypeProjectTxChanged: true, TypeProjectAdded: true,
 		TypeSplitChanged: true,
 	}

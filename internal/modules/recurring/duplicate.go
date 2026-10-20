@@ -27,6 +27,9 @@ func (s *Service) Duplicate(ctx context.Context, userID, id uuid.UUID, tz string
 	cp.Status = "active"
 	cp.GeneratedUntil, cp.EndingNotified, cp.TotalCount = nil, false, nil
 	cp.StartDate = today
+	cp.TrackedFrom, cp.DueNotifiedUntil = today, &today
+	yesterday := today.AddDate(0, 0, -1)
+	cp.AutoCreatedUntil = &yesterday
 	cp.Name = copyName(src.Name)
 	cp.Weekdays = append([]int(nil), src.Weekdays...)
 	cp.TagIDs = append([]uuid.UUID(nil), src.TagIDs...)
@@ -50,9 +53,6 @@ func (s *Service) Duplicate(ctx context.Context, userID, id uuid.UUID, tz string
 		return nil, err
 	}
 	if err := saveRuleTx(ctx, tx, &cp); err != nil {
-		return nil, err
-	}
-	if err := s.generateTx(ctx, tx, &cp, cp.StartDate); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {

@@ -729,7 +729,7 @@ func TestAccountPageNumbers(t *testing.T) {
 				t.Errorf("bank = %+v, want in 400 out 200 (the transfer is neither), no due date", a)
 			}
 		case card:
-			if a.CreditUsedPct == nil || *a.CreditUsedPct != 24 || a.CreditAvailable == nil || *a.CreditAvailable != 7600 || a.MonthIn != 0 || a.MonthOut != 0 || a.DueDateNext == nil || a.DaysUntilDue == nil || *a.DaysUntilDue < 0 || *a.DaysUntilDue > 31 {
+			if a.CreditUsedPct == nil || *a.CreditUsedPct != 24 || a.CreditAvailable == nil || *a.CreditAvailable != 7600 || a.MonthIn != 100 || a.MonthOut != 0 || a.DueDateNext == nil || a.DaysUntilDue == nil || *a.DaysUntilDue < 0 || *a.DaysUntilDue > 31 {
 				t.Errorf("card = %+v", a)
 			}
 		}
@@ -741,5 +741,23 @@ func TestAccountPageNumbers(t *testing.T) {
 		fv("saved_total") != 0 || fv("available_total") != 1100 || fv("card_remaining") != 7600 ||
 		len(split) != 1 || split[0].(map[string]any)["type"] != "bank" || split[0].(map[string]any)["pct"] != float64(100) {
 		t.Errorf("totals = %v", tt)
+	}
+
+	// The account summary agrees: on a card the transfer in counts as money in,
+	// on a bank the transfer is neither.
+	for id, want := range map[uuid.UUID][2]float64{card: {100, 0}, bank: {400, 200}} {
+		var got struct {
+			Summary struct {
+				TotalIncome  float64 `json:"total_income"`
+				TotalExpense float64 `json:"total_expense"`
+			} `json:"summary"`
+		}
+		raw := e.call(r, "getAccount", "GET", "/api/v1/accounts/"+id.String()+"?include=summary", nil, http.StatusOK)
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Summary.TotalIncome != want[0] || got.Summary.TotalExpense != want[1] {
+			t.Errorf("summary of %s = %+v, want in %v out %v", id, got.Summary, want[0], want[1])
+		}
 	}
 }

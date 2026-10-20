@@ -468,12 +468,12 @@ func TestDeleteTxWithLinkedBill(t *testing.T) {
 		return f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE project_id = $1 AND parent_project_transaction_id IS NULL`, ev)
 	}
 	keep, tx := mk("Keep")
-	res, err := f.txs.DeleteWrite(context.Background(), f.owner, tx, false)
+	res, err := f.txs.DeleteWrite(context.Background(), f.owner, tx, false, false)
 	if err != nil || res.BillID != nil || bills(keep) != 1 {
 		t.Fatalf("plain delete: %v %+v bills %d", err, res, bills(keep))
 	}
 	drop, tx := mk("Drop")
-	res, err = f.txs.DeleteWrite(context.Background(), f.owner, tx, true)
+	res, err = f.txs.DeleteWrite(context.Background(), f.owner, tx, true, false)
 	if err != nil || res.BillID == nil || bills(drop) != 0 {
 		t.Fatalf("also_delete_link: %v %+v bills %d", err, res, bills(drop))
 	}

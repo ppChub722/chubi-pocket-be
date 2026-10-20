@@ -241,10 +241,12 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		totals Totals
 	)
 	share := shared.ShareAmountExpr("t")
+	// The list shows future-dated rows, the totals count them from their day.
+	due := `t.date <= ` + shared.TodaySQL("$1")
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*),
-		COALESCE(SUM(`+share+`) FILTER (WHERE t.type = 'income'), 0),
-		COALESCE(SUM(`+share+`) FILTER (WHERE t.type = 'expense'), 0),
-		COUNT(*) FILTER (WHERE t.type <> 'transfer')
+		COALESCE(SUM(`+share+`) FILTER (WHERE t.type = 'income' AND `+due+`), 0),
+		COALESCE(SUM(`+share+`) FILTER (WHERE t.type = 'expense' AND `+due+`), 0),
+		COUNT(*) FILTER (WHERE t.type <> 'transfer' AND `+due+`)
 		FROM transactions t WHERE `+where, args...).Scan(&total, &totals.Income, &totals.Expense, &totals.Count)
 	if err != nil {
 		return nil, 0, Totals{}, nil, fmt.Errorf("count: %w", err)

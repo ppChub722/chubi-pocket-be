@@ -18,6 +18,9 @@ func (s *Service) decorateMonth(ctx context.Context, userID uuid.UUID, cats []Ca
 		return err
 	}
 	first, last := shared.MonthBounds(today)
+	if last.After(today) {
+		last = today // a future-dated transaction counts from its day
+	}
 	rows, err := s.store.db.Query(ctx, `
 		SELECT t.category_id, COUNT(*), COALESCE(SUM(`+shared.ShareAmountExpr("t")+`), 0)::float8
 		FROM transactions t

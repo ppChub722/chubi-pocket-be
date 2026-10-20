@@ -97,9 +97,20 @@ func reply(c *gin.Context, status int, out any, err error) {
 
 func mapError(c *gin.Context, err error) {
 	var conflict *ConflictError
+	var link *LinkConflict
 	switch {
 	case errors.As(err, &conflict):
 		response.Fail(c, http.StatusConflict, "ITEM_ALREADY_LINKED", "Some items can't take this action", gin.H{"ids": conflict.IDs})
+	case errors.As(err, &link):
+		response.Fail(c, http.StatusConflict, "ITEM_ALREADY_LINKED", err.Error(), gin.H{"transaction": link.Linked, "other": link.Other})
+	case errors.Is(err, ErrAutoCreateNeedsAmount):
+		response.BadRequest(c, "AUTO_CREATE_NEEDS_AMOUNT", err.Error(), nil)
+	case errors.Is(err, ErrAutoCreateNeedsWallet):
+		response.BadRequest(c, "AUTO_CREATE_NEEDS_WALLET", err.Error(), nil)
+	case errors.Is(err, ErrAmountRequired):
+		response.BadRequest(c, "AMOUNT_REQUIRED", err.Error(), nil)
+	case errors.Is(err, ErrAlreadyRecorded):
+		response.Fail(c, http.StatusConflict, "ALREADY_RECORDED", err.Error(), nil)
 	case errors.Is(err, ErrNotFound):
 		response.NotFound(c, "NOT_FOUND", "Recurring setting not found")
 	case errors.Is(err, ErrTxNotFound):
@@ -236,8 +247,17 @@ func (h *Handler) RuleItems(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid tab", nil)
 		return
 	}
+	var from *time.Time
+	if v := c.Query("from"); v != "" {
+		d, err := time.Parse(dateLayout, v)
+		if err != nil {
+			response.BadRequest(c, "VALIDATION_ERROR", "from must be YYYY-MM-DD", nil)
+			return
+		}
+		from = &d
+	}
 	out, err := h.service.RuleItems(c.Request.Context(), uid, id, tab,
-		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20), tz(c))
+		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20), from, atoiOr(c.Query("months"), 12), tz(c))
 	reply(c, http.StatusOK, out, err)
 }
 
@@ -306,19 +326,26 @@ func (h *Handler) Items(c *gin.Context) {
 	if month != "" {
 		defStatus = "all"
 	}
-	status := c.DefaultQuery("status", defStatus)
+	status := c.Query("status")
+	if status == "" {
+		status = c.DefaultQuery("state", defStatus)
+	}
 	switch status {
-	case StatusUpcoming, StatusNotCreated, StatusPending, StatusDone, StatusArchived, "all":
+	case StatusUpcoming, StatusDue, StatusPending, StatusDone, StatusPaid, StatusSkipped, StatusNotCreated, StatusArchived, "all":
 	default:
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
 		return
 	}
 	kind := c.DefaultQuery("kind", "all")
-	if kind != "all" && kind != "recurring" && kind != "one_off" {
+	if kind != "all" && kind != "recurring" {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid kind", nil)
 		return
 	}
-	out, err := h.service.Items(c.Request.Context(), uid, status, kind, month,
+	ruleID, ok := optionalRuleID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.Items(c.Request.Context(), uid, status, kind, month, ruleID,
 		atoiOr(c.Query("page"), 1), atoiOr(c.Query("per_page"), 20), tz(c))
 	reply(c, http.StatusOK, out, err)
 }
@@ -383,24 +410,6 @@ func nestedFields(f *Fields, keys map[string]json.RawMessage) error {
 	return nil
 }
 
-func (h *Handler) CreateNow(c *gin.Context) {
-	uid, id, ok := userAndID(c)
-	if !ok {
-		return
-	}
-	var req CreateNowRequest
-	keys, ok := bind(c, &req)
-	if !ok {
-		return
-	}
-	if err := nestedFields(req.Fields, keys); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-		return
-	}
-	out, err := h.service.CreateNow(c.Request.Context(), uid, id, req, tz(c))
-	reply(c, http.StatusOK, out, err)
-}
-
 func (h *Handler) ArchiveItem(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {
@@ -419,20 +428,166 @@ func (h *Handler) RestoreItem(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-func (h *Handler) Batch(c *gin.Context) {
-	uid, ok := user(c)
+func optionalRuleID(c *gin.Context) (*uuid.UUID, bool) {
+	v := c.Query("rule_id")
+	if v == "" {
+		return nil, true
+	}
+	id, err := uuid.Parse(v)
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid rule_id", nil)
+		return nil, false
+	}
+	return &id, true
+}
+
+// ruleAndSlot reads /recurring/:id/occurrences/:slot.
+func ruleAndSlot(c *gin.Context) (uuid.UUID, uuid.UUID, time.Time, bool) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return uuid.Nil, uuid.Nil, time.Time{}, false
+	}
+	slot, err := time.Parse(dateLayout, c.Param("slot"))
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "slot must be YYYY-MM-DD", nil)
+		return uuid.Nil, uuid.Nil, time.Time{}, false
+	}
+	return uid, id, slot, true
+}
+
+func (h *Handler) Occurrences(c *gin.Context) {
+	uid, id, ok := userAndID(c)
 	if !ok {
 		return
 	}
-	var req BatchRequest
+	var txDate *time.Time
+	if v := c.Query("tx_date"); v != "" {
+		d, err := time.Parse(dateLayout, v)
+		if err != nil {
+			response.BadRequest(c, "VALIDATION_ERROR", "tx_date must be YYYY-MM-DD", nil)
+			return
+		}
+		txDate = &d
+	}
+	out, err := h.service.Occurrences(c.Request.Context(), uid, id, txDate, atoiOr(c.Query("past"), 3), atoiOr(c.Query("upcoming"), 3), tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) EditOcc(c *gin.Context) {
+	uid, id, slot, ok := ruleAndSlot(c)
+	if !ok {
+		return
+	}
+	var req ItemUpdateRequest
 	keys, ok := bind(c, &req)
 	if !ok {
 		return
 	}
-	if err := nestedFields(req.Fields, keys); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	markFields(&req.Fields, keys)
+	out, err := h.service.EditOcc(c.Request.Context(), uid, id, slot, req, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) ConfirmOcc(c *gin.Context) {
+	uid, id, slot, ok := ruleAndSlot(c)
+	if !ok {
 		return
 	}
-	out, err := h.service.Batch(c.Request.Context(), uid, req, tz(c))
+	var req ConfirmRequest
+	keys, ok := bind(c, &req)
+	if !ok {
+		return
+	}
+	markFields(&req.Fields, keys)
+	out, err := h.service.Confirm(c.Request.Context(), uid, id, slot, req, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) SkipOcc(c *gin.Context) {
+	uid, id, slot, ok := ruleAndSlot(c)
+	if !ok {
+		return
+	}
+	var req SkipRequest
+	if _, ok := bind(c, &req); !ok {
+		return
+	}
+	out, err := h.service.SkipOcc(c.Request.Context(), uid, id, slot, req.DeleteTx, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) RestoreOcc(c *gin.Context) {
+	uid, id, slot, ok := ruleAndSlot(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.RestoreOcc(c.Request.Context(), uid, id, slot, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) MarkPaidOcc(c *gin.Context) {
+	uid, id, slot, ok := ruleAndSlot(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.MarkPaid(c.Request.Context(), uid, id, slot, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) UnmarkPaidOcc(c *gin.Context) {
+	uid, id, slot, ok := ruleAndSlot(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.UnmarkPaid(c.Request.Context(), uid, id, slot, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) LinkOcc(c *gin.Context) {
+	uid, id, slot, ok := ruleAndSlot(c)
+	if !ok {
+		return
+	}
+	var req LinkSlotRequest
+	if _, ok := bind(c, &req); !ok {
+		return
+	}
+	out, err := h.service.LinkOcc(c.Request.Context(), uid, id, slot, req, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) UnlinkOcc(c *gin.Context) {
+	uid, id, slot, ok := ruleAndSlot(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.UnlinkOcc(c.Request.Context(), uid, id, slot, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) ConfirmReady(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.ConfirmReady(c.Request.Context(), uid, id, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) MarkPaidReady(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.MarkPaidReady(c.Request.Context(), uid, id, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) SkipReady(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.SkipReady(c.Request.Context(), uid, id, tz(c))
 	reply(c, http.StatusOK, out, err)
 }

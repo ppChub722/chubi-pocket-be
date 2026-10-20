@@ -193,14 +193,6 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 }
 
 func (s *Service) CreateWrite(ctx context.Context, userID uuid.UUID, req CreateRequest) (*WriteResult, error) {
-	if future, err := s.isFuture(ctx, userID, req.Date); err != nil {
-		return nil, err
-	} else if future {
-		if err := s.validateCreateCommon(req); err != nil {
-			return nil, err
-		}
-		return s.createUpcoming(ctx, userID, req)
-	}
 	res, err := s.Create(ctx, userID, req)
 	if err != nil {
 		return nil, err
@@ -480,17 +472,6 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 }
 
 func (s *Service) UpdateWrite(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (*WriteResult, error) {
-	if req.Date != nil {
-		if future, err := s.isFuture(ctx, userID, *req.Date); err != nil {
-			return nil, err
-		} else if future {
-			current, err := s.store.GetByID(ctx, userID, id)
-			if err != nil {
-				return nil, err
-			}
-			return s.moveToUpcoming(ctx, userID, current, req)
-		}
-	}
 	u, err := s.update(ctx, userID, id, req)
 	if err != nil {
 		return nil, err
@@ -828,7 +809,7 @@ func (s *Service) updateTransferInTx(
 }
 
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
-	_, err := s.delete(ctx, userID, id, false)
+	_, err := s.delete(ctx, userID, id, false, false)
 	return err
 }
 
@@ -840,8 +821,11 @@ type deleted struct {
 	bill      *uuid.UUID
 }
 
-func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID, alsoDeleteLink bool) (*DeleteResult, error) {
-	d, err := s.delete(ctx, userID, id, alsoDeleteLink)
+// DeleteWrite deletes a transaction. alsoDeleteLink also deletes the event bill made from it;
+// skipOccurrence stores the recurring occurrence it records as skipped (without it the occurrence
+// just goes back to due / upcoming).
+func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID, alsoDeleteLink, skipOccurrence bool) (*DeleteResult, error) {
+	d, err := s.delete(ctx, userID, id, alsoDeleteLink, skipOccurrence)
 	if err != nil {
 		return nil, err
 	}
@@ -859,7 +843,7 @@ func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID, alsoDel
 	return out, nil
 }
 
-func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLink bool) (*deleted, error) {
+func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLink, skipOccurrence bool) (*deleted, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -873,12 +857,12 @@ func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLi
 
 	out := &deleted{}
 	// The linked records first: the delete would break their links.
-	if alsoDeleteLink && current.UserID == userID {
-		if s.recurring != nil {
-			if out.item, err = s.recurring.TxDeletingTx(ctx, tx, userID, current.ID); err != nil {
-				return nil, err
-			}
+	if s.recurring != nil {
+		if out.item, err = s.recurring.TxDeletingTx(ctx, tx, userID, current.ID, skipOccurrence); err != nil {
+			return nil, err
 		}
+	}
+	if alsoDeleteLink && current.UserID == userID {
 		if s.billDeleter != nil && current.Type != TypeTransfer {
 			if out.bill, err = s.billDeleter(ctx, tx, userID, current.ID); err != nil {
 				return nil, err
@@ -1050,6 +1034,7 @@ func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequ
 		shared.ReportScopePredicate("t", "$1"),
 		shared.ReportableCategoryPredicate("c"),
 		"t.date >= $2::date", "t.date <= $3::date",
+		"t.date <= " + shared.TodaySQL("$1"), // a future-dated transaction counts from its day
 		"t.type IN ('income','expense')",
 	}
 	args := []any{userID, req.From, req.To}

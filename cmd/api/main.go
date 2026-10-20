@@ -46,6 +46,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/database"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/logger"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 func main() {
@@ -171,6 +172,10 @@ func main() {
 	pendingService.WithSavings(savingGoalsService)
 	recurringService.WithSavings(savingGoalsService)
 
+	budgetsService.WithExpected(recurringService)
+	dashboardService.WithExpected(recurringService)
+	meService.WithExpected(recurringService)
+
 	meService.WithDueCheck(recurringService.DueCheck)
 	dashboardService.WithDueCheck(recurringService.DueCheck)
 	notificationsService.WithDueCheck(recurringService.DueCheck)
@@ -286,6 +291,14 @@ func main() {
 
 		protected := api.Group("/")
 		protected.Use(auth.Middleware(cfg, authStore))
+		// the caller's X-Timezone rides in the request context: every service that works
+		// out "today" (recurring, me, dashboard, budgets) reads it from there
+		protected.Use(func(c *gin.Context) {
+			if tz := c.GetHeader("X-Timezone"); tz != "" {
+				c.Request = c.Request.WithContext(shared.WithHeaderTZ(c.Request.Context(), tz))
+			}
+			c.Next()
+		})
 		protected.Use(datasync.Middleware(dbPool, log))
 		{
 			protected.POST("/auth/logout", authHandler.Logout)
@@ -426,6 +439,8 @@ func main() {
 			protected.DELETE("/saving-entries/:id", savingGoalsHandler.DeleteEntry)
 			protected.PUT("/saving-goals/:id", savingGoalsHandler.Update)
 			protected.DELETE("/saving-goals/:id", savingGoalsHandler.Delete)
+			protected.PUT("/saving-goals/:id/auto-saves", savingGoalsHandler.PutAutoSaves)
+			protected.PUT("/saving-goals/spare/auto-saves", savingGoalsHandler.PutAutoSavesSpare)
 			protected.PUT("/saving-goals/:id/auto-save", savingGoalsHandler.PutAutoSave)
 			protected.DELETE("/saving-goals/:id/auto-save", savingGoalsHandler.DeleteAutoSave)
 			protected.PUT("/saving-goals/spare/auto-save", savingGoalsHandler.PutAutoSaveSpare)
@@ -457,13 +472,23 @@ func main() {
 			protected.POST("/recurring/:id/restore", recurringHandler.Restore)
 			protected.POST("/recurring/:id/extend", recurringHandler.Extend)
 			protected.POST("/recurring/:id/duplicate", recurringHandler.Duplicate)
+			protected.GET("/recurring/:id/occurrences", recurringHandler.Occurrences)
+			protected.POST("/recurring/:id/occurrences/confirm-ready", recurringHandler.ConfirmReady)
+			protected.POST("/recurring/:id/occurrences/mark-paid-ready", recurringHandler.MarkPaidReady)
+			protected.POST("/recurring/:id/occurrences/skip-ready", recurringHandler.SkipReady)
+			protected.PUT("/recurring/:id/occurrences/:slot", recurringHandler.EditOcc)
+			protected.POST("/recurring/:id/occurrences/:slot/confirm", recurringHandler.ConfirmOcc)
+			protected.POST("/recurring/:id/occurrences/:slot/skip", recurringHandler.SkipOcc)
+			protected.POST("/recurring/:id/occurrences/:slot/restore", recurringHandler.RestoreOcc)
+			protected.POST("/recurring/:id/occurrences/:slot/mark-paid", recurringHandler.MarkPaidOcc)
+			protected.POST("/recurring/:id/occurrences/:slot/unmark-paid", recurringHandler.UnmarkPaidOcc)
+			protected.POST("/recurring/:id/occurrences/:slot/link", recurringHandler.LinkOcc)
+			protected.POST("/recurring/:id/occurrences/:slot/unlink", recurringHandler.UnlinkOcc)
 			protected.GET("/recurring-items", recurringHandler.Items)
 			protected.POST("/recurring-items", recurringHandler.CreateItem)
-			protected.POST("/recurring-items/batch", recurringHandler.Batch)
 			protected.GET("/recurring-items/:id", recurringHandler.GetItem)
 			protected.PUT("/recurring-items/:id", recurringHandler.UpdateItem)
 			protected.DELETE("/recurring-items/:id", recurringHandler.DeleteItem)
-			protected.POST("/recurring-items/:id/create", recurringHandler.CreateNow)
 			protected.POST("/recurring-items/:id/link", recurringHandler.Link)
 			protected.POST("/recurring-items/:id/unlink", recurringHandler.Unlink)
 			protected.POST("/recurring-items/:id/archive", recurringHandler.ArchiveItem)

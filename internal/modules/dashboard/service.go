@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -31,9 +32,47 @@ type Service struct {
 	goals        *saving_goals.Service
 	debts        *personal_debts.Service
 	due          shared.DueChecker
+	// expected, when set, supplies the upcoming recurring occurrences; nil keeps
+	// reading the stored recurring items.
+	expected shared.Expecter
 }
 
 func (s *Service) WithDueCheck(fn shared.DueChecker) { s.due = fn }
+
+func (s *Service) WithExpected(e shared.Expecter) *Service { s.expected = e; return s }
+
+// upcomingItems are the recurring occurrences in the next upcomingDays days
+// (after today, not yet due).
+func (s *Service) upcomingItems(ctx context.Context, userID uuid.UUID, today time.Time) ([]upcomingRow, error) {
+	until := today.AddDate(0, 0, upcomingDays)
+	if s.expected == nil {
+		return s.store.UpcomingItems(ctx, userID, today.Format(dateLayout), until.Format(dateLayout))
+	}
+	day := func(t time.Time) time.Time { return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC) }
+	occs, err := s.expected.ExpectedBetween(ctx, userID, day(today.AddDate(0, 0, 1)), day(until))
+	if err != nil {
+		return nil, fmt.Errorf("upcoming expected: %w", err)
+	}
+	out := make([]upcomingRow, 0, len(occs))
+	for _, o := range occs {
+		if o.Due {
+			continue
+		}
+		id, rule, slot := o.RuleID, o.RuleID, o.Slot.Format(dateLayout)
+		if o.ItemID != nil {
+			id = *o.ItemID
+		}
+		name := o.Name
+		if name == "" {
+			name = o.RuleName
+		}
+		out = append(out, upcomingRow{
+			ID: id, Name: name, Type: o.Type, Amount: o.Amount, DueDate: o.Date.Format(dateLayout),
+			IconCode: o.RuleIcon, RuleID: &rule, Slot: &slot,
+		})
+	}
+	return out, nil
+}
 
 func NewService(
 	store *Store,
@@ -107,7 +146,7 @@ func (s *Service) Get(ctx context.Context, userID uuid.UUID, month, headerTZ str
 	var scheduled []upcomingRow
 	g.Go(func() error {
 		var err error
-		scheduled, err = s.store.UpcomingItems(gctx, userID, today.Format(dateLayout), today.AddDate(0, 0, upcomingDays).Format(dateLayout))
+		scheduled, err = s.upcomingItems(gctx, userID, today)
 		return err
 	})
 	if err := g.Wait(); err != nil {
@@ -272,7 +311,7 @@ func buildUpcoming(today time.Time, scheduled []upcomingRow, accts []accounts.Ac
 		up.Items = append(up.Items, UpcomingItem{
 			Kind: KindRecurring, ID: r.ID, Name: r.Name, Type: r.Type, Amount: r.Amount,
 			DueDate: r.DueDate, DaysUntil: days, Overdue: days < 0,
-			IconCode: r.IconCode, LogoURL: r.LogoURL,
+			IconCode: r.IconCode, LogoURL: r.LogoURL, RuleID: r.RuleID, Slot: r.Slot,
 		})
 	}
 	for _, a := range accts {

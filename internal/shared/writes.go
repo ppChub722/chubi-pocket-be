@@ -13,7 +13,9 @@ func LoadWalletBalances(ctx context.Context, q Querier, ids []uuid.UUID) ([]Wall
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := q.Query(ctx, `SELECT id, balance FROM accounts WHERE id = ANY($1)`, ids)
+	// As of today in the owner's time zone: a future transaction is already in
+	// the cached balance but not in the number shown.
+	rows, err := q.Query(ctx, `SELECT a.id, `+EffectiveBalanceSQL("a.balance", "a.id", "a.user_id")+` FROM accounts a WHERE a.id = ANY($1)`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("wallet balances: %w", err)
 	}

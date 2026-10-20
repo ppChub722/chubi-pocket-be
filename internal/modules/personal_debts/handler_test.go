@@ -358,7 +358,7 @@ func TestDebtLedgerFlow(t *testing.T) {
 		"direction": "paid", "amount": 40, "account_id": f.wallet,
 	}, "createDebtEntry", http.StatusCreated)
 	againTx := uuid.MustParse(obj(again, "transaction")["id"].(string))
-	dr, err := f.txs.DeleteWrite(f.ctx, f.me, againTx, false)
+	dr, err := f.txs.DeleteWrite(f.ctx, f.me, againTx, false, false)
 	if err != nil || dr.DebtEntryID == nil || dr.DebtEntryID.String() != obj(again, "entry")["id"] {
 		t.Fatalf("delete the wallet side: %+v, %v", dr, err)
 	}

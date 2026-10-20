@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared/recurrence"
 )
 
 type Handler struct {
@@ -46,6 +48,19 @@ func userAndID(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 		return uuid.Nil, uuid.Nil, false
 	}
 	return uid, id, true
+}
+
+// monthParam reads ?month=YYYY-MM ("" = this month).
+func monthParam(c *gin.Context) (string, bool) {
+	m := c.Query("month")
+	if m == "" {
+		return "", true
+	}
+	if _, err := time.Parse("2006-01", m); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid month", nil)
+		return "", false
+	}
+	return m, true
 }
 
 func optionalID(c *gin.Context, name string) (*uuid.UUID, bool) {
@@ -103,6 +118,10 @@ func mapError(c *gin.Context, err error) {
 		response.NotFound(c, "NOT_FOUND", "Saving entry not found")
 	case errors.Is(err, ErrValidation):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, recurrence.ErrInvalidRule):
+		response.BadRequest(c, "INVALID_RULE", err.Error(), nil)
+	case errors.Is(err, recurrence.ErrEndTooFar):
+		response.BadRequest(c, "END_TOO_FAR", err.Error(), nil)
 	case errors.Is(err, ErrSplitMismatch):
 		response.BadRequest(c, "SPLIT_MISMATCH", err.Error(), nil)
 	case errors.Is(err, ErrAccountNotFound):
@@ -135,7 +154,11 @@ func (h *Handler) List(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid sort", nil)
 		return
 	}
-	out, err := h.service.List(c.Request.Context(), uid, status, sortBy)
+	month, ok := monthParam(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.List(c.Request.Context(), uid, status, sortBy, month)
 	reply(c, http.StatusOK, out, err)
 }
 
@@ -168,7 +191,11 @@ func (h *Handler) Get(c *gin.Context) {
 	if !ok {
 		return
 	}
-	out, err := h.service.Get(c.Request.Context(), uid, id, atoiOr(c.Query("per_page"), entriesPerPage), strings.Contains(","+c.Query("include")+",", ",delete_preview,"))
+	month, ok := monthParam(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.GetMonth(c.Request.Context(), uid, id, atoiOr(c.Query("per_page"), entriesPerPage), strings.Contains(","+c.Query("include")+",", ",delete_preview,"), month)
 	reply(c, http.StatusOK, out, err)
 }
 
@@ -284,6 +311,42 @@ func (h *Handler) DeleteEntry(c *gin.Context) {
 		return
 	}
 	out, err := h.service.DeleteEntry(c.Request.Context(), uid, id)
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) PutAutoSaves(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	var req AutoSavesRequest
+	present, ok := bind(c, &req)
+	if !ok {
+		return
+	}
+	if !present["items"] || req.Items == nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "items is required", nil)
+		return
+	}
+	out, err := h.service.PutAutoSavesGoal(c.Request.Context(), uid, id, req.Items)
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) PutAutoSavesSpare(c *gin.Context) {
+	uid, ok := user(c)
+	if !ok {
+		return
+	}
+	var req AutoSavesRequest
+	present, ok := bind(c, &req)
+	if !ok {
+		return
+	}
+	if !present["items"] || req.Items == nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "items is required", nil)
+		return
+	}
+	out, err := h.service.PutAutoSavesSpare(c.Request.Context(), uid, req.Items)
 	reply(c, http.StatusOK, out, err)
 }
 

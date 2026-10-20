@@ -224,7 +224,7 @@ func (h *Handler) Delete(c *gin.Context) {
 		return
 	}
 
-	res, err := h.service.DeleteWrite(c.Request.Context(), userID, id, c.Query("also_delete_link") == "true")
+	res, err := h.service.DeleteWrite(c.Request.Context(), userID, id, c.Query("also_delete_link") == "true", c.Query("skip_occurrence") == "true")
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -401,8 +401,6 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "SYSTEM_TRANSACTION_IMMUTABLE", err.Error(), nil)
 	case errors.Is(err, ErrCategoryAuthorOnly):
 		response.Fail(c, http.StatusForbidden, "CATEGORY_AUTHOR_ONLY", err.Error(), nil)
-	case errors.Is(err, ErrFutureDateNotAllowed):
-		response.BadRequest(c, "FUTURE_DATE_NOT_ALLOWED", err.Error(), nil)
 	case errors.Is(err, ErrDebtTxAuthorOnly):
 		response.Fail(c, http.StatusForbidden, "DEBT_TX_AUTHOR_ONLY", err.Error(), nil)
 	case errors.Is(err, ErrDebtTxNeedsWallet):

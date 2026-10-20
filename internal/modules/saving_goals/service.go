@@ -266,7 +266,16 @@ func (s *Service) spare(ctx context.Context, q shared.Querier, userID uuid.UUID)
 	return Spare{Amount: total, ByWallet: by}, nil
 }
 
-func (s *Service) goalViews(ctx context.Context, userID uuid.UUID, goals []*Goal, today time.Time) ([]GoalView, error) {
+// goalViews builds the goal rows; month ("YYYY-MM", "" = this month) is the
+// month the month_* numbers are for.
+func (s *Service) goalViews(ctx context.Context, userID uuid.UUID, goals []*Goal, today time.Time, month string) ([]GoalView, error) {
+	if month == "" {
+		month = monthKey(today)
+	}
+	monthStart, err := time.Parse("2006-01", month)
+	if err != nil {
+		return nil, ErrValidation
+	}
 	out := make([]GoalView, 0, len(goals))
 	if len(goals) == 0 {
 		return out, nil
@@ -291,20 +300,20 @@ func (s *Service) goalViews(ctx context.Context, userID uuid.UUID, goals []*Goal
 	if err != nil {
 		return nil, err
 	}
-	autos, err := s.autoViews(ctx, userID, today)
+	autos, err := s.autoViews(ctx, userID, today, monthStart)
 	if err != nil {
 		return nil, err
 	}
-	month := monthKey(today)
 	for _, g := range goals {
 		v := goalView(g, saved[g.ID], nets[g.ID], today, currency)
-		v.AutoSave = autos[g.ID]
+		auto := autos[g.ID]
+		v.AutoSave, v.AutoSaves = auto.legacyOrNil(), auto.itemsOrEmpty()
 		v.MonthSaved = round2(nets[g.ID][month])
 		active := v.State == StateActive
 		switch {
 		case !active:
-		case v.AutoSave != nil:
-			v.MonthPlan = fptr(v.AutoSave.Amount)
+		case auto != nil:
+			v.MonthPlan = fptr(auto.monthPlan)
 		case v.NeededMonthly != nil:
 			v.MonthPlan = v.NeededMonthly
 		}
@@ -481,7 +490,7 @@ func (s *Service) Entries(ctx context.Context, userID uuid.UUID, goalID *uuid.UU
 	return &out, err
 }
 
-func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy string) (*GoalList, error) {
+func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, month string) (*GoalList, error) {
 	today, err := s.today(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -498,7 +507,7 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy str
 		return nil, err
 	}
 	out := &GoalList{Data: []GoalView{}}
-	if out.Data, err = s.goalViews(ctx, userID, goals, today); err != nil {
+	if out.Data, err = s.goalViews(ctx, userID, goals, today, month); err != nil {
 		return nil, err
 	}
 	if out.Spare, err = s.spare(ctx, s.store.db, userID); err != nil {
@@ -532,6 +541,11 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy str
 }
 
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int, withDeletePreview bool) (*GoalDetail, error) {
+	return s.GetMonth(ctx, userID, id, perPage, withDeletePreview, "")
+}
+
+// GetMonth is Get with the month_* numbers of month ("YYYY-MM", "" = this month).
+func (s *Service) GetMonth(ctx context.Context, userID, id uuid.UUID, perPage int, withDeletePreview bool, month string) (*GoalDetail, error) {
 	today, err := s.today(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -540,7 +554,7 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int, wi
 	if err != nil {
 		return nil, err
 	}
-	views, err := s.goalViews(ctx, userID, []*Goal{g}, today)
+	views, err := s.goalViews(ctx, userID, []*Goal{g}, today, month)
 	if err != nil {
 		return nil, err
 	}
@@ -582,11 +596,11 @@ func (s *Service) Spare(ctx context.Context, userID uuid.UUID, perPage int) (*Sp
 		return nil, err
 	}
 	out := &SpareDetail{}
-	autos, err := s.autoViews(ctx, userID, today)
+	autos, err := s.autoViews(ctx, userID, today, time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		return nil, err
 	}
-	out.AutoSave = autos[uuid.Nil]
+	out.AutoSave, out.AutoSaves = autos[uuid.Nil].legacyOrNil(), autos[uuid.Nil].itemsOrEmpty()
 	if out.Spare, err = s.spare(ctx, s.store.db, userID); err != nil {
 		return nil, err
 	}

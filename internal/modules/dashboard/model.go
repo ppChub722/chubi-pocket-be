@@ -92,7 +92,7 @@ type Upcoming struct {
 
 type UpcomingItem struct {
 	Kind      string           `json:"kind"`
-	ID        uuid.UUID        `json:"id"` // recurring item id, or account id for card_due
+	ID        uuid.UUID        `json:"id"` // the stored recurring item, else its setting; the account for card_due
 	Name      string           `json:"name"`
 	Type      string           `json:"type"` // income | expense
 	Amount    float64          `json:"amount"`
@@ -101,6 +101,10 @@ type UpcomingItem struct {
 	Overdue   bool             `json:"overdue"`
 	IconCode  *shared.IconCode `json:"icon_code"`
 	LogoURL   *string          `json:"logo_url"`
+	// RuleID / Slot say which occurrence a recurring row is (its setting and its
+	// original date): the id alone repeats for a daily setting. Null for card_due.
+	RuleID *uuid.UUID `json:"rule_id"`
+	Slot   *string    `json:"slot"`
 }
 
 type BudgetsTile struct {

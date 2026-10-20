@@ -23,9 +23,14 @@ const (
 
 type Service struct {
 	store *Store
+	// expected, when set, supplies the recurring occurrences that are still to
+	// be recorded (รอจ่าย); nil keeps reading the stored recurring items.
+	expected shared.Expecter
 }
 
 func NewService(store *Store) *Service { return &Service{store: store} }
+
+func (s *Service) WithExpected(e shared.Expecter) *Service { s.expected = e; return s }
 
 func (s *Service) ResolveTimezone(ctx context.Context, userID uuid.UUID, headerTZ string) (*time.Location, string, error) {
 	stored, err := s.store.userTimezone(ctx, userID)
@@ -227,10 +232,13 @@ type refs struct {
 	accs    map[uuid.UUID]shared.AccountRef
 	events  map[uuid.UUID]shared.EventRef
 	recItem map[uuid.UUID]shared.RecurringItemLink
+	// tagIcons — the user's own tags by lower-cased name.
+	tagIcons map[string]*shared.IconCode
 }
 
-func (s *Service) loadRefs(ctx context.Context, bs []*Budget, rows []countRow) (*refs, error) {
+func (s *Service) loadRefs(ctx context.Context, userID uuid.UUID, bs []*Budget, rows []countRow) (*refs, error) {
 	var catIDs, accIDs, evIDs, itemIDs []uuid.UUID
+	tagNames := map[string]bool{}
 	for _, b := range bs {
 		for _, c := range b.Categories {
 			catIDs = append(catIDs, c.ID)
@@ -250,9 +258,37 @@ func (s *Service) loadRefs(ctx context.Context, bs []*Budget, rows []countRow) (
 		if r.ItemID != nil {
 			itemIDs = append(itemIDs, *r.ItemID)
 		}
+		for _, t := range r.Tags {
+			tagNames[strings.ToLower(t)] = true
+		}
 	}
-	out := &refs{recItem: map[uuid.UUID]shared.RecurringItemLink{}}
+	out := &refs{recItem: map[uuid.UUID]shared.RecurringItemLink{}, tagIcons: map[string]*shared.IconCode{}}
 	var err error
+	if len(tagNames) > 0 {
+		names := make([]string, 0, len(tagNames))
+		for n := range tagNames {
+			names = append(names, n)
+		}
+		q, err := s.store.db.Query(ctx, `SELECT lower(name), icon_code FROM tags WHERE user_id = $1 AND lower(name) = ANY($2)`, userID, names)
+		if err != nil {
+			return nil, err
+		}
+		for q.Next() {
+			var (
+				name string
+				icon []byte
+			)
+			if err := q.Scan(&name, &icon); err != nil {
+				q.Close()
+				return nil, err
+			}
+			out.tagIcons[name] = shared.IconFromJSON(icon)
+		}
+		q.Close()
+		if err := q.Err(); err != nil {
+			return nil, err
+		}
+	}
 	if out.cats, err = shared.LoadCategoryRefs(ctx, s.store.db, catIDs); err != nil {
 		return nil, err
 	}
@@ -332,7 +368,10 @@ func budgetView(b *Budget, state string, p Period, rf *refs) View {
 func itemView(c countRow, rf *refs, reason func(countRow) string) Item {
 	it := Item{
 		Kind: c.Kind, ID: c.ID, Source: c.Source, CountsAs: c.CountsAs, Date: dstr(c.Date), Amount: round2(c.Amount),
-		Description: c.Description, Tags: c.Tags, Reason: reason(c),
+		Description: c.Description, Tags: c.Tags, Reason: reason(c), TagRefs: []ItemTag{},
+	}
+	for _, t := range c.Tags {
+		it.TagRefs = append(it.TagRefs, ItemTag{Name: t, IconCode: rf.tagIcons[strings.ToLower(t)]})
 	}
 	if c.CategoryID != nil {
 		if ref, ok := rf.cats[*c.CategoryID]; ok {
@@ -349,9 +388,12 @@ func itemView(c countRow, rf *refs, reason func(countRow) string) Item {
 			it.Event = &ref
 		}
 	}
-	if c.ItemID != nil {
+	it.RuleID, it.Slot = c.RuleID, dstr(c.Slot)
+	if c.Link != nil {
+		it.Recurring = c.Link
+	} else if c.ItemID != nil {
 		if l, ok := rf.recItem[*c.ItemID]; ok {
-			it.Recurring = &l
+			it.Recurring = &ItemRecurring{ItemID: &l.ItemID, Recurring: l.Recurring, Seq: l.Seq, Total: l.Total}
 		}
 	}
 	return it
@@ -536,7 +578,7 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, he
 	for i, e := range picked {
 		bs[i] = e.b
 	}
-	rf, err := s.loadRefs(ctx, bs, nil)
+	rf, err := s.loadRefs(ctx, userID, bs, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -623,7 +665,7 @@ func (s *Service) detail(ctx context.Context, b *Budget, periodID *uuid.UUID, to
 		}
 	}
 	sortItems(f.rows)
-	rf, err := s.loadRefs(ctx, []*Budget{b}, f.rows)
+	rf, err := s.loadRefs(ctx, b.UserID, []*Budget{b}, f.rows)
 	if err != nil {
 		return nil, err
 	}
@@ -662,7 +704,7 @@ func (s *Service) detail(ctx context.Context, b *Budget, periodID *uuid.UUID, to
 		}
 		cr.Amount += r.Amount
 	}
-	for _, k := range []string{SourceNormal, SourceRecurring, SourceEvent, SourceUpcoming, SourcePending} {
+	for _, k := range []string{SourceNormal, SourceRecurring, SourceEvent, SourceUpcoming, SourcePending, SourceFutureTx} {
 		if sr := src[k]; sr != nil && sr.Amount != 0 {
 			sr.Amount = round2(sr.Amount)
 			out.BySource = append(out.BySource, *sr)
@@ -840,7 +882,7 @@ func (s *Service) Items(ctx context.Context, userID, id uuid.UUID, periodID *uui
 		rows = kept
 	}
 	sortItems(rows)
-	rf, err := s.loadRefs(ctx, nil, rows)
+	rf, err := s.loadRefs(ctx, userID, nil, rows)
 	if err != nil {
 		return nil, err
 	}

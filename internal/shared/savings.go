@@ -121,7 +121,8 @@ func LoadWalletSavings(ctx context.Context, q Querier, userID uuid.UUID, account
 		tracked bool
 	}
 	accts := map[uuid.UUID]acct{}
-	rows, err := q.Query(ctx, `SELECT id, balance::float8, track_balance FROM accounts WHERE id = ANY($1)`, accountIDs)
+	rows, err := q.Query(ctx, `SELECT a.id, `+EffectiveBalanceSQL("a.balance", "a.id", "$2")+`::float8, a.track_balance
+		FROM accounts a WHERE a.id = ANY($1)`, accountIDs, userID)
 	if err != nil {
 		return nil, fmt.Errorf("wallet balances: %w", err)
 	}
@@ -222,7 +223,7 @@ func LoadSavingTotals(ctx context.Context, q Querier, userID uuid.UUID) (*Saving
 		}
 	}
 	rows.Close()
-	rows, err = q.Query(ctx, `SELECT a.id, a.balance::float8 FROM accounts a
+	rows, err = q.Query(ctx, `SELECT a.id, `+EffectiveBalanceSQL("a.balance", "a.id", "$1")+`::float8 FROM accounts a
 		WHERE a.status = 'active' AND a.track_balance AND `+ActiveMembershipPredicate("a.id", "$1"), userID)
 	if err != nil {
 		return nil, fmt.Errorf("saving totals: %w", err)

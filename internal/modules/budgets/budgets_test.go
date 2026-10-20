@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,8 +141,13 @@ func TestBudgetRecurringCategory(t *testing.T) {
 	f.tx(400, &f.food, monthStart.AddDate(0, -1, 0).Format(dateLayout)) // last month
 	end := monthStart.AddDate(0, 1, -1)
 	if f.today.Before(end) {
-		f.exec(`INSERT INTO recurring_items (id, user_id, date, draft) VALUES (gen_random_uuid(), $1, $2,
-			jsonb_build_object('type', 'expense', 'amount', 50, 'category_id', $3::text))`, f.me, end, f.food)
+		// A stored occurrence of an active rule (an item always has a rule).
+		t.Cleanup(func() { _, _ = f.pool.Exec(f.ctx, `DELETE FROM recurring_rules WHERE user_id = $1`, f.me) })
+		f.exec(`WITH r AS (INSERT INTO recurring_rules (id, user_id, name, type, amount, account_id, freq, start_date, status)
+				VALUES (gen_random_uuid(), $1, 'Rent', 'expense', 50, $4, 'monthly', $2, 'active') RETURNING id)
+			INSERT INTO recurring_items (id, user_id, rule_id, seq, slot, date, draft)
+			SELECT gen_random_uuid(), $1, id, 1, $2, $2,
+				jsonb_build_object('type', 'expense', 'amount', 50, 'category_id', $3::text) FROM r`, f.me, end, f.food, f.wallet)
 	}
 	f.exec(`INSERT INTO pending_transactions (id, user_id, source, kind, draft) VALUES (gen_random_uuid(), $1, 'manual', 'create',
 		jsonb_build_object('type', 'expense', 'amount', 20, 'date', $2::text, 'category_id', $3::text))`, f.me, cur, f.food)
@@ -239,6 +245,69 @@ func TestBudgetRecurringCategory(t *testing.T) {
 	f.call("GET", "/budgets/"+id, "", nil, http.StatusNotFound, nil)
 }
 
+// A transaction dated after today is not "used" yet: it is รอจ่าย (source
+// future_tx, counts_as expected) until its day.
+func TestBudgetFutureTransactionIsExpected(t *testing.T) {
+	f := newBudFix(t)
+	var d Detail
+	f.call("POST", "/budgets", "createBudget", map[string]any{
+		"name": "Food", "amount": 1000, "warn_pct": nil, "start_date": f.day(-4), "end": map[string]any{"kind": "date", "date": f.day(5)},
+		"scope": map[string]any{"categories": []map[string]any{{"id": f.food}}},
+	}, http.StatusCreated, &d)
+	id := d.Budget.ID.String()
+	f.tx(100, &f.food, f.day(0))
+	f.tx(60, &f.food, f.day(3))
+
+	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
+	if p := d.Budget.Period; p.Used != 100 || p.Expected != 60 {
+		t.Fatalf("used %v / expected %v, want 100 / 60; sources %+v", p.Used, p.Expected, d.BySource)
+	}
+	if s := src(d, SourceFutureTx); s == nil || s.Count != 1 || s.Amount != 60 {
+		t.Errorf("future_tx source = %+v", s)
+	}
+	if src(d, SourceNormal) == nil || src(d, SourceNormal).Amount != 100 {
+		t.Errorf("normal source = %+v", src(d, SourceNormal))
+	}
+	var items ItemList
+	f.call("GET", "/budgets/"+id+"/items?source=future_tx", "listBudgetItems", nil, http.StatusOK, &items)
+	if len(items.Data) != 1 || items.Data[0].CountsAs != "expected" || items.Data[0].Kind != "transaction" {
+		t.Errorf("future_tx items = %+v", items.Data)
+	}
+}
+
+// An event bill dated after today is not "used" yet either: it is expected until its day.
+func TestBudgetFutureEventBillIsExpected(t *testing.T) {
+	f := newBudFix(t)
+	var d Detail
+	f.call("POST", "/budgets", "createBudget", map[string]any{
+		"name": "Trip", "amount": 1000, "warn_pct": nil, "start_date": f.day(-4), "end": map[string]any{"kind": "date", "date": f.day(6)},
+		"scope": map[string]any{"tags": []string{"Trip"}},
+	}, http.StatusCreated, &d)
+	id := d.Budget.ID.String()
+
+	ev, meM, beeM := uuid.New(), uuid.New(), uuid.New()
+	f.exec(`INSERT INTO projects (id, owner_user_id, name, status) VALUES ($1, $2, 'CNX', 'active')`, ev, f.me)
+	f.exec(`INSERT INTO project_members (id, project_id, user_id, display_name, role, status) VALUES
+		($1, $2, $3, 'Me', 'owner', 'active'), ($4, $2, NULL, 'Bee', 'contributor', 'active')`, meM, ev, f.me, beeM)
+	tag := uuid.New()
+	f.exec(`INSERT INTO event_tags (id, project_id, name) VALUES ($1, $2, 'trip')`, tag, ev)
+	bill := func(date string, share float64) {
+		b, c := uuid.New(), uuid.New()
+		f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date) VALUES
+			($1, $2, $3, $4, 'expense', $5, 'THB', $6)`, b, ev, beeM, f.me, share*3, date)
+		f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date, parent_project_transaction_id) VALUES
+			($1, $2, $3, $4, 'expense', $5, 'THB', $6, $7)`, c, ev, meM, f.me, share, date, b)
+		f.exec(`INSERT INTO project_transaction_tags (project_transaction_id, event_tag_id) VALUES ($1, $2)`, b, tag)
+	}
+	bill(f.day(-1), 100) // past: used
+	bill(f.day(2), 70)   // future: expected
+
+	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
+	if p := d.Budget.Period; p.Used != 100 || p.Expected != 70 {
+		t.Fatalf("used %v / expected %v, want 100 / 70; sources %+v", p.Used, p.Expected, d.BySource)
+	}
+}
+
 func TestBudgetTagRangeWithEvent(t *testing.T) {
 	f := newBudFix(t)
 	var d Detail
@@ -287,6 +356,30 @@ func TestBudgetTagRangeWithEvent(t *testing.T) {
 		if it.Source == SourceEvent && (it.Event == nil || it.Event.ID != ev) {
 			t.Errorf("event item = %+v", it)
 		}
+	}
+	// Each tag on an item comes with the icon of the user's tag of that name.
+	f.exec(`UPDATE tags SET icon_code = $2::jsonb WHERE user_id = $1 AND lower(name) = 'trip'`, f.me,
+		`{"icon":"movie","border":null,"bgColors":["#00BCD4"],"background":"solid","iconColors":["#FFFFFF"],"borderColors":[]}`)
+	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
+	tagged := 0
+	for _, it := range d.Items.Data {
+		if len(it.TagRefs) != len(it.Tags) {
+			t.Fatalf("tag_refs %+v vs tags %v", it.TagRefs, it.Tags)
+		}
+		for i, tr := range it.TagRefs {
+			if tr.Name != it.Tags[i] {
+				t.Errorf("tag_refs order: %+v vs %v", it.TagRefs, it.Tags)
+			}
+			if strings.EqualFold(tr.Name, "trip") {
+				tagged++
+				if tr.IconCode == nil || tr.IconCode.Icon == nil || *tr.IconCode.Icon != "movie" {
+					t.Errorf("tag %q icon = %+v", tr.Name, tr.IconCode)
+				}
+			}
+		}
+	}
+	if tagged == 0 {
+		t.Error("no item carried the trip tag")
 	}
 	f.tx(380, &f.travel, f.day(0), "Trip")
 	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
@@ -406,4 +499,21 @@ func TestBudgetListSummaryCard(t *testing.T) {
 		t.Errorf("health=near rows = %d summary %+v", len(l.Data), l.Summary)
 	}
 	f.call("GET", "/budgets?health=nope", "", nil, http.StatusBadRequest, nil)
+}
+
+func TestBudgetScopeListsAreAnd(t *testing.T) {
+	f := newBudFix(t)
+	var d Detail
+	f.call("POST", "/budgets", "createBudget", map[string]any{
+		"name": "Trip food", "amount": 1000, "start_date": f.day(-4),
+		"scope": map[string]any{"categories": []map[string]any{{"id": f.food}}, "tags": []string{"Trip"}},
+	}, http.StatusCreated, &d)
+	f.tx(100, &f.food, f.day(0), "trip")  // food AND trip: counts
+	f.tx(50, &f.food, f.day(0))           // food only: out
+	f.tx(30, &f.travel, f.day(0), "trip") // trip only: out
+
+	f.call("GET", "/budgets/"+d.Budget.ID.String(), "getBudget", nil, http.StatusOK, &d)
+	if d.Budget.Period.Used != 100 {
+		t.Fatalf("used = %v, want 100 (only rows matching every picked list)", d.Budget.Period.Used)
+	}
 }

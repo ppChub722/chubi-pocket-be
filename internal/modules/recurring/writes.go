@@ -16,7 +16,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// ConflictError — items that can't take a batch action (409 with their ids).
+// ConflictError — items that can't take an action (409 with their ids).
 type ConflictError struct{ IDs []uuid.UUID }
 
 func (e *ConflictError) Error() string { return ErrAlreadyLinked.Error() }
@@ -33,7 +33,9 @@ func validateFields(f *Fields) error {
 			return ErrValidation
 		}
 	}
-	if f.has("amount") && (f.Amount == nil || *f.Amount < 0) { // 0 = no amount (a reminder); kinds that need one check it
+	// null clears the amount of an occurrence; 0 = no amount (a reminder); a setting
+	// needs one (checked on create / edit) except a reminder
+	if f.has("amount") && f.Amount != nil && *f.Amount < 0 {
 		return ErrValidation
 	}
 	if f.Description != nil && len([]rune(*f.Description)) > 200 {
@@ -146,6 +148,22 @@ func checkDraftRefsTx(ctx context.Context, q rowQuerier, userID uuid.UUID, d pen
 	return nil
 }
 
+// validateAuto — auto-create needs a fixed amount and a wallet.
+func validateAuto(r *Rule) error {
+	if !r.AutoCreate {
+		return nil
+	}
+	if r.Amount <= 0 {
+		return ErrAutoCreateNeedsAmount
+	}
+	if r.AccountID == nil {
+		return ErrAutoCreateNeedsWallet
+	}
+	return nil
+}
+
+// syncLinkTx pushes an edit of a stored item on to what it is linked to: its
+// transaction (or a legacy draft / saving entry).
 func (s *Service) syncLinkTx(ctx context.Context, tx pgx.Tx, it *itemRow, f *Fields, date *string) ([]uuid.UUID, error) {
 	switch {
 	case it.SavingEntryID != nil:
@@ -228,6 +246,9 @@ func (s *Service) syncLinkTx(ctx context.Context, tx pgx.Tx, it *itemRow, f *Fie
 	return nil, nil
 }
 
+// unlinkTx deletes what a stored item points at (a legacy draft, a saving
+// entry, the transaction) and returns the transaction's id and the wallets
+// it touched.
 func (s *Service) unlinkTx(ctx context.Context, tx pgx.Tx, it *itemRow) (*uuid.UUID, []uuid.UUID, error) {
 	if it.PendingID != nil {
 		if err := s.pending.Store().DeleteTx(ctx, tx, it.UserID, *it.PendingID); err != nil {
@@ -247,6 +268,7 @@ func (s *Service) unlinkTx(ctx context.Context, tx pgx.Tx, it *itemRow) (*uuid.U
 	id := *it.TransactionID
 	touched, err := s.txs.DeleteInTx(ctx, tx, it.UserID, id)
 	if errors.Is(err, transactions.ErrTxNotFound) {
+		it.TransactionID = nil
 		return nil, nil, nil
 	}
 	if err != nil {
@@ -311,7 +333,9 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 	if err != nil {
 		return nil, err
 	}
-	r := &Rule{UserID: userID, Name: name, IconCode: req.IconCode, StartDate: start, Status: "active", TagIDs: []uuid.UUID{}}
+	r := &Rule{UserID: userID, Name: name, IconCode: req.IconCode, Status: "active", TagIDs: []uuid.UUID{}}
+	r.StartDate = start
+	r.TrackedFrom, r.DueNotifiedUntil = today, &today
 	applyToRule(r, &req.Fields)
 	if err := r.applyRule(*req.Rule); err != nil {
 		return nil, err
@@ -328,6 +352,14 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 	if err := r.limits(today); err != nil {
 		return nil, err
 	}
+	if req.AutoCreate != nil && *req.AutoCreate {
+		r.AutoCreate = true
+		yesterday := today.AddDate(0, 0, -1)
+		r.AutoCreatedUntil = &yesterday
+	}
+	if err := validateAuto(r); err != nil {
+		return nil, err
+	}
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
@@ -339,25 +371,19 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 	if err := saveRuleTx(ctx, tx, r); err != nil {
 		return nil, err
 	}
-	if err := s.generateTx(ctx, tx, r, r.StartDate); err != nil {
-		return nil, err
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return s.afterWrite(ctx, userID, r.ID, tz, nil)
 }
 
+// Update edits a setting. Its computed occurrences follow at once; stored
+// ones (edited, recorded, skipped) stay as they are. also_update_tx pushes a
+// change of name / category / wallet / tags / note to the transactions already
+// recorded from it (never date or amount).
 func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest, tz string) (*Detail, error) {
 	if err := validateFields(&req.Fields); err != nil {
 		return nil, err
-	}
-	scope := req.Scope
-	if scope == "" {
-		scope = "upcoming"
-	}
-	if scope != "upcoming" && scope != "all" {
-		return nil, ErrValidation
 	}
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
@@ -372,17 +398,15 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 	if err != nil {
 		return nil, err
 	}
+	old := *r
 	f := &req.Fields
-	// Without a description of its own an item shows the setting's name: a rename carries over to the
-	// items still showing the old one.
-	var renamed *[2]string
+	if f.has("amount") && f.Amount == nil {
+		return nil, ErrValidation // a setting's amount can't be cleared (0 for a reminder)
+	}
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
 		if name == "" || len([]rune(name)) > 100 {
 			return nil, ErrValidation
-		}
-		if name != r.Name && (r.Description == nil || *r.Description == "") && !f.has("description") {
-			renamed = &[2]string{r.Name, name}
 		}
 		r.Name = name
 	}
@@ -423,53 +447,136 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 			return nil, err
 		}
 	}
+	if req.AutoCreate != nil && *req.AutoCreate != r.AutoCreate {
+		r.AutoCreate = *req.AutoCreate
+		yesterday := today.AddDate(0, 0, -1)
+		r.AutoCreatedUntil = &yesterday // switching on / off never back-creates
+	}
+	if err := validateAuto(r); err != nil {
+		return nil, err
+	}
 	if err := checkRuleRefsTx(ctx, tx, userID, r); err != nil {
 		return nil, err
 	}
 	if err := saveRuleTx(ctx, tx, r); err != nil {
 		return nil, err
 	}
-	var touched []uuid.UUID
-	if rebuild {
-		if err := dropUnproducedTx(ctx, tx, r.ID); err != nil {
-			return nil, err
-		}
-		if r.Status == "active" {
-			if err := s.generateTx(ctx, tx, r, today); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if f.values() || renamed != nil {
-		cond := `i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL`
-		if scope == "all" {
-			cond = `TRUE`
-		}
-		items, err := s.lockItems(ctx, tx, `WHERE i.rule_id = $1 AND i.user_id = $2 AND `+cond, r.ID, userID)
-		if err != nil {
-			return nil, err
-		}
-		for _, it := range items {
-			applyToDraft(&it.Draft, f)
-			if renamed != nil && it.Draft.Description != nil && *it.Draft.Description == renamed[0] {
-				it.Draft.Description = ptr(renamed[1])
-			}
-			if err := saveItemTx(ctx, tx, it); err != nil {
-				return nil, err
-			}
-			if scope == "all" && req.AlsoUpdateLink && f.values() {
-				t, err := s.syncLinkTx(ctx, tx, it, f, nil)
-				if err != nil {
-					return nil, err
-				}
-				touched = append(touched, t...)
-			}
-		}
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.afterWrite(ctx, userID, r.ID, tz, touched)
+	var upd *TxUpdateResult
+	var touched []uuid.UUID
+	if req.AlsoUpdateTx {
+		if upd, touched, err = s.pushToRecorded(ctx, userID, &old, r, f, req.Name != nil, today); err != nil {
+			return nil, err
+		}
+	}
+	d, err := s.afterWrite(ctx, userID, r.ID, tz, touched)
+	if err != nil {
+		return nil, err
+	}
+	d.TxUpdate = upd
+	return d, nil
+}
+
+// pushToRecorded — the descriptive fields of the setting go to the
+// transactions recorded from it. A name change rewrites a transaction's
+// description only while it still is the auto name from the OLD setting name;
+// a transaction that cannot take the change is reported, never fails the edit.
+func (s *Service) pushToRecorded(ctx context.Context, userID uuid.UUID, old, cur *Rule, f *Fields, nameSent bool, today time.Time) (*TxUpdateResult, []uuid.UUID, error) {
+	nameChanged := nameSent && old.Name != cur.Name
+	if !nameChanged && !f.has("category_id") && !f.has("account_id") && !f.has("tag_ids") && !f.has("note") {
+		return nil, nil, nil
+	}
+	rows, err := s.storedRows(ctx, s.db, userID, []uuid.UUID{cur.ID}, nil, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	lang := s.lang(ctx, userID)
+	res := &TxUpdateResult{Failed: []TxUpdateFailure{}}
+	var touched []uuid.UUID
+	oldSeqs, newSeqs := seqIndex(old), seqIndex(cur)
+	for _, it := range rows {
+		if it.TransactionID == nil || it.RuleID == nil {
+			continue
+		}
+		slot := it.Date
+		if it.Slot != nil {
+			slot = *it.Slot
+		}
+		var (
+			current *string
+			prevAcc *uuid.UUID
+		)
+		if err := s.db.QueryRow(ctx, `SELECT description, account_id FROM transactions WHERE id = $1 AND user_id = $2`, *it.TransactionID, userID).Scan(&current, &prevAcc); err != nil {
+			res.Failed = append(res.Failed, TxUpdateFailure{TransactionID: *it.TransactionID, Reason: "not_found"})
+			continue
+		}
+		req := transactions.UpdateRequest{}
+		var keys []string
+		if f.has("category_id") {
+			req.CategoryID, keys = f.CategoryID, append(keys, "category_id")
+		}
+		if f.has("account_id") {
+			req.AccountID, keys = f.AccountID, append(keys, "account_id")
+		}
+		if f.has("tag_ids") {
+			req.TagIDs, keys = append([]uuid.UUID{}, f.TagIDs...), append(keys, "tag_ids")
+		}
+		if f.has("note") {
+			req.Note, keys = f.Note, append(keys, "note")
+		}
+		if nameChanged {
+			oldSeq, newSeq := seqPtr(oldSeqs, slot), seqPtr(newSeqs, slot)
+			if current != nil && *current == occName(old, slot, oldSeq, lang) {
+				req.Description = ptr(occName(cur, slot, newSeq, lang))
+				keys = append(keys, "description")
+			}
+		}
+		if len(keys) == 0 {
+			continue
+		}
+		req.MarkPresent(keys...)
+		tx, err := s.begin(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := s.txs.UpdateInTx(ctx, tx, userID, *it.TransactionID, req); err != nil {
+			tx.Rollback(ctx)
+			res.Failed = append(res.Failed, TxUpdateFailure{TransactionID: *it.TransactionID, Reason: failReason(err)})
+			continue
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, nil, err
+		}
+		res.UpdatedCount++
+		if f.has("account_id") { // the wallet it left and the one it joined
+			if prevAcc != nil {
+				touched = append(touched, *prevAcc)
+			}
+			if f.AccountID != nil {
+				touched = append(touched, *f.AccountID)
+			}
+		}
+	}
+	return res, touched, nil
+}
+
+func seqPtr(m map[string]int, slot time.Time) *int {
+	if n, ok := m[slot.Format(dateLayout)]; ok {
+		return &n
+	}
+	return nil
+}
+
+func failReason(err error) string {
+	switch {
+	case errors.Is(err, transactions.ErrAccountArchived):
+		return "account_archived"
+	case errors.Is(err, transactions.ErrSplitsOnTransfer):
+		return "transfer"
+	}
+	return "refused"
 }
 
 func (s *Service) lockItems(ctx context.Context, tx pgx.Tx, where string, args ...any) ([]*itemRow, error) {
@@ -565,15 +672,18 @@ func (s *Service) transition(ctx context.Context, userID, id uuid.UUID, tz strin
 }
 
 func (s *Service) Pause(ctx context.Context, userID, id uuid.UUID, tz string) (*Detail, error) {
-	return s.transition(ctx, userID, id, tz, func(tx pgx.Tx, r *Rule, _ time.Time) error {
+	return s.transition(ctx, userID, id, tz, func(tx pgx.Tx, r *Rule, today time.Time) error {
 		if r.Status != "active" {
 			return ErrInvalidTransition
 		}
-		r.Status = "paused"
-		return dropUnproducedTx(ctx, tx, r.ID)
+		r.Status, r.PausedFrom = "paused", &today
+		return nil
 	})
 }
 
+// Resume — what was due before the pause stays due; the occurrences inside the
+// paused gap [paused_from, today) are skipped (stored as skipped rows: not due,
+// not paid). Auto-create and the due notice start from today.
 func (s *Service) Resume(ctx context.Context, userID, id uuid.UUID, tz string) (*Detail, error) {
 	return s.transition(ctx, userID, id, tz, func(tx pgx.Tx, r *Rule, today time.Time) error {
 		if r.Status != "paused" {
@@ -586,7 +696,26 @@ func (s *Service) Resume(ctx context.Context, userID, id uuid.UUID, tz string) (
 		if err := r.limits(today); err != nil {
 			return err
 		}
-		return s.generateTx(ctx, tx, r, today)
+		gapFrom := time.Date(r.UpdatedAt.Year(), r.UpdatedAt.Month(), r.UpdatedAt.Day(), 0, 0, 0, 0, time.UTC)
+		if r.PausedFrom != nil {
+			gapFrom = *r.PausedFrom
+		}
+		if gapFrom.Before(r.TrackedFrom) {
+			gapFrom = r.TrackedFrom
+		}
+		if gapFrom.Before(today) {
+			for _, d := range r.Spec.Between(gapFrom, today.AddDate(0, 0, -1)) {
+				slot, rid := d, r.ID
+				if _, err := insertItemTx(ctx, tx, &itemRow{UserID: r.UserID, RuleID: &rid, Slot: &slot, Date: d,
+					Draft: ruleBaseDraft(r), Archived: true}); err != nil {
+					return err
+				}
+			}
+		}
+		r.PausedFrom, r.DueNotifiedUntil = nil, &today
+		yesterday := today.AddDate(0, 0, -1)
+		r.AutoCreatedUntil = &yesterday
+		return nil
 	})
 }
 
@@ -611,12 +740,15 @@ func ptrIDs(p *uuid.UUID) []uuid.UUID {
 }
 
 func (s *Service) Archive(ctx context.Context, userID, id uuid.UUID, tz string) (*Detail, error) {
-	return s.transition(ctx, userID, id, tz, func(tx pgx.Tx, r *Rule, _ time.Time) error {
+	return s.transition(ctx, userID, id, tz, func(tx pgx.Tx, r *Rule, today time.Time) error {
 		if r.Status == "archived" {
 			return ErrInvalidTransition
 		}
+		if r.Status == "active" {
+			r.PausedFrom = &today
+		}
 		r.Status = "archived"
-		return dropUnproducedTx(ctx, tx, r.ID)
+		return nil
 	})
 }
 
@@ -630,59 +762,41 @@ func (s *Service) Restore(ctx context.Context, userID, id uuid.UUID, tz string) 
 	})
 }
 
+// Extend pushes the END of a setting that has one further out (a setting
+// without an end has nothing to extend: its occurrences are computed).
 func (s *Service) Extend(ctx context.Context, userID, id uuid.UUID, req ExtendRequest, tz string) (*Detail, error) {
 	return s.transition(ctx, userID, id, tz, func(tx pgx.Tx, r *Rule, today time.Time) error {
-		if r.Status == "archived" || r.Freq == "dates" {
+		if r.Status == "archived" || r.Freq == "dates" || r.EndKind == "none" || req.End == nil {
 			return ErrInvalidTransition
 		}
-		if req.End == nil {
-			if r.EndKind != "none" {
-				return ErrValidation
-			}
-			from := today
-			if r.GeneratedUntil != nil && r.GeneratedUntil.After(from) {
-				from = *r.GeneratedUntil
-			}
-			h := r.horizonSpan(from)
-			r.GeneratedUntil = &h
-		} else {
-			if err := r.applyEnd(req.End); err != nil {
-				return err
-			}
-			r.GeneratedUntil = nil
-			if err := r.limits(today); err != nil {
-				return err
-			}
-		}
-		r.EndingNotified = false
-		if _, err := tx.Exec(ctx, `UPDATE notifications SET actioned_at = NOW(), read_at = COALESCE(read_at, NOW())
-			WHERE recipient_user_id = $1 AND type = 'recurring_ending' AND actioned_at IS NULL AND dismissed_at IS NULL
-			  AND payload->>'recurring_id' = $2`, userID, r.ID.String()); err != nil {
+		if err := r.applyEnd(req.End); err != nil {
 			return err
 		}
-		if r.Status != "active" {
-			return nil
+		r.GeneratedUntil = nil
+		if err := r.limits(today); err != nil {
+			return err
 		}
-		return s.generateTx(ctx, tx, r, today)
+		r.EndingNotified = false
+		_, err := tx.Exec(ctx, `UPDATE notifications SET actioned_at = NOW(), read_at = COALESCE(read_at, NOW())
+			WHERE recipient_user_id = $1 AND type = 'recurring_ending' AND actioned_at IS NULL AND dismissed_at IS NULL
+			  AND payload->>'recurring_id' = $2`, userID, r.ID.String())
+		return err
 	})
 }
 
 func (s *Service) itemsResult(ctx context.Context, userID uuid.UUID, ids, touched []uuid.UUID) (*ItemsWriteResult, error) {
-	today, err := s.today(ctx, userID, "")
-	if err != nil {
-		return nil, err
-	}
-	items, err := s.itemViews(ctx, s.db, userID, today, `WHERE i.id = ANY($1) AND i.user_id = $2 ORDER BY i.date, i.id`,
-		uniqueIDs(ids), userID)
-	if err != nil {
-		return nil, err
-	}
-	out := &ItemsWriteResult{Items: items}
+	out := &ItemsWriteResult{Items: []Item{}}
 	var rs []*uuid.UUID
-	for i := range items {
-		rs = append(rs, ruleOf(&items[i]))
+	for _, id := range uniqueIDs(ids) {
+		it, err := s.itemView(ctx, userID, id)
+		if err != nil {
+			return nil, err
+		}
+		out.Items = append(out.Items, *it)
+		rs = append(rs, ruleOf(it))
 	}
 	out.Setting = s.settingOf(ctx, userID, rs...)
+	var err error
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
 		return nil, err
 	}
@@ -694,46 +808,45 @@ func (s *Service) itemResult(ctx context.Context, userID, id uuid.UUID, txRow an
 	if err != nil {
 		return nil, err
 	}
+	return s.resultOf(ctx, userID, it, txRow, touched)
+}
+
+// resultOf wraps an item (stored or computed) with the setting and the balances of a write.
+func (s *Service) resultOf(ctx context.Context, userID uuid.UUID, it *Item, txRow any, touched []uuid.UUID) (*ItemWriteResult, error) {
 	out := &ItemWriteResult{Item: *it, Transaction: txRow}
 	out.Setting = s.settingOf(ctx, userID, ruleOf(it))
+	var err error
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
+// CreateItem adds an extra, manual occurrence to a setting.
 func (s *Service) CreateItem(ctx context.Context, userID uuid.UUID, req ItemCreateRequest, tz string) (*ItemWriteResult, error) {
-	if req.Date == nil || req.Type == nil || req.Amount == nil {
+	// Only an occurrence of a rule: a one-off upcoming item no longer exists (a
+	// future-dated transaction is just a transaction).
+	if req.Date == nil || req.Type == nil || req.Amount == nil || req.RecurringID == nil {
 		return nil, ErrValidation
 	}
 	if err := validateFields(&req.Fields); err != nil {
 		return nil, err
 	}
 	date, _ := parseDate(*req.Date)
-	today, err := s.today(ctx, userID, tz)
-	if err != nil {
-		return nil, err
-	}
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	it := &itemRow{UserID: userID, Date: date, Manual: true}
-	if req.RecurringID != nil {
-		r, err := getRule(ctx, tx, userID, *req.RecurringID, false)
-		if err != nil {
-			return nil, err
-		}
-		it.RuleID, it.Draft = &r.ID, draftFromRule(r)
+	it := &itemRow{UserID: userID, Date: date, Manual: true, Edited: true}
+	r, err := getRule(ctx, tx, userID, *req.RecurringID, false)
+	if err != nil {
+		return nil, err
 	}
+	it.RuleID, it.Draft = &r.ID, ruleBaseDraft(r)
 	applyToDraft(&it.Draft, &req.Fields)
 	if err := checkDraftRefsTx(ctx, tx, userID, it.Draft); err != nil {
 		return nil, err
-	}
-	if !date.After(today) {
-		now := time.Now()
-		it.ProducedAt = &now // not_created: "สร้างใหม่" makes it real
 	}
 	if _, err := insertItemTx(ctx, tx, it); err != nil {
 		return nil, err
@@ -744,17 +857,14 @@ func (s *Service) CreateItem(ctx context.Context, userID uuid.UUID, req ItemCrea
 	return s.itemResult(ctx, userID, it.ID, nil, nil)
 }
 
+// UpdateItem edits a STORED item (scope this only; to change what a setting
+// gives, edit the setting).
 func (s *Service) UpdateItem(ctx context.Context, userID, id uuid.UUID, req ItemUpdateRequest, tz string) (*ItemsWriteResult, error) {
 	if err := validateFields(&req.Fields); err != nil {
 		return nil, err
 	}
-	scope := req.Scope
-	if scope == "" {
-		scope = "this"
-	}
-	today, err := s.today(ctx, userID, tz)
-	if err != nil {
-		return nil, err
+	if req.Scope != "" && req.Scope != "this" {
+		return nil, ErrValidation
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -765,80 +875,49 @@ func (s *Service) UpdateItem(ctx context.Context, userID, id uuid.UUID, req Item
 	if err != nil {
 		return nil, err
 	}
-	items := []*itemRow{it}
-	if scope != "this" {
-		if req.has("date") {
-			return nil, ErrValidation // the date changes on one item only
-		}
-		if it.RuleID == nil {
-			scope = "this"
-		}
-	}
-	switch scope {
-	case "this":
-	case "following":
-		items, err = s.lockItems(ctx, tx, `WHERE i.rule_id = $1 AND i.user_id = $2 AND (i.date >= $3 OR i.id = $4)`,
-			*it.RuleID, userID, it.Date, it.ID)
-	case "past":
-		items, err = s.lockItems(ctx, tx, `WHERE i.rule_id = $1 AND i.user_id = $2 AND i.date <= $3`, *it.RuleID, userID, today)
-	case "upcoming":
-		items, err = s.lockItems(ctx, tx, `WHERE i.rule_id = $1 AND i.user_id = $2 AND i.produced_at IS NULL
-			AND i.pending_id IS NULL AND i.transaction_id IS NULL`, *it.RuleID, userID)
-	case "all":
-		items, err = s.lockItems(ctx, tx, `WHERE i.rule_id = $1 AND i.user_id = $2`, *it.RuleID, userID)
-	default:
-		return nil, ErrValidation
-	}
+	var touched []uuid.UUID
+	t, err := s.applyItemEdit(ctx, tx, it, &req.Fields, req.AlsoUpdateLink)
 	if err != nil {
 		return nil, err
 	}
-	var (
-		ids     []uuid.UUID
-		touched []uuid.UUID
-	)
-	for _, x := range items {
-		applyToDraft(&x.Draft, &req.Fields)
-		if err := checkDraftRefsTx(ctx, tx, userID, x.Draft); err != nil {
-			return nil, err
-		}
-		var date *string
-		if req.has("date") {
-			d, _ := parseDate(*req.Date)
-			x.Date, date = d, req.Date
-		}
-		if req.values() || date != nil {
-			x.Edited = true
-		}
-		if req.AlsoUpdateLink {
-			if date != nil && x.Date.After(today) && x.linked() {
-				_, t, err := s.unlinkTx(ctx, tx, x)
-				if err != nil {
-					return nil, err
-				}
-				touched = append(touched, t...)
-				x.ProducedAt = nil
-			} else {
-				t, err := s.syncLinkTx(ctx, tx, x, &req.Fields, date)
-				if err != nil {
-					return nil, err
-				}
-				touched = append(touched, t...)
-			}
-		}
-		if err := saveItemTx(ctx, tx, x); err != nil {
-			return nil, err
-		}
-		ids = append(ids, x.ID)
-	}
+	touched = append(touched, t...)
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	if err := s.DueCheck(ctx, userID, tz); err != nil {
-		return nil, err
-	}
-	return s.itemsResult(ctx, userID, ids, touched)
+	return s.itemsResult(ctx, userID, []uuid.UUID{id}, touched)
 }
 
+// applyItemEdit puts the fields on a stored row, marks it edited and pushes the
+// change to what it is linked to.
+func (s *Service) applyItemEdit(ctx context.Context, tx pgx.Tx, it *itemRow, f *Fields, alsoUpdateLink bool) ([]uuid.UUID, error) {
+	applyToDraft(&it.Draft, f)
+	if err := checkDraftRefsTx(ctx, tx, it.UserID, it.Draft); err != nil {
+		return nil, err
+	}
+	var date *string
+	if f.has("date") {
+		d, _ := parseDate(*f.Date)
+		it.Date, date = d, f.Date
+	}
+	if f.values() || date != nil {
+		it.Edited = true
+	}
+	var touched []uuid.UUID
+	if alsoUpdateLink {
+		t, err := s.syncLinkTx(ctx, tx, it, f, date)
+		if err != nil {
+			return nil, err
+		}
+		touched = append(touched, t...)
+	}
+	if err := saveItemTx(ctx, tx, it); err != nil {
+		return nil, err
+	}
+	return touched, nil
+}
+
+// DeleteItem removes a stored row: the occurrence goes back to its computed
+// state. deleteLinked also deletes the transaction recorded from it.
 func (s *Service) DeleteItem(ctx context.Context, userID, id uuid.UUID, deleteLinked bool) (*ItemDeleteResult, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -869,74 +948,6 @@ func (s *Service) DeleteItem(ctx context.Context, userID, id uuid.UUID, deleteLi
 	return out, nil
 }
 
-func (s *Service) CreateNow(ctx context.Context, userID, id uuid.UUID, req CreateNowRequest, tz string) (*ItemWriteResult, error) {
-	if req.Target != "pending" && req.Target != "transaction" {
-		return nil, ErrValidation
-	}
-	f := req.Fields
-	if f == nil {
-		f = &Fields{}
-	}
-	if err := validateFields(f); err != nil {
-		return nil, err
-	}
-	today, err := s.today(ctx, userID, tz)
-	if err != nil {
-		return nil, err
-	}
-	tx, err := s.begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-	it, err := getItem(ctx, tx, userID, id, true)
-	if err != nil {
-		return nil, err
-	}
-	if it.linked() {
-		return nil, ErrAlreadyLinked
-	}
-	applyToDraft(&it.Draft, f)
-	if f.has("date") {
-		it.Date, _ = parseDate(*f.Date)
-	}
-	if f.values() || f.has("date") {
-		it.Edited = true
-	}
-	if it.Date.After(today) {
-		it.ProducedAt, it.Archived = nil, false
-		if err := saveItemTx(ctx, tx, it); err != nil {
-			return nil, err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, err
-		}
-		return s.itemResult(ctx, userID, id, nil, nil)
-	}
-	if err := s.produceTx(ctx, tx, it); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	if req.Target == "pending" {
-		return s.itemResult(ctx, userID, id, nil, nil)
-	}
-	res, err := s.pending.Submit(ctx, userID, pending.SubmitRequest{IDs: []uuid.UUID{*it.PendingID}})
-	if err != nil {
-		return nil, err
-	}
-	var row any
-	if len(res.Submitted) > 0 && len(res.Submitted[0].Rows) > 0 {
-		row = res.Submitted[0].Rows[0]
-	}
-	it2, err := s.itemView(ctx, userID, id)
-	if err != nil {
-		return nil, err
-	}
-	return &ItemWriteResult{Item: *it2, Transaction: row, AccountBalances: res.AccountBalances, Setting: s.settingOf(ctx, userID, ruleOf(it2))}, nil
-}
-
 func (s *Service) setArchived(ctx context.Context, userID, id uuid.UUID, archived bool) (*ItemWriteResult, error) {
 	tag, err := s.db.Exec(ctx, `UPDATE recurring_items SET archived = $3 WHERE id = $1 AND user_id = $2`, id, userID, archived)
 	if err != nil {
@@ -956,186 +967,30 @@ func (s *Service) RestoreItem(ctx context.Context, userID, id uuid.UUID) (*ItemW
 	return s.setArchived(ctx, userID, id, false)
 }
 
-func (s *Service) Batch(ctx context.Context, userID uuid.UUID, req BatchRequest, tz string) (*BatchResult, error) {
-	ids := uniqueIDs(req.IDs)
-	if len(ids) == 0 || len(ids) > 100 {
-		return nil, ErrValidation
-	}
-	today, err := s.today(ctx, userID, tz)
-	if err != nil {
-		return nil, err
-	}
-	tx, err := s.begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-	items, err := s.lockItems(ctx, tx, `WHERE i.id = ANY($1) AND i.user_id = $2`, ids, userID)
-	if err != nil {
-		return nil, err
-	}
-	if len(items) != len(ids) {
-		return nil, ErrItemNotFound
-	}
-	out := &BatchResult{Items: []Item{}, DeletedIDs: []uuid.UUID{}}
-	var (
-		touched []uuid.UUID
-		drafts  []uuid.UUID
-	)
-	switch req.Action {
-	case "edit":
-		if req.Fields == nil || !req.Fields.values() {
-			return nil, ErrValidation
-		}
-		if err := validateFields(req.Fields); err != nil {
-			return nil, err
-		}
-		for _, it := range items {
-			applyToDraft(&it.Draft, req.Fields)
-			if err := checkDraftRefsTx(ctx, tx, userID, it.Draft); err != nil {
-				return nil, err
-			}
-			it.Edited = true
-			if req.AlsoUpdateLink {
-				t, err := s.syncLinkTx(ctx, tx, it, req.Fields, nil)
-				if err != nil {
-					return nil, err
-				}
-				touched = append(touched, t...)
-			}
-			if err := saveItemTx(ctx, tx, it); err != nil {
-				return nil, err
-			}
-		}
-	case "create":
-		if req.Target != "pending" && req.Target != "transaction" {
-			return nil, ErrValidation
-		}
-		var bad []uuid.UUID
-		for _, it := range items {
-			if it.linked() || it.Date.After(today) {
-				bad = append(bad, it.ID)
-			}
-		}
-		if len(bad) > 0 {
-			return nil, &ConflictError{IDs: bad}
-		}
-		for _, it := range items {
-			if err := s.produceTx(ctx, tx, it); err != nil {
-				return nil, err
-			}
-			drafts = append(drafts, *it.PendingID)
-		}
-	case "archive", "restore":
-		for _, it := range items {
-			it.Archived = req.Action == "archive"
-			if err := saveItemTx(ctx, tx, it); err != nil {
-				return nil, err
-			}
-		}
-	case "delete":
-		for _, it := range items {
-			if req.DeleteLinkedTx {
-				_, t, err := s.unlinkTx(ctx, tx, it)
-				if err != nil {
-					return nil, err
-				}
-				touched = append(touched, t...)
-			}
-			if _, err := tx.Exec(ctx, `DELETE FROM recurring_items WHERE id = $1`, it.ID); err != nil {
-				return nil, err
-			}
-			out.DeletedIDs = append(out.DeletedIDs, it.ID)
-		}
-	default:
-		return nil, ErrValidation
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	if req.Action == "create" && req.Target == "transaction" && len(drafts) > 0 {
-		res, err := s.pending.Submit(ctx, userID, pending.SubmitRequest{IDs: drafts})
-		if err != nil {
-			return nil, err
-		}
-		for _, b := range res.AccountBalances {
-			touched = append(touched, b.AccountID)
-		}
-	}
-	if req.Action != "delete" {
-		if out.Items, err = s.itemViews(ctx, s.db, userID, today, `WHERE i.id = ANY($1) AND i.user_id = $2 ORDER BY i.date, i.id`,
-			ids, userID); err != nil {
-			return nil, err
-		}
-	}
-	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
-		return nil, err
-	}
-	var rs []*uuid.UUID
-	for _, it := range items {
-		rs = append(rs, it.RuleID)
-	}
-	out.Setting = s.settingOf(ctx, userID, rs...)
-	return out, nil
-}
-
-func draftFromCreate(req transactions.CreateRequest) pending.Draft {
-	typ := string(req.Type)
-	d := pending.Draft{
-		Type: &typ, Amount: ptr(req.Amount), AccountID: req.AccountID, CategoryID: req.CategoryID,
-		Description: shared.CleanText(req.Description), Note: shared.CleanText(req.Note),
-		TransferToAccountID: req.TransferToAccountID, TagIDs: append([]uuid.UUID(nil), req.TagIDs...), Splits: req.Splits,
-	}
-	return d
-}
-
-func (s *Service) CreateUpcomingTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, req transactions.CreateRequest) (uuid.UUID, error) {
-	date, err := parseDate(req.Date)
-	if err != nil {
-		return uuid.Nil, ErrValidation
-	}
-	d := draftFromCreate(req)
-	if err := checkDraftRefsTx(ctx, tx, userID, d); err != nil {
-		return uuid.Nil, err
-	}
-	return insertItemTx(ctx, tx, &itemRow{UserID: userID, Date: date, Draft: d})
-}
-
-func (s *Service) MoveToUpcomingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, req transactions.CreateRequest) (uuid.UUID, error) {
-	date, err := parseDate(req.Date)
-	if err != nil {
-		return uuid.Nil, ErrValidation
-	}
-	var id uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT id FROM recurring_items WHERE transaction_id = $1 AND user_id = $2 FOR UPDATE`,
-		txID, userID).Scan(&id)
+// TxEditedTx — a transaction linked to an occurrence was edited with
+// also_update_link: the occurrence keeps the new values.
+// itemOfTx finds the stored row that records a transaction — or its other leg
+// when it is half of a transfer — whoever owns the row (the rule's owner may
+// not be the member who edits / deletes the transaction of a shared wallet).
+func itemOfTx(ctx context.Context, tx pgx.Tx, txID uuid.UUID) (*itemRow, error) {
+	var id, owner uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT i.id, i.user_id FROM recurring_items i
+		WHERE i.transaction_id IN (SELECT t.id FROM transactions t WHERE t.id = $1
+			OR (t.transfer_group_id IS NOT NULL
+			    AND t.transfer_group_id = (SELECT g.transfer_group_id FROM transactions g WHERE g.id = $1)))
+		LIMIT 1 FOR UPDATE`, txID).Scan(&id, &owner)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return s.CreateUpcomingTx(ctx, tx, userID, req)
+		return nil, nil
 	}
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
-	it, err := getItem(ctx, tx, userID, id, false)
-	if err != nil {
-		return uuid.Nil, err
-	}
-	it.Draft, it.Date, it.Edited = draftFromCreate(req), date, true
-	it.TransactionID, it.PendingID, it.ProducedAt, it.Archived = nil, nil, nil, false
-	return id, saveItemTx(ctx, tx, it)
+	return getItem(ctx, tx, owner, id, false)
 }
 
 func (s *Service) TxEditedTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, row *transactions.Transaction, tagIDs []uuid.UUID, tagsSet bool) error {
-	var id uuid.UUID
-	err := tx.QueryRow(ctx, `SELECT id FROM recurring_items WHERE transaction_id = $1 AND user_id = $2 FOR UPDATE`,
-		row.ID, userID).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	it, err := getItem(ctx, tx, userID, id, false)
-	if err != nil {
+	it, err := itemOfTx(ctx, tx, row.ID)
+	if err != nil || it == nil {
 		return err
 	}
 	typ := string(row.Type)
@@ -1144,26 +999,42 @@ func (s *Service) TxEditedTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, r
 	if tagsSet {
 		it.Draft.TagIDs = append([]uuid.UUID(nil), tagIDs...)
 	}
-	if d, err := parseDate(row.Date); err == nil {
-		it.Date = d
-	}
 	it.Edited = true
 	return saveItemTx(ctx, tx, it)
 }
 
-func (s *Service) TxDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (*uuid.UUID, error) {
-	var id uuid.UUID
-	err := tx.QueryRow(ctx, `DELETE FROM recurring_items WHERE transaction_id = $1 AND user_id = $2 RETURNING id`,
-		txID, userID).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
+// TxDeletingTx — a transaction linked to an occurrence is being deleted: the
+// occurrence goes back to its state before (computed due / upcoming; paid when
+// it was cleared first). skip stores it as skipped instead. It returns the
+// item id when a row stays.
+func (s *Service) TxDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, skip bool) (*uuid.UUID, error) {
+	it, err := itemOfTx(ctx, tx, txID)
+	if err != nil || it == nil {
 		return nil, err
 	}
-	return &id, nil
+	if skip {
+		it.TransactionID, it.AutoCreatedAt, it.Archived = nil, nil, true
+		id := it.ID
+		return &id, saveItemTx(ctx, tx, it)
+	}
+	return s.release(ctx, tx, it)
 }
 
+// release drops the transaction link of a row: a row with nothing else on it
+// goes (the occurrence is computed again); one that was cleared, edited or
+// added by hand stays without the transaction.
+func (s *Service) release(ctx context.Context, tx pgx.Tx, it *itemRow) (*uuid.UUID, error) {
+	it.TransactionID, it.AutoCreatedAt = nil, nil
+	if it.ClearedAt == nil && !it.Edited && !it.Manual && !it.Archived && it.PendingID == nil && it.SavingEntryID == nil {
+		_, err := tx.Exec(ctx, `DELETE FROM recurring_items WHERE id = $1`, it.ID)
+		return nil, err
+	}
+	id := it.ID
+	return &id, saveItemTx(ctx, tx, it)
+}
+
+// OnDraftSubmitted — a legacy recurring draft was submitted: its item links to
+// what it became.
 func (s *Service) OnDraftSubmitted(ctx context.Context, tx pgx.Tx, userID, draftID, id uuid.UUID, kind string) error {
 	col := "transaction_id"
 	if kind == pending.KindSaving {

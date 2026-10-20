@@ -160,7 +160,6 @@ func TestMyCountsTileFigures(t *testing.T) {
 			SELECT gen_random_uuid(), $1, id, 1, CURRENT_DATE + $4::int, CURRENT_DATE + $4::int, '{}' FROM r`,
 			uid, c.name, acct, c.days, c.status)
 	}
-	exec(`INSERT INTO recurring_items (id, user_id, date, draft) VALUES (gen_random_uuid(), $1, CURRENT_DATE + 5, '{}')`, uid)
 
 	got := get().Counts
 	if got.DebtsSummary.OwedToMe != 70 || got.DebtsSummary.IOwe != 40 || got.DebtsSummary.Net != 30 {
@@ -169,7 +168,10 @@ func TestMyCountsTileFigures(t *testing.T) {
 	if got.BudgetsSummary.TotalBudget != 100 || got.BudgetsSummary.TotalSpent != 150 || got.BudgetsSummary.OverLimitCount != 1 {
 		t.Errorf("budgets_summary = %+v, want budget 100 / spent 150 / 1 over", got.BudgetsSummary)
 	}
-	if got.Recurring.ActiveCount != 2 || got.Recurring.UpcomingCount != 2 {
-		t.Errorf("recurring = %+v, want 2 active / 2 upcoming (the paused one never counts)", got.Recurring)
+	// Without an Expecter the stored items are counted (the guard for the
+	// computed path in expected_test.go): due / needs-amount stay 0.
+	if got.Recurring.ActiveCount != 2 || got.Recurring.UpcomingCount != 1 ||
+		got.Recurring.DueCount != 0 || got.Recurring.NeedsAmountCount != 0 {
+		t.Errorf("recurring = %+v, want 2 active / 1 upcoming (the paused one never counts) / 0 due / 0 needs amount", got.Recurring)
 	}
 }

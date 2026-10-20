@@ -79,7 +79,7 @@ func (s *Service) FormOptions(ctx context.Context, userID uuid.UUID) (*FormOptio
 
 func formAccounts(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]AccountOption, error) {
 	rows, err := q.Query(ctx, `
-		SELECT a.id, a.name, a.icon_code, a.logo_url, a.type, a.currency, a.balance, m.sort_order
+		SELECT a.id, a.name, a.icon_code, a.logo_url, a.type, a.currency, `+shared.EffectiveBalanceSQL("a.balance", "a.id", "$1")+`, m.sort_order
 		FROM accounts a
 		JOIN LATERAL (SELECT am.sort_order FROM account_members am
 		              WHERE am.account_id = a.id AND am.user_id = $1

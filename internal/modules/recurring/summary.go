@@ -24,6 +24,9 @@ type ListSummary struct {
 	Next         *NextUp `json:"next"`
 	Due30dTotal         float64  `json:"due_30d_total"`
 	AwaitingAmountCount int      `json:"awaiting_amount_count"`
+	// DueCount / DueTotal — the occurrences due and not recorded (overdue + today).
+	DueCount int     `json:"due_count"`
+	DueTotal float64 `json:"due_total"`
 	ByKind              KindsSum `json:"by_kind"`
 }
 
@@ -65,7 +68,7 @@ func monthlyCount(r *Rule, today time.Time) float64 {
 func (s *Service) summary(ctx context.Context, userID uuid.UUID, today time.Time) (ListSummary, error) {
 	out := ListSummary{}
 	var err error
-	if out.Due30dTotal, out.AwaitingAmountCount, err = s.dueWindow(ctx, userID, today); err != nil {
+	if err := s.dueWindow(ctx, userID, today, &out); err != nil {
 		return out, err
 	}
 	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules r
@@ -95,28 +98,16 @@ func (s *Service) summary(ctx context.Context, userID uuid.UUID, today time.Time
 	for i, r := range rules {
 		ids[i] = r.ID
 	}
+	_ = ids
 	next := map[uuid.UUID]time.Time{}
-	nr, err := s.db.Query(ctx, `SELECT rule_id, MIN(date) FROM recurring_items
-		WHERE rule_id = ANY($1) AND produced_at IS NULL AND pending_id IS NULL
-		  AND transaction_id IS NULL AND saving_entry_id IS NULL AND NOT archived AND date >= $2
-		GROUP BY rule_id`, ids, today)
+	ahead, err := s.occsInRange(ctx, s.db, userID, rules, today, today.AddDate(0, 0, horizonDays), today, true)
 	if err != nil {
 		return out, fmt.Errorf("summary next: %w", err)
 	}
-	for nr.Next() {
-		var (
-			id uuid.UUID
-			d  time.Time
-		)
-		if err := nr.Scan(&id, &d); err != nil {
-			nr.Close()
-			return out, err
+	for _, o := range ahead { // oldest first: the first expected one of a rule is its next
+		if _, seen := next[o.rule.ID]; !seen && o.expected() {
+			next[o.rule.ID] = o.date
 		}
-		next[id] = d
-	}
-	nr.Close()
-	if err := nr.Err(); err != nil {
-		return out, err
 	}
 	sort.SliceStable(rules, func(i, j int) bool {
 		di, oki := next[rules[i].ID]
@@ -181,14 +172,37 @@ func (k *KindsSum) of(kind string) *KindTotals {
 	return &k.Subscription
 }
 
-func (s *Service) dueWindow(ctx context.Context, userID uuid.UUID, today time.Time) (total float64, awaiting int, err error) {
-	err = s.db.QueryRow(ctx, `
-		SELECT COALESCE(SUM((i.draft->>'amount')::numeric) FILTER (WHERE i.draft->>'type' = 'expense'
-		                   AND COALESCE((i.draft->>'amount')::numeric, 0) > 0), 0)::float8,
-		       COUNT(*) FILTER (WHERE COALESCE((i.draft->>'amount')::numeric, 0) <= 0)
-		FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.rule_id
-		WHERE i.user_id = $1 AND i.transaction_id IS NULL AND i.saving_entry_id IS NULL AND NOT i.archived
-		  AND i.date <= $2 AND (i.rule_id IS NULL OR r.status = 'active')`, userID, today.AddDate(0, 0, 30)).Scan(&total, &awaiting)
-	total = math.Round(total*100) / 100
-	return
+// dueWindow fills what is due and what falls in the next 30 days: the expense
+// total, the occurrences still without an amount, and the overdue ones.
+func (s *Service) dueWindow(ctx context.Context, userID uuid.UUID, today time.Time, out *ListSummary) error {
+	rules, err := s.activeRules(ctx, s.db, userID)
+	if err != nil {
+		return err
+	}
+	occs, err := s.occsInRange(ctx, s.db, userID, rules, today.AddDate(-5, 0, 0), today.AddDate(0, 0, 30), today, true)
+	if err != nil {
+		return err
+	}
+	var total, dueTotal float64
+	for _, o := range occs {
+		if !o.expected() {
+			continue
+		}
+		has := o.draft.Amount != nil && *o.draft.Amount > 0
+		if !has {
+			out.AwaitingAmountCount++
+		}
+		if o.status == StatusDue {
+			out.DueCount++
+			if has && o.draft.Type != nil && *o.draft.Type == "expense" {
+				dueTotal += *o.draft.Amount
+			}
+		}
+		if has && o.draft.Type != nil && *o.draft.Type == "expense" {
+			total += *o.draft.Amount
+		}
+	}
+	out.Due30dTotal = math.Round(total*100) / 100
+	out.DueTotal = math.Round(dueTotal*100) / 100
+	return nil
 }

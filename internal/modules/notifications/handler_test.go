@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/apidoc/apitest"
@@ -330,5 +331,127 @@ func TestInboxSummaryAndAwaitsAnswer(t *testing.T) {
 		if n["awaits_answer"] != want {
 			t.Errorf("%v awaits_answer = %v, want %v", n["type"], n["awaits_answer"], want)
 		}
+	}
+}
+
+// inTx runs one service write in its own DB transaction.
+func (f *nfix) inTx(t *testing.T, run func(ctx context.Context, tx pgx.Tx) error) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := run(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type recurringNotice struct {
+	date  string
+	count int
+	link  string
+	read  bool
+}
+
+func (f *nfix) recurringNotices(t *testing.T, typ string) []recurringNotice {
+	t.Helper()
+	rows, err := f.pool.Query(context.Background(), `
+		SELECT COALESCE(payload->>'date', ''), COALESCE((payload->>'count')::int, 0), COALESCE(deep_link, ''), read_at IS NOT NULL
+		FROM notifications WHERE recipient_user_id = $1 AND type = $2
+		ORDER BY payload->>'date', created_at`, f.uid, typ)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []recurringNotice
+	for rows.Next() {
+		var n recurringNotice
+		if err := rows.Scan(&n.date, &n.count, &n.link, &n.read); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// One auto-create notice per day: the day's row (read or not) adds up the
+// counts; another day gets its own row; muted = none.
+func TestRecurringAutoCreatedGroupsPerDay(t *testing.T) {
+	f := newFix(t)
+	svc := NewService(NewStore(f.pool))
+	add := func(count int, date string) {
+		t.Helper()
+		f.inTx(t, func(ctx context.Context, tx pgx.Tx) error {
+			return svc.RecurringAutoCreatedTx(ctx, tx, f.uid, count, date)
+		})
+	}
+	add(2, "2026-10-20")
+	add(3, "2026-10-20")
+	add(0, "2026-10-20") // nothing recorded: no change
+	got := f.recurringNotices(t, TypeRecurringAutoCreated)
+	if len(got) != 1 || got[0].count != 5 || got[0].date != "2026-10-20" || got[0].link != "/recurring" {
+		t.Fatalf("same day = %+v, want one row, count 5, link /recurring", got)
+	}
+
+	// Read, then more the same day: still the one row, read stays.
+	if _, err := f.pool.Exec(context.Background(), `UPDATE notifications SET read_at = NOW()
+		WHERE recipient_user_id = $1 AND type = $2`, f.uid, TypeRecurringAutoCreated); err != nil {
+		t.Fatal(err)
+	}
+	add(1, "2026-10-20")
+	add(4, "2026-10-21")
+	got = f.recurringNotices(t, TypeRecurringAutoCreated)
+	if len(got) != 2 || got[0].count != 6 || !got[0].read || got[1].date != "2026-10-21" || got[1].count != 4 || got[1].read {
+		t.Fatalf("next day = %+v, want [2026-10-20 ×6 read, 2026-10-21 ×4 unread]", got)
+	}
+
+	// The inbox lists it in the spec's shape.
+	out := f.do(t, "GET", "/api/v1/notifications?type=recurring_auto_created&read=all", nil, "listNotifications", http.StatusOK)
+	if n := len(out["data"].([]any)); n != 2 {
+		t.Errorf("listed %d, want 2", n)
+	}
+
+	// Muted: nothing is written.
+	if _, err := f.pool.Exec(context.Background(), `UPDATE user_notification_settings SET muted_types = ARRAY[$2]
+		WHERE user_id = $1`, f.uid, TypeRecurringAutoCreated); err != nil {
+		t.Fatal(err)
+	}
+	add(7, "2026-10-22")
+	if got := f.recurringNotices(t, TypeRecurringAutoCreated); len(got) != 2 {
+		t.Errorf("muted wrote a row: %+v", got)
+	}
+}
+
+// The due notice opens ต้องจัดการ: a new one and a bumped one both point at
+// /recurring?focus=due (an old unread one still on /pending moves over).
+func TestRecurringDueDeepLink(t *testing.T) {
+	f := newFix(t)
+	svc := NewService(NewStore(f.pool))
+	due := func(n int) {
+		t.Helper()
+		f.inTx(t, func(ctx context.Context, tx pgx.Tx) error { return svc.RecurringDueTx(ctx, tx, f.uid, n) })
+	}
+	due(2)
+	got := f.recurringNotices(t, TypeRecurringDue)
+	if len(got) != 1 || got[0].count != 2 || got[0].link != "/recurring?focus=due" {
+		t.Fatalf("new due notice = %+v", got)
+	}
+	if _, err := f.pool.Exec(context.Background(), `UPDATE notifications SET deep_link = '/pending'
+		WHERE recipient_user_id = $1 AND type = $2`, f.uid, TypeRecurringDue); err != nil {
+		t.Fatal(err)
+	}
+	due(1)
+	got = f.recurringNotices(t, TypeRecurringDue)
+	if len(got) != 1 || got[0].count != 3 || got[0].link != "/recurring?focus=due" {
+		t.Fatalf("bumped due notice = %+v, want one row, count 3, the new link", got)
+	}
+	due(0) // nothing new: no change
+	if got := f.recurringNotices(t, TypeRecurringDue); len(got) != 1 || got[0].count != 3 {
+		t.Errorf("due(0) changed it: %+v", got)
 	}
 }

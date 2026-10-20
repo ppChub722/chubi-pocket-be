@@ -24,7 +24,28 @@ var (
 	ErrInvalidCategory   = errors.New("invalid category")
 	ErrTagNotFound       = errors.New("tag not found")
 	ErrValidation        = errors.New("invalid request")
+
+	ErrAutoCreateNeedsAmount = errors.New("auto-create needs a fixed amount")
+	ErrAutoCreateNeedsWallet = errors.New("auto-create needs a wallet")
+	ErrAmountRequired        = errors.New("this occurrence has no amount yet: send one")
+	ErrAlreadyRecorded       = errors.New("this occurrence is already recorded")
 )
+
+// LinkConflict — a link that needs `replace`: the occurrence already has a
+// transaction, or the transaction is already another occurrence's.
+type LinkConflict struct {
+	Linked *LinkedTx // the transaction the occurrence has now
+	Other  *OccRef   // the other occurrence the transaction belongs to
+}
+
+// OccRef names an occurrence.
+type OccRef struct {
+	RuleID uuid.UUID `json:"rule_id"`
+	Slot   string    `json:"slot"`
+}
+
+func (e *LinkConflict) Error() string { return ErrAlreadyLinked.Error() }
+func (e *LinkConflict) Unwrap() error { return ErrAlreadyLinked }
 
 type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
@@ -34,7 +55,8 @@ const ruleColumns = `id, user_id, name, description, note, icon_code, type, amou
 	account_id, to_account_id, category_id, tag_ids, freq, interval_n, weekdays,
 	monthly_mode, month_day, month_nth, month_weekday, dates, start_date, end_kind,
 	end_date, end_count, total_count, generated_until, status, ending_notified,
-	created_at, updated_at, goal_id, kind, trial_until`
+	created_at, updated_at, goal_id, kind, trial_until,
+	tracked_from, due_notified_until, auto_create, auto_created_until, paused_from`
 
 func scanRule(row pgx.Row) (*Rule, error) {
 	var (
@@ -49,7 +71,8 @@ func scanRule(row pgx.Row) (*Rule, error) {
 		&r.AccountID, &r.ToAccountID, &r.CategoryID, &r.TagIDs, &r.Freq, &interval, &weekdays,
 		&r.MonthlyMode, &monthDay, &monthNth, &monthWD, &r.Dates, &r.StartDate, &r.EndKind,
 		&r.EndDate, &count, &total, &r.GeneratedUntil, &r.Status, &r.EndingNotified,
-		&r.CreatedAt, &r.UpdatedAt, &r.GoalID, &r.Kind, &r.TrialUntil); err != nil {
+		&r.CreatedAt, &r.UpdatedAt, &r.GoalID, &r.Kind, &r.TrialUntil,
+		&r.TrackedFrom, &r.DueNotifiedUntil, &r.AutoCreate, &r.AutoCreatedUntil, &r.PausedFrom); err != nil {
 		return nil, err
 	}
 	r.IconCode = shared.IconFromJSON(icon)
@@ -106,22 +129,26 @@ func saveRuleTx(ctx context.Context, tx pgx.Tx, r *Rule) error {
 	args := []any{r.ID, r.UserID, r.Name, shared.CleanText(r.Description), shared.CleanText(r.Note), icon, r.Type, r.Amount,
 		r.AccountID, r.ToAccountID, r.CategoryID, tags, r.Freq, r.Interval, weekdays,
 		r.MonthlyMode, r.MonthDay, r.MonthNth, r.MonthWeekday, dates, r.StartDate, r.EndKind,
-		r.EndDate, r.EndCount, r.TotalCount, r.GeneratedUntil, r.Status, r.EndingNotified, r.GoalID, r.Kind, r.TrialUntil}
+		r.EndDate, r.EndCount, r.TotalCount, r.GeneratedUntil, r.Status, r.EndingNotified, r.GoalID, r.Kind, r.TrialUntil,
+		r.TrackedFrom, r.DueNotifiedUntil, r.AutoCreate, r.AutoCreatedUntil, r.PausedFrom}
 	if r.ID == uuid.Nil {
 		r.ID, _ = uuid.NewV7()
 		args[0] = r.ID
 		_, err = tx.Exec(ctx, `INSERT INTO recurring_rules (id, user_id, name, description, note, icon_code, type, amount,
 			account_id, to_account_id, category_id, tag_ids, freq, interval_n, weekdays,
 			monthly_mode, month_day, month_nth, month_weekday, dates, start_date, end_kind,
-			end_date, end_count, total_count, generated_until, status, ending_notified, goal_id, kind, trial_until)
+			end_date, end_count, total_count, generated_until, status, ending_notified, goal_id, kind, trial_until,
+			tracked_from, due_notified_until, auto_create, auto_created_until, paused_from)
 			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-			        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)`, args...)
+			        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
+			        $32, $33, $34, $35, $36)`, args...)
 	} else {
 		_, err = tx.Exec(ctx, `UPDATE recurring_rules SET name = $3, description = $4, note = $5, icon_code = $6::jsonb,
 			type = $7, amount = $8, account_id = $9, to_account_id = $10, category_id = $11, tag_ids = $12,
 			freq = $13, interval_n = $14, weekdays = $15, monthly_mode = $16, month_day = $17, month_nth = $18,
 			month_weekday = $19, dates = $20, start_date = $21, end_kind = $22, end_date = $23, end_count = $24,
-			total_count = $25, generated_until = $26, status = $27, ending_notified = $28, goal_id = $29, kind = $30, trial_until = $31
+			total_count = $25, generated_until = $26, status = $27, ending_notified = $28, goal_id = $29, kind = $30, trial_until = $31,
+			tracked_from = $32, due_notified_until = $33, auto_create = $34, auto_created_until = $35, paused_from = $36
 			WHERE id = $1 AND user_id = $2`, args...)
 	}
 	if err != nil {
@@ -152,6 +179,12 @@ type itemRow struct {
 	PendingID     *uuid.UUID
 	TransactionID *uuid.UUID
 	SavingEntryID *uuid.UUID
+	// ClearedAt — paid without a transaction ("แม่จ่ายให้").
+	ClearedAt *time.Time
+	// AutoCreatedAt — the transaction was recorded by auto-create.
+	AutoCreatedAt *time.Time
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 func (it *itemRow) linked() bool {
@@ -159,7 +192,7 @@ func (it *itemRow) linked() bool {
 }
 
 const itemColumns = `id, user_id, rule_id, seq, slot, date, draft, edited, manual, archived,
-	produced_at, pending_id, transaction_id, saving_entry_id`
+	produced_at, pending_id, transaction_id, saving_entry_id, cleared_at, auto_created_at, created_at, updated_at`
 
 func scanItem(row pgx.Row) (*itemRow, error) {
 	var (
@@ -168,7 +201,7 @@ func scanItem(row pgx.Row) (*itemRow, error) {
 		seq   *int32
 	)
 	if err := row.Scan(&it.ID, &it.UserID, &it.RuleID, &seq, &it.Slot, &it.Date, &draft, &it.Edited, &it.Manual,
-		&it.Archived, &it.ProducedAt, &it.PendingID, &it.TransactionID, &it.SavingEntryID); err != nil {
+		&it.Archived, &it.ProducedAt, &it.PendingID, &it.TransactionID, &it.SavingEntryID, &it.ClearedAt, &it.AutoCreatedAt, &it.CreatedAt, &it.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if seq != nil {
@@ -211,12 +244,14 @@ func insertItemTx(ctx context.Context, tx pgx.Tx, it *itemRow) (uuid.UUID, error
 		v := int32(*it.Seq)
 		seq = &v
 	}
-	q := `INSERT INTO recurring_items (id, user_id, rule_id, seq, slot, date, draft, edited, manual, archived, produced_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, FALSE, $10)`
+	q := `INSERT INTO recurring_items (id, user_id, rule_id, seq, slot, date, draft, edited, manual, archived, produced_at,
+			pending_id, transaction_id, saving_entry_id, cleared_at, auto_created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`
 	if it.Slot != nil {
 		q += ` ON CONFLICT (rule_id, slot) WHERE slot IS NOT NULL DO NOTHING`
 	}
-	tag, err := tx.Exec(ctx, q, id, it.UserID, it.RuleID, seq, it.Slot, it.Date, draft, it.Edited, it.Manual, it.ProducedAt)
+	tag, err := tx.Exec(ctx, q, id, it.UserID, it.RuleID, seq, it.Slot, it.Date, draft, it.Edited, it.Manual, it.Archived, it.ProducedAt,
+		it.PendingID, it.TransactionID, it.SavingEntryID, it.ClearedAt, it.AutoCreatedAt)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("insert item: %w", err)
 	}
@@ -234,9 +269,10 @@ func saveItemTx(ctx context.Context, tx pgx.Tx, it *itemRow) error {
 		return err
 	}
 	_, err = tx.Exec(ctx, `UPDATE recurring_items SET date = $3, draft = $4, edited = $5, archived = $6,
-		produced_at = $7, pending_id = $8, transaction_id = $9, saving_entry_id = $10 WHERE id = $1 AND user_id = $2`,
+		produced_at = $7, pending_id = $8, transaction_id = $9, saving_entry_id = $10, cleared_at = $11,
+		auto_created_at = $12 WHERE id = $1 AND user_id = $2`,
 		it.ID, it.UserID, it.Date, draft, it.Edited, it.Archived, it.ProducedAt, it.PendingID, it.TransactionID,
-		it.SavingEntryID)
+		it.SavingEntryID, it.ClearedAt, it.AutoCreatedAt)
 	if err != nil {
 		return fmt.Errorf("save item: %w", err)
 	}

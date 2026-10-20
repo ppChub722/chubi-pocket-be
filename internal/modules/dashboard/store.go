@@ -28,6 +28,9 @@ type upcomingRow struct {
 	DueDate  string
 	IconCode *shared.IconCode
 	LogoURL  *string
+	// RuleID / Slot name a recurring occurrence read from an Expecter.
+	RuleID *uuid.UUID
+	Slot   *string
 }
 
 func (s *Store) UpcomingItems(ctx context.Context, userID uuid.UUID, today, until string) ([]upcomingRow, error) {
@@ -37,7 +40,7 @@ func (s *Store) UpcomingItems(ctx context.Context, userID uuid.UUID, today, unti
 		FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.rule_id
 		WHERE i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
 		  AND NOT i.archived AND i.date > $2::date AND i.date <= $3::date
-		  AND (i.rule_id IS NULL OR r.status = 'active')
+		  AND r.status = 'active'
 		ORDER BY i.date ASC, 2 ASC`, userID, today, until)
 	if err != nil {
 		return nil, fmt.Errorf("upcoming items: %w", err)

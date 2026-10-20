@@ -4,14 +4,13 @@ import (
 	"context"
 	"errors"
 	"math"
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"net/http"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -19,6 +18,8 @@ var ErrTxNotFound = errors.New("transaction not found")
 
 type LinkRequest struct {
 	TransactionID uuid.UUID `json:"transaction_id"`
+	// Replace — swap (see LinkSlotRequest).
+	Replace bool `json:"replace"`
 }
 
 type LinkResult struct {
@@ -28,21 +29,48 @@ type LinkResult struct {
 	RuleAmount        *float64               `json:"rule_amount"`
 	TransactionAmount float64                `json:"transaction_amount"`
 	AccountBalances   []shared.WalletBalance `json:"account_balances"`
-	Setting *Recurring `json:"setting"`
+	Setting           *Recurring             `json:"setting"`
 }
 
+// Link — the old call by item id (a stored row): it becomes LinkOcc at the row's slot.
 func (s *Service) Link(ctx context.Context, userID, itemID uuid.UUID, req LinkRequest) (*LinkResult, error) {
+	it, err := getItem(ctx, s.db, userID, itemID, false)
+	if err != nil {
+		return nil, err
+	}
+	if it.RuleID == nil {
+		return nil, ErrItemNotFound
+	}
+	slot := it.Date
+	if it.Slot != nil {
+		slot = *it.Slot
+	}
+	return s.linkOcc(ctx, userID, *it.RuleID, slot, LinkSlotRequest{TransactionID: req.TransactionID, Replace: req.Replace}, "", it)
+}
+
+// LinkOcc makes an existing transaction the record of the occurrence: one
+// occurrence ↔ one transaction. The transaction keeps its own date and amount
+// (early / late payment is fine). An occurrence that already has a transaction
+// (or a transaction that is another occurrence's) needs Replace, else the 409
+// says which.
+func (s *Service) LinkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot time.Time, req LinkSlotRequest, tz string) (*LinkResult, error) {
+	return s.linkOcc(ctx, userID, ruleID, slot, req, tz, nil)
+}
+
+// linkOcc — byRow set: the occurrence IS that stored row (a manual item has no slot
+// of its own, so it can only be reached by its id).
+func (s *Service) linkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot time.Time, req LinkSlotRequest, tz string, byRow *itemRow) (*LinkResult, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	it, err := getItem(ctx, tx, userID, itemID, true)
+	r, o, err := s.occOf(ctx, tx, userID, ruleID, slot, tz, byRow)
 	if err != nil {
 		return nil, err
 	}
-	if it.TransactionID != nil || it.SavingEntryID != nil || it.Archived {
-		return nil, ErrAlreadyLinked
+	if o.status == StatusSkipped {
+		return nil, ErrInvalidTransition
 	}
 	var (
 		txType   string
@@ -57,57 +85,78 @@ func (s *Service) Link(ctx context.Context, userID, itemID uuid.UUID, req LinkRe
 	if err != nil {
 		return nil, err
 	}
-	var taken bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM recurring_items WHERE transaction_id = $1)`, req.TransactionID).Scan(&taken); err != nil {
-		return nil, err
-	}
-	if taken {
-		return nil, ErrAlreadyLinked
-	}
-	if it.Draft.Type == nil || *it.Draft.Type != txType {
+	if o.draft.Type == nil || *o.draft.Type != txType {
 		return nil, ErrValidation
 	}
-	if it.PendingID != nil {
-		if _, err := tx.Exec(ctx, `DELETE FROM pending_transactions WHERE id = $1 AND user_id = $2`, *it.PendingID, userID); err != nil {
-			return nil, err
-		}
-		it.PendingID = nil
-	}
-	now := time.Now()
-	if it.ProducedAt == nil {
-		it.ProducedAt = &now
-	}
-	it.TransactionID = &req.TransactionID
-	a := txAmount
-	it.Draft.Amount = &a
-	it.Edited = true
-	if err := saveItemTx(ctx, tx, it); err != nil {
+	// the transaction may belong to another occurrence
+	var otherID *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM recurring_items WHERE transaction_id = $1 AND user_id = $2 FOR UPDATE`,
+		req.TransactionID, userID).Scan(&otherID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
-	out := &LinkResult{TransactionAmount: math.Round(txAmount*100) / 100}
-	if it.RuleID != nil {
-		r, err := getRule(ctx, tx, userID, *it.RuleID, false)
+	if otherID != nil && (o.row == nil || *otherID != o.row.ID) {
+		other, err := getItem(ctx, tx, userID, *otherID, true)
 		if err != nil {
 			return nil, err
 		}
-		if r.Amount > 0 {
-			ra := r.Amount
-			out.RuleAmount = &ra
-			out.AmountDiffers = math.Abs(r.Amount-txAmount) > 0.004
+		if !req.Replace {
+			os := other.Date
+			if other.Slot != nil {
+				os = *other.Slot
+			}
+			return nil, &LinkConflict{Other: &OccRef{RuleID: *other.RuleID, Slot: os.Format(dateLayout)}}
 		}
+		if _, err := s.release(ctx, tx, other); err != nil {
+			return nil, err
+		}
+	}
+	if o.row != nil && o.row.TransactionID != nil && *o.row.TransactionID != req.TransactionID && !req.Replace {
+		lt := &LinkedTx{ID: *o.row.TransactionID}
+		var d *string
+		var amt float64
+		var dd string
+		if err := tx.QueryRow(ctx, `SELECT description, amount::float8, to_char(date, 'YYYY-MM-DD') FROM transactions WHERE id = $1`,
+			*o.row.TransactionID).Scan(&d, &amt, &dd); err == nil {
+			lt.Description, lt.Amount, lt.Date = d, &amt, &dd
+		}
+		return nil, &LinkConflict{Linked: lt}
+	}
+	row, err := s.store(ctx, tx, o)
+	if err != nil {
+		return nil, err
+	}
+	if row.PendingID != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM pending_transactions WHERE id = $1 AND user_id = $2`, *row.PendingID, userID); err != nil {
+			return nil, err
+		}
+		row.PendingID = nil
+	}
+	now := time.Now()
+	row.TransactionID, row.AutoCreatedAt, row.Archived = &req.TransactionID, nil, false
+	if row.ProducedAt == nil {
+		row.ProducedAt = &now
+	}
+	if err := saveItemTx(ctx, tx, row); err != nil {
+		return nil, err
+	}
+	out := &LinkResult{TransactionAmount: math.Round(txAmount*100) / 100}
+	if r.Amount > 0 {
+		ra := r.Amount
+		out.RuleAmount = &ra
+		out.AmountDiffers = math.Abs(r.Amount-txAmount) > 0.004
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	v, err := s.itemView(ctx, userID, itemID)
+	it, err := s.itemAfter(ctx, userID, ruleID, slot, byRow)
 	if err != nil {
 		return nil, err
 	}
-	out.Item = *v
-	out.Setting = s.settingOf(ctx, userID, ruleOf(v))
+	out.Item = *it
+	out.Setting = s.settingOf(ctx, userID, ruleOf(it))
 	if s.txs != nil {
-		if row, err := s.txs.Get(ctx, userID, req.TransactionID); err == nil {
-			out.Transaction = row
+		if txRow, err := s.txs.Get(ctx, userID, req.TransactionID); err == nil {
+			out.Transaction = txRow
 		}
 	}
 	var touched []uuid.UUID
@@ -119,8 +168,6 @@ func (s *Service) Link(ctx context.Context, userID, itemID uuid.UUID, req LinkRe
 	}
 	return out, nil
 }
-
-var _ = transactions.TypeExpense
 
 func (h *Handler) Link(c *gin.Context) {
 	uid, id, ok := userAndID(c)
@@ -136,41 +183,61 @@ func (h *Handler) Link(c *gin.Context) {
 }
 
 type UnlinkResult struct {
-	Item Item `json:"item"`
+	Item    Item       `json:"item"`
 	Setting *Recurring `json:"setting"`
 }
 
+// Unlink — the old call by item id.
 func (s *Service) Unlink(ctx context.Context, userID, itemID uuid.UUID) (*UnlinkResult, error) {
+	it, err := getItem(ctx, s.db, userID, itemID, false)
+	if err != nil {
+		return nil, err
+	}
+	if it.RuleID == nil {
+		return nil, ErrItemNotFound
+	}
+	slot := it.Date
+	if it.Slot != nil {
+		slot = *it.Slot
+	}
+	return s.unlinkOcc(ctx, userID, *it.RuleID, slot, "", it)
+}
+
+// UnlinkOcc lets go of the occurrence's transaction (the transaction stays):
+// the occurrence goes back to computed (due / upcoming), or to paid when it was
+// cleared first.
+func (s *Service) UnlinkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot time.Time, tz string) (*UnlinkResult, error) {
+	return s.unlinkOcc(ctx, userID, ruleID, slot, tz, nil)
+}
+
+func (s *Service) unlinkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot time.Time, tz string, byRow *itemRow) (*UnlinkResult, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	it, err := getItem(ctx, tx, userID, itemID, true)
+	_, o, err := s.occOf(ctx, tx, userID, ruleID, slot, tz, byRow)
 	if err != nil {
 		return nil, err
 	}
-	if it.TransactionID == nil {
+	if o.row == nil || o.row.TransactionID == nil {
 		return nil, ErrValidation
 	}
-	it.TransactionID, it.ProducedAt = nil, nil
-	if it.RuleID != nil {
-		if r, err := getRule(ctx, tx, userID, *it.RuleID, false); err == nil && r.Amount > 0 {
-			a := r.Amount
-			it.Draft.Amount = &a
-		}
+	row, err := getItem(ctx, tx, userID, o.row.ID, true)
+	if err != nil {
+		return nil, err
 	}
-	if err := saveItemTx(ctx, tx, it); err != nil {
+	if _, err := s.release(ctx, tx, row); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	v, err := s.itemView(ctx, userID, itemID)
+	it, err := s.itemAfter(ctx, userID, ruleID, slot, byRow)
 	if err != nil {
 		return nil, err
 	}
-	return &UnlinkResult{Item: *v, Setting: s.settingOf(ctx, userID, ruleOf(v))}, nil
+	return &UnlinkResult{Item: *it, Setting: s.settingOf(ctx, userID, ruleOf(it))}, nil
 }
 
 func (h *Handler) Unlink(c *gin.Context) {

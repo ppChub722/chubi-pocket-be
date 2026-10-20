@@ -131,7 +131,6 @@ type WriteResult struct {
 	// The debt person's new balance when the row is a debt entry's wallet side (a
 	// personal_debts.DebtPerson; null otherwise).
 	PersonBalance any `json:"person_balance"`
-	Upcoming any `json:"upcoming"`
 }
 
 type DeleteResult struct {

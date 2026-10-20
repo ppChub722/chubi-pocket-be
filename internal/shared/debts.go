@@ -67,6 +67,8 @@ type RecurringRef struct {
 	ID       uuid.UUID `json:"id"`
 	Name     string    `json:"name"`
 	IconCode *IconCode `json:"icon_code"`
+	// Kind — subscription | installment | income | reminder (set by the recurring module only).
+	Kind string `json:"kind,omitempty"`
 }
 
 type RecurringItemLink struct {

@@ -7,23 +7,34 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared/recurrence"
 )
 
-const dateLayout = "2006-01-02"
+const dateLayout = recurrence.DateLayout
 
+// Item statuses: upcoming (date after today) · due (date today or before, not
+// recorded) · done (a transaction) · paid (cleared without a transaction) ·
+// skipped · pending (a legacy draft still waiting). StatusNotCreated and
+// StatusArchived are the old names (= due, = skipped), still accepted as filters.
 const (
 	StatusUpcoming   = "upcoming"
-	StatusNotCreated = "not_created"
+	StatusDue        = "due"
 	StatusPending    = "pending"
 	StatusDone       = "done"
+	StatusPaid       = "paid"
+	StatusSkipped    = "skipped"
+	StatusNotCreated = "not_created"
 	StatusArchived   = "archived"
 )
 
-const statusSQL = `(CASE WHEN i.transaction_id IS NOT NULL OR i.saving_entry_id IS NOT NULL THEN 'done'
+// statusSQL is the status of a STORED item row (alias i); a computed
+// occurrence has no row and gets its status in Go.
+var statusSQL = `(CASE WHEN i.transaction_id IS NOT NULL OR i.saving_entry_id IS NOT NULL THEN 'done'
+	WHEN i.archived THEN 'skipped'
+	WHEN i.cleared_at IS NOT NULL THEN 'paid'
 	WHEN i.pending_id IS NOT NULL THEN 'pending'
-	WHEN i.archived THEN 'archived'
-	WHEN i.produced_at IS NULL THEN 'upcoming'
-	ELSE 'not_created' END)`
+	WHEN i.date <= ` + shared.TodaySQL("i.user_id") + ` THEN 'due'
+	ELSE 'upcoming' END)`
 
 type Rule struct {
 	ID             uuid.UUID
@@ -39,60 +50,81 @@ type Rule struct {
 	CategoryID     *uuid.UUID
 	GoalID         *uuid.UUID // type saving: the goal (nil = spare)
 	TagIDs         []uuid.UUID
-	Freq           string
-	Interval       int
-	Weekdays       []int
-	MonthlyMode    *string
-	MonthDay       *int
-	MonthNth       *int
-	MonthWeekday   *int
-	Dates          []time.Time
-	StartDate      time.Time
-	EndKind        string
-	EndDate        *time.Time
-	EndCount       *int
-	TotalCount     *int
-	Kind           string     // subscription | installment | income | reminder
-	TrialUntil     *time.Time // subscription: the free trial runs until
-	GeneratedUntil *time.Time
-	Status         string
+	recurrence.Spec
+	Kind       string     // subscription | installment | income | reminder
+	TrialUntil *time.Time // subscription: the free trial runs until
+	Status     string
 	EndingNotified bool
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	// TrackedFrom — occurrences before it are history (paid implicitly), never overdue.
+	TrackedFrom time.Time
+	// DueNotifiedUntil — the due notice has counted the occurrences up to this day.
+	DueNotifiedUntil *time.Time
+	// AutoCreate — record the transaction by itself when an occurrence comes due;
+	// AutoCreatedUntil is the last day it has handled.
+	AutoCreate       bool
+	AutoCreatedUntil *time.Time
+	// PausedFrom — the day it was paused (or archived while active); resuming skips the
+	// occurrences of the gap.
+	PausedFrom *time.Time
 }
 
-type Monthly struct {
-	Mode    string `json:"mode"`
-	Day     *int   `json:"day"`
-	Nth     *int   `json:"nth"`
-	Weekday *int   `json:"weekday"`
-}
-
-type RecurrenceRule struct {
-	Freq     string   `json:"freq"`
-	Interval int      `json:"interval"`
-	Weekdays []int    `json:"weekdays"`
-	Monthly  *Monthly `json:"monthly"`
-	Dates    []string `json:"dates"`
-}
-
-type RecurrenceEnd struct {
-	Kind  string  `json:"kind"`
-	Date  *string `json:"date"`
-	Count *int    `json:"count"`
-}
+type (
+	Monthly        = recurrence.Monthly
+	RecurrenceRule = recurrence.RecurrenceRule
+	RecurrenceEnd  = recurrence.RecurrenceEnd
+)
 
 type Progress struct {
 	Done  int  `json:"done"`
 	Total *int `json:"total"`
 }
 
+// StatusCounts — Upcoming is only counted for a setting with an end (a no-end
+// one has no end to count to); NotCreated / Archived are the old names of
+// Due / Skipped.
 type StatusCounts struct {
 	Upcoming   int `json:"upcoming"`
-	NotCreated int `json:"not_created"`
+	Due        int `json:"due"`
 	Pending    int `json:"pending"`
 	Done       int `json:"done"`
+	Paid       int `json:"paid"`
+	Skipped    int `json:"skipped"`
+	NotCreated int `json:"not_created"`
 	Archived   int `json:"archived"`
+}
+
+// ChainStep is one occurrence of an installment chain (a setting with an end).
+type ChainStep struct {
+	Slot   string `json:"slot"`
+	Status string `json:"status"`
+}
+
+// Stats — the detail page's numbers: what was paid, what is left, the amounts
+// of the recorded occurrences.
+type Stats struct {
+	PaidCount      int      `json:"paid_count"`
+	PaidTotal      float64  `json:"paid_total"`
+	RemainingTotal *float64 `json:"remaining_total"` // only for a setting with an end
+	LastPeriod     *string  `json:"last_period"`     // slot of the latest recorded occurrence
+	AvgAmount      *float64 `json:"avg_amount"`
+	LastAmount     *float64 `json:"last_amount"`
+	MaxAmount      *float64 `json:"max_amount"`
+	Series         []Point  `json:"series"` // recorded occurrences by slot, newest 24
+}
+
+type Point struct {
+	Slot   string  `json:"slot"`
+	Date   string  `json:"date"`
+	Amount float64 `json:"amount"`
+}
+
+// Window is the span an upcoming list covers (a setting without an end).
+type Window struct {
+	From     string  `json:"from"`
+	To       string  `json:"to"`
+	NextFrom *string `json:"next_from"`
 }
 
 type Actions struct {
@@ -140,6 +172,16 @@ type Recurring struct {
 	Actions   Actions   `json:"actions"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// DueCount — occurrences due and not recorded (overdue + today).
+	DueCount int `json:"due_count"`
+	// AvgAmount — the average of the recorded amounts, else the rule's amount (null without one).
+	AvgAmount *float64 `json:"avg_amount"`
+	// Chain — an installment (a setting with an end, up to 60 occurrences): the status of every occurrence.
+	Chain []ChainStep `json:"chain"`
+	// AutoCreate — the transaction is recorded by itself when an occurrence comes due.
+	AutoCreate bool `json:"auto_create"`
+	// RecordedTxCount — recorded occurrences that have a transaction (for "apply to the N recorded tx?").
+	RecordedTxCount int `json:"recorded_tx_count"`
 }
 
 type ListCounts struct {
@@ -159,10 +201,19 @@ type LinkedTx struct {
 	ID          uuid.UUID          `json:"id"`
 	Description *string            `json:"description"`
 	Account     *shared.AccountRef `json:"account"`
+	Amount      *float64           `json:"amount"`
+	Date        *string            `json:"date"`
 }
 
+// Item is one occurrence of a setting: a stored row (id set) or one computed
+// from the rule (id null, stored false), addressed by rule_id + slot.
 type Item struct {
-	ID            uuid.UUID               `json:"id"`
+	ID            *uuid.UUID              `json:"id"`
+	RuleID        uuid.UUID               `json:"rule_id"`
+	Slot          string                  `json:"slot"` // the occurrence's original date
+	Stored        bool                    `json:"stored"`
+	AutoCreated   bool                    `json:"auto_created"`
+	NeedsAmount   bool                    `json:"needs_amount"`
 	Recurring     *shared.RecurringRef    `json:"recurring"`
 	Seq           *int                    `json:"seq"`
 	Total         *int                    `json:"total"`
@@ -185,19 +236,24 @@ type Item struct {
 	PendingID     *uuid.UUID              `json:"pending_id"`
 	Transaction   *LinkedTx               `json:"transaction"`
 	SavingEntryID *uuid.UUID              `json:"saving_entry_id"`
-	CreatedAt     time.Time               `json:"created_at"`
-	UpdatedAt     time.Time               `json:"updated_at"`
+	CreatedAt     *time.Time              `json:"created_at"` // null while computed
+	UpdatedAt     *time.Time              `json:"updated_at"`
 }
 
 type ItemList struct {
 	Data       []Item      `json:"data"`
 	Pagination shared.Page `json:"pagination"`
+	// Window — set for the upcoming list of a setting without an end (from / months).
+	Window *Window `json:"window"`
 }
 
 type Detail struct {
 	Recurring Recurring `json:"recurring"`
 	Items     ItemList  `json:"items"`
 	Upcoming ItemList `json:"upcoming"`
+	Stats    Stats    `json:"stats"`
+	// TxUpdate — set by an edit that sent also_update_tx.
+	TxUpdate        *TxUpdateResult        `json:"tx_update"`
 	DeletePreview   *DeletePreview         `json:"delete_preview"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
 }
@@ -270,6 +326,19 @@ type CreateRequest struct {
 	Rule       *RecurrenceRule  `json:"rule"`
 	StartDate  string           `json:"start_date"`
 	End        *RecurrenceEnd   `json:"end"`
+	// AutoCreate — record the transaction by itself when an occurrence comes due.
+	AutoCreate *bool `json:"auto_create"`
+}
+
+// TxUpdateResult — what also_update_tx did to the transactions already recorded.
+type TxUpdateResult struct {
+	UpdatedCount int               `json:"updated_tx_count"`
+	Failed       []TxUpdateFailure `json:"failed"`
+}
+
+type TxUpdateFailure struct {
+	TransactionID uuid.UUID `json:"transaction_id"`
+	Reason        string    `json:"reason"` // not_found | account_archived | transfer | refused
 }
 
 type UpdateRequest struct {
@@ -283,6 +352,11 @@ type UpdateRequest struct {
 	End            *RecurrenceEnd   `json:"end"`
 	Scope          string           `json:"scope"`
 	AlsoUpdateLink bool             `json:"also_update_link"`
+	// AutoCreate — switch auto-create on / off (never back-creates).
+	AutoCreate *bool `json:"auto_create"`
+	// AlsoUpdateTx — push a change of name / category / wallet / tags / note to the
+	// transactions already recorded from this setting (never date or amount).
+	AlsoUpdateTx bool `json:"also_update_tx"`
 }
 
 type ExtendRequest struct {

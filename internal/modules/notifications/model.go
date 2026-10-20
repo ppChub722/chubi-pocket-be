@@ -19,6 +19,7 @@ const (
 	TypeSplitChanged            = "split_changed"
 	TypeRecurringDue            = "recurring_due"
 	TypeRecurringEnding         = "recurring_ending"
+	TypeRecurringAutoCreated    = "recurring_auto_created"
 )
 
 type Notification struct {

@@ -28,10 +28,22 @@ var (
 	ErrAccountNotFound = errors.New("account not found")
 )
 
+// accountColumns lists the columns scanScan reads, with the cached balance as
+// is (RETURNING of a write, where the row has no future transactions to hide).
 const accountColumns = `id, user_id, name, type, balance, currency, icon_code, logo_url,
 	description, note, status,
 	credit_limit, statement_date, payment_due_date, minimum_payment,
 	sort_order, created_at, updated_at, identifiers, track_balance`
+
+// accountReadColumns is the same list for a read from `accounts a`: `balance`
+// is the wallet's balance as of the caller's today (future transactions are
+// not in it yet). userParam is the SQL parameter holding the caller's user id.
+func accountReadColumns(userParam string) string {
+	return `a.id, a.user_id, a.name, a.type, ` + shared.EffectiveBalanceSQL("a.balance", "a.id", userParam) + `, a.currency, a.icon_code, a.logo_url,
+	a.description, a.note, a.status,
+	a.credit_limit, a.statement_date, a.payment_due_date, a.minimum_payment,
+	a.sort_order, a.created_at, a.updated_at, a.identifiers, a.track_balance`
+}
 
 func scanAccount(row pgx.Row) (*Account, error) {
 	var a Account
@@ -57,7 +69,7 @@ func scanAccount(row pgx.Row) (*Account, error) {
 }
 
 func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Account, error) {
-	q := `SELECT ` + accountColumns + ` FROM accounts a
+	q := `SELECT ` + accountReadColumns("$2") + ` FROM accounts a
 		WHERE a.id = $1 AND ` + shared.ActiveMembershipPredicate("a.id", "$2")
 	a, err := scanAccount(s.db.QueryRow(ctx, q, id, userID))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -76,7 +88,7 @@ func (s *Store) GetByID(ctx context.Context, userID, id uuid.UUID) (*Account, er
 // getAnyMember reads a wallet WITHOUT the active-membership gate - only for a caller who is (or
 // was) a member, e.g.
 func (s *Store) getAnyMember(ctx context.Context, userID, id uuid.UUID) (*Account, error) {
-	a, err := scanAccount(s.db.QueryRow(ctx, `SELECT `+accountColumns+` FROM accounts a WHERE a.id = $1`, id))
+	a, err := scanAccount(s.db.QueryRow(ctx, `SELECT `+accountReadColumns("$2")+` FROM accounts a WHERE a.id = $1`, id, userID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrAccountNotFound
 	}
@@ -91,16 +103,16 @@ func (s *Store) getAnyMember(ctx context.Context, userID, id uuid.UUID) (*Accoun
 }
 
 func (s *Store) List(ctx context.Context, userID uuid.UUID, status, accType string) ([]Account, error) {
-	q := `SELECT ` + accountColumns + ` FROM accounts a
+	q := `SELECT ` + accountReadColumns("$1") + ` FROM accounts a
 		WHERE ` + shared.ActiveMembershipPredicate("a.id", "$1")
 	args := []any{userID}
 	if status != "all" {
 		args = append(args, status)
-		q += fmt.Sprintf(" AND status = $%d", len(args))
+		q += fmt.Sprintf(" AND a.status = $%d", len(args))
 	}
 	if accType != "" {
 		args = append(args, accType)
-		q += fmt.Sprintf(" AND type = $%d", len(args))
+		q += fmt.Sprintf(" AND a.type = $%d", len(args))
 	}
 	q += ` ORDER BY (SELECT am.sort_order FROM account_members am
 		WHERE am.account_id = a.id AND am.user_id = $1
@@ -132,8 +144,12 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, status, accType stri
 
 func (s *Store) SummaryAggregate(ctx context.Context, accountID uuid.UUID, from, to string) (income, expense float64, count int, err error) {
 	share := shared.ShareAmountExpr("t")
+	// On a credit card the money in is the payments: transfers into it.
+	payment := `(t.type = 'transfer' AND c.system_kind = 'TRANSFER_IN'
+		AND (SELECT wa.type FROM accounts wa WHERE wa.id = $1) IN ('` + TypeCreditCard + `', '` + TypePayLater + `'))`
 	q := `SELECT
-		COALESCE(SUM(` + share + `) FILTER (WHERE t.type = 'income'), 0),
+		COALESCE(SUM(` + share + `) FILTER (WHERE t.type = 'income'), 0)
+			+ COALESCE(SUM(t.amount) FILTER (WHERE ` + payment + `), 0),
 		COALESCE(SUM(` + share + `) FILTER (WHERE t.type = 'expense'), 0),
 		COUNT(*)
 		FROM transactions t
@@ -141,7 +157,8 @@ func (s *Store) SummaryAggregate(ctx context.Context, accountID uuid.UUID, from,
 		WHERE t.account_id = $1
 		  AND t.date >= $2::date
 		  AND t.date <= $3::date
-		  AND COALESCE(c.include_in_report, TRUE) = TRUE`
+		  AND t.date <= ` + shared.TodaySQL("(SELECT wa.user_id FROM accounts wa WHERE wa.id = $1)") + `
+		  AND (COALESCE(c.include_in_report, TRUE) = TRUE OR ` + payment + `)`
 	err = s.db.QueryRow(ctx, q, accountID, from, to).
 		Scan(&income, &expense, &count)
 	return

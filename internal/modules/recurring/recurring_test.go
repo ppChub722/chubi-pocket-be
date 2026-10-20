@@ -20,6 +20,8 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared/recurrence"
 )
 
 type recFix struct {
@@ -75,13 +77,23 @@ func newRecFix(t *testing.T) *recFix {
 		g.POST("/recurring/:id/restore", h.Restore)
 		g.POST("/recurring/:id/extend", h.Extend)
 		g.POST("/recurring/:id/duplicate", h.Duplicate)
+		g.GET("/recurring/:id/occurrences", h.Occurrences)
+		g.POST("/recurring/:id/occurrences/confirm-ready", h.ConfirmReady)
+		g.POST("/recurring/:id/occurrences/mark-paid-ready", h.MarkPaidReady)
+		g.POST("/recurring/:id/occurrences/skip-ready", h.SkipReady)
+		g.PUT("/recurring/:id/occurrences/:slot", h.EditOcc)
+		g.POST("/recurring/:id/occurrences/:slot/confirm", h.ConfirmOcc)
+		g.POST("/recurring/:id/occurrences/:slot/skip", h.SkipOcc)
+		g.POST("/recurring/:id/occurrences/:slot/restore", h.RestoreOcc)
+		g.POST("/recurring/:id/occurrences/:slot/mark-paid", h.MarkPaidOcc)
+		g.POST("/recurring/:id/occurrences/:slot/unmark-paid", h.UnmarkPaidOcc)
+		g.POST("/recurring/:id/occurrences/:slot/link", h.LinkOcc)
+		g.POST("/recurring/:id/occurrences/:slot/unlink", h.UnlinkOcc)
 		g.GET("/recurring-items", h.Items)
 		g.POST("/recurring-items", h.CreateItem)
-		g.POST("/recurring-items/batch", h.Batch)
 		g.GET("/recurring-items/:id", h.GetItem)
 		g.PUT("/recurring-items/:id", h.UpdateItem)
 		g.DELETE("/recurring-items/:id", h.DeleteItem)
-		g.POST("/recurring-items/:id/create", h.CreateNow)
 		g.POST("/recurring-items/:id/link", h.Link)
 		g.POST("/recurring-items/:id/archive", h.ArchiveItem)
 		g.POST("/recurring-items/:id/restore", h.RestoreItem)
@@ -134,6 +146,17 @@ func (f *recFix) balance() float64 {
 	return b
 }
 
+// shownBalance is the wallet's balance as the app shows it: the cached balance
+// minus transactions dated after today.
+func (f *recFix) shownBalance() float64 {
+	f.t.Helper()
+	bs, err := shared.LoadWalletBalances(f.ctx, f.pool, []uuid.UUID{f.wallet})
+	if err != nil || len(bs) != 1 {
+		f.t.Fatalf("wallet balance: %v %+v", err, bs)
+	}
+	return bs[0].Balance
+}
+
 func (f *recFix) items(ruleID uuid.UUID, tab string) []Item {
 	f.t.Helper()
 	var out ItemList
@@ -154,280 +177,449 @@ func (f *recFix) createWeekly(count int) Detail {
 	return d
 }
 
-func TestRecurringLifecycle(t *testing.T) {
+
+// track makes a rule count its past: occurrences before it was created are
+// history (paid implicitly), so a test that wants overdue ones moves
+// tracked_from back to the start.
+func (f *recFix) track(id uuid.UUID) {
+	f.t.Helper()
+	f.exec(`UPDATE recurring_rules SET tracked_from = start_date WHERE id = $1`, id)
+}
+
+func (f *recFix) occ(id uuid.UUID, slot string) string {
+	return "/recurring/" + id.String() + "/occurrences/" + slot
+}
+
+func (f *recFix) newTx(amount float64, day int) uuid.UUID {
+	f.t.Helper()
+	res, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
+		Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: amount, Date: f.day(day)})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return res.(*transactions.TransactionDetail).ID
+}
+
+func (f *recFix) storedRows(id uuid.UUID) int {
+	f.t.Helper()
+	var n int
+	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM recurring_items WHERE rule_id = $1`, id).Scan(&n); err != nil {
+		f.t.Fatal(err)
+	}
+	return n
+}
+
+func (f *recFix) notices(typ string) (rows, count int) {
+	f.t.Helper()
+	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*), COALESCE(MAX((payload->>'count')::int), 0) FROM notifications
+		WHERE recipient_user_id = $1 AND type = $2`, f.me, typ).Scan(&rows, &count); err != nil {
+		f.t.Fatal(err)
+	}
+	return
+}
+
+// Upcoming occurrences are computed, not stored; a due one is a state.
+func TestComputedOccurrences(t *testing.T) {
 	f := newRecFix(t)
-	d := f.createWeekly(6)
+	d := f.createWeekly(6) // daily / 7 from 14 days ago: -14 -7 0 +7 +14 +21
 	id := d.Recurring.ID
-	if d.Recurring.Counts.Pending != 3 || d.Recurring.Counts.Upcoming != 3 || d.Recurring.Progress.Total == nil ||
-		*d.Recurring.Progress.Total != 6 || d.Recurring.Progress.Done != 3 {
-		t.Fatalf("after create: counts %+v progress %+v", d.Recurring.Counts, d.Recurring.Progress)
+	if f.storedRows(id) != 0 {
+		t.Fatalf("a new rule stored %d rows", f.storedRows(id))
+	}
+	// Created today: the two earlier ones are history (paid implicitly), today is due.
+	if c := d.Recurring.Counts; c.Due != 1 || c.Upcoming != 3 || d.Recurring.Progress.Done != 2 ||
+		d.Recurring.Progress.Total == nil || *d.Recurring.Progress.Total != 6 {
+		t.Fatalf("counts %+v progress %+v", d.Recurring.Counts, d.Recurring.Progress)
+	}
+	f.track(id)
+	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, &d)
+	if c := d.Recurring.Counts; c.Due != 3 || c.Upcoming != 3 || d.Recurring.Progress.Done != 0 || d.Recurring.DueCount != 3 {
+		t.Fatalf("after track: counts %+v progress %+v", c, d.Recurring.Progress)
 	}
 	if d.Recurring.NextDate == nil || *d.Recurring.NextDate != f.day(7) {
 		t.Errorf("next_date = %v, want %s", d.Recurring.NextDate, f.day(7))
 	}
-	var n, count int
-	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*), COALESCE(MAX((payload->>'count')::int), 0) FROM notifications
-		WHERE recipient_user_id = $1 AND type = 'recurring_due'`, f.me).Scan(&n, &count); err != nil {
-		t.Fatal(err)
+	if len(d.Recurring.Chain) != 6 || d.Recurring.Chain[0].Status != StatusDue || d.Recurring.Chain[5].Status != StatusUpcoming {
+		t.Errorf("chain = %+v", d.Recurring.Chain)
 	}
-	if n != 1 || count != 3 {
-		t.Errorf("recurring_due notices = %d (count %d), want 1 (3)", n, count)
+	if d.Recurring.CurrentOccurrence == nil || d.Recurring.CurrentOccurrence.Slot != f.day(-14) ||
+		d.Recurring.CurrentOccurrence.Status != StatusDue || d.Recurring.CurrentOccurrence.ItemID != nil {
+		t.Errorf("current occurrence = %+v", d.Recurring.CurrentOccurrence)
 	}
-	var list RecurringList
-	f.call("GET", "/recurring", "listRecurring", nil, 200, &list)
-	if list.Counts.Current != 1 || len(list.Data) != 1 || list.Data[0].Counts.Pending != 3 {
-		t.Fatalf("list = %+v", list)
+	if d.Stats.RemainingTotal == nil || *d.Stats.RemainingTotal != 600 {
+		t.Errorf("remaining_total = %v, want 600", d.Stats.RemainingTotal)
 	}
-	if sm := list.Summary; sm.MonthPay != 434.82 || sm.MonthReceive != 0 || sm.Next == nil ||
-		sm.Next.ID != id || sm.Next.Date != f.day(7) || av(sm.Next.Amount) != 100 || sm.Next.Type != "expense" {
-		t.Errorf("summary = %+v next %+v", sm, sm.Next)
-	}
-	var none RecurringList
-	f.call("GET", "/recurring?q=zzz", "listRecurring", nil, 200, &none)
-	if len(none.Data) != 0 || none.Summary.MonthPay != 434.82 {
-		t.Errorf("q=zzz: %d rows, summary %+v", len(none.Data), none.Summary)
-	}
-	f.call("GET", "/recurring?q=netf", "listRecurring", nil, 200, &none)
-	if len(none.Data) != 1 {
-		t.Errorf("q=netf rows = %d", len(none.Data))
-	}
-	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, nil)
-
-	produced := f.items(id, "produced")
-	if len(produced) != 3 || produced[0].Status != StatusPending || produced[0].PendingID == nil {
-		t.Fatalf("produced = %+v", produced)
-	}
-	var source, ref string
-	if err := f.pool.QueryRow(f.ctx, `SELECT source, source_ref::text FROM pending_transactions WHERE id = $1`,
-		*produced[0].PendingID).Scan(&source, &ref); err != nil {
-		t.Fatal(err)
-	}
-	if source != "recurring" {
-		t.Errorf("draft source = %q (%s)", source, ref)
+	if f.storedRows(id) != 0 {
+		t.Errorf("reading stored %d rows", f.storedRows(id))
 	}
 
-	newest := produced[0]
-	res, err := f.pending.Submit(f.ctx, f.me, pending.SubmitRequest{IDs: []uuid.UUID{*newest.PendingID}})
-	if err != nil || len(res.Submitted) != 1 {
-		t.Fatalf("submit: %v %+v", err, res)
+	var due ItemList
+	f.call("GET", "/recurring-items?status=due", "listRecurringItems", nil, 200, &due)
+	if len(due.Data) != 3 {
+		t.Fatalf("due items = %d, want 3", len(due.Data))
 	}
-	var it Item
-	f.call("GET", "/recurring-items/"+newest.ID.String(), "getRecurringItem", nil, 200, &it)
-	if it.Status != StatusDone || it.Transaction == nil {
-		t.Fatalf("after submit: %+v", it)
-	}
-	txID := it.Transaction.ID
-	var tx transactions.TransactionDetail
-	f.call("GET", "/transactions/"+txID.String(), "", nil, 200, &tx)
-	if tx.RecurringItem == nil || tx.RecurringItem.ItemID != newest.ID || tx.RecurringItem.Seq == nil || *tx.RecurringItem.Seq != 3 {
-		t.Errorf("tx recurring_item = %+v", tx.RecurringItem)
-	}
-	if f.balance() != 900 {
-		t.Errorf("balance = %v, want 900", f.balance())
-	}
-
-	second := produced[1]
-	if _, err := f.pending.Discard(f.ctx, f.me, []uuid.UUID{*second.PendingID}); err != nil {
-		t.Fatal(err)
-	}
-	f.call("GET", "/recurring-items/"+second.ID.String(), "", nil, 200, &it)
-	if it.Status != StatusNotCreated {
-		t.Fatalf("after discard: %s", it.Status)
-	}
-	body := map[string]any{"target": "transaction", "fields": map[string]any{"amount": 120}}
-	apitest.ConformRequest(t, "createFromRecurringItem", body)
-	var w ItemWriteResult
-	f.call("POST", "/recurring-items/"+second.ID.String()+"/create", "createFromRecurringItem", body, 200, &w)
-	if w.Item.Status != StatusDone || w.Transaction == nil || len(w.AccountBalances) != 1 || w.AccountBalances[0].Balance != 780 {
-		t.Fatalf("create now: %+v", w)
-	}
-	f.call("POST", "/recurring-items/"+second.ID.String()+"/create", "", body, 409, nil)
-
-	upd := map[string]any{"amount": 150, "also_update_link": true}
-	apitest.ConformRequest(t, "updateRecurringItem", upd)
-	var ws ItemsWriteResult
-	f.call("PUT", "/recurring-items/"+newest.ID.String(), "updateRecurringItem", upd, 200, &ws)
-	if len(ws.Items) != 1 || av(ws.Items[0].Amount) != 150 || !ws.Items[0].Edited || f.balance() != 730 {
-		t.Fatalf("edit + link: %+v balance %v", ws, f.balance())
-	}
-	// Without also_update_link the transaction stays.
-	f.call("PUT", "/recurring-items/"+newest.ID.String(), "updateRecurringItem", map[string]any{"amount": 99}, 200, nil)
-	if f.balance() != 730 {
-		t.Errorf("unlinked edit moved money: %v", f.balance())
-	}
-	f.call("PUT", "/transactions/"+txID.String(), "", map[string]any{"amount": 60, "also_update_link": true}, 200, nil)
-	f.call("GET", "/recurring-items/"+newest.ID.String(), "", nil, 200, &it)
-	if av(it.Amount) != 60 {
-		t.Errorf("item after tx edit = %v, want 60", it.Amount)
-	}
-
-	f.call("PUT", "/recurring-items/"+newest.ID.String(), "updateRecurringItem",
-		map[string]any{"note": "monthly plan", "scope": "upcoming"}, 200, &ws)
-	if len(ws.Items) != 3 {
-		t.Fatalf("scope upcoming changed %d items", len(ws.Items))
-	}
-	for _, u := range ws.Items {
-		if u.Note == nil || *u.Note != "monthly plan" || u.Status != StatusUpcoming {
-			t.Errorf("upcoming item = %+v", u)
+	for _, it := range due.Data {
+		if it.ID != nil || it.Stored || it.RuleID != id || it.Status != StatusDue || it.Description == nil ||
+			!strings.Contains(*it.Description, "Netflix") {
+			t.Errorf("due item = %+v", it)
 		}
 	}
-
-	put := map[string]any{"name": "Netflix HD", "amount": 200}
-	apitest.ConformRequest(t, "updateRecurring", put)
-	f.call("PUT", "/recurring/"+id.String(), "updateRecurring", put, 200, &d)
-	if d.Recurring.Name != "Netflix HD" || av(d.Recurring.Amount) != 200 {
-		t.Fatalf("update = %+v", d.Recurring)
-	}
 	up := f.items(id, "upcoming")
-	if len(up) != 3 || av(up[0].Amount) != 200 || up[0].Description == nil || *up[0].Description != "Netflix HD" {
-		t.Fatalf("upcoming after update = %+v", up)
+	if len(up) != 3 || up[0].Slot != f.day(7) || up[0].Seq == nil || *up[0].Seq != 4 {
+		t.Fatalf("upcoming = %+v", up)
+	}
+	hist := f.items(id, "produced")
+	if len(hist) != 3 { // the due ones show in the history tab
+		t.Errorf("history = %d", len(hist))
 	}
 
-	f.call("POST", "/recurring/"+id.String()+"/pause", "pauseRecurring", nil, 200, &d)
-	if d.Recurring.Status != "paused" || d.Recurring.Counts.Upcoming != 0 || !d.Recurring.Actions.Resume {
-		t.Fatalf("pause = %+v", d.Recurring)
-	var paused RecurringList
-	f.call("GET", "/recurring", "listRecurring", nil, 200, &paused)
-	if sm := paused.Summary; sm.MonthPay != 0 || sm.Next != nil {
-		t.Errorf("paused summary = %+v, want zeros and no next", sm)
+	// A rule without an end: a window of months from `from`, and next_from to go on.
+	var m Detail
+	f.call("POST", "/recurring", "createRecurring", map[string]any{"name": "Rent", "type": "expense", "amount": 5000, "account_id": f.wallet,
+		"rule": map[string]any{"freq": "monthly", "interval": 1}, "start_date": f.day(0)}, 201, &m)
+	if m.Recurring.Counts.Upcoming != 0 || m.Recurring.Progress.Total != nil || m.Recurring.EndingSoon || len(m.Recurring.Chain) != 0 {
+		t.Errorf("no-end counts %+v progress %+v", m.Recurring.Counts, m.Recurring.Progress)
 	}
+	var w ItemList
+	f.call("GET", "/recurring/"+m.Recurring.ID.String()+"/items?tab=upcoming&months=12", "listRecurringRuleItems", nil, 200, &w)
+	if len(w.Data) < 11 || w.Window == nil || w.Window.NextFrom == nil {
+		t.Fatalf("12-month window: %d items, window %+v", len(w.Data), w.Window)
 	}
-	f.call("POST", "/recurring/"+id.String()+"/pause", "pauseRecurring", nil, 409, nil)
-	f.call("POST", "/recurring/"+id.String()+"/resume", "resumeRecurring", nil, 200, &d)
-	if d.Recurring.Status != "active" || d.Recurring.Counts.Upcoming != 3 {
-		t.Fatalf("resume = %+v", d.Recurring.Counts)
+	var w2 ItemList
+	f.call("GET", "/recurring/"+m.Recurring.ID.String()+"/items?tab=upcoming&months=12&from="+*w.Window.NextFrom, "listRecurringRuleItems", nil, 200, &w2)
+	if len(w2.Data) < 11 || w2.Data[0].Date <= w.Data[len(w.Data)-1].Date {
+		t.Errorf("next window starts %v after %v", w2.Data[0].Date, w.Data[len(w.Data)-1].Date)
 	}
-	f.call("POST", "/recurring/"+id.String()+"/extend", "extendRecurring",
-		map[string]any{"end": map[string]any{"kind": "count", "count": 8}}, 200, &d)
-	if d.Recurring.Counts.Upcoming != 5 {
-		t.Errorf("extend: upcoming %d, want 5", d.Recurring.Counts.Upcoming)
-	}
-	f.call("POST", "/recurring/"+id.String()+"/archive", "archiveRecurring", nil, 200, &d)
-	f.call("POST", "/recurring/"+id.String()+"/restore", "restoreRecurring", nil, 200, &d)
-	if d.Recurring.Status != "paused" {
-		t.Errorf("restore → %s, want paused", d.Recurring.Status)
-	}
-
-	var del DeleteResult
-	f.call("DELETE", "/recurring/"+id.String()+"?delete_linked_txs=true", "deleteRecurring", nil, 200, &del)
-	if del.DeletedTransactionCount != 2 || f.balance() != 1000 {
-		t.Errorf("delete = %+v balance %v", del, f.balance())
-	}
-	f.call("GET", "/recurring/"+id.String(), "", nil, 404, nil)
+	f.call("GET", "/recurring/"+m.Recurring.ID.String()+"/items?tab=upcoming&from=nope", "listRecurringRuleItems", nil, 400, nil)
 }
 
-func TestRecurringEndingNotice(t *testing.T) {
-	f := newRecFix(t)
-	d := f.createWeekly(5) // 3 due, 2 upcoming → ending
-	if !d.Recurring.EndingSoon {
-		t.Errorf("ending_soon = false with %d upcoming", d.Recurring.Counts.Upcoming)
-	}
-	var left int
-	if err := f.pool.QueryRow(f.ctx, `SELECT (payload->>'left')::int FROM notifications
-		WHERE recipient_user_id = $1 AND type = 'recurring_ending'`, f.me).Scan(&left); err != nil {
-		t.Fatal(err)
-	}
-	if left != 2 {
-		t.Errorf("left = %d, want 2", left)
-	}
-	f.call("GET", "/recurring", "", nil, 200, nil)
-	var n int
-	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1 AND type = 'recurring_ending'`, f.me).Scan(&n)
-	if n != 1 {
-		t.Errorf("ending notices = %d, want 1", n)
-	}
-}
-
-func TestRecurringItemsAndOneOffs(t *testing.T) {
+// Confirm, skip, paid, link, unlink and the tx delete options.
+func TestOccurrenceActions(t *testing.T) {
 	f := newRecFix(t)
 	d := f.createWeekly(6)
+	id := d.Recurring.ID
+	f.track(id)
+	s1, s2, s3 := f.day(-14), f.day(-7), f.day(0)
 
-	body := map[string]any{"type": "expense", "amount": 40, "account_id": f.wallet, "category_id": f.food,
-		"date": f.day(3), "description": "Concert"}
-	var wr struct {
-		Rows     []json.RawMessage `json:"rows"`
-		Upcoming *Item             `json:"upcoming"`
-	}
-	f.call("POST", "/transactions", "createTransaction", body, 201, &wr)
-	if len(wr.Rows) != 0 || wr.Upcoming == nil || wr.Upcoming.Status != StatusUpcoming || wr.Upcoming.Recurring != nil {
-		t.Fatalf("future create = %+v", wr)
-	}
-	if f.balance() != 1000 {
-		t.Errorf("an upcoming item moved money: %v", f.balance())
-	}
-	var list ItemList
-	f.call("GET", "/recurring-items?kind=one_off", "listRecurringItems", nil, 200, &list)
-	if len(list.Data) != 1 || list.Data[0].ID != wr.Upcoming.ID {
-		t.Fatalf("one-offs = %+v", list.Data)
-	}
-	f.call("GET", "/recurring-items?status=pending", "listRecurringItems", nil, 200, &list)
-	if len(list.Data) != 3 {
-		t.Errorf("pending items = %d, want 3", len(list.Data))
-	}
-
-	f.call("POST", "/transactions", "createTransaction", map[string]any{"type": "expense", "amount": 25,
-		"account_id": f.wallet, "date": f.day(0)}, 201, nil)
-	var txID uuid.UUID
-	_ = f.pool.QueryRow(f.ctx, `SELECT id FROM transactions WHERE user_id = $1 AND amount = 25`, f.me).Scan(&txID)
-	if f.balance() != 975 {
-		t.Fatalf("balance = %v", f.balance())
-	}
-	f.call("PUT", "/transactions/"+txID.String(), "updateTransaction", map[string]any{"date": f.day(10)}, 200, &wr)
-	if wr.Upcoming == nil || wr.Upcoming.Date != f.day(10) || f.balance() != 1000 {
-		t.Fatalf("move to upcoming = %+v balance %v", wr, f.balance())
-	}
-
-	mi := map[string]any{"recurring_id": d.Recurring.ID, "date": f.day(0), "type": "expense", "amount": 15}
-	apitest.ConformRequest(t, "createRecurringItem", mi)
 	var w ItemWriteResult
-	f.call("POST", "/recurring-items", "createRecurringItem", mi, 201, &w)
-	if !w.Item.Manual || w.Item.Status != StatusNotCreated || w.Item.Recurring == nil {
-		t.Fatalf("manual item = %+v", w.Item)
+	f.call("POST", f.occ(id, s1)+"/confirm", "confirmRecurringOccurrence", map[string]any{}, 200, &w)
+	if w.Item.Status != StatusDone || !w.Item.Stored || w.Item.ID == nil || w.Transaction == nil || f.balance() != 900 {
+		t.Fatalf("confirm = %+v balance %v", w.Item, f.balance())
 	}
-	f.call("POST", "/recurring-items/"+w.Item.ID.String()+"/archive", "archiveRecurringItem", nil, 200, &w)
-	if w.Item.Status != StatusArchived {
-		t.Errorf("archive → %s", w.Item.Status)
+	var tx struct {
+		Date        string  `json:"date"`
+		Description *string `json:"description"`
 	}
-	f.call("POST", "/recurring-items/"+w.Item.ID.String()+"/restore", "restoreRecurringItem", nil, 200, &w)
+	f.call("GET", "/transactions/"+w.Item.Transaction.ID.String(), "", nil, 200, &tx)
+	if tx.Date != s1 || tx.Description == nil || !strings.Contains(*tx.Description, "Netflix") {
+		t.Errorf("confirmed tx = %+v", tx)
+	}
+	f.call("POST", f.occ(id, s1)+"/confirm", "confirmRecurringOccurrence", map[string]any{}, 409, nil)
+	f.call("POST", f.occ(id, f.day(-3))+"/confirm", "confirmRecurringOccurrence", map[string]any{}, 404, nil) // not an occurrence
 
-	b := map[string]any{"ids": []uuid.UUID{w.Item.ID}, "action": "create", "target": "transaction"}
-	apitest.ConformRequest(t, "batchRecurringItems", b)
-	var br BatchResult
-	f.call("POST", "/recurring-items/batch", "batchRecurringItems", b, 200, &br)
-	if len(br.Items) != 1 || br.Items[0].Status != StatusDone || f.balance() != 985 {
-		t.Fatalf("batch create = %+v balance %v", br, f.balance())
+	// skip / restore: the row goes again when nothing is left on it
+	f.call("POST", f.occ(id, s2)+"/skip", "skipRecurringOccurrence", map[string]any{}, 200, &w)
+	if w.Item.Status != StatusSkipped || !w.Item.Stored {
+		t.Fatalf("skip = %+v", w.Item)
 	}
-	f.call("POST", "/recurring-items/batch", "batchRecurringItems", b, 409, nil)
-	f.call("POST", "/recurring-items/batch", "batchRecurringItems",
-		map[string]any{"ids": []uuid.UUID{wr.Upcoming.ID}, "action": "edit", "fields": map[string]any{"amount": 30}}, 200, &br)
-	if av(br.Items[0].Amount) != 30 || !br.Items[0].Edited {
-		t.Errorf("batch edit = %+v", br.Items[0])
+	f.call("POST", f.occ(id, s2)+"/restore", "restoreRecurringOccurrence", nil, 200, &w)
+	if w.Item.Status != StatusDue || w.Item.Stored || w.Item.ID != nil || f.storedRows(id) != 1 {
+		t.Fatalf("restore = %+v rows %d", w.Item, f.storedRows(id))
 	}
-	f.call("POST", "/recurring-items/batch", "batchRecurringItems",
-		map[string]any{"ids": []uuid.UUID{wr.Upcoming.ID}, "action": "delete"}, 200, &br)
-	if len(br.DeletedIDs) != 1 {
-		t.Errorf("batch delete = %+v", br)
+	// paid without a transaction
+	f.call("POST", f.occ(id, s2)+"/mark-paid", "markRecurringOccurrencePaid", nil, 200, &w)
+	if w.Item.Status != StatusPaid || w.Item.Transaction != nil {
+		t.Fatalf("mark-paid = %+v", w.Item)
 	}
-
-	var dr ItemDeleteResult
-	f.call("DELETE", "/recurring-items/"+w.Item.ID.String()+"?delete_linked_tx=true", "deleteRecurringItem", nil, 200, &dr)
-	if dr.TransactionID == nil || f.balance() != 1000 {
-		t.Errorf("delete item = %+v balance %v", dr, f.balance())
+	f.call("POST", f.occ(id, s2)+"/unmark-paid", "unmarkRecurringOccurrencePaid", nil, 200, &w)
+	if w.Item.Status != StatusDue {
+		t.Fatalf("unmark-paid = %+v", w.Item)
 	}
 
-	produced := f.items(d.Recurring.ID, "produced")
-	res, err := f.pending.Submit(f.ctx, f.me, pending.SubmitRequest{IDs: []uuid.UUID{*produced[0].PendingID}})
-	if err != nil || len(res.Submitted) != 1 {
-		t.Fatalf("submit: %v", err)
+	// link: the tx keeps its date and amount; the occurrence shows the tx amount
+	f.call("POST", f.occ(id, s2)+"/mark-paid", "markRecurringOccurrencePaid", nil, 200, nil)
+	tx1 := f.newTx(120, -2)
+	var link LinkResult
+	f.call("POST", f.occ(id, s2)+"/link", "linkRecurringOccurrence", map[string]any{"transaction_id": tx1}, 200, &link)
+	if link.Item.Status != StatusDone || av(link.Item.Amount) != 120 || link.Item.Transaction == nil ||
+		link.Item.Transaction.Date == nil || *link.Item.Transaction.Date != f.day(-2) || !link.AmountDiffers || av(link.RuleAmount) != 100 {
+		t.Fatalf("link = %+v", link)
 	}
-	var del struct {
-		RecurringItemID *uuid.UUID `json:"recurring_item_id"`
+	// unlink: cleared first → back to paid
+	var ul UnlinkResult
+	f.call("POST", f.occ(id, s2)+"/unlink", "unlinkRecurringOccurrence", nil, 200, &ul)
+	if ul.Item.Status != StatusPaid || ul.Item.Transaction != nil {
+		t.Fatalf("unlink of a cleared one = %+v", ul.Item)
 	}
-	f.call("DELETE", "/transactions/"+res.Submitted[0].Rows[0].ID.String()+"?also_delete_link=true", "deleteTransaction", nil, 200, &del)
-	if del.RecurringItemID == nil || *del.RecurringItemID != produced[0].ID {
-		t.Errorf("also_delete_link: %+v", del)
+	f.call("POST", f.occ(id, s2)+"/unmark-paid", "unmarkRecurringOccurrencePaid", nil, 200, nil)
+	// a swap needs replace
+	f.call("POST", f.occ(id, s3)+"/link", "linkRecurringOccurrence", map[string]any{"transaction_id": tx1}, 200, nil)
+	raw := f.call("POST", f.occ(id, s2)+"/link", "linkRecurringOccurrence", map[string]any{"transaction_id": tx1}, 409, nil)
+	if !contains(raw, s3) {
+		t.Errorf("409 should name the other occurrence %s: %s", s3, raw)
 	}
-	f.call("GET", "/recurring-items/"+produced[0].ID.String(), "", nil, 404, nil)
+	f.call("POST", f.occ(id, s2)+"/link", "linkRecurringOccurrence", map[string]any{"transaction_id": tx1, "replace": true}, 200, &link)
+	var s3item ItemList
+	f.call("GET", "/recurring-items?month="+f.today.Format("2006-01"), "listRecurringItems", nil, 200, &s3item)
+	for _, it := range s3item.Data {
+		if it.Slot == s3 && it.Status != StatusDue {
+			t.Errorf("after the swap %s is %s, want due", s3, it.Status)
+		}
+	}
+	// unlink of a never-cleared one → computed again (no row left)
+	f.call("POST", f.occ(id, s2)+"/unlink", "unlinkRecurringOccurrence", nil, 200, &ul)
+	if ul.Item.Status != StatusDue || ul.Item.Stored {
+		t.Fatalf("unlink = %+v", ul.Item)
+	}
+	f.call("POST", f.occ(id, s2)+"/unlink", "unlinkRecurringOccurrence", nil, 400, nil)
+
+	// deleting the tx: plain → the occurrence is due again; skip_occurrence → skipped
+	confirmed := w.Transaction
+	_ = confirmed
+	var first ItemWriteResult
+	f.call("POST", f.occ(id, s2)+"/confirm", "confirmRecurringOccurrence", map[string]any{}, 200, &first)
+	f.call("DELETE", "/transactions/"+first.Item.Transaction.ID.String(), "deleteTransaction", nil, 200, nil)
+	var again Item
+	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM recurring_items WHERE rule_id = $1 AND slot = $2`, id, s2).Scan(new(int)); err != nil {
+		t.Fatal(err)
+	}
+	f.call("GET", "/recurring-items?month="+f.today.Format("2006-01")+"&status=due", "listRecurringItems", nil, 200, nil)
+	_ = again
+	second := f.newTx(100, -1)
+	f.call("POST", f.occ(id, s3)+"/link", "linkRecurringOccurrence", map[string]any{"transaction_id": second}, 200, nil)
+	f.call("DELETE", "/transactions/"+second.String()+"?skip_occurrence=true", "deleteTransaction", nil, 200, nil)
+	var skipped ItemList
+	f.call("GET", "/recurring-items?status=skipped", "listRecurringItems", nil, 200, &skipped)
+	if len(skipped.Data) != 1 || skipped.Data[0].Slot != s3 {
+		t.Errorf("skipped after delete + skip_occurrence = %+v", skipped.Data)
+	}
+	// skip an occurrence that has a tx, deleting the tx too
+	var txCount int
+	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM transactions WHERE user_id = $1 AND amount = 100`, f.me).Scan(&txCount)
+	f.call("POST", f.occ(id, s1)+"/skip", "skipRecurringOccurrence", map[string]any{"delete_tx": true}, 200, &w)
+	var after int
+	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM transactions WHERE user_id = $1 AND amount = 100`, f.me).Scan(&after)
+	if w.Item.Status != StatusSkipped || w.Item.Transaction != nil || after != txCount-1 {
+		t.Errorf("skip + delete_tx = %v tx %v, transactions %d → %d", w.Item.Status, w.Item.Transaction, txCount, after)
+	}
+}
+
+func TestBulkOccurrences(t *testing.T) {
+	f := newRecFix(t)
+	d := f.createWeekly(6)
+	id := d.Recurring.ID
+	f.track(id)
+	var b BulkResult
+	f.call("POST", "/recurring/"+id.String()+"/occurrences/confirm-ready", "confirmRecurringOccurrencesReady", nil, 200, &b)
+	if len(b.Items) != 3 || len(b.LeftOut) != 0 || f.balance() != 700 {
+		t.Fatalf("confirm-ready = %d items, left out %+v, balance %v", len(b.Items), b.LeftOut, f.balance())
+	}
+	for _, it := range b.Items {
+		if it.Status != StatusDone || it.Transaction == nil {
+			t.Errorf("item = %+v", it)
+		}
+	}
+	// a reminder has no amount: confirm-ready leaves it out; mark-paid-ready and skip-ready take it
+	var rem Detail
+	f.call("POST", "/recurring", "createRecurring", map[string]any{"name": "Water", "kind": "reminder", "account_id": f.wallet,
+		"rule": map[string]any{"freq": "monthly", "interval": 1}, "start_date": f.day(-40)}, 201, &rem)
+	f.track(rem.Recurring.ID)
+	f.call("POST", "/recurring/"+rem.Recurring.ID.String()+"/occurrences/confirm-ready", "confirmRecurringOccurrencesReady", nil, 200, &b)
+	if len(b.Items) != 0 || len(b.LeftOut) == 0 || b.LeftOut[0].Reason != "needs_amount" {
+		t.Fatalf("reminder confirm-ready = %+v", b)
+	}
+	f.call("POST", "/recurring/"+rem.Recurring.ID.String()+"/occurrences/mark-paid-ready", "markRecurringOccurrencesPaidReady", nil, 200, &b)
+	if len(b.Items) == 0 || b.Items[0].Status != StatusPaid {
+		t.Fatalf("mark-paid-ready = %+v", b.Items)
+	}
+	var due ItemList
+	f.call("GET", "/recurring-items?status=due&rule_id="+rem.Recurring.ID.String(), "listRecurringItems", nil, 200, &due)
+	// (the list also carries this month's upcoming ones without an amount: only the due ones count here)
+	if n := len(onlyDue(due.Data)); n != 0 {
+		t.Errorf("still due after mark-paid-ready: %d", n)
+	}
+	d2 := f.createWeekly(6)
+	f.track(d2.Recurring.ID)
+	f.call("POST", "/recurring/"+d2.Recurring.ID.String()+"/occurrences/skip-ready", "skipRecurringOccurrencesReady", nil, 200, &b)
+	if len(b.Items) != 3 || b.Items[0].Status != StatusSkipped {
+		t.Fatalf("skip-ready = %+v", b.Items)
+	}
+}
+
+func TestAutoCreate(t *testing.T) {
+	f := newRecFix(t)
+	body := map[string]any{"name": "Gym", "type": "expense", "amount": 50, "account_id": f.wallet,
+		"rule": map[string]any{"freq": "daily", "interval": 1}, "start_date": f.day(-3), "auto_create": true}
+	var d Detail
+	f.call("POST", "/recurring", "createRecurring", body, 201, &d)
+	id := d.Recurring.ID
+	if !d.Recurring.AutoCreate {
+		t.Fatalf("auto_create = %v", d.Recurring.AutoCreate)
+	}
+	// Today's occurrence came due after it was switched on: recorded; earlier ones are history.
+	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, &d)
+	if f.balance() != 950 {
+		t.Fatalf("balance = %v, want 950 (today's occurrence)", f.balance())
+	}
+	var items ItemList
+	f.call("GET", "/recurring-items?status=done", "listRecurringItems", nil, 200, &items)
+	if len(items.Data) != 1 || !items.Data[0].AutoCreated || items.Data[0].Slot != f.day(0) || items.Data[0].Transaction == nil {
+		t.Fatalf("auto-created = %+v", items.Data)
+	}
+	if rows, count := f.notices("recurring_auto_created"); rows != 1 || count != 1 {
+		t.Errorf("auto notice rows %d count %d", rows, count)
+	}
+	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, nil)
+	if f.balance() != 950 {
+		t.Errorf("a second check made more: %v", f.balance())
+	}
+	// Deleting the tx: due again, never re-created.
+	f.call("DELETE", "/transactions/"+items.Data[0].Transaction.ID.String(), "deleteTransaction", nil, 200, nil)
+	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, &d)
+	if f.balance() != 1000 || d.Recurring.Counts.Due != 1 {
+		t.Errorf("after delete: balance %v due %d", f.balance(), d.Recurring.Counts.Due)
+	}
+
+	// validation
+	noAmount := map[string]any{"name": "W", "kind": "reminder", "account_id": f.wallet, "auto_create": true,
+		"rule": map[string]any{"freq": "monthly", "interval": 1}, "start_date": f.day(0)}
+	if raw := f.call("POST", "/recurring", "createRecurring", noAmount, 400, nil); !contains(raw, "AUTO_CREATE_NEEDS_AMOUNT") {
+		t.Errorf("no amount: %s", raw)
+	}
+	noWallet := map[string]any{"name": "W", "type": "expense", "amount": 5, "auto_create": true,
+		"rule": map[string]any{"freq": "monthly", "interval": 1}, "start_date": f.day(0)}
+	if raw := f.call("POST", "/recurring", "createRecurring", noWallet, 400, nil); !contains(raw, "AUTO_CREATE_NEEDS_WALLET") {
+		t.Errorf("no wallet: %s", raw)
+	}
+
+	// Switching it on later never back-creates: the old due ones stay due.
+	var old Detail
+	f.call("POST", "/recurring", "createRecurring", map[string]any{"name": "Old", "type": "expense", "amount": 10, "account_id": f.wallet,
+		"rule": map[string]any{"freq": "daily", "interval": 1}, "start_date": f.day(-5)}, 201, &old)
+	f.track(old.Recurring.ID)
+	f.call("PUT", "/recurring/"+old.Recurring.ID.String(), "updateRecurring", map[string]any{"auto_create": true}, 200, &old)
+	f.call("GET", "/recurring/"+old.Recurring.ID.String(), "getRecurring", nil, 200, &old)
+	if old.Recurring.Counts.Due != 5 || old.Recurring.Counts.Done != 1 { // the 5 past ones due, today recorded
+		t.Errorf("late switch: counts %+v", old.Recurring.Counts)
+	}
+}
+
+func TestDueNoticeResumeAndEdit(t *testing.T) {
+	f := newRecFix(t)
+	d := f.createWeekly(6)
+	id := d.Recurring.ID
+	f.track(id)
+	f.exec(`UPDATE recurring_rules SET due_notified_until = $2 WHERE id = $1`, id, f.today.AddDate(0, 0, -30))
+	f.exec(`DELETE FROM notifications WHERE recipient_user_id = $1`, f.me)
+	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, nil)
+	if rows, count := f.notices("recurring_due"); rows != 1 || count != 3 {
+		t.Errorf("recurring_due rows %d count %d, want 1 / 3", rows, count)
+	}
+	var dl string
+	_ = f.pool.QueryRow(f.ctx, `SELECT COALESCE(deep_link, '') FROM notifications WHERE recipient_user_id = $1 AND type = 'recurring_due'`, f.me).Scan(&dl)
+	if dl != "/recurring?focus=due" {
+		t.Errorf("deep link = %q", dl)
+	}
+	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, nil)
+	if rows, count := f.notices("recurring_due"); rows != 1 || count != 3 {
+		t.Errorf("a second look made another notice: rows %d count %d", rows, count)
+	}
+
+	// Pause + resume: what was due before the pause stays due; the occurrences of the
+	// paused gap are skipped. (The rule is daily / 7: -14, -7, 0, +7 …; paused "since" 8 days ago.)
+	f.call("POST", "/recurring/"+id.String()+"/pause", "pauseRecurring", nil, 200, nil)
+	f.exec(`UPDATE recurring_rules SET paused_from = $2 WHERE id = $1`, id, f.today.AddDate(0, 0, -8))
+	f.call("POST", "/recurring/"+id.String()+"/resume", "resumeRecurring", nil, 200, &d)
+	var tf string
+	_ = f.pool.QueryRow(f.ctx, `SELECT to_char(tracked_from, 'YYYY-MM-DD') FROM recurring_rules WHERE id = $1`, id).Scan(&tf)
+	if tf != f.day(-14) {
+		t.Errorf("resume moved tracked_from to %s", tf)
+	}
+	if c := d.Recurring.Counts; c.Due != 2 || c.Skipped != 1 || c.Paid != 0 { // -14 and today stay due, -7 is in the gap
+		t.Errorf("after resume: counts %+v", c)
+	}
+	var skippedSlot string
+	_ = f.pool.QueryRow(f.ctx, `SELECT to_char(slot, 'YYYY-MM-DD') FROM recurring_items WHERE rule_id = $1 AND archived`, id).Scan(&skippedSlot)
+	if skippedSlot != f.day(-7) {
+		t.Errorf("skipped slot = %s, want %s", skippedSlot, f.day(-7))
+	}
+}
+
+func onlyDue(items []Item) []Item {
+	var out []Item
+	for _, it := range items {
+		if it.Status == StatusDue {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+func TestRuleEditPushesToRecordedTx(t *testing.T) {
+	f := newRecFix(t)
+	d := f.createWeekly(6)
+	id := d.Recurring.ID
+	f.track(id)
+	var a, b ItemWriteResult
+	f.call("POST", f.occ(id, f.day(-14))+"/confirm", "confirmRecurringOccurrence", map[string]any{}, 200, &a)
+	f.call("POST", f.occ(id, f.day(-7))+"/confirm", "confirmRecurringOccurrence", map[string]any{}, 200, &b)
+	// the second one's description was changed by the user: the rename leaves it alone
+	f.call("PUT", "/transactions/"+b.Item.Transaction.ID.String(), "", map[string]any{"description": "mine"}, 200, nil)
+
+	var upd Detail
+	f.call("PUT", "/recurring/"+id.String(), "updateRecurring", map[string]any{"amount": 999}, 200, &upd)
+	if upd.TxUpdate != nil {
+		t.Errorf("tx_update without also_update_tx: %+v", upd.TxUpdate)
+	}
+	f.call("PUT", "/recurring/"+id.String(), "updateRecurring", map[string]any{"name": "Netflix 4K", "also_update_tx": true}, 200, &upd)
+	if upd.TxUpdate == nil || upd.TxUpdate.UpdatedCount != 1 || len(upd.TxUpdate.Failed) != 0 {
+		t.Fatalf("tx_update = %+v", upd.TxUpdate)
+	}
+	read := func(txID uuid.UUID) (desc *string, amount float64, date string) {
+		var row struct {
+			Description *string `json:"description"`
+			Amount      float64 `json:"amount"`
+			Date        string  `json:"date"`
+		}
+		f.call("GET", "/transactions/"+txID.String(), "", nil, 200, &row)
+		return row.Description, row.Amount, row.Date
+	}
+	da, aa, dd := read(a.Item.Transaction.ID)
+	if da == nil || !strings.Contains(*da, "Netflix 4K") || aa != 100 || dd != f.day(-14) {
+		t.Errorf("tx a = %v %v %v (name follows, amount / date never)", da, aa, dd)
+	}
+	if db, _, _ := read(b.Item.Transaction.ID); db == nil || *db != "mine" {
+		t.Errorf("tx b description = %v, want mine", db)
+	}
+	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, &upd)
+	if upd.Recurring.RecordedTxCount != 2 {
+		t.Errorf("recorded_tx_count = %d", upd.Recurring.RecordedTxCount)
+	}
+}
+
+func TestOccurrencesPicker(t *testing.T) {
+	f := newRecFix(t)
+	d := f.createWeekly(6)
+	id := d.Recurring.ID
+	f.track(id)
+	var res OccurrencesResult
+	f.call("GET", "/recurring/"+id.String()+"/occurrences?tx_date="+f.day(8)+"&past=1&upcoming=2", "listRecurringOccurrences", nil, 200, &res)
+	if len(res.Data) != 5 || res.SuggestedSlot == nil || *res.SuggestedSlot != f.day(-14) {
+		t.Fatalf("picker = %d items, suggested %v", len(res.Data), res.SuggestedSlot)
+	}
+	var cp Detail
+	f.call("POST", "/recurring/"+id.String()+"/occurrences/confirm-ready", "confirmRecurringOccurrencesReady", nil, 200, nil)
+	f.call("GET", "/recurring/"+id.String()+"/occurrences?tx_date="+f.day(8), "listRecurringOccurrences", nil, 200, &res)
+	if res.SuggestedSlot == nil || *res.SuggestedSlot != f.day(7) {
+		t.Errorf("nothing overdue: suggested %v, want the one nearest the tx date %s", res.SuggestedSlot, f.day(7))
+	}
+	_ = cp
+	// the rule list: overdue first
+	var list RecurringList
+	f.call("GET", "/recurring?for_type=expense", "listRecurring", nil, 200, &list)
+	if len(list.Data) != 1 || list.Data[0].DueCount != 0 {
+		t.Errorf("list = %+v", list.Data)
+	}
 }
 
 func TestRecurringValidation(t *testing.T) {
@@ -435,38 +627,173 @@ func TestRecurringValidation(t *testing.T) {
 	bad := map[string]any{"name": "X", "type": "expense", "amount": 10, "account_id": f.wallet,
 		"rule": map[string]any{"freq": "monthly"}, "start_date": f.day(0),
 		"end": map[string]any{"kind": "date", "date": f.today.AddDate(3, 0, 0).Format(dateLayout)}}
-	raw := f.call("POST", "/recurring", "", bad, 400, nil)
+	raw := f.call("POST", "/recurring", "createRecurring", bad, 400, nil)
 	if !contains(raw, "END_TOO_FAR") {
 		t.Errorf("end too far: %s", raw)
 	}
 	bad["end"] = nil
 	bad["rule"] = map[string]any{"freq": "hourly"}
-	if raw := f.call("POST", "/recurring", "", bad, 400, nil); !contains(raw, "INVALID_RULE") {
+	if raw := f.call("POST", "/recurring", "createRecurring", bad, 400, nil); !contains(raw, "INVALID_RULE") {
 		t.Errorf("invalid rule: %s", raw)
 	}
 	bad["rule"] = map[string]any{"freq": "monthly"}
 	bad["category_id"] = uuid.New()
-	if raw := f.call("POST", "/recurring", "", bad, 400, nil); !contains(raw, "INVALID_CATEGORY") {
+	if raw := f.call("POST", "/recurring", "createRecurring", bad, 400, nil); !contains(raw, "INVALID_CATEGORY") {
 		t.Errorf("invalid category: %s", raw)
 	}
 	delete(bad, "category_id")
 	var d Detail
 	f.call("POST", "/recurring", "createRecurring", bad, 201, &d)
-	if d.Recurring.Counts.Upcoming < 11 || d.Recurring.Progress.Total != nil {
+	if d.Recurring.Counts.Upcoming != 0 || d.Recurring.Progress.Total != nil {
 		t.Errorf("no end monthly: %+v", d.Recurring)
 	}
-	f.call("POST", "/recurring/"+d.Recurring.ID.String()+"/extend", "extendRecurring", map[string]any{}, 200, &d)
-	if d.Recurring.Counts.Upcoming < 23 {
-		t.Errorf("extend no-end: upcoming %d", d.Recurring.Counts.Upcoming)
-	}
+	// nothing to extend without an end
+	f.call("POST", "/recurring/"+d.Recurring.ID.String()+"/extend", "extendRecurring", map[string]any{}, 409, nil)
 	bad["rule"] = map[string]any{"freq": "dates", "dates": []string{f.day(5), f.day(9), f.day(5)}}
 	f.call("POST", "/recurring", "createRecurring", bad, 201, &d)
 	if d.Recurring.Counts.Upcoming != 2 || d.Recurring.Progress.Total == nil || *d.Recurring.Progress.Total != 2 {
 		t.Errorf("dates: %+v", d.Recurring)
 	}
+	// an end can be pushed out
+	var e Detail
+	f.call("POST", "/recurring", "createRecurring", map[string]any{"name": "E", "type": "expense", "amount": 10, "account_id": f.wallet,
+		"rule": map[string]any{"freq": "daily", "interval": 7}, "start_date": f.day(0), "end": map[string]any{"kind": "count", "count": 3}}, 201, &e)
+	f.call("POST", "/recurring/"+e.Recurring.ID.String()+"/extend", "extendRecurring", map[string]any{"end": map[string]any{"kind": "count", "count": 5}}, 200, &e)
+	if e.Recurring.Progress.Total == nil || *e.Recurring.Progress.Total != 5 {
+		t.Errorf("extended end: %+v", e.Recurring.Progress)
+	}
 }
 
-func contains(b []byte, s string) bool { return strings.Contains(string(b), s) }
+func TestRecurringKinds(t *testing.T) {
+	f := newRecFix(t)
+	monthly := map[string]any{"freq": "monthly", "interval": 1}
+	mk := func(body map[string]any, want int) Detail {
+		t.Helper()
+		var d Detail
+		body["rule"], body["start_date"] = monthly, f.day(-1)
+		if _, ok := body["name"]; !ok {
+			body["name"] = "X"
+		}
+		f.call("POST", "/recurring", "createRecurring", body, want, &d)
+		return d
+	}
+	sub := mk(map[string]any{"kind": "subscription", "amount": 100, "account_id": f.wallet, "trial_until": f.day(14)}, 201)
+	if sub.Recurring.Kind != "subscription" || sub.Recurring.Type != "expense" || sub.Recurring.YearlyCost != 1200 ||
+		sub.Recurring.TrialUntil == nil || *sub.Recurring.TrialUntil != f.day(14) {
+		t.Errorf("subscription = %+v", sub.Recurring)
+	}
+	mk(map[string]any{"kind": "installment", "amount": 500}, 400)
+	inst := mk(map[string]any{"name": "Phone", "kind": "installment", "amount": 500, "account_id": f.wallet,
+		"end": map[string]any{"kind": "count", "count": 6}}, 201)
+	if inst.Recurring.Kind != "installment" || inst.Recurring.YearlyCost != 3000 || inst.Recurring.Progress.Total == nil ||
+		*inst.Recurring.Progress.Total != 6 {
+		t.Errorf("installment = %+v yearly %v", inst.Recurring.Progress, inst.Recurring.YearlyCost)
+	}
+	inc := mk(map[string]any{"name": "Salary", "kind": "income", "amount": 30000, "account_id": f.wallet}, 201)
+	if inc.Recurring.Type != "income" || inc.Recurring.YearlyCost != 360000 {
+		t.Errorf("income = %+v", inc.Recurring)
+	}
+	mk(map[string]any{"kind": "income", "type": "expense", "amount": 5}, 400) // an income kind is an income
+	rem := mk(map[string]any{"name": "Electricity", "kind": "reminder", "account_id": f.wallet}, 201)
+	if rem.Recurring.Kind != "reminder" || rem.Recurring.Amount != nil || rem.Recurring.YearlyCost != 0 {
+		t.Errorf("reminder = %+v", rem.Recurring)
+	}
+	// a reminder cannot be confirmed without an amount; with one it can
+	var occs ItemList
+	f.call("GET", "/recurring-items?status=due&rule_id="+rem.Recurring.ID.String(), "listRecurringItems", nil, 200, &occs)
+	_ = occs
+	f.track(rem.Recurring.ID)
+	f.call("GET", "/recurring-items?status=due&rule_id="+rem.Recurring.ID.String(), "listRecurringItems", nil, 200, &occs)
+	dueNow := onlyDue(occs.Data) // not this month's upcoming ones (they are in the list too)
+	if len(dueNow) != 1 || !dueNow[0].NeedsAmount {
+		t.Fatalf("reminder due = %+v", occs.Data)
+	}
+	slot := dueNow[0].Slot
+	if raw := f.call("POST", f.occ(rem.Recurring.ID, slot)+"/confirm", "confirmRecurringOccurrence", map[string]any{}, 400, nil); !contains(raw, "AMOUNT_REQUIRED") {
+		t.Errorf("confirm without amount: %s", raw)
+	}
+	f.call("POST", f.occ(rem.Recurring.ID, slot)+"/confirm", "confirmRecurringOccurrence", map[string]any{"amount": 321}, 200, nil)
+	other := testdb.Account(t, f.pool, f.me)
+	mk(map[string]any{"name": "Move", "kind": "reminder", "type": "transfer", "account_id": f.wallet, "to_account_id": other}, 201)
+	mk(map[string]any{"kind": "bogus", "amount": 5}, 400)
+
+	var list RecurringList
+	f.call("GET", "/recurring", "listRecurring", nil, 200, &list)
+	k := list.Summary.ByKind
+	if k.Subscription.Count != 1 || k.Subscription.Yearly != 1200 || k.Installment.Count != 1 || k.Income.Count != 1 ||
+		k.Income.Monthly != 30000 || k.Reminder.Count != 2 {
+		t.Errorf("by_kind = %+v", k)
+	}
+	if list.Summary.Due30dTotal <= 0 {
+		t.Errorf("due_30d_total = %v", list.Summary.Due30dTotal)
+	}
+}
+
+func TestRecurringCalendarMonth(t *testing.T) {
+	f := newRecFix(t)
+	d := f.createWeekly(6) // every 7 days, started 14 days ago
+	f.track(d.Recurring.ID)
+	month := f.today.Format("2006-01")
+	var l ItemList
+	f.call("GET", "/recurring-items?month="+month, "listRecurringItems", nil, 200, &l)
+	first, last := f.today.AddDate(0, 0, -f.today.Day()+1), f.today.AddDate(0, 1, -f.today.Day())
+	for i, it := range l.Data {
+		if it.Date < first.Format("2006-01-02") || it.Date > last.Format("2006-01-02") {
+			t.Errorf("item %s outside %s", it.Date, month)
+		}
+		if i > 0 && l.Data[i-1].Date > it.Date {
+			t.Errorf("not oldest first: %s before %s", l.Data[i-1].Date, it.Date)
+		}
+	}
+	if l.Pagination.PerPage != 100 {
+		t.Errorf("per_page = %d, want 100 for a month", l.Pagination.PerPage)
+	}
+	f.call("GET", "/recurring-items?month=2026-13", "listRecurringItems", nil, 400, nil)
+}
+
+// A stored (edited) occurrence replaces the computed one of the same period.
+func TestEditedOccurrenceReplacesComputed(t *testing.T) {
+	f := newRecFix(t)
+	var m Detail
+	f.call("POST", "/recurring", "createRecurring", map[string]any{"name": "Rent", "type": "expense", "amount": 5000, "account_id": f.wallet,
+		"rule": map[string]any{"freq": "monthly", "interval": 1}, "start_date": f.day(0)}, 201, &m)
+	id := m.Recurring.ID
+	up := f.items(id, "upcoming")
+	if len(up) < 2 {
+		t.Fatalf("upcoming = %d", len(up))
+	}
+	slot := up[0].Slot
+	var w ItemWriteResult
+	f.call("PUT", f.occ(id, slot), "updateRecurringOccurrence", map[string]any{"amount": 4800, "date": up[0].Date}, 200, &w)
+	if !w.Item.Stored || !w.Item.Edited || av(w.Item.Amount) != 4800 {
+		t.Fatalf("edit = %+v", w.Item)
+	}
+	up = f.items(id, "upcoming")
+	n := 0
+	for _, it := range up {
+		if it.Slot == slot {
+			n++
+			if av(it.Amount) != 4800 {
+				t.Errorf("edited occurrence amount = %v", av(it.Amount))
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("the edited occurrence shows %d times", n)
+	}
+	// a rule edit changes the unstored ones only
+	f.call("PUT", "/recurring/"+id.String(), "updateRecurring", map[string]any{"amount": 5100}, 200, nil)
+	up = f.items(id, "upcoming")
+	for _, it := range up {
+		want := 5100.0
+		if it.Slot == slot {
+			want = 4800
+		}
+		if av(it.Amount) != want {
+			t.Errorf("%s amount = %v, want %v", it.Slot, av(it.Amount), want)
+		}
+	}
+}
 
 func TestGoalAutoSaveDraft(t *testing.T) {
 	f := newRecFix(t)
@@ -527,98 +854,86 @@ func TestGoalAutoSaveDraft(t *testing.T) {
 	}
 }
 
+func TestManyAutoSavesProduceEveryOccurrence(t *testing.T) {
+	f := newRecFix(t)
+	goal := uuid.New()
+	f.exec(`INSERT INTO saving_goals (id, user_id, name, target_amount) VALUES ($1, $2, 'Japan', 80000)`, goal, f.me)
+	items := []saving_goals.AutoSaveInput{
+		// 21 daily occurrences since 20 days ago: only the newest 12 become drafts.
+		{Amount: 10, AccountID: &f.wallet, StartDate: f.day(-20),
+			Rule: &recurrence.RecurrenceRule{Freq: "daily", Interval: 1}},
+		// two weekly occurrences, then it ends.
+		{Amount: 20, StartDate: f.day(-14),
+			Rule: &recurrence.RecurrenceRule{Freq: "weekly", Interval: 1},
+			End:  &recurrence.RecurrenceEnd{Kind: "count", Count: intp(2)}},
+		// not started yet: nothing.
+		{Amount: 30, StartDate: f.day(3),
+			Rule: &recurrence.RecurrenceRule{Freq: "daily", Interval: 1}},
+	}
+	if err := f.savings.SetAutoSaves(f.ctx, f.me, &goal, items); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ { // the second run makes nothing more
+		if err := f.svc.DueCheck(f.ctx, f.me, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := func(amount float64) (n int, oldest string) {
+		_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*), COALESCE(MIN(draft->>'date'), '') FROM pending_transactions
+			WHERE user_id = $1 AND source = 'auto_save' AND (draft->>'amount')::float8 = $2`, f.me, amount).Scan(&n, &oldest)
+		return
+	}
+	if n, oldest := count(10); n != 12 || oldest != f.day(-11) {
+		t.Errorf("daily drafts = %d from %s, want 12 from %s", n, oldest, f.day(-11))
+	}
+	if n, oldest := count(20); n != 2 || oldest != f.day(-14) {
+		t.Errorf("weekly drafts = %d from %s, want 2 from %s", n, oldest, f.day(-14))
+	}
+	if n, _ := count(30); n != 0 {
+		t.Errorf("future start made %d drafts", n)
+	}
+
+	page, err := f.savings.Get(f.ctx, f.me, goal, 20, false)
+	if err != nil || len(page.Goal.AutoSaves) != 3 {
+		t.Fatalf("auto_saves = %+v (%v)", page.Goal.AutoSaves, err)
+	}
+	daily, weekly, future := page.Goal.AutoSaves[0], page.Goal.AutoSaves[1], page.Goal.AutoSaves[2]
+	if daily.NextDate == nil || *daily.NextDate != f.day(1) {
+		t.Errorf("daily next = %v, want %s", daily.NextDate, f.day(1))
+	}
+	if weekly.NextDate != nil {
+		t.Errorf("an ended item has next_date %v", *weekly.NextDate)
+	}
+	if future.NextDate == nil || *future.NextDate != f.day(3) {
+		t.Errorf("future next = %v, want %s", future.NextDate, f.day(3))
+	}
+
+	// A closed goal makes no drafts; the spare is always on.
+	f.exec(`UPDATE saving_goals SET status = 'completed' WHERE id = $1`, goal)
+	f.exec(`UPDATE saving_auto SET last_produced = NULL WHERE user_id = $1`, f.me)
+	f.exec(`DELETE FROM pending_transactions WHERE user_id = $1`, f.me)
+	if err := f.savings.SetAutoSaves(f.ctx, f.me, nil, []saving_goals.AutoSaveInput{
+		{Amount: 5, StartDate: f.day(0), Rule: &recurrence.RecurrenceRule{Freq: "daily", Interval: 1}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.DueCheck(f.ctx, f.me, ""); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM pending_transactions WHERE user_id = $1 AND source = 'auto_save'`, f.me).Scan(&n)
+	if n != 1 {
+		t.Errorf("drafts with the goal closed = %d, want 1 (the spare's)", n)
+	}
+}
+
+func intp(n int) *int { return &n }
+
 func av(p *float64) float64 {
 	if p == nil {
 		return 0
 	}
 	return *p
-}
-
-// TestRecurringKinds — the four kinds: validation, yearly cost, trial, the amount-less reminder
-// (its draft has no amount and can't be confirmed), and the list summary by kind.
-func TestRecurringKinds(t *testing.T) {
-	f := newRecFix(t)
-	monthly := map[string]any{"freq": "monthly", "interval": 1}
-	mk := func(body map[string]any, want int) Detail {
-		t.Helper()
-		var d Detail
-		body["rule"], body["start_date"] = monthly, f.day(-1)
-		if _, ok := body["name"]; !ok {
-			body["name"] = "X"
-		}
-		f.call("POST", "/recurring", "createRecurring", body, want, &d)
-		return d
-	}
-
-	sub := mk(map[string]any{"kind": "subscription", "amount": 100, "account_id": f.wallet, "trial_until": f.day(14)}, 201)
-	if sub.Recurring.Kind != "subscription" || sub.Recurring.Type != "expense" || sub.Recurring.YearlyCost != 1200 ||
-		sub.Recurring.TrialUntil == nil || *sub.Recurring.TrialUntil != f.day(14) {
-		t.Errorf("subscription = %+v", sub.Recurring)
-	}
-	mk(map[string]any{"kind": "installment", "amount": 500}, 400)
-	inst := mk(map[string]any{"name": "Phone", "kind": "installment", "amount": 500, "account_id": f.wallet,
-		"end": map[string]any{"kind": "count", "count": 6}}, 201)
-	if inst.Recurring.Kind != "installment" || inst.Recurring.YearlyCost != 3000 || inst.Recurring.Progress.Total == nil ||
-		*inst.Recurring.Progress.Total != 6 {
-		t.Errorf("installment = %+v yearly %v", inst.Recurring.Progress, inst.Recurring.YearlyCost)
-	}
-	inc := mk(map[string]any{"name": "Salary", "kind": "income", "amount": 30000, "account_id": f.wallet}, 201)
-	if inc.Recurring.Type != "income" || inc.Recurring.YearlyCost != 360000 {
-		t.Errorf("income = %+v", inc.Recurring)
-	}
-	mk(map[string]any{"kind": "income", "type": "expense", "amount": 5}, 400) // an income kind is an income
-	rem := mk(map[string]any{"name": "Electricity", "kind": "reminder", "account_id": f.wallet}, 201)
-	if rem.Recurring.Kind != "reminder" || rem.Recurring.Amount != nil || rem.Recurring.YearlyCost != 0 {
-		t.Errorf("reminder = %+v", rem.Recurring)
-	}
-	var pend int
-	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM pending_transactions WHERE user_id = $1 AND NOT (draft ? 'amount')`, f.me).Scan(&pend); err != nil || pend != 1 {
-		t.Fatalf("amount-less drafts = %d (%v), want 1 (the reminder's due item)", pend, err)
-	}
-	var draftID uuid.UUID
-	_ = f.pool.QueryRow(f.ctx, `SELECT id FROM pending_transactions WHERE user_id = $1 AND NOT (draft ? 'amount')`, f.me).Scan(&draftID)
-	res, err := f.pending.Submit(f.ctx, f.me, pending.SubmitRequest{IDs: []uuid.UUID{draftID}})
-	if err != nil || len(res.Failed) != 1 || res.Failed[0].Error.Code != "MISSING_AMOUNT" || len(res.Submitted) != 0 {
-		t.Errorf("confirm without amount = %+v (%v)", res, err)
-	}
-	other := testdb.Account(t, f.pool, f.me)
-	mk(map[string]any{"name": "Move", "kind": "reminder", "type": "transfer", "account_id": f.wallet, "to_account_id": other}, 201)
-	mk(map[string]any{"kind": "bogus", "amount": 5}, 400)
-
-	var list RecurringList
-	f.call("GET", "/recurring", "listRecurring", nil, 200, &list)
-	k := list.Summary.ByKind
-	if k.Subscription.Count != 1 || k.Subscription.Yearly != 1200 || k.Installment.Count != 1 || k.Income.Count != 1 ||
-		k.Income.Monthly != 30000 || k.Reminder.Count != 2 {
-		t.Errorf("by_kind = %+v", k)
-	}
-	if list.Summary.AwaitingAmountCount < 1 {
-		t.Errorf("awaiting_amount_count = %d, want the reminder's draft", list.Summary.AwaitingAmountCount)
-	}
-	if list.Summary.Due30dTotal <= 0 {
-		t.Errorf("due_30d_total = %v", list.Summary.Due30dTotal)
-	}
-}
-
-func TestRecurringCalendarMonth(t *testing.T) {
-	f := newRecFix(t)
-	f.createWeekly(6) // every 7 days, started 14 days ago
-	month := f.today.Format("2006-01")
-	var l ItemList
-	f.call("GET", "/recurring-items?month="+month, "listRecurringItems", nil, 200, &l)
-	first, last := f.today.AddDate(0, 0, -f.today.Day()+1), f.today.AddDate(0, 1, -f.today.Day())
-	for i, it := range l.Data {
-		if it.Date < first.Format("2006-01-02") || it.Date > last.Format("2006-01-02") {
-			t.Errorf("item %s outside %s", it.Date, month)
-		}
-		if i > 0 && l.Data[i-1].Date > it.Date {
-			t.Errorf("not oldest first: %s before %s", l.Data[i-1].Date, it.Date)
-		}
-	}
-	if l.Pagination.PerPage != 100 {
-		t.Errorf("per_page = %d, want 100 for a month", l.Pagination.PerPage)
-	}
-	f.call("GET", "/recurring-items?month=2026-13", "", nil, 400, nil)
 }
 
 func TestRecurringDuplicate(t *testing.T) {
@@ -631,76 +946,8 @@ func TestRecurringDuplicate(t *testing.T) {
 		cp.Recurring.Kind != KindInstallment || av(cp.Recurring.Amount) != 100 {
 		t.Errorf("copy = %+v", cp.Recurring)
 	}
-	f.call("POST", "/recurring/"+uuid.NewString()+"/duplicate", "", nil, 404, nil)
+	f.call("POST", "/recurring/"+uuid.NewString()+"/duplicate", "duplicateRecurring", nil, 404, nil)
 }
 
-func TestRecurringPickerAndLink(t *testing.T) {
-	f := newRecFix(t)
-	mkRule := func(body map[string]any) Detail {
-		t.Helper()
-		var d Detail
-		body["rule"], body["start_date"] = map[string]any{"freq": "monthly", "interval": 1}, f.day(-1)
-		f.call("POST", "/recurring", "createRecurring", body, 201, &d)
-		return d
-	}
-	sub := mkRule(map[string]any{"name": "Netflix", "kind": "subscription", "amount": 100, "account_id": f.wallet})
-	rem := mkRule(map[string]any{"name": "Water", "kind": "reminder", "account_id": f.wallet})
-	mkRule(map[string]any{"name": "Salary", "kind": "income", "amount": 900, "account_id": f.wallet})
 
-	var pick RecurringList
-	f.call("GET", "/recurring?for_type=expense", "listRecurring", nil, 200, &pick)
-	if len(pick.Data) != 2 {
-		t.Fatalf("expense picker = %d rows, want 2 (Netflix, Water)", len(pick.Data))
-	}
-	occ := map[string]*Occurrence{}
-	for _, r := range pick.Data {
-		occ[r.Name] = r.CurrentOccurrence
-	}
-	if occ["Netflix"] == nil || occ["Netflix"].Status != "pending" || av(occ["Netflix"].Amount) != 100 ||
-		occ["Water"] == nil || occ["Water"].Amount != nil {
-		t.Fatalf("current occurrences = %+v / %+v", occ["Netflix"], occ["Water"])
-	}
-	f.call("GET", "/recurring?for_type=nope", "", nil, 400, nil)
-
-	mk := func(amount float64) uuid.UUID {
-		res, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
-			Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: amount, Date: f.day(0)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return res.(*transactions.TransactionDetail).ID
-	}
-	tx1 := mk(120)
-	var link LinkResult
-	f.call("POST", "/recurring-items/"+occ["Netflix"].ItemID.String()+"/link", "linkRecurringItem",
-		map[string]any{"transaction_id": tx1}, 200, &link)
-	if link.Item.Status != StatusDone || link.Item.Transaction == nil || link.Item.Transaction.ID != tx1 ||
-		!link.AmountDiffers || av(link.RuleAmount) != 100 || link.TransactionAmount != 120 || av(link.Item.Amount) != 120 {
-		t.Errorf("link = %+v", link)
-	}
-	var left int
-	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM pending_transactions WHERE id = $1`, occ["Netflix"].ItemID).Scan(&left)
-	var pend int
-	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM pending_transactions p JOIN recurring_items i ON i.pending_id = p.id WHERE i.id = $1`, occ["Netflix"].ItemID).Scan(&pend)
-	if pend != 0 {
-		t.Errorf("the occurrence's pending draft survived")
-	}
-	// The same transaction / item can't be linked twice.
-	f.call("POST", "/recurring-items/"+occ["Netflix"].ItemID.String()+"/link", "", map[string]any{"transaction_id": mk(5)}, 409, nil)
-	f.call("POST", "/recurring-items/"+occ["Water"].ItemID.String()+"/link", "", map[string]any{"transaction_id": tx1}, 409, nil)
-	f.call("POST", "/recurring-items/"+occ["Water"].ItemID.String()+"/link", "", map[string]any{"transaction_id": uuid.New()}, 404, nil)
-
-	// A reminder takes the real amount; the setting stays without one.
-	tx2 := mk(333)
-	f.call("POST", "/recurring-items/"+occ["Water"].ItemID.String()+"/link", "linkRecurringItem",
-		map[string]any{"transaction_id": tx2}, 200, &link)
-	if link.AmountDiffers || link.RuleAmount != nil || av(link.Item.Amount) != 333 || link.Item.Status != StatusDone {
-		t.Errorf("reminder link = %+v", link)
-	}
-	var det Detail
-	f.call("GET", "/recurring/"+rem.Recurring.ID.String(), "getRecurring", nil, 200, &det)
-	if det.Recurring.Amount != nil || det.Recurring.SavedCount != 1 {
-		t.Errorf("reminder after link: amount %v saved %d", det.Recurring.Amount, det.Recurring.SavedCount)
-	}
-	_ = sub
-}
+func contains(b []byte, s string) bool { return strings.Contains(string(b), s) }

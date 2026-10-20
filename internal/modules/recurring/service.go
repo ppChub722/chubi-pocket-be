@@ -2,10 +2,10 @@ package recurring
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -64,54 +64,13 @@ func (s *Service) Today(ctx context.Context, userID uuid.UUID) (string, error) {
 	return t.Format(dateLayout), err
 }
 
-func draftFromRule(r *Rule) pending.Draft {
-	d := pending.Draft{
-		Type: ptr(r.Type), Amount: amountPtr(r.Amount), AccountID: r.AccountID, CategoryID: r.CategoryID,
-		Description: r.Description, Note: r.Note, TagIDs: append([]uuid.UUID(nil), r.TagIDs...),
-	}
-	if d.Description == nil || strings.TrimSpace(*d.Description) == "" {
-		d.Description = ptr(r.Name)
-	}
-	switch r.Type {
-	case "transfer":
-		d.TransferToAccountID = r.ToAccountID
-		d.CategoryID = nil
-	case typeSaving:
-		d.GoalID, d.CategoryID, d.TagIDs = r.GoalID, nil, nil
-	}
-	return d
-}
-
-func (s *Service) generateTx(ctx context.Context, tx pgx.Tx, r *Rule, from time.Time) error {
-	if r.GeneratedUntil == nil {
-		return nil
-	}
-	limit := 0
-	if r.EndKind == "count" && r.EndCount != nil {
-		limit = *r.EndCount
-	}
-	for i, d := range r.occurrences(*r.GeneratedUntil, limit) {
-		if d.Before(from) {
-			continue
-		}
-		seq, slot := i+1, d
-		if _, err := insertItemTx(ctx, tx, &itemRow{
-			UserID: r.UserID, RuleID: &r.ID, Seq: &seq, Slot: &slot, Date: d, Draft: draftFromRule(r),
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// dropUnproducedTx removes a rule's items that were never produced (paused / rebuilt settings
-// produce nothing).
-func dropUnproducedTx(ctx context.Context, tx pgx.Tx, ruleID uuid.UUID) error {
-	_, err := tx.Exec(ctx, `DELETE FROM recurring_items WHERE rule_id = $1 AND produced_at IS NULL
-		AND pending_id IS NULL AND transaction_id IS NULL AND NOT archived AND NOT manual`, ruleID)
-	return err
-}
-
+// DueCheck runs on every read of the recurring module (and the dashboard, the
+// counts, the notifications, sync). Nothing is produced into pending any more:
+// an occurrence that came due is just a computed `due` state. What it does:
+// pause settings whose wallet was archived, record the transactions of the
+// settings with auto-create on, count the newly due occurrences for ONE grouped
+// notice, tell about settings that are about to end, and make the goal
+// auto-save drafts.
 func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ string) error {
 	today, err := s.today(ctx, userID, headerTZ)
 	if err != nil {
@@ -123,98 +82,66 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 	}
 	defer tx.Rollback(ctx)
 
-	rows, err := tx.Query(ctx, `UPDATE recurring_rules SET status = 'paused'
+	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET status = 'paused', paused_from = $2
 		WHERE user_id = $1 AND status = 'active'
 		  AND (account_id IN (SELECT id FROM accounts WHERE status = 'archived')
-		    OR to_account_id IN (SELECT id FROM accounts WHERE status = 'archived'))
-		RETURNING id`, userID)
-	if err != nil {
+		    OR to_account_id IN (SELECT id FROM accounts WHERE status = 'archived'))`, userID, today); err != nil {
 		return fmt.Errorf("auto-pause: %w", err)
 	}
-	var paused []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		paused = append(paused, id)
-	}
-	rows.Close()
-	for _, id := range paused {
-		if err := dropUnproducedTx(ctx, tx, id); err != nil {
-			return err
-		}
-	}
 
-	rows, err = tx.Query(ctx, `SELECT i.id FROM recurring_items i
-		LEFT JOIN recurring_rules r ON r.id = i.rule_id
-		WHERE i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
-		  AND NOT i.archived AND i.date <= $2 AND (i.rule_id IS NULL OR r.status = 'active')
-		ORDER BY i.date, i.id
-		FOR UPDATE OF i SKIP LOCKED`, userID, today)
+	rows, err := tx.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1 AND status = 'active'
+		ORDER BY created_at, id FOR UPDATE SKIP LOCKED`, userID)
 	if err != nil {
-		return fmt.Errorf("due items: %w", err)
+		return fmt.Errorf("due rules: %w", err)
 	}
-	var due []uuid.UUID
+	var rules []*Rule
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		r, err := scanRule(rows)
+		if err != nil {
 			rows.Close()
 			return err
 		}
-		due = append(due, id)
+		rules = append(rules, r)
 	}
 	rows.Close()
-	for _, id := range due {
-		it, err := getItem(ctx, tx, userID, id, false)
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	lang := s.lang(ctx, userID)
+	newlyDue, autoMade := 0, 0
+	var ends []ending
+	for _, r := range rules {
+		made, err := s.autoCreate(ctx, tx, r, today, lang)
 		if err != nil {
 			return err
 		}
-		if err := s.produceTx(ctx, tx, it); err != nil {
+		autoMade += made
+		n, err := s.newlyDue(ctx, tx, r, today, lang)
+		if err != nil {
 			return err
+		}
+		newlyDue += n
+		if e, ok, err := s.endingOf(ctx, tx, r, today, lang); err != nil {
+			return err
+		} else if ok {
+			ends = append(ends, e)
 		}
 	}
 	if err := s.produceAutoSaves(ctx, tx, userID, today); err != nil {
 		return err
 	}
-	if s.notifs != nil && len(due) > 0 {
-		if err := s.notifs.RecurringDueTx(ctx, tx, userID, len(due)); err != nil {
-			return err
+	if s.notifs != nil {
+		if newlyDue > 0 {
+			if err := s.notifs.RecurringDueTx(ctx, tx, userID, newlyDue); err != nil {
+				return err
+			}
 		}
-	}
-
-	rows, err = tx.Query(ctx, `SELECT r.id, r.name, to_char(r.start_date, 'YYYY-MM-DD'), r.end_kind, to_char(r.end_date, 'YYYY-MM-DD'), r.end_count, (SELECT COUNT(*) FROM recurring_items i
-			WHERE i.rule_id = r.id AND i.produced_at IS NULL AND i.pending_id IS NULL
-			  AND i.transaction_id IS NULL AND NOT i.archived)
-		FROM recurring_rules r
-		WHERE r.user_id = $1 AND r.status = 'active' AND NOT r.ending_notified`, userID)
-	if err != nil {
-		return fmt.Errorf("ending: %w", err)
-	}
-	type ending struct {
-		id       uuid.UUID
-		name     string
-		left     int
-		start    string
-		endKind  string
-		endDate  *string
-		endCount *int
-	}
-	var ends []ending
-	for rows.Next() {
-		var e ending
-		if err := rows.Scan(&e.id, &e.name, &e.start, &e.endKind, &e.endDate, &e.endCount, &e.left); err != nil {
-			rows.Close()
-			return err
+		if autoMade > 0 {
+			if err := s.notifs.RecurringAutoCreatedTx(ctx, tx, userID, autoMade, today.Format(dateLayout)); err != nil {
+				return err
+			}
 		}
-		if e.left <= 2 {
-			ends = append(ends, e)
-		}
-	}
-	rows.Close()
-	for _, e := range ends {
-		if s.notifs != nil {
+		for _, e := range ends {
 			if err := s.notifs.RecurringEndingTx(ctx, tx, userID, notifications.RecurringEndingPayload{
 				RecurringID: e.id, Name: e.name, Left: e.left, StartDate: e.start,
 				End: notifications.RecurringEnd{Kind: e.endKind, Date: e.endDate, Count: e.endCount},
@@ -222,6 +149,8 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 				return err
 			}
 		}
+	}
+	for _, e := range ends {
 		if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET ending_notified = TRUE WHERE id = $1`, e.id); err != nil {
 			return err
 		}
@@ -229,163 +158,201 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 	return tx.Commit(ctx)
 }
 
-func (s *Service) produceTx(ctx context.Context, tx pgx.Tx, it *itemRow) error {
-	ref := sourceRef{ItemID: it.ID, Seq: it.Seq}
-	source := "upcoming"
-	if it.RuleID != nil {
-		source = "recurring"
-		var (
-			name  string
-			icon  []byte
-			total *int32
-		)
-		if err := tx.QueryRow(ctx, `SELECT name, icon_code, total_count FROM recurring_rules WHERE id = $1`,
-			*it.RuleID).Scan(&name, &icon, &total); err == nil {
-			ref.Recurring = &shared.RecurringRef{ID: *it.RuleID, Name: name, IconCode: shared.IconFromJSON(icon)}
-			if total != nil {
-				v := int(*total)
-				ref.Total = &v
-			}
-		}
-	}
-	raw, _ := json.Marshal(ref)
-	d := it.Draft
-	d.Date = ptr(it.Date.Format(dateLayout))
-	kind := pending.KindCreate
-	if d.Type != nil && *d.Type == typeSaving {
-		kind = pending.KindSaving
-	}
-	p, err := s.pending.Store().InsertTx(ctx, tx, it.UserID, source, kind, d, raw)
-	if err != nil {
-		return fmt.Errorf("produce: %w", err)
-	}
-	now := time.Now()
-	it.PendingID, it.ProducedAt, it.Archived = &p.ID, &now, false
-	return saveItemTx(ctx, tx, it)
+type ending struct {
+	id       uuid.UUID
+	name     string
+	left     int
+	start    string
+	endKind  string
+	endDate  *string
+	endCount *int
 }
 
-func (s *Service) itemViews(ctx context.Context, q shared.Querier, userID uuid.UUID, today time.Time, where string, args ...any) ([]Item, error) {
-	rows, err := q.Query(ctx, `SELECT i.id, i.rule_id, r.name, r.icon_code, i.seq, r.total_count, i.date,
-			`+statusSQL+`, i.edited, i.manual, i.draft, i.pending_id, i.transaction_id, i.saving_entry_id, t.description, t.account_id,
-			i.created_at, i.updated_at
-		FROM recurring_items i
-		LEFT JOIN recurring_rules r ON r.id = i.rule_id
-		LEFT JOIN transactions t ON t.id = i.transaction_id
-		`+where, args...)
-	if err != nil {
-		return nil, fmt.Errorf("items: %w", err)
+// newlyDue counts the occurrences of r that came due since the due notice last
+// looked (due_notified_until, today], not recorded and not made by auto-create
+// just now, and moves the marker to today.
+func (s *Service) newlyDue(ctx context.Context, tx pgx.Tx, r *Rule, today time.Time, lang string) (int, error) {
+	if r.DueNotifiedUntil != nil && !r.DueNotifiedUntil.Before(today) {
+		return 0, nil // already looked today: no queries, no write
 	}
-	var (
-		out    []Item
-		drafts []pending.Draft
-		accIDs []uuid.UUID
-		txAcc  = map[int]uuid.UUID{}
-	)
-	for rows.Next() {
-		var (
-			it     Item
-			ruleID *uuid.UUID
-			name   *string
-			icon   []byte
-			seq    *int32
-			total  *int32
-			date   time.Time
-			draft  []byte
-			txID   *uuid.UUID
-			txDesc *string
-			txAcct *uuid.UUID
-		)
-		if err := rows.Scan(&it.ID, &ruleID, &name, &icon, &seq, &total, &date, &it.Status, &it.Edited, &it.Manual,
-			&draft, &it.PendingID, &txID, &it.SavingEntryID, &txDesc, &txAcct, &it.CreatedAt, &it.UpdatedAt); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if ruleID != nil && name != nil {
-			it.Recurring = &shared.RecurringRef{ID: *ruleID, Name: *name, IconCode: shared.IconFromJSON(icon)}
-		}
-		if seq != nil {
-			v := int(*seq)
-			it.Seq = &v
-		}
-		if total != nil && ruleID != nil {
-			v := int(*total)
-			it.Total = &v
-		}
-		it.Date = date.Format(dateLayout)
-		it.DaysUntil = int(date.Sub(today).Hours() / 24)
-		var d pending.Draft
-		if err := json.Unmarshal(draft, &d); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if d.Type != nil {
-			it.Type = *d.Type
-		}
-		if d.Amount != nil {
-			it.Amount = d.Amount
-		}
-		it.Description, it.Note = d.Description, d.Note
-		if txID != nil {
-			it.Transaction = &LinkedTx{ID: *txID, Description: txDesc}
-			if txAcct != nil {
-				txAcc[len(out)] = *txAcct
-				accIDs = append(accIDs, *txAcct)
-			}
-		}
-		drafts = append(drafts, d)
-		out = append(out, it)
+	from := r.TrackedFrom
+	if r.DueNotifiedUntil != nil && r.DueNotifiedUntil.AddDate(0, 0, 1).After(from) {
+		from = r.DueNotifiedUntil.AddDate(0, 0, 1)
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if out == nil {
-		return []Item{}, nil
-	}
-	resolved, err := pending.ResolveDrafts(ctx, q, userID, drafts)
-	if err != nil {
-		return nil, err
-	}
-	accs, err := shared.LoadAccountRefs(ctx, q, accIDs)
-	if err != nil {
-		return nil, err
-	}
-	for i := range out {
-		r := resolved[i]
-		out[i].Account, out[i].ToAccount, out[i].Category, out[i].Project = r.Account, r.TransferToAccount, r.Category, r.Project
-		out[i].Tags, out[i].Splits, out[i].Goal = r.Tags, r.Splits, r.Goal
-		if out[i].Tags == nil {
-			out[i].Tags = []shared.TagRef{}
+	n := 0
+	if !from.After(today) {
+		rows, err := s.storedRows(ctx, tx, r.UserID, []uuid.UUID{r.ID}, &from, &today)
+		if err != nil {
+			return 0, err
 		}
-		if out[i].Splits == nil {
-			out[i].Splits = []pending.ResolvedSplit{}
-		}
-		if id, ok := txAcc[i]; ok {
-			if a, ok := accs[id]; ok {
-				out[i].Transaction.Account = &a
+		for _, o := range occsOf(r, rows, from, today, today, lang) {
+			if o.status == StatusDue {
+				n++
 			}
 		}
 	}
-	return out, nil
+	// only when it moves: a write bumps updated_at, which the sync fingerprint reads
+	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET due_notified_until = $2 WHERE id = $1
+		AND due_notified_until IS DISTINCT FROM $2`, r.ID, today); err != nil {
+		return 0, err
+	}
+	r.DueNotifiedUntil = &today
+	return n, nil
 }
 
-func (s *Service) ItemView(ctx context.Context, userID, itemID uuid.UUID) (any, error) {
-	return s.itemView(ctx, userID, itemID)
+// endingOf — a setting WITH an end that has 2 or fewer occurrences left gets
+// one "about to end" notice.
+func (s *Service) endingOf(ctx context.Context, tx pgx.Tx, r *Rule, today time.Time, lang string) (ending, bool, error) {
+	if r.EndingNotified || r.TotalCount == nil || r.GeneratedUntil == nil {
+		return ending{}, false, nil
+	}
+	from := today.AddDate(0, 0, 1)
+	if from.After(*r.GeneratedUntil) {
+		return ending{}, false, nil
+	}
+	rows, err := s.storedRows(ctx, tx, r.UserID, []uuid.UUID{r.ID}, &from, r.GeneratedUntil)
+	if err != nil {
+		return ending{}, false, err
+	}
+	left := 0
+	for _, o := range occsOf(r, rows, from, *r.GeneratedUntil, today, lang) {
+		if o.status == StatusUpcoming {
+			left++
+		}
+	}
+	if left > 2 {
+		return ending{}, false, nil
+	}
+	return ending{id: r.ID, name: r.Name, left: left, start: r.StartDate.Format(dateLayout), endKind: r.EndKind,
+		endDate: dstr(r.EndDate), endCount: r.EndCount}, true, nil
 }
 
 func (s *Service) itemView(ctx context.Context, userID, itemID uuid.UUID) (*Item, error) {
-	today, err := s.today(ctx, userID, "")
+	it, err := getItem(ctx, s.db, userID, itemID, false)
 	if err != nil {
 		return nil, err
 	}
-	items, err := s.itemViews(ctx, s.db, userID, today, `WHERE i.id = $1 AND i.user_id = $2`, itemID, userID)
-	if err != nil {
-		return nil, err
-	}
-	if len(items) == 0 {
+	if it.RuleID == nil {
 		return nil, ErrItemNotFound
 	}
+	return s.viewRow(ctx, userID, it)
+}
+
+// viewRow is the Item of a stored row.
+func (s *Service) viewRow(ctx context.Context, userID uuid.UUID, it *itemRow) (*Item, error) {
+	today, err := s.today(ctx, userID, shared.HeaderTZ(ctx))
+	if err != nil {
+		return nil, err
+	}
+	r, err := getRule(ctx, s.db, userID, *it.RuleID, false)
+	if err != nil {
+		return nil, err
+	}
+	o := rowOcc(r, it, seqIndex(r), today, s.lang(ctx, userID))
+	items, err := s.viewOccs(ctx, s.db, userID, today, []*occ{o})
+	if err != nil {
+		return nil, err
+	}
 	return &items[0], nil
+}
+
+// slotItem is the Item of the occurrence of a rule at slot (stored, else computed).
+func (s *Service) slotItem(ctx context.Context, userID, ruleID uuid.UUID, slot time.Time) (*Item, error) {
+	today, err := s.today(ctx, userID, shared.HeaderTZ(ctx))
+	if err != nil {
+		return nil, err
+	}
+	r, err := getRule(ctx, s.db, userID, ruleID, false)
+	if err != nil {
+		return nil, err
+	}
+	o, err := s.loadOcc(ctx, s.db, userID, r, slot, today)
+	if err != nil {
+		return nil, err
+	}
+	items, err := s.viewOccs(ctx, s.db, userID, today, []*occ{o})
+	if err != nil {
+		return nil, err
+	}
+	return &items[0], nil
+}
+
+// ruleAgg is what a setting's row shows, worked out from its occurrences.
+type ruleAgg struct {
+	counts   StatusCounts
+	done     int // recorded + paid + the implicit paid ones
+	dueOccs  []*occ
+	next     *occ
+	edited   bool
+	txCount  int
+	chain    []ChainStep
+	upcoming int
+}
+
+const horizonDays = 400
+
+// aggregate — counts, the oldest due, the next upcoming, the chain.
+func (s *Service) aggregate(r *Rule, stored []*itemRow, today time.Time, lang string) *ruleAgg {
+	a := &ruleAgg{}
+	for _, it := range stored {
+		switch statusOfRow(it, today) {
+		case StatusDone:
+			a.counts.Done++
+			a.done++
+		case StatusPaid:
+			a.counts.Paid++
+			a.done++
+		case StatusSkipped:
+			a.counts.Skipped++
+		case StatusPending:
+			a.counts.Pending++
+		}
+		if it.Edited {
+			a.edited = true
+		}
+		if it.TransactionID != nil {
+			a.txCount++
+		}
+	}
+	var all []*occ
+	if r.TotalCount != nil && r.GeneratedUntil != nil { // an end: every occurrence
+		all = occsOf(r, stored, r.StartDate, *r.GeneratedUntil, today, lang)
+	} else {
+		from := r.TrackedFrom
+		hi := today.AddDate(0, 0, horizonDays)
+		all = occsOf(r, stored, from, hi, today, lang)
+	}
+	implicitPaid := 0
+	for _, o := range all {
+		if r.Status != "active" && o.expected() {
+			continue // a paused or archived setting has nothing due or coming
+		}
+		switch o.status {
+		case StatusDue:
+			a.counts.Due++
+			a.dueOccs = append(a.dueOccs, o)
+		case StatusUpcoming:
+			a.upcoming++
+			if a.next == nil {
+				a.next = o
+			}
+		case StatusPaid:
+			if !o.stored() {
+				implicitPaid++
+			}
+		}
+	}
+	if r.TotalCount != nil {
+		a.counts.Upcoming = a.upcoming // only a setting with an end counts them
+		a.done += implicitPaid
+		if len(all) <= 60 {
+			for _, o := range all {
+				a.chain = append(a.chain, ChainStep{Slot: o.slot.Format(dateLayout), Status: o.status})
+			}
+		}
+	}
+	a.counts.NotCreated, a.counts.Archived = a.counts.Due, a.counts.Skipped
+	return a
 }
 
 func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today time.Time, rules []*Rule) ([]Recurring, error) {
@@ -394,7 +361,7 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 		return out, nil
 	}
 	ids := make([]uuid.UUID, len(rules))
-	var accIDs, catIDs, tagIDs []uuid.UUID
+	var accIDs, catIDs, tagIDs, goalIDs []uuid.UUID
 	for i, r := range rules {
 		ids[i] = r.ID
 		for _, a := range []*uuid.UUID{r.AccountID, r.ToAccountID} {
@@ -405,98 +372,42 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 		if r.CategoryID != nil {
 			catIDs = append(catIDs, *r.CategoryID)
 		}
-		tagIDs = append(tagIDs, r.TagIDs...)
-	}
-	type agg struct {
-		counts StatusCounts
-		done   int
-		next   *time.Time
-		edited bool
-	}
-	aggs := map[uuid.UUID]*agg{}
-	rows, err := s.db.Query(ctx, `SELECT i.rule_id, `+statusSQL+`, COUNT(*),
-			COUNT(*) FILTER (WHERE i.produced_at IS NOT NULL AND NOT i.manual),
-			MIN(i.date) FILTER (WHERE `+statusSQL+` = 'upcoming'), BOOL_OR(i.edited)
-		FROM recurring_items i WHERE i.rule_id = ANY($1) GROUP BY i.rule_id, 2`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("rule counts: %w", err)
-	}
-	for rows.Next() {
-		var (
-			id     uuid.UUID
-			status string
-			n      int
-			done   int
-			next   *time.Time
-			edited bool
-		)
-		if err := rows.Scan(&id, &status, &n, &done, &next, &edited); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		a := aggs[id]
-		if a == nil {
-			a = &agg{}
-			aggs[id] = a
-		}
-		switch status {
-		case StatusUpcoming:
-			a.counts.Upcoming = n
-		case StatusNotCreated:
-			a.counts.NotCreated = n
-		case StatusPending:
-			a.counts.Pending = n
-		case StatusDone:
-			a.counts.Done = n
-		case StatusArchived:
-			a.counts.Archived = n
-		}
-		a.done += done
-		if next != nil && (a.next == nil || next.Before(*a.next)) {
-			a.next = next
-		}
-		a.edited = a.edited || edited
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	occ, err := s.currentOccurrences(ctx, userID, today, rules)
-	if err != nil {
-		return nil, err
-	}
-	nextAmt := map[uuid.UUID]*float64{}
-	nrows, err := s.db.Query(ctx, `SELECT DISTINCT ON (i.rule_id) i.rule_id, NULLIF((i.draft->>'amount')::numeric, 0)::float8
-		FROM recurring_items i
-		WHERE i.rule_id = ANY($1) AND `+statusSQL+` = 'upcoming'
-		ORDER BY i.rule_id, i.date, i.id`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("next amounts: %w", err)
-	}
-	for nrows.Next() {
-		var (
-			id  uuid.UUID
-			amt *float64
-		)
-		if err := nrows.Scan(&id, &amt); err != nil {
-			nrows.Close()
-			return nil, err
-		}
-		nextAmt[id] = amt
-	}
-	nrows.Close()
-	if err := nrows.Err(); err != nil {
-		return nil, err
-	}
-	accs, err := shared.LoadAccountRefs(ctx, s.db, accIDs)
-	if err != nil {
-		return nil, err
-	}
-	var goalIDs []uuid.UUID
-	for _, r := range rules {
 		if r.GoalID != nil {
 			goalIDs = append(goalIDs, *r.GoalID)
 		}
+		tagIDs = append(tagIDs, r.TagIDs...)
+	}
+	stored, err := s.storedRows(ctx, s.db, userID, ids, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	byRule := map[uuid.UUID][]*itemRow{}
+	for _, it := range stored {
+		if it.RuleID != nil {
+			byRule[*it.RuleID] = append(byRule[*it.RuleID], it)
+		}
+	}
+	avg := map[uuid.UUID]float64{}
+	arows, err := s.db.Query(ctx, `SELECT i.rule_id, AVG(t.amount)::float8 FROM recurring_items i
+		JOIN transactions t ON t.id = i.transaction_id WHERE i.user_id = $1 AND i.rule_id = ANY($2) GROUP BY i.rule_id`, userID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("avg amounts: %w", err)
+	}
+	for arows.Next() {
+		var (
+			id uuid.UUID
+			v  float64
+		)
+		if err := arows.Scan(&id, &v); err != nil {
+			arows.Close()
+			return nil, err
+		}
+		avg[id] = math.Round(v*100) / 100
+	}
+	arows.Close()
+	accs, err := shared.LoadAccountRefs(ctx, s.db, accIDs)
+	if err != nil {
+		return nil, err
 	}
 	goals, err := shared.LoadSavingGoalRefs(ctx, s.db, goalIDs)
 	if err != nil {
@@ -510,19 +421,45 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 	if err != nil {
 		return nil, err
 	}
+	lang := s.lang(ctx, userID)
 	for _, r := range rules {
-		a := aggs[r.ID]
-		if a == nil {
-			a = &agg{}
-		}
+		a := s.aggregate(r, byRule[r.ID], today, lang)
 		v := Recurring{
 			ID: r.ID, Name: r.Name, Description: r.Description, Note: r.Note, IconCode: r.IconCode,
 			Type: r.Type, Amount: amountPtr(r.Amount), Tags: []shared.TagRef{}, Rule: r.apiRule(),
 			Kind: r.Kind, TrialUntil: dstr(r.TrialUntil), YearlyCost: yearlyCost(r, today), MonthlyAmount: monthlyAmount(r, today),
-			SavedCount: a.counts.Done, PendingCount: a.counts.Pending, NextAmount: nextAmt[r.ID], CurrentOccurrence: occ[r.ID],
+			SavedCount: a.counts.Done, PendingCount: a.counts.Pending,
 			StartDate: r.StartDate.Format(dateLayout), End: r.apiEnd(), Status: r.Status,
 			Progress: Progress{Done: a.done, Total: r.TotalCount}, Counts: a.counts, EditedAny: a.edited,
 			CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+			DueCount: a.counts.Due, Chain: a.chain, AutoCreate: r.AutoCreate, RecordedTxCount: a.txCount,
+		}
+		if a.chain == nil {
+			v.Chain = []ChainStep{}
+		}
+		if m, ok := avg[r.ID]; ok {
+			v.AvgAmount = &m
+		} else {
+			v.AvgAmount = amountPtr(r.Amount)
+		}
+		if a.next != nil {
+			v.NextAmount = amountPtrFrom(a.next.draft.Amount)
+			ns := a.next.date.Format(dateLayout)
+			d := int(a.next.date.Sub(today).Hours() / 24)
+			v.NextDate, v.DaysUntil = &ns, &d
+		}
+		cur := a.next
+		if len(a.dueOccs) > 0 {
+			cur = a.dueOccs[0] // the oldest due one first
+		}
+		if cur != nil && int(cur.date.Sub(today).Hours()/24) <= windowDays(r) {
+			oc := &Occurrence{RuleID: r.ID, Slot: cur.slot.Format(dateLayout), Date: cur.date.Format(dateLayout),
+				DaysUntil: int(cur.date.Sub(today).Hours() / 24), Amount: amountPtrFrom(cur.draft.Amount), Status: cur.status}
+			if cur.row != nil {
+				id := cur.row.ID
+				oc.ItemID = &id
+			}
+			v.CurrentOccurrence = oc
 		}
 		if r.AccountID != nil {
 			if x, ok := accs[*r.AccountID]; ok {
@@ -549,16 +486,11 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 				v.Tags = append(v.Tags, x)
 			}
 		}
-		if a.next != nil {
-			s := a.next.Format(dateLayout)
-			d := int(a.next.Sub(today).Hours() / 24)
-			v.NextDate, v.DaysUntil = &s, &d
-		}
-		v.EndingSoon = r.Status == "active" && a.counts.Upcoming <= 2
+		v.EndingSoon = r.Status == "active" && r.TotalCount != nil && a.upcoming <= 2
 		v.Actions = Actions{
 			Pause: r.Status == "active", Resume: r.Status == "paused",
 			Archive: r.Status != "archived", Restore: r.Status == "archived",
-			Extend: r.Status != "archived" && r.Freq != "dates",
+			Extend: r.Status != "archived" && r.Freq != "dates" && r.TotalCount != nil,
 		}
 		out = append(out, v)
 	}
@@ -574,19 +506,84 @@ func (s *Service) detail(ctx context.Context, userID, id uuid.UUID, today time.T
 	if err != nil {
 		return nil, err
 	}
-	items, err := s.ruleItems(ctx, userID, id, today, "produced", page, perPage)
+	items, err := s.ruleItems(ctx, userID, r, today, "produced", page, perPage, nil, 0)
 	if err != nil {
 		return nil, err
 	}
-	up, err := s.ruleItems(ctx, userID, id, today, "upcoming", 1, perPage)
+	up, err := s.ruleItems(ctx, userID, r, today, "upcoming", 1, perPage, nil, 0)
 	if err != nil {
 		return nil, err
 	}
 	out := &Detail{Recurring: views[0], Items: *items, Upcoming: *up}
+	if out.Stats, err = s.stats(ctx, userID, r, today); err != nil {
+		return nil, err
+	}
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// stats — the detail page's numbers, from the recorded occurrences.
+func (s *Service) stats(ctx context.Context, userID uuid.UUID, r *Rule, today time.Time) (Stats, error) {
+	st := Stats{Series: []Point{}}
+	rows, err := s.db.Query(ctx, `SELECT COALESCE(i.slot, i.date), i.date, t.amount::float8 FROM recurring_items i
+		JOIN transactions t ON t.id = i.transaction_id
+		WHERE i.user_id = $1 AND i.rule_id = $2 ORDER BY COALESCE(i.slot, i.date)`, userID, r.ID)
+	if err != nil {
+		return st, fmt.Errorf("stats: %w", err)
+	}
+	var pts []Point
+	for rows.Next() {
+		var (
+			slot, date time.Time
+			amt        float64
+		)
+		if err := rows.Scan(&slot, &date, &amt); err != nil {
+			rows.Close()
+			return st, err
+		}
+		pts = append(pts, Point{Slot: slot.Format(dateLayout), Date: date.Format(dateLayout), Amount: amt})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return st, err
+	}
+	st.PaidCount = len(pts)
+	var max float64
+	for _, p := range pts {
+		st.PaidTotal += p.Amount
+		if p.Amount > max {
+			max = p.Amount
+		}
+	}
+	st.PaidTotal = math.Round(st.PaidTotal*100) / 100
+	if n := len(pts); n > 0 {
+		avg := math.Round(st.PaidTotal/float64(n)*100) / 100
+		last, mx := pts[n-1].Amount, max
+		st.AvgAmount, st.LastAmount, st.MaxAmount = &avg, &last, &mx
+		lp := pts[n-1].Slot
+		st.LastPeriod = &lp
+	}
+	if len(pts) > 24 {
+		pts = pts[len(pts)-24:]
+	}
+	st.Series = append(st.Series, pts...)
+	if r.TotalCount != nil && r.GeneratedUntil != nil {
+		stored, err := s.storedRows(ctx, s.db, userID, []uuid.UUID{r.ID}, nil, nil)
+		if err != nil {
+			return st, err
+		}
+		left := 0.0
+		for _, o := range occsOf(r, stored, r.StartDate, *r.GeneratedUntil, today, s.lang(ctx, userID)) {
+			if o.expected() && o.draft.Amount != nil {
+				left += *o.draft.Amount
+			}
+		}
+		left = math.Round(left*100) / 100
+		st.RemainingTotal = &left
+	}
+	return st, nil
 }
 
 const unlimitedPerPage = 100000
@@ -604,23 +601,90 @@ func clampPage(page, perPage int) (int, int) {
 	return page, perPage
 }
 
-func (s *Service) ruleItems(ctx context.Context, userID, ruleID uuid.UUID, today time.Time, tab string, page, perPage int) (*ItemList, error) {
-	page, perPage = clampPage(page, perPage)
-	cond, order := statusSQL+` <> 'upcoming'`, `i.date DESC, i.seq DESC NULLS LAST, i.id`
-	if tab == "upcoming" {
-		cond, order = statusSQL+` = 'upcoming'`, `i.date ASC, i.id`
+// pageOccs slices occurrences into a page and builds their views.
+func (s *Service) pageOccs(ctx context.Context, userID uuid.UUID, today time.Time, occs []*occ, page, perPage int) (*ItemList, error) {
+	total := len(occs)
+	lo, hi := (page-1)*perPage, page*perPage
+	if lo > total {
+		lo = total
 	}
-	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM recurring_items i WHERE i.rule_id = $1 AND i.user_id = $2 AND `+cond,
-		ruleID, userID).Scan(&total); err != nil {
-		return nil, err
+	if hi > total {
+		hi = total
 	}
-	items, err := s.itemViews(ctx, s.db, userID, today, `WHERE i.rule_id = $1 AND i.user_id = $2 AND `+cond+
-		` ORDER BY `+order+` LIMIT $3 OFFSET $4`, ruleID, userID, perPage, (page-1)*perPage)
+	items, err := s.viewOccs(ctx, s.db, userID, today, occs[lo:hi])
 	if err != nil {
 		return nil, err
 	}
 	return &ItemList{Data: items, Pagination: shared.NewPage(page, perPage, total)}, nil
+}
+
+// ruleItems — one setting's items. tab produced = the history (recorded, paid,
+// skipped, legacy pending, and the ones due, newest first); tab upcoming = what
+// is still to come (oldest first): a setting WITHOUT an end shows `months`
+// months from `from` (default today, 12), one with an end shows all of it.
+func (s *Service) ruleItems(ctx context.Context, userID uuid.UUID, r *Rule, today time.Time, tab string, page, perPage int, from *time.Time, months int) (*ItemList, error) {
+	page, perPage = clampPage(page, perPage)
+	lang := s.lang(ctx, userID)
+	stored, err := s.storedRows(ctx, s.db, userID, []uuid.UUID{r.ID}, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if tab != "upcoming" {
+		var occs []*occ
+		seqs := seqIndex(r)
+		for _, it := range stored {
+			if st := statusOfRow(it, today); st != StatusUpcoming {
+				occs = append(occs, rowOcc(r, it, seqs, today, lang))
+			}
+		}
+		if r.Status == "active" && !r.TrackedFrom.After(today) {
+			for _, o := range occsOf(r, stored, r.TrackedFrom, today, today, lang) {
+				if !o.stored() && o.status == StatusDue {
+					occs = append(occs, o)
+				}
+			}
+		}
+		sort.SliceStable(occs, func(i, j int) bool { return occs[i].date.After(occs[j].date) })
+		return s.pageOccs(ctx, userID, today, occs, page, perPage)
+	}
+	if r.TotalCount != nil && r.GeneratedUntil != nil { // an end: all of it
+		var occs []*occ
+		for _, o := range occsOf(r, stored, r.StartDate, *r.GeneratedUntil, today, lang) {
+			if o.status == StatusUpcoming {
+				occs = append(occs, o)
+			}
+		}
+		return s.pageOccs(ctx, userID, today, occs, page, perPage)
+	}
+	start := today.AddDate(0, 0, 1)
+	if from != nil {
+		start = *from
+	}
+	if months <= 0 {
+		months = 12
+	}
+	if months > 24 {
+		months = 24
+	}
+	end := start.AddDate(0, months, -1)
+	var occs []*occ
+	for _, o := range occsOf(r, stored, start, end, today, lang) {
+		if o.status == StatusUpcoming {
+			occs = append(occs, o)
+		}
+	}
+	items, err := s.viewOccs(ctx, s.db, userID, today, occs)
+	if err != nil {
+		return nil, err
+	}
+	out := &ItemList{Data: items, Pagination: shared.NewPage(1, len(items)+1, len(items))}
+	w := &Window{From: start.Format(dateLayout), To: end.Format(dateLayout)}
+	if r.Status == "active" && (r.TotalCount == nil) {
+		nf := end.AddDate(0, 0, 1).Format(dateLayout)
+		w.NextFrom = &nf
+	}
+	out.Window = w
+	return out, nil
 }
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType string, hint PickerHint, kind string, page, perPage int, tz string) (*RecurringList, error) {
@@ -672,30 +736,7 @@ func (s *Service) list(ctx context.Context, userID uuid.UUID, status, q, forType
 		&out.Counts.Current, &out.Counts.Archived, &out.Counts.All); err != nil {
 		return nil, err
 	}
-	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM recurring_rules WHERE user_id = $1 AND `+cond, args...).Scan(&total); err != nil {
-		return nil, err
-	}
-	qargs, likelyOrder := append([]any{}, args...), ""
-	if forType != "" {
-		var ors []string
-		if hint.CategoryID != nil {
-			qargs = append(qargs, *hint.CategoryID)
-			ors = append(ors, fmt.Sprintf(`r.category_id = $%d`, len(qargs)))
-		}
-		if hint.Amount != nil && *hint.Amount > 0 {
-			qargs = append(qargs, *hint.Amount)
-			ors = append(ors, fmt.Sprintf(`(r.amount > 0 AND ABS(r.amount - $%d::numeric) <= $%d::numeric * 0.05 + 0.004)`, len(qargs), len(qargs)))
-		}
-		if len(ors) > 0 {
-			likelyOrder = `(` + strings.Join(ors, ` OR `) + `) DESC, `
-		}
-	}
-	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules r WHERE user_id = $1 AND `+cond+`
-		ORDER BY `+likelyOrder+`(SELECT MIN(i.date) FROM recurring_items i WHERE i.rule_id = r.id AND i.produced_at IS NULL
-		          AND i.pending_id IS NULL AND i.transaction_id IS NULL AND NOT i.archived) ASC NULLS LAST,
-		         LOWER(name), id
-		LIMIT $`+fmt.Sprint(len(qargs)+1)+` OFFSET $`+fmt.Sprint(len(qargs)+2), append(qargs, perPage, (page-1)*perPage)...)
+	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1 AND `+cond, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -709,17 +750,62 @@ func (s *Service) list(ctx context.Context, userID uuid.UUID, status, q, forType
 		rules = append(rules, r)
 	}
 	rows.Close()
-	if out.Data, err = s.recurringViews(ctx, userID, today, rules); err != nil {
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	views, err := s.recurringViews(ctx, userID, today, rules)
+	if err != nil {
+		return nil, err
+	}
+	likely := map[uuid.UUID]bool{}
 	if forType != "" {
-		for i := range out.Data {
+		for i := range views {
 			amt := rules[i].Amount
-			out.Data[i].Likely = hint.likely(rules[i].CategoryID, &amt)
+			views[i].Likely = hint.likely(rules[i].CategoryID, &amt)
+			likely[views[i].ID] = views[i].Likely
 		}
 	}
+	// the picker: likely first; then the nearest due first (overdue, then the next
+	// one coming, none last), then by name.
+	sort.SliceStable(views, func(i, j int) bool {
+		if forType != "" && likely[views[i].ID] != likely[views[j].ID] {
+			return likely[views[i].ID]
+		}
+		ki, kj := dueKey(&views[i]), dueKey(&views[j])
+		if ki != kj {
+			return ki < kj
+		}
+		return strings.ToLower(views[i].Name) < strings.ToLower(views[j].Name)
+	})
+	total := len(views)
+	if !unlimited {
+		lo, hi := (page-1)*perPage, page*perPage
+		if lo > total {
+			lo = total
+		}
+		if hi > total {
+			hi = total
+		}
+		views = views[lo:hi]
+	}
+	out.Data = views
 	out.Pagination = shared.NewPage(page, perPage, total)
 	return out, nil
+}
+
+// dueKey orders settings: overdue first (oldest first), then by the next date,
+// settings with nothing coming last.
+func dueKey(v *Recurring) string {
+	if v.CurrentOccurrence != nil {
+		if v.CurrentOccurrence.Status == StatusDue {
+			return "0" + v.CurrentOccurrence.Date
+		}
+		return "1" + v.CurrentOccurrence.Date
+	}
+	if v.NextDate != nil {
+		return "1" + *v.NextDate
+	}
+	return "2"
 }
 
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, page, perPage int, tz string, withDeletePreview bool) (*Detail, error) {
@@ -743,21 +829,27 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, page, perPage i
 	return d, nil
 }
 
-func (s *Service) RuleItems(ctx context.Context, userID, id uuid.UUID, tab string, page, perPage int, tz string) (*ItemList, error) {
+func (s *Service) RuleItems(ctx context.Context, userID, id uuid.UUID, tab string, page, perPage int, from *time.Time, months int, tz string) (*ItemList, error) {
 	if err := s.DueCheck(ctx, userID, tz); err != nil {
 		return nil, err
 	}
-	if _, err := getRule(ctx, s.db, userID, id, false); err != nil {
+	r, err := getRule(ctx, s.db, userID, id, false)
+	if err != nil {
 		return nil, err
 	}
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
 		return nil, err
 	}
-	return s.ruleItems(ctx, userID, id, today, tab, page, perPage)
+	return s.ruleItems(ctx, userID, r, today, tab, page, perPage, from, months)
 }
 
-func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, month string, page, perPage int, tz string) (*ItemList, error) {
+// Items lists occurrences across the settings. status: upcoming (default, the
+// next 120 days) | due (overdue + due today + this month's upcoming ones with
+// no amount yet, flagged needs_amount) | done | paid | skipped | pending
+// (stored rows, newest first) | all (needs a month). month = every occurrence
+// dated in it, oldest first.
+func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, month string, ruleID *uuid.UUID, page, perPage int, tz string) (*ItemList, error) {
 	if err := s.DueCheck(ctx, userID, tz); err != nil {
 		return nil, err
 	}
@@ -766,51 +858,228 @@ func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, mon
 		return nil, err
 	}
 	page, perPage = clampPage(page, perPage)
-	where := `WHERE i.user_id = $1`
-	args := []any{userID}
-	order := `i.date DESC, i.id`
+	switch status {
+	case StatusNotCreated:
+		status = StatusDue
+	case StatusArchived:
+		status = StatusSkipped
+	}
+	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1
+		AND ($2::uuid IS NULL OR id = $2)`, userID, ruleID)
+	if err != nil {
+		return nil, err
+	}
+	var rules []*Rule
+	for rows.Next() {
+		r, err := scanRule(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if ruleID != nil && len(rules) == 0 {
+		return nil, ErrNotFound
+	}
+	var occs []*occ
 	if month != "" {
 		first, err := time.Parse("2006-01", month)
 		if err != nil {
 			return nil, ErrValidation
 		}
-		args = append(args, first, first.AddDate(0, 1, -1))
-		where += fmt.Sprintf(` AND i.date BETWEEN $%d AND $%d AND (i.rule_id IS NULL OR r.status = 'active')`, len(args)-1, len(args))
-		order = `i.date ASC, i.id`
-		if perPage < 100 && perPage == 20 {
+		if occs, err = s.occsInRange(ctx, s.db, userID, rules, first, first.AddDate(0, 1, -1), today, false); err != nil {
+			return nil, err
+		}
+		if perPage == 20 {
 			perPage = 100
 		}
+		occs = filterStatus(occs, status)
+		return s.pageOccs(ctx, userID, today, occs, page, perPage)
 	}
 	switch status {
-	case "", StatusUpcoming:
-		where += ` AND ` + statusSQL + ` = 'upcoming' AND (i.rule_id IS NULL OR r.status = 'active')`
-		order = `i.date ASC, i.id`
-	case StatusNotCreated, StatusPending, StatusDone, StatusArchived:
-		args = append(args, status)
-		where += fmt.Sprintf(` AND `+statusSQL+` = $%d`, len(args))
+	case StatusDone, StatusPaid, StatusSkipped, StatusPending:
+		ids := make([]uuid.UUID, len(rules))
+		byID := map[uuid.UUID]*Rule{}
+		for i, r := range rules {
+			ids[i], byID[r.ID] = r.ID, r
+		}
+		stored, err := s.storedRows(ctx, s.db, userID, ids, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		lang := s.lang(ctx, userID)
+		for _, it := range stored {
+			if statusOfRow(it, today) == status && it.RuleID != nil {
+				r := byID[*it.RuleID]
+				occs = append(occs, rowOcc(r, it, seqIndex(r), today, lang))
+			}
+		}
+		sort.SliceStable(occs, func(i, j int) bool { return occs[i].date.After(occs[j].date) })
+	case StatusDue:
+		rules = activeOnly(rules) // the badge counts active settings only
+		lo := today
+		for _, r := range rules {
+			if r.TrackedFrom.Before(lo) {
+				lo = r.TrackedFrom
+			}
+		}
+		due, err := s.occsInRange(ctx, s.db, userID, rules, lo, today, today, true)
+		if err != nil {
+			return nil, err
+		}
+		occs = filterStatus(due, StatusDue)
+		// this month's upcoming ones that still have no amount
+		first, last := shared.MonthBounds(today)
+		ahead := first
+		if today.AddDate(0, 0, 1).After(ahead) {
+			ahead = today.AddDate(0, 0, 1)
+		}
+		if !ahead.After(last) {
+			up, err := s.occsInRange(ctx, s.db, userID, rules, ahead, last, today, true)
+			if err != nil {
+				return nil, err
+			}
+			for _, o := range up {
+				if o.status == StatusUpcoming && (o.draft.Amount == nil || *o.draft.Amount <= 0) {
+					occs = append(occs, o)
+				}
+			}
+		}
+	case "all":
+		return nil, ErrValidation
+	default: // upcoming
+		rules = activeOnly(rules)
+		up, err := s.occsInRange(ctx, s.db, userID, rules, today.AddDate(0, 0, 1), today.AddDate(0, 0, 120), today, true)
+		if err != nil {
+			return nil, err
+		}
+		occs = filterStatus(up, StatusUpcoming)
 	}
-	switch kind {
-	case "recurring":
-		where += ` AND i.rule_id IS NOT NULL`
-	case "one_off":
-		where += ` AND i.rule_id IS NULL`
+	return s.pageOccs(ctx, userID, today, occs, page, perPage)
+}
+
+func activeOnly(rules []*Rule) []*Rule {
+	out := make([]*Rule, 0, len(rules))
+	for _, r := range rules {
+		if r.Status == "active" {
+			out = append(out, r)
+		}
 	}
-	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.rule_id `+where,
-		args...).Scan(&total); err != nil {
-		return nil, err
+	return out
+}
+
+func filterStatus(occs []*occ, status string) []*occ {
+	if status == "" || status == "all" {
+		return occs
 	}
-	args = append(args, perPage, (page-1)*perPage)
-	items, err := s.itemViews(ctx, s.db, userID, today, where+fmt.Sprintf(` ORDER BY %s LIMIT $%d OFFSET $%d`,
-		order, len(args)-1, len(args)), args...)
-	if err != nil {
-		return nil, err
+	out := occs[:0:0]
+	for _, o := range occs {
+		if o.status == status {
+			out = append(out, o)
+		}
 	}
-	return &ItemList{Data: items, Pagination: shared.NewPage(page, perPage, total)}, nil
+	return out
 }
 
 func (s *Service) GetItem(ctx context.Context, userID, id uuid.UUID) (*Item, error) {
 	return s.itemView(ctx, userID, id)
+}
+
+// Occurrences is the quick-create picker's step 2: one setting's overdue
+// occurrences (the 24 newest), the `past` most recent earlier ones and the next
+// `upcoming` ones, each with its state and linked transaction; suggested_slot is
+// the oldest overdue one, else the free one nearest txDate.
+func (s *Service) Occurrences(ctx context.Context, userID, ruleID uuid.UUID, txDate *time.Time, past, upcoming int, tz string) (*OccurrencesResult, error) {
+	if err := s.DueCheck(ctx, userID, tz); err != nil {
+		return nil, err
+	}
+	today, err := s.today(ctx, userID, tz)
+	if err != nil {
+		return nil, err
+	}
+	r, err := getRule(ctx, s.db, userID, ruleID, false)
+	if err != nil {
+		return nil, err
+	}
+	if past < 0 {
+		past = 3
+	}
+	if upcoming < 0 {
+		upcoming = 3
+	}
+	stored, err := s.storedRows(ctx, s.db, userID, []uuid.UUID{r.ID}, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	lang := s.lang(ctx, userID)
+	var due, earlier, ahead []*occ
+	lo := r.TrackedFrom
+	for _, o := range occsOf(r, stored, lo, today, today, lang) {
+		if o.status == StatusDue {
+			due = append(due, o)
+		} else {
+			earlier = append(earlier, o)
+		}
+	}
+	var oldestDue *occ
+	if len(due) > 0 {
+		oldestDue = due[0] // the oldest overdue one of all, before the list is cut
+	}
+	if len(due) > 24 {
+		due = due[len(due)-24:]
+	}
+	if len(earlier) > past {
+		earlier = earlier[len(earlier)-past:]
+	}
+	for _, o := range occsOf(r, stored, today.AddDate(0, 0, 1), today.AddDate(0, 0, horizonDays), today, lang) {
+		if len(ahead) < upcoming {
+			ahead = append(ahead, o)
+		}
+	}
+	all := append(append(append([]*occ{}, earlier...), due...), ahead...)
+	sort.SliceStable(all, func(i, j int) bool { return all[i].date.Before(all[j].date) }) // oldest first
+	items, err := s.viewOccs(ctx, s.db, userID, today, all)
+	if err != nil {
+		return nil, err
+	}
+	out := &OccurrencesResult{Data: items}
+	switch {
+	case oldestDue != nil:
+		sl := oldestDue.slot.Format(dateLayout)
+		out.SuggestedSlot = &sl
+	case txDate != nil:
+		var best *occ
+		for _, o := range all {
+			if o.status != StatusUpcoming && o.status != StatusDue {
+				continue
+			}
+			if best == nil || absDays(o.date, *txDate) < absDays(best.date, *txDate) {
+				best = o
+			}
+		}
+		if best != nil {
+			sl := best.slot.Format(dateLayout)
+			out.SuggestedSlot = &sl
+		}
+	}
+	return out, nil
+}
+
+func absDays(a, b time.Time) int {
+	d := int(a.Sub(b).Hours() / 24)
+	if d < 0 {
+		return -d
+	}
+	return d
+}
+
+type OccurrencesResult struct {
+	Data          []Item  `json:"data"`
+	SuggestedSlot *string `json:"suggested_slot"`
 }
 
 type PickerHint struct {

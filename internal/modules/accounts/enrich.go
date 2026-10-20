@@ -20,17 +20,23 @@ func (s *Service) decorate(ctx context.Context, userID uuid.UUID, accs []Account
 		return err
 	}
 	first, last := shared.MonthBounds(today)
+	if last.After(today) {
+		last = today // a future-dated transaction counts from its day
+	}
 	ids := make([]uuid.UUID, len(accs))
 	for i, a := range accs {
 		ids[i] = a.ID
 	}
 	rows, err := s.store.Pool().Query(ctx, `
 		SELECT t.account_id,
-		       COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'income'), 0)::float8,
+		       COALESCE(SUM(t.amount) FILTER (WHERE t.type IN ('income', 'transfer')), 0)::float8,
 		       COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0)::float8
 		FROM transactions t
+		JOIN accounts a ON a.id = t.account_id
 		LEFT JOIN categories c ON c.id = t.category_id
-		WHERE t.account_id = ANY($1) AND t.type IN ('income', 'expense')
+		WHERE t.account_id = ANY($1)
+		  AND (t.type IN ('income', 'expense')
+		       OR (t.type = 'transfer' AND c.system_kind = 'TRANSFER_IN' AND a.type IN ('credit_card', 'pay_later')))
 		  AND t.date BETWEEN $2 AND $3
 		  AND COALESCE(c.system_kind NOT IN ('OPENING_IN', 'OPENING_OUT', 'ADJUST_IN', 'ADJUST_OUT'), TRUE)
 		GROUP BY t.account_id`, ids, first, last)
