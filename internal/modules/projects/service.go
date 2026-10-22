@@ -282,7 +282,13 @@ func (s *Service) AddMember(ctx context.Context, callerUserID, projectID uuid.UU
 	if err != nil {
 		return nil, err
 	}
-	if p.OwnerUserID != callerUserID {
+	// A typed person (ad_hoc) may be added by any member who may add bills (0.4.0-3: the same power
+	// as auto-adding from a bill); an account invite (email) stays the owner's.
+	if req.AdHoc && req.Email == nil {
+		if _, err := s.store.AssertCanWrite(ctx, projectID, callerUserID); err != nil {
+			return nil, err
+		}
+	} else if p.OwnerUserID != callerUserID {
 		return nil, ErrNotOwner
 	}
 	if err := s.store.AssertWritable(ctx, projectID, "member_crud"); err != nil {

@@ -97,6 +97,8 @@ var sources = map[string][]source{
 	},
 	DebtPeople: {
 		ts(`personal_debts x WHERE x.user_id = $1`),
+		// Repayments (0.4.0-3) count in the balance: a repayment write must move this fingerprint.
+		ts(`transactions x WHERE x.user_id = $1 AND x.repay_person_name IS NOT NULL`),
 		ts(`contacts x WHERE x.user_id = $1`),
 		ts(`users x WHERE x.id IN ` + linkedUser),
 	},

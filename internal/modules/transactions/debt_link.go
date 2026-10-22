@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 var (
@@ -23,19 +24,26 @@ type DebtLinks interface {
 	TxDeletedTx(ctx context.Context, tx pgx.Tx, userID, entryID uuid.UUID) (key string, err error)
 	PersonBalanceByEntry(ctx context.Context, userID, entryID uuid.UUID) (any, error)
 	PersonBalanceByKey(ctx context.Context, userID uuid.UUID, key string) (any, error)
+	// SetPaidByTx — writes the paid-by debt of row (in nil = remove it); returns the person's key.
+	SetPaidByTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, row *Transaction, in *PaidByInput) (key string, err error)
+	// PaidByDeletingTx — row txID (with a paid-by debt) is about to be deleted: my own paid-by debt
+	// goes with it (the partner is told); a partner's mirrored debt stays, unlinked.
+	PaidByDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (key string, err error)
+	// PersonNetTx — a person's balance as q sees it (0 when they have no lines), for the preview.
+	PersonNetTx(ctx context.Context, q shared.Querier, userID uuid.UUID, key string) (shared.PersonRef, float64, error)
 }
 
 func (s *Service) WithDebtLinks(l DebtLinks) { s.debtLinks = l }
 
 type DebtTxInput struct {
-	Direction string // paid | received
+	Direction   string // paid | received
 	AccountID   *uuid.UUID
 	Amount      float64
 	Date        string
 	Description *string
 	Note        *string
-	TagIDs  []uuid.UUID
-	TagsSet bool
+	TagIDs      []uuid.UUID
+	TagsSet     bool
 }
 
 func (in DebtTxInput) txType() TxType {
@@ -151,6 +159,88 @@ func (s *Service) DeleteDebtTxInTx(ctx context.Context, tx pgx.Tx, userID, txID 
 	return current.AccountID, nil
 }
 
+// RepayInput — a repayment to (pay) / from (receive) a debt person (0.4.0-3).
+type RepayInput struct {
+	Kind        string // pay | receive
+	ContactID   *uuid.UUID
+	PersonName  string
+	AccountID   *uuid.UUID // optional, as on POST /transactions
+	Amount      float64
+	Date        string
+	Description *string
+	Note        *string
+	TagIDs      []uuid.UUID
+}
+
+// CreateRepaymentInTx writes ONE transaction: pay = expense in Debt Paid, receive = income in Debt
+// Received, tied to the person. The wallet moves like any transaction.
+func (s *Service) CreateRepaymentInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, in RepayInput) (*Transaction, error) {
+	if in.Amount <= 0 {
+		return nil, ErrAmountInvalid
+	}
+	if in.AccountID != nil {
+		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*in.AccountID}); err != nil {
+			return nil, err
+		}
+		if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *in.AccountID); err != nil {
+			return nil, err
+		}
+	}
+	t := TypeIncome
+	if in.Kind == "pay" {
+		t = TypeExpense
+	}
+	catID, err := s.debtCategory(ctx, userID, t)
+	if err != nil {
+		return nil, err
+	}
+	name := in.PersonName
+	created, err := s.store.InsertRowTx(ctx, tx, &Transaction{
+		UserID: userID, AccountID: in.AccountID, Type: t, Amount: in.Amount, CategoryID: &catID,
+		Date: in.Date, Description: in.Description, Note: in.Note,
+		RepayContactID: in.ContactID, RepayPersonName: &name,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if in.AccountID != nil {
+		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *in.AccountID, signedDelta(t, in.Amount, false)); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.store.AttachTagsTx(ctx, tx, userID, created.ID, in.TagIDs); err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+// repayKey — the debt person key of a repayment row ("" when the row is not one).
+func repayKey(t *Transaction) string {
+	if t.RepayPersonName == nil {
+		return ""
+	}
+	return shared.DebtKey(t.RepayContactID, *t.RepayPersonName)
+}
+
+// checkLinkedEdit — the edit / delete gate for a non-transfer row: a debt entry's wallet side and a
+// repayment are system-category rows the author may still edit (amount, date, wallet, text, tags;
+// never the category); any other system row is read-only.
+func (s *Service) checkLinkedEdit(ctx context.Context, userID uuid.UUID, current *Transaction, req UpdateRequest, deleting bool) error {
+	switch {
+	case current.SourcePersonalDebtID != nil:
+		return checkDebtTxEdit(userID, current, req, deleting)
+	case current.RepayPersonName != nil:
+		if current.UserID != userID {
+			return ErrDebtTxAuthorOnly
+		}
+		if _, ok := req.CategoryIDChange(); ok && !deleting {
+			return ErrSystemTransactionImmutable
+		}
+		return nil
+	}
+	return s.checkNotSystemRow(ctx, current)
+}
+
 func checkDebtTxEdit(userID uuid.UUID, current *Transaction, req UpdateRequest, deleting bool) error {
 	if current.UserID != userID {
 		return ErrDebtTxAuthorOnly
@@ -190,10 +280,13 @@ func (s *Service) DeleteInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUI
 	if current.Type == TypeTransfer {
 		return s.deleteTransferInTx(ctx, tx, userID, current)
 	}
-	if current.SourcePersonalDebtID == nil {
+	if current.SourcePersonalDebtID == nil && current.RepayPersonName == nil {
 		if err := s.checkNotSystemRow(ctx, current); err != nil {
 			return nil, err
 		}
+	}
+	if _, err := s.paidByDeletingTx(ctx, tx, userID, current); err != nil {
+		return nil, err
 	}
 	if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
 		return nil, err
@@ -204,4 +297,33 @@ func (s *Service) DeleteInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUI
 		}
 	}
 	return nonNilIDs(current.AccountID), nil
+}
+
+// paidByDeletingTx — the paid-by debt of a row about to go (key "" when it has none).
+func (s *Service) paidByDeletingTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) (string, error) {
+	if current.PaidByAmount == nil || s.debtLinks == nil {
+		return "", nil
+	}
+	return s.debtLinks.PaidByDeletingTx(ctx, tx, userID, current.ID)
+}
+
+// CreatePaidForTxInTx — a partner's split mirrored into my book (0.4.0-3): my expense of my share,
+// paid in full by them, so no wallet. categoryID is optional (a same-named category of mine).
+func (s *Service) CreatePaidForTxInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID,
+	amount float64, date string, categoryID *uuid.UUID, description *string) (*Transaction, error) {
+	paid := amount
+	return s.store.InsertRowTx(ctx, tx, &Transaction{
+		UserID: userID, Type: TypeExpense, Amount: amount, CategoryID: categoryID,
+		Date: date, Description: description, PaidByAmount: &paid,
+	})
+}
+
+// SetPaidForAmountTx — the partner changed their split ("อัปเดตตาม"): my mirrored expense follows
+// (it has no wallet, so no balance moves).
+func (s *Service) SetPaidForAmountTx(ctx context.Context, tx pgx.Tx, txID uuid.UUID, amount float64) error {
+	if _, err := tx.Exec(ctx, `UPDATE transactions SET amount = $2, paid_by_amount = $2
+		WHERE id = $1 AND account_id IS NULL`, txID, amount); err != nil {
+		return fmt.Errorf("mirror amount: %w", err)
+	}
+	return nil
 }

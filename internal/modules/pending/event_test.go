@@ -364,3 +364,37 @@ func TestSubmitBadSplitsOnEventDraft(t *testing.T) {
 		}
 	}
 }
+
+// TestEventDraftWithPayer — an event draft carries payer / members (0.4.0-3): resolved names, and
+// at submit someone else paid → my transaction is my share with no wallet.
+func TestEventDraftWithPayer(t *testing.T) {
+	f := newEvFixture(t)
+	d := f.draft(&f.event)
+	d.Payer = &projects.BillPerson{PersonName: "Dan"}
+	d.Members = []projects.BillMember{
+		{BillPerson: projects.BillPerson{Me: true}, Share: 60},
+		{BillPerson: projects.BillPerson{PersonName: "Dan"}, Share: 90},
+	}
+	p := f.save(t, d)
+	bp := p.Resolved.BillPeople
+	if p.Resolved.LinkMode != "event" || bp == nil || bp.Payer.Name != "Dan" || len(bp.Members) != 2 ||
+		!bp.Members[0].Me || bp.Members[0].Share == nil || *bp.Members[0].Share != 60 {
+		t.Fatalf("resolved = %+v / bill_people %+v", p.Resolved, bp)
+	}
+	res := f.submit(t, p.ID)
+	if len(res.Submitted) != 1 || len(res.Submitted[0].Rows) != 1 {
+		t.Fatalf("submit: %+v", res)
+	}
+	row := res.Submitted[0].Rows[0]
+	if row.Amount != 60 || row.Account != nil || row.LinkMode != "event" || f.balance(t) != 1000 {
+		t.Errorf("my share row = %+v (wallet %v)", row.Transaction, f.balance(t))
+	}
+
+	// Payer / members without an event → refused at submit.
+	bad := f.draft(nil)
+	bad.Payer = &projects.BillPerson{Me: true}
+	b := f.save(t, bad)
+	if r := f.submit(t, b.ID); len(r.Failed) != 1 || r.Failed[0].Error.Code != "LINK_MODE_CONFLICT" {
+		t.Errorf("payer without an event: %+v", r)
+	}
+}

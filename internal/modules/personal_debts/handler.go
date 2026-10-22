@@ -81,7 +81,7 @@ func (h *Handler) Entries(c *gin.Context) {
 	f := EntryFilter{
 		Q: c.Query("q"), Sort: c.Query("sort"), Direction: c.Query("direction"),
 		Money: c.Query("money") == "true", Cycle: c.Query("cycle"),
-		Page:  atoiOr(c.Query("page"), 1), PerPage: atoiOr(c.Query("per_page"), 30),
+		Page: atoiOr(c.Query("page"), 1), PerPage: atoiOr(c.Query("per_page"), 30),
 	}
 	switch f.Cycle {
 	case "", "current", "earlier", "all":
@@ -143,6 +143,25 @@ func (h *Handler) CreateEntry(c *gin.Context) {
 		return
 	}
 	out, err := h.service.CreateEntry(c.Request.Context(), userID, c.Param("key"), req)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, out)
+}
+
+// CreateRepayment — POST /personal-debts/people/:key/repayments.
+func (h *Handler) CreateRepayment(c *gin.Context) {
+	userID, ok := caller(c)
+	if !ok {
+		return
+	}
+	var req RepaymentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	out, err := h.service.CreateRepayment(c.Request.Context(), userID, c.Param("key"), req)
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -243,6 +262,10 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "ENTRY_NOT_FOUND", err.Error(), nil)
 	case errors.Is(err, ErrManagedBySource):
 		response.Fail(c, http.StatusConflict, "ENTRY_MANAGED_BY_SOURCE", err.Error(), nil)
+	case errors.Is(err, ErrBillNotFound):
+		response.BadRequest(c, "BILL_NOT_FOUND", err.Error(), nil)
+	case errors.Is(err, ErrManagedByTx):
+		response.Fail(c, http.StatusConflict, "DEBT_MANAGED_BY_TX", err.Error(), nil)
 	case errors.Is(err, transactions.ErrAccountArchived):
 		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, transactions.ErrAccountForbidden):
@@ -324,4 +347,3 @@ func (h *Handler) ApplySplitChange(c *gin.Context) {
 		c.JSON(http.StatusOK, out)
 	}
 }
-

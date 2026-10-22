@@ -69,6 +69,7 @@ func newDebtHFix(t *testing.T) *debtHFix {
 		g.GET("/personal-debts/people/:key", h.Person)
 		g.GET("/personal-debts/people/:key/entries", h.Entries)
 		g.POST("/personal-debts/people/:key/entries", h.CreateEntry)
+		g.POST("/personal-debts/people/:key/repayments", h.CreateRepayment)
 		g.GET("/personal-debts/:id", h.Get)
 		g.PUT("/personal-debts/:id", h.Update)
 		g.DELETE("/personal-debts/:id", h.Delete)

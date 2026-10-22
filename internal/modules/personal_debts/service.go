@@ -88,7 +88,7 @@ func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey, cycle st
 	if cycle == "" {
 		cycle = "current" // the page shows the current cycle; earlier ones are "load more"
 	}
-	items, total, err := s.store.listEntries(ctx, userID, k.Key(), EntryFilter{Page: page, PerPage: perPage, Cycle: cycle})
+	items, total, err := s.store.listStatement(ctx, userID, k.Key(), cycle, false, page, perPage)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +168,18 @@ func resolvePerson(ctx context.Context, q querier, userID uuid.UUID, rawKey stri
 	}
 	name := k.Name
 	if personName != nil && strings.EqualFold(strings.TrimSpace(*personName), k.Name) {
-		name = strings.TrimSpace(*personName)
+		return nil, strings.TrimSpace(*personName), nil
+	}
+	// No spelling sent: keep the person's current one (the latest line's snapshot), so writing to
+	// "n:lee" doesn't rename "Lee".
+	var snap string
+	err = q.QueryRow(ctx, `SELECT l.snap FROM `+ledgerSQL+` l WHERE l.key = $2
+		ORDER BY l.created_at DESC LIMIT 1`, userID, k.Key()).Scan(&snap)
+	switch {
+	case err == nil:
+		name = snap
+	case !errors.Is(err, pgx.ErrNoRows):
+		return nil, "", fmt.Errorf("person name: %w", err)
 	}
 	return nil, name, nil
 }
@@ -200,10 +211,26 @@ func (s *Service) CreateEntry(ctx context.Context, userID uuid.UUID, rawKey stri
 	} else if date, err = today(ctx, tx); err != nil {
 		return nil, err
 	}
-	e, err := insertEntryTx(ctx, tx, &Entry{
+	entry := &Entry{
 		UserID: userID, Direction: req.Direction, ContactID: contactID, PersonName: name,
 		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note,
-	})
+	}
+	if req.BillID != nil {
+		// The event resolve sheet's "as debt" (0.4.0-3 B3): the debt keeps its bill and event.
+		var projectID uuid.UUID
+		err := tx.QueryRow(ctx, `SELECT pt.project_id FROM project_transactions pt
+			JOIN project_members pm ON pm.project_id = pt.project_id AND pm.user_id = $2 AND pm.status = 'active'
+			WHERE pt.id = $1`, *req.BillID, userID).Scan(&projectID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrBillNotFound
+		}
+		if err != nil {
+			return nil, fmt.Errorf("debt bill: %w", err)
+		}
+		kind := SourceEvent
+		entry.SourceKind, entry.SourceProjectTransactionID, entry.ProjectID = &kind, req.BillID, &projectID
+	}
+	e, err := insertEntryTx(ctx, tx, entry)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +321,9 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 	if err != nil {
 		return nil, err
 	}
-	if e.SourceKind != nil && req.moneyChange() {
+	// A split-sourced entry's money belongs to its source; an event-resolve debt (source event) is
+	// my own record of the bill and stays editable.
+	if e.SourceKind != nil && *e.SourceKind != SourceEvent && req.moneyChange() {
 		return nil, ErrManagedBySource
 	}
 	prevKey := e.Key()
@@ -377,7 +406,7 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 			return nil, err
 		}
 		touched = nonNil(acc)
-	case txID != nil && e.SourceKind == nil:
+	case txID != nil && (e.SourceKind == nil || *e.SourceKind == SourceEvent):
 		if touched, err = s.txs.SyncDebtTxInTx(ctx, tx, userID, *txID, in); err != nil {
 			return nil, err
 		}
@@ -411,6 +440,9 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, id uuid.UUID) (*Delet
 	if err != nil {
 		return nil, err
 	}
+	if e.SourceKind != nil && *e.SourceKind == SourcePaidBy {
+		return nil, ErrManagedByTx
+	}
 	txID, err := entryTxID(ctx, tx, e.ID)
 	if err != nil {
 		return nil, err
@@ -422,6 +454,14 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, id uuid.UUID) (*Delet
 			return nil, err
 		}
 		touched = nonNil(acc)
+	}
+	if e.PaidForTransactionID != nil {
+		// A partner's split on me: my expense of it goes with it (it has no wallet).
+		acc, err := s.txs.DeleteInTx(ctx, tx, userID, *e.PaidForTransactionID)
+		if err != nil && !errors.Is(err, transactions.ErrTxNotFound) {
+			return nil, err
+		}
+		touched = append(touched, acc...)
 	}
 	if e.SourceKind != nil && *e.SourceKind == SourceTransaction {
 		if err := s.notifySplitChangeTx(ctx, tx, e, 0, notifications.SplitChangeRemoved); err != nil {
@@ -444,15 +484,90 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, id uuid.UUID) (*Delet
 	return out, nil
 }
 
+// CreateRepayment — POST /personal-debts/people/{key}/repayments: ONE transaction tied to the person
+// (pay = expense in Debt Paid, receive = income in Debt Received). It counts in the person's
+// balance (pay +, receive −); mark_paid_ids only label debts paid.
+func (s *Service) CreateRepayment(ctx context.Context, userID uuid.UUID, rawKey string, req RepaymentRequest) (*RepaymentResult, error) {
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
+	if err != nil {
+		return nil, err
+	}
+	date := ""
+	if req.Date != nil {
+		date = *req.Date
+	} else if date, err = today(ctx, tx); err != nil {
+		return nil, err
+	}
+	row, err := s.txs.CreateRepaymentInTx(ctx, tx, userID, transactions.RepayInput{
+		Kind: req.Kind, ContactID: contactID, PersonName: strings.TrimSpace(name), AccountID: req.AccountID,
+		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note, TagIDs: req.TagIDs,
+	})
+	if err != nil {
+		return nil, err
+	}
+	key := shared.DebtKey(contactID, name)
+	if err := markPaidTx(ctx, tx, userID, key, req.MarkPaidIDs); err != nil {
+		return nil, err
+	}
+	if contactID != nil {
+		_, _ = tx.Exec(ctx, `UPDATE contacts SET last_used_at = NOW() WHERE id = $1 AND user_id = $2`, *contactID, userID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.repaymentResult(ctx, userID, row.ID, key, nonNil(req.AccountID))
+}
+
+func (s *Service) repaymentResult(ctx context.Context, userID, txID uuid.UUID, key string, touched []uuid.UUID) (*RepaymentResult, error) {
+	out := &RepaymentResult{}
+	var err error
+	if out.Transaction, err = s.txs.Get(ctx, userID, txID); err != nil {
+		return nil, err
+	}
+	items, err := loadRepayments(ctx, s.store.db, userID, []uuid.UUID{txID})
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 1 {
+		out.Item = items[0]
+		mark, err := s.store.cycleBoundary(ctx, s.store.db, userID, key)
+		if err != nil {
+			return nil, err
+		}
+		cur := mark.after(out.Item.Date, out.Item.CreatedAt, out.Item.ID)
+		out.Item.InCurrentCycle = &cur
+	}
+	if out.PersonBalance, err = s.balanceOfKey(ctx, s.store.db, userID, key); err != nil {
+		return nil, err
+	}
+	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.store.db, touched); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RepayEntry — a pending settle_debt draft: a repayment TRANSACTION to / from the debt's person
+// (a paid debt → they pay me back = receive; a received debt → I pay back = pay). The debt itself
+// is not touched (the paid label stays the user's call).
 func (s *Service) RepayEntry(ctx context.Context, userID, targetID uuid.UUID, amount float64, accountID *uuid.UUID,
-	date, description, note *string) (*WriteResult, error) {
+	date, description, note *string) (*RepaymentResult, error) {
 	e, err := getEntry(ctx, s.store.db, userID, targetID, false)
 	if err != nil {
 		return nil, err
 	}
+	kind := RepayPay
+	if e.Direction == DirectionPaid {
+		kind = RepayReceive
+	}
 	name := e.PersonName
-	return s.CreateEntry(ctx, userID, e.Key(), CreateEntryRequest{
-		Direction: opposite(e.Direction), Amount: amount, Date: date, AccountID: accountID,
+	return s.CreateRepayment(ctx, userID, e.Key(), RepaymentRequest{
+		Kind: kind, Amount: amount, Date: date, AccountID: accountID,
 		Description: description, Note: note, PersonName: &name,
 	})
 }

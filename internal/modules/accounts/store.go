@@ -150,7 +150,7 @@ func (s *Store) SummaryAggregate(ctx context.Context, accountID uuid.UUID, from,
 	q := `SELECT
 		COALESCE(SUM(` + share + `) FILTER (WHERE t.type = 'income'), 0)
 			+ COALESCE(SUM(t.amount) FILTER (WHERE ` + payment + `), 0),
-		COALESCE(SUM(` + share + `) FILTER (WHERE t.type = 'expense'), 0),
+		COALESCE(SUM(LEAST(` + share + `, ` + shared.CashAmountSQL("t") + `)) FILTER (WHERE t.type = 'expense'), 0),
 		COUNT(*)
 		FROM transactions t
 		LEFT JOIN categories c ON c.id = t.category_id

@@ -134,10 +134,16 @@ func loadEvent(ctx context.Context, q shared.Querier, callerID, id uuid.UUID) (E
 
 func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid.UUID) ([]EventMember, error) {
 	rows, err := q.Query(ctx, `SELECT pm.id, pm.user_id, COALESCE(u.display_name, pm.display_name),
-			COALESCE(u.icon_code, pm.icon_code), pm.role, pm.status, pm.invited_at, pm.joined_at, pm.left_at
+			COALESCE(u.icon_code, pm.icon_code), pm.role, pm.status, pm.invited_at, pm.joined_at, pm.left_at,
+			mc.id
 		FROM project_members pm LEFT JOIN users u ON u.id = pm.user_id
+		LEFT JOIN LATERAL (
+			SELECT c.id FROM contacts c
+			WHERE c.user_id = $2 AND ((pm.user_id IS NOT NULL AND c.linked_user_id = pm.user_id)
+			   OR (pm.user_id IS NULL AND LOWER(BTRIM(c.display_name)) = LOWER(BTRIM(pm.display_name))))
+			ORDER BY (c.status = 'active') DESC, c.created_at, c.id LIMIT 1) mc ON pm.user_id IS DISTINCT FROM $2
 		WHERE pm.project_id = $1
-		ORDER BY pm.status = 'left', pm.role <> 'owner', pm.created_at, pm.id`, projectID)
+		ORDER BY pm.status = 'left', pm.role <> 'owner', pm.created_at, pm.id`, projectID, callerID)
 	if err != nil {
 		return nil, fmt.Errorf("members: %w", err)
 	}
@@ -148,7 +154,8 @@ func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid
 			m    EventMember
 			icon []byte
 		)
-		if err := rows.Scan(&m.ID, &m.UserID, &m.Name, &icon, &m.Role, &m.Status, &m.InvitedAt, &m.JoinedAt, &m.LeftAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.UserID, &m.Name, &icon, &m.Role, &m.Status, &m.InvitedAt, &m.JoinedAt, &m.LeftAt,
+			&m.ContactID); err != nil {
 			return nil, err
 		}
 		m.IconCode = shared.IconFromJSON(icon)

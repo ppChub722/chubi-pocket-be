@@ -30,7 +30,7 @@ func (s *Service) decorate(ctx context.Context, userID uuid.UUID, accs []Account
 	rows, err := s.store.Pool().Query(ctx, `
 		SELECT t.account_id,
 		       COALESCE(SUM(t.amount) FILTER (WHERE t.type IN ('income', 'transfer')), 0)::float8,
-		       COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'expense'), 0)::float8
+		       COALESCE(SUM(`+shared.CashAmountSQL("t")+`) FILTER (WHERE t.type = 'expense'), 0)::float8
 		FROM transactions t
 		JOIN accounts a ON a.id = t.account_id
 		LEFT JOIN categories c ON c.id = t.category_id
@@ -38,7 +38,8 @@ func (s *Service) decorate(ctx context.Context, userID uuid.UUID, accs []Account
 		  AND (t.type IN ('income', 'expense')
 		       OR (t.type = 'transfer' AND c.system_kind = 'TRANSFER_IN' AND a.type IN ('credit_card', 'pay_later')))
 		  AND t.date BETWEEN $2 AND $3
-		  AND COALESCE(c.system_kind NOT IN ('OPENING_IN', 'OPENING_OUT', 'ADJUST_IN', 'ADJUST_OUT'), TRUE)
+		  AND COALESCE(c.system_kind NOT IN ('OPENING_IN', 'OPENING_OUT', 'ADJUST_IN', 'ADJUST_OUT',
+		                                     'DEBT_PAID', 'DEBT_RECEIVED'), TRUE)
 		GROUP BY t.account_id`, ids, first, last)
 	if err != nil {
 		return fmt.Errorf("wallet month flow: %w", err)

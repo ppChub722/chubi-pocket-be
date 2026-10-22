@@ -43,14 +43,47 @@ func DebtKey(contactID *uuid.UUID, name string) string {
 	return "n:" + strings.ToLower(strings.TrimSpace(name))
 }
 
+func personKeySQL(contactCol, nameCol string) string {
+	return fmt.Sprintf(`(CASE WHEN %[1]s IS NOT NULL
+		THEN 'c:' || %[1]s::text
+		ELSE 'n:' || LOWER(TRIM(%[2]s)) END)`, contactCol, nameCol)
+}
+
+// DebtKeySQL — the person key of a personal_debts row (alias a).
 func DebtKeySQL(a string) string {
-	return fmt.Sprintf(`(CASE WHEN %[1]s.counterparty_contact_id IS NOT NULL
-		THEN 'c:' || %[1]s.counterparty_contact_id::text
-		ELSE 'n:' || LOWER(TRIM(%[1]s.counterparty_person_name)) END)`, a)
+	return personKeySQL(a+".counterparty_contact_id", a+".counterparty_person_name")
+}
+
+// RepayKeySQL — the person key of a repayment transaction (alias a; repay_person_name set).
+func RepayKeySQL(a string) string {
+	return personKeySQL(a+".repay_contact_id", a+".repay_person_name")
 }
 
 func DebtSignedSQL(a string) string {
 	return fmt.Sprintf(`(CASE %[1]s.direction WHEN 'paid' THEN %[1]s.amount ELSE -%[1]s.amount END)`, a)
+}
+
+// RepaySignedSQL — a repayment I PAY (expense) = + (it lowers what I owe / raises what they owe);
+// one I RECEIVE (income) = −.
+func RepaySignedSQL(a string) string {
+	return fmt.Sprintf(`(CASE %[1]s.type WHEN 'expense' THEN %[1]s.amount ELSE -%[1]s.amount END)`, a)
+}
+
+// DebtLedgerSQL — every signed line of the user's person ledger (userParam = the user id): the
+// debts (personal_debts) and the repayments (transactions with a repay person). A debt's own
+// linked transaction is not a line. Columns: kind (debt | repayment), key, id, cid, snap (the
+// typed-name snapshot), signed, paid (always TRUE on a repayment: never "open"), date, created_at.
+// Wrap it: SELECT … FROM (` + DebtLedgerSQL("$1") + `) l.
+func DebtLedgerSQL(userParam string) string {
+	return `SELECT 'debt' AS kind, ` + DebtKeySQL("lpd") + ` AS key, lpd.id,
+		       lpd.counterparty_contact_id AS cid, lpd.counterparty_person_name AS snap,
+		       ` + DebtSignedSQL("lpd") + ` AS signed, lpd.paid, lpd.date, lpd.created_at
+		FROM personal_debts lpd WHERE lpd.user_id = ` + userParam + `
+		UNION ALL
+		SELECT 'repayment', ` + RepayKeySQL("lrt") + `, lrt.id,
+		       lrt.repay_contact_id, lrt.repay_person_name,
+		       ` + RepaySignedSQL("lrt") + `, TRUE, lrt.date, lrt.created_at
+		FROM transactions lrt WHERE lrt.user_id = ` + userParam + ` AND lrt.repay_person_name IS NOT NULL`
 }
 
 type DebtLink struct {

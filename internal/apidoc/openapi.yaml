@@ -79,7 +79,7 @@ paths:
         - { name: tag_id, in: query, description: 'Repeatable; rows having ANY of these tags.', schema: { type: array, items: { $ref: '#/components/schemas/Uuid' } }, style: form, explode: true }
         - { name: sort, in: query, schema: { type: string, enum: [date_desc, date_asc, amount_desc, amount_asc], default: date_desc } }
         - { name: can_join_event, in: query, description: 'true = only rows I may pull into an event (the event "add existing bills" picker): mine, expense / income, not in an event, not a debt entry or system row, no split labelled paid.', schema: { type: boolean } }
-        - { name: counterparty_key, in: query, description: 'Only the wallet transactions of this debt person.', schema: { $ref: '#/components/schemas/PersonKey' } }
+        - { name: counterparty_key, in: query, description: 'Only the money of this debt person: the wallet transactions of their debts AND their repayment transactions (repayment_person).', schema: { $ref: '#/components/schemas/PersonKey' } }
       responses:
         '200':
           description: 'One page of rows plus totals over the whole filtered set.'
@@ -99,6 +99,7 @@ paths:
       description: |
         Returns a `TransactionWriteResult`: `rows` (one row, or both rows of a transfer) in their final state + `account_balances`. `tag_ids` attach the tags in the same call; with `splits`, the response already contains them (`splits[]` with resolved persons).
         `project_id` is not accepted (events are joined through the bills endpoints).
+        **paid_by (0.4.0-3, quick create tab "จ่ายแทน")**: bill 123, Lee paid 13 → `{type: expense, amount: 123, account_id: <wallet>, paid_by: {person_name: "Lee", amount: 13}}`: ONE expense of 123 (reports / budgets / my_share count 123), the wallet moves 110 (`wallet_amount`), and the debt "I owe Lee 13" is made in the same call (`rows[0].paid_by`, `person_balance` = Lee's new balance). paid_by.amount = amount → no wallet. Errors: 400 PAID_BY_EXPENSE_ONLY, PAID_BY_EXCEEDS_AMOUNT, LINK_MODE_CONFLICT (with splits / source_project_transaction_id), CONTACT_NOT_FOUND, VALIDATION_ERROR (no person).
         **A date after today (the user's timezone)** is allowed and makes a normal transaction (0.4.0-2: there is no upcoming one-off item any more). It stays in the transactions list but counts nowhere until its day: wallet `balance` (and `account_balances`), month flows, reports, the dashboard and a budget's `used` all stop at today; a budget counts it as รอจ่าย (source `future_tx`) while its period is current.
       operationId: createTransaction
       requestBody:
@@ -153,8 +154,14 @@ paths:
       description: |
         Partial body; a key present with `null` clears the field. `tag_ids` (when present) REPLACES the tag set. Returns a `TransactionWriteResult` (the edited row, both rows for a transfer, and the touched wallets' balances; moving a row to another wallet touches two).
         `also_update_link` (the app asks at save): when the row is linked — an event bill made from it (`event_bill.linked`) or a recurring item (`recurring_item`) — the same change goes to the other side too; without it only this row changes (no notification either way).
+        `paid_by` (0.4.0-3): see UpdateTransactionRequest.paid_by; the response's `person_balance` is the paid-by person's new balance (or the old person's when it was removed). Errors: 400 PAID_BY_EXPENSE_ONLY / PAID_BY_EXCEEDS_AMOUNT / LINK_MODE_CONFLICT, 409 PAID_BY_LOCKED (a partner-mirrored row's money).
+        **Link-mode switch (0.4.0-3 B3)**: `link_mode` (personal | split | paid | event) with that mode's data (`splits` / `paid_by` / `event {project_id, payer?, members?}`) switches how the bill is shared in ONE call: the old mode's data goes first (an origin's event bill is removed / a copy unlinked; split debts deleted, linked partners get split_changed removed; the paid-by debt deleted), then the new one is written. Into an event: I paid → the row becomes the bill; someone else paid → the row becomes my share with no wallet. Repayments are never touched. `person_balances` lists every person whose balance moved. Author only (403 SPLITS_AUTHOR_ONLY); not on a debt's wallet side or a repayment (400 SYSTEM_TRANSACTION_IMMUTABLE). Errors: 400 LINK_MODE_INPUT (the new mode without its data), LINK_MODE_CONFLICT (another mode's data sent), SPLITS_EXCEED_AMOUNT. Without link_mode, `splits` edits a split row (LINK_MODE_CONFLICT on a paid / event row) and `event` is refused.
+        **`?preview=true`**: a dry run. The whole edit runs and is rolled back; the answer is `TransactionPreview` (the row as it would be, every touched person's balance before / after, every touched wallet's balance before / after). Use it for the confirm dialog of a mode switch. Nothing is saved, no notification goes out.
+        **apply_to_event** ("แก้ในอีเวนต์ด้วย", B3): the row's amount / date / description / note go to its event bill (an origin also sends its tags as event tags; a copy's amount becomes my share on the bill). The bill's other people get project_tx_changed. `also_update_link` does the same for events.
         **A date after today** is allowed (0.4.0-2): the row stays a transaction dated in the future (counts nowhere until its day, see create); no upcoming item, no `FUTURE_DATE_NOT_ALLOWED`.
       operationId: updateTransaction
+      parameters:
+        - { name: preview, in: query, description: 'true = dry run (TransactionPreview), nothing saved.', schema: { type: boolean } }
       requestBody:
         required: true
         content:
@@ -162,10 +169,13 @@ paths:
             schema: { $ref: '#/components/schemas/UpdateTransactionRequest' }
       responses:
         '200':
-          description: "The edited row(s) and the touched wallets' balances."
+          description: "The edited row(s) and the touched wallets' balances (with preview=true: TransactionPreview)."
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TransactionWriteResult' }
+              schema:
+                oneOf:
+                  - { $ref: '#/components/schemas/TransactionWriteResult' }
+                  - { $ref: '#/components/schemas/TransactionPreview' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
       x-breaking: "Request: tag_ids added. Response: TransactionWriteResult {rows, account_balances}."
@@ -243,6 +253,26 @@ paths:
       x-used-by:
         - { page: transaction-detail, calls: 1 }
         - { page: edit-transaction-sheet, calls: 1 }
+  /transactions/{id}/apply-event:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Transactions]
+      summary: Make my transaction match its event bill now ("อัปเดตตามอีเวนต์")
+      description: |
+        0.4.0-3 B3 (my book vs the event book): my transaction linked to an event bill (event_bill set; origin = made from it, copy = my share) takes the bill AS IT IS NOW: amount (the bill for an origin, my share for a copy), date, description, note; the bill's event tags I have as personal tags are added. My unanswered project_tx_changed notices about it are marked actioned. Use it from tx detail when event_bill.in_sync is false, or later from a notice. No body.
+        Errors: 404 NOT_FOUND / TX_NOT_IN_PROJECT (not in an event), 422 NO_SHARE_TO_COPY (a copy whose share is now 0), 409 ACCOUNT_ARCHIVED.
+      operationId: applyEventToTransaction
+      responses:
+        '200':
+          description: 'The row, now in sync, and the touched wallet.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionWriteResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-used-by:
+        - { page: transaction-detail, calls: 1 }
+        - { page: notifications, calls: 1 }
 
   # ───────────────────────────── Pending ─────────────────────────────
   /pending-transactions:
@@ -3514,7 +3544,7 @@ paths:
       summary: Add a member (a typed name or an email invite)
       operationId: addProjectMember
       description: |
-        Owner only. One of: `display_name` + `ad_hoc=true` = a typed person (active, no app account); `email` + `display_name` = invite by email (pending + project_invite when the email is a user). Anything else → 400 VALIDATION_ERROR (was 500); role `owner` → 400 VALIDATION_ERROR (use transfer-ownership).
+        One of: `display_name` + `ad_hoc=true` = a typed person (active, no app account; any member who may add bills, not a viewer: 403 FORBIDDEN_ROLE — 0.4.0-3); `email` + `display_name` = invite by email (owner only: 403 FORBIDDEN_ROLE) (pending + project_invite when the email is a user). Anything else → 400 VALIDATION_ERROR (was 500); role `owner` → 400 VALIDATION_ERROR (use transfer-ownership).
       requestBody:
         required: true
         content:
@@ -4317,10 +4347,11 @@ paths:
         - { page: recurring-item, calls: 1 }
 
   # ───────────────────────────── Debts (person ledger, 0.3.1-10) ─────────────────────────────
-  # One record type: a person entry {person, direction paid|received, amount > 0, date, description,
-  # note, paid label, optional wallet tx, optional split source}. net per person = Σ paid − Σ received
-  # (> 0 = they owe me, < 0 = I owe them). The "paid" label never changes a number. No cancel, no
-  # settled_amount / outstanding: stop counting = delete.
+  # Debt model (0.4.0-3): a DEBT is a person entry {person, direction paid|received, amount > 0, date,
+  # description, note, paid label, optional linked wallet tx, optional split source}; its linked tx
+  # does NOT change the balance. A REPAYMENT is a TRANSACTION tied to the person (POST …/repayments).
+  # net per person = Σ signed debts + Σ signed repayments (> 0 = they owe me, < 0 = I owe them). The
+  # "paid" label never changes a number. No cancel, no settled_amount: stop counting = delete.
   /personal-debts/people:
     get:
       tags: [Debts]
@@ -4355,15 +4386,15 @@ paths:
       - { $ref: '#/components/parameters/PersonKeyPath' }
     get:
       tags: [Debts]
-      summary: Person page (balance + counts + first page of entries)
+      summary: Person page (balance + counts + the statement, debts and repayments)
       operationId: getDebtPerson
       description: |
-        Page-ready: the person's balance, counts and the first page of entries (newest first, same items as listDebtEntries with no filter; `page` / `per_page` apply to `items`).
-        A `c:` key of one of the caller's contacts answers even with no entries (zeros, `items: []`); an `n:` key with no entries → 404 NOT_FOUND. A malformed key → 400 INVALID_PERSON_KEY.
+        Page-ready: the person's balance, counts and the first page of the STATEMENT ("ที่มาของยอด"): debt entries AND repayment transactions interleaved, newest first (date, created_at, id), each with `kind` debt | repayment and `signed_amount` (`page` / `per_page` apply to `items`).
+        A `c:` key of one of the caller's contacts answers even with no lines (zeros, `items: []`); an `n:` key with no lines → 404 NOT_FOUND. A malformed key → 400 INVALID_PERSON_KEY.
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
-        - { name: cycle, in: query, description: 'current = entries after the last time the balance with the person hit 0; earlier = the entries before it (older cycles). Omitted = all.', schema: { type: string, enum: [current, earlier] } }
+        - { name: cycle, in: query, description: 'current (default) = lines after the last time the balance with the person hit 0; earlier = the lines up to it (older cycles); all = every line.', schema: { type: string, enum: [current, earlier, all] } }
       responses:
         '200':
           description: The person page.
@@ -4373,18 +4404,52 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
-      x-breaking: New (replaces the client-side grouping of /personal-debts).
+      x-breaking: "0.4.0-3: items are DebtStatementItem (kind debt | repayment, signed_amount; paid / source null on a repayment) instead of DebtEntry; counts, net, cleared_at and days_outstanding include repayments."
       x-used-by:
+        - { page: debt-person, calls: 1 }
+  /personal-debts/people/{key}/repayments:
+    parameters:
+      - { $ref: '#/components/parameters/PersonKeyPath' }
+    post:
+      tags: [Debts]
+      summary: Record a repayment (a transaction tied to the person)
+      operationId: createDebtRepayment
+      description: |
+        "จ่ายคืนลี 400" / "รับคืนจาก chalee 82": creates ONE transaction: `pay` = expense in the system category Debt Paid (net +), `receive` = income in Debt Received (net −); both are out of reports. It is linked to the PERSON (not to a debt), shows `repayment_person` on the transaction, and moves the wallet like any transaction (`account_id` optional, as on POST /transactions).
+        The person: a `c:` key = that contact (400 CONTACT_NOT_FOUND if not the caller's); an `n:` key = a typed name (`person_name` = the shown spelling). `mark_paid_ids` labels debt entries of the SAME person paid (label only; 400 ENTRY_NOT_FOUND if one is not). `date` default = today.
+        Edit / delete the repayment through PUT / DELETE /transactions/{id} (the link stays; the balance follows). Returns 201 with the transaction, its statement line, the person's new balance and the touched wallet balance.
+        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND / ENTRY_NOT_FOUND, 409 ACCOUNT_ARCHIVED.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DebtRepaymentCreateRequest' }
+      responses:
+        '201':
+          description: The repayment and everything the pages patch from it.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DebtRepaymentResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: '409 ACCOUNT_ARCHIVED.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: "New (0.4.0-3): replaces recording a repayment as an opposite-direction entry via POST …/entries."
+      x-used-by:
+        - { page: quick-create-sheet, calls: 1 }
         - { page: debt-person, calls: 1 }
   /personal-debts/people/{key}/entries:
     parameters:
       - { $ref: '#/components/parameters/PersonKeyPath' }
     get:
       tags: [Debts]
-      summary: A person's entries (filter / sort / page)
+      summary: A person's debt entries (filter / sort / page)
       operationId: listDebtEntries
       description: |
-        `q` matches description / note (case-insensitive). `direction` paid | received. `paid` true | false (the label). `money=true` = only entries with a wallet transaction (the "ประวัติการจ่าย" tab); `account_id` = only entries whose transaction sits on that wallet. `from` / `to` = entry date range (inclusive). `sort`: date_desc (default) | date_asc | amount_desc | amount_asc (ties: newest created first).
+        DEBT entries only (repayments are transactions: the person page statement and GET /transactions?counterparty_key show them). `q` matches description / note (case-insensitive). `direction` paid | received. `paid` true | false (the label). `money=true` = only entries with a wallet transaction (the "ประวัติการจ่าย" tab); `account_id` = only entries whose transaction sits on that wallet. `from` / `to` = entry date range (inclusive). `sort`: date_desc (default) | date_asc | amount_desc | amount_asc (ties: newest created first).
         Also feeds the "mark entries paid" list (`paid=false`). Unknown key → `{data: [], pagination}` with total 0 (a 400 only for a malformed key).
       parameters:
         - { $ref: '#/components/parameters/Page' }
@@ -4412,10 +4477,10 @@ paths:
         - { page: quick-create-sheet, calls: 1 }
     post:
       tags: [Debts]
-      summary: Record an entry with a person (the ONE debt write)
+      summary: Record a debt with a person
       operationId: createDebtEntry
       description: |
-        Paid = I paid them (net + amount); received = they paid me (net − amount). With `account_id` the BE also writes the LINKED wallet transaction (paid = expense, received = income, system category Debt Paid / Debt Received, description / note copied) and `tag_ids` go on that transaction; without it the entry is ledger-only and `tag_ids` must be empty (400 TAGS_NEED_WALLET).
+        DEBTS only ("ลีจ่ายค่าข้าวให้ 60", "ยืมลี 500"); a repayment is POST …/repayments. Paid = I paid them (net + amount); received = they paid me (net − amount). With `account_id` the BE also writes the LINKED wallet transaction (it moves the wallet but NOT the person's balance) (paid = expense, received = income, system category Debt Paid / Debt Received, description / note copied) and `tag_ids` go on that transaction; without it the entry is ledger-only and `tag_ids` must be empty (400 TAGS_NEED_WALLET).
         The person: a `c:` key = that contact (400 CONTACT_NOT_FOUND if not the caller's); an `n:` key = a typed name (`person_name` sets the shown spelling, default = the key's text as sent). `mark_paid_ids` labels those entries of the SAME person paid in the same call (400 ENTRY_NOT_FOUND if one is not).
         `date` default = today. Returns 201 with the entry, the person's new balance, the linked transaction (full row) and the touched wallet balances.
         Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAGS_NEED_WALLET / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND / ENTRY_NOT_FOUND.
@@ -4432,7 +4497,7 @@ paths:
               schema: { $ref: '#/components/schemas/DebtEntryWriteResult' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-      x-breaking: New (replaces POST /personal-debts and POST /personal-debts/{id}/settle).
+      x-breaking: "New (replaces POST /personal-debts and POST /personal-debts/{id}/settle). 0.4.0-3: debts only; record repayments with POST …/repayments."
       x-used-by:
         - { page: quick-create-sheet, calls: 1 }
   /personal-debts/{id}:
@@ -4492,7 +4557,7 @@ paths:
       summary: Delete an entry (and its linked transaction)
       operationId: deleteDebtEntry
       description: |
-        Hard delete. An entry with a wallet transaction deletes BOTH (the balance comes back; the confirm modal names both). A split-sourced entry deletes the split from its bill (my_share grows; a linked partner gets split_changed "removed", like a split edit). 404 NOT_FOUND if not the caller's.
+        Hard delete. An entry with a wallet transaction deletes BOTH (the balance comes back; the confirm modal names both). A split-sourced entry deletes the split from its bill (my_share grows; a linked partner gets split_changed "removed", like a split edit). A `partner` entry with my expense of it (source.id) deletes that expense too (no wallet). A `paid_by` entry is one record with its expense: 409 DEBT_MANAGED_BY_TX (delete / edit the transaction). 404 NOT_FOUND if not the caller's.
       responses:
         '200':
           description: What went and the new balances.
@@ -4502,6 +4567,11 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'DEBT_MANAGED_BY_TX.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
       x-breaking: "Was the legacy {success, message} envelope; now DebtEntryDeleteResult. Also deletes the linked transaction."
       x-used-by:
         - { page: tx-detail, calls: 1 }
@@ -5512,12 +5582,16 @@ components:
         - transfer_group_id
         - transfer_peer
         - counterparty
+        - repayment_person
         - event_bill
         - recurring_item
         - source_project_transaction_id
         - my_share
         - split_count
         - splits
+        - link_mode
+        - paid_by
+        - wallet_amount
         - can_split
         - can_edit_splits
         - can_join_event
@@ -5544,13 +5618,17 @@ components:
         recurring_item: { oneOf: [{ $ref: '#/components/schemas/RecurringItemLink' }, { type: 'null' }], description: 'Set when a recurring item is linked to this row (produced into it / created from it).' }
         event_bill: { oneOf: [{ $ref: '#/components/schemas/EventBillLink' }, { type: 'null' }], description: 'Set when the row is in an event (tx detail "อยู่ในอีเวนต์ … ›" → the bill).' }
         counterparty: { oneOf: [{ $ref: '#/components/schemas/DebtLink' }, { type: 'null' }], description: 'Set when this row is a debt entry''s wallet transaction (one record: editing / deleting either side changes both; open it in debt mode). Replaces is_repayment / source_personal_debt_id.' }
+        repayment_person: { oneOf: [{ $ref: '#/components/schemas/RepaymentPerson' }, { type: 'null' }], description: 'Set when this row is a REPAYMENT to / from a debt person (0.4.0-3; made by POST /personal-debts/people/{key}/repayments): expense = I paid them back, income = they paid me back. Tx detail shows "จ่ายคืนให้ <name> ›" / "รับคืนจาก <name> ›" → the person page (key). Editing the row (PUT /transactions/{id}: amount, date, wallet, text, tags; never the category) keeps the link and moves the person''s balance; deleting it deletes the repayment. Null otherwise (and on another member''s row).' }
         source_project_transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         my_share: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'Amount minus what others owe on it; expense / income only, null for transfers. What reports and budgets count.' }
         split_count: { type: integer, minimum: 0 }
         splits: { type: [array, 'null'], items: { $ref: '#/components/schemas/Split' }, description: 'Detail and write responses only; null on list rows. '}
+        link_mode: { type: string, enum: [personal, split, paid, event], description: 'How the bill is shared (0.4.0-3; the quick-create tab it was saved with): event = an event bill or a copy of one (project / event_bill / source_project_transaction_id); split = it has splits; paid = someone paid (part of) it for me (paid_by); personal = all mine. One mode at a time.' }
+        paid_by: { oneOf: [{ $ref: '#/components/schemas/PaidBy' }, { type: 'null' }], description: 'link_mode paid: who paid (part of) this expense for me and the debt it made. Null otherwise (and on another member''s row).' }
+        wallet_amount: { $ref: '#/components/schemas/Money', description: 'What the row moved on its wallet: amount − paid_by.amount (= amount without paid_by; 0 when they paid it all, then there is no wallet). amount stays the bill (my consumption: reports, budgets, my_share).' }
         can_split: { type: boolean }
         can_edit_splits: { type: boolean }
-        can_join_event: { type: boolean }
+        can_join_event: { type: boolean, description: 'False on a paid_by row (one way at a time).' }
         created_by: { oneOf: [{ $ref: '#/components/schemas/UserRef' }, { type: 'null' }], description: 'Set on rows of a shared wallet (more than one active member). '}
         is_locked: { type: boolean }
         can_edit_category: { type: boolean }
@@ -5572,12 +5650,16 @@ components:
         transfer_group_id: null
         transfer_peer: null
         counterparty: null
+        repayment_person: null
         event_bill: null
         recurring_item: null
         source_project_transaction_id: null
         my_share: 200
         split_count: 1
         splits: [{ debt_id: 0191c2a0-0000-7000-8000-0000000000d1, person: { name: Beam, contact_id: null, icon_code: null, linked: false, linked_user_id: null }, person_name: Beam, key: n:beam, direction: paid, amount: 100, paid: false }]
+        link_mode: split
+        paid_by: null
+        wallet_amount: 300
         can_split: true
         can_edit_splits: true
         can_join_event: true
@@ -5586,6 +5668,28 @@ components:
         can_edit_category: true
         created_at: '2026-10-12T09:30:00Z'
         updated_at: '2026-10-12T09:30:00Z'
+    PaidBy:
+      type: object
+      description: |
+        Someone paid (part of) my expense (0.4.0-3). Bill 123, Lee paid 13: amount = 123 (my consumption), paid_by.amount = 13, my_paid = 110 (what left my wallet; 0 = no wallet), and the debt "I owe Lee 13" (a received entry, source paid_by, GET /personal-debts/{debt_id}) is one record with the expense: PUT / DELETE the transaction to change it.
+        source partner = another user's split on me mirrored into my book (my expense of my share, paid in full by them): its amount, date and wallet follow their bill ("อัปเดตตาม"; PUT money → 409 PAID_BY_LOCKED); category, text and tags are mine. Deleting it keeps their debt.
+      required: [debt_id, key, person, amount, my_paid, source, paid]
+      properties:
+        debt_id: { $ref: '#/components/schemas/Uuid' }
+        key: { $ref: '#/components/schemas/PersonKey', description: 'The person page.' }
+        person: { $ref: '#/components/schemas/PersonRef' }
+        amount: { $ref: '#/components/schemas/Money', description: 'What they paid.' }
+        my_paid: { $ref: '#/components/schemas/Money', description: 'What I paid from the wallet (= wallet_amount).' }
+        source: { type: string, enum: [me, partner] }
+        paid: { type: boolean, description: 'The debt''s "จ่ายแล้ว" label.' }
+    PaidByInput:
+      type: object
+      description: 'Who paid (part of) the bill for me: contact_id (my contact) or a typed person_name, and how much (≤ the bill). Expense only. Exclusive with splits and an event (400 LINK_MODE_CONFLICT). amount = the bill → the wallet is dropped (they paid it all). A linked contact gets the usual split_created notice (recipient_direction paid).'
+      required: [amount]
+      properties:
+        contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        person_name: { type: string, maxLength: 100, description: 'Typed name (level 1); with contact_id the contact''s name is used.' }
+        amount: { type: number, exclusiveMinimum: 0 }
     WalletBalance:
       type: object
       description: "A wallet's balance right after a write."
@@ -5607,10 +5711,39 @@ components:
         account_balances:
           type: array
           items: { $ref: '#/components/schemas/WalletBalance' }
-        person_balance: { oneOf: [{ $ref: '#/components/schemas/DebtPerson' }, { type: 'null' }], description: 'Non-null when the row is a debt entry''s wallet side (counterparty set).' }
+        person_balance: { oneOf: [{ $ref: '#/components/schemas/DebtPerson' }, { type: 'null' }], description: 'Non-null when the row is a debt entry''s wallet side (counterparty set), a repayment, or carries / dropped a paid_by (that person''s new balance).' }
+        person_balances: { type: array, items: { $ref: '#/components/schemas/DebtPerson' }, description: '0.4.0-3 B3, PUT only, absent when none: every person the row touched before / after the edit (its splits, its paid-by person), with the new balance.' }
+    TransactionPreview:
+      type: object
+      description: 'PUT /transactions/{id}?preview=true: what the edit would do; nothing saved.'
+      required: [preview, rows, people, wallets]
+      properties:
+        preview: { type: boolean, const: true }
+        rows: { type: array, items: { $ref: '#/components/schemas/Transaction' }, description: 'The row as it would be.' }
+        people:
+          type: array
+          items:
+            type: object
+            required: [key, person, before, after, delta]
+            properties:
+              key: { $ref: '#/components/schemas/PersonKey' }
+              person: { $ref: '#/components/schemas/PersonRef' }
+              before: { $ref: '#/components/schemas/Money', description: 'net now (> 0 they owe me)' }
+              after: { $ref: '#/components/schemas/Money' }
+              delta: { $ref: '#/components/schemas/Money' }
+        wallets:
+          type: array
+          items:
+            type: object
+            required: [account_id, before, after, delta]
+            properties:
+              account_id: { $ref: '#/components/schemas/Uuid' }
+              before: { $ref: '#/components/schemas/Money' }
+              after: { $ref: '#/components/schemas/Money' }
+              delta: { $ref: '#/components/schemas/Money' }
     Totals:
       type: object
-      description: 'Money over the WHOLE filtered set (every page). Transfers count in neither side.'
+      description: 'Money over the WHOLE filtered set (every page). Transfers count in neither side; like reports, income / expense leave out categories kept out of reports (include_in_report false: Debt Paid / Debt Received, opening balance, adjustments, …). count still counts those rows.'
       required: [income, expense, net, count]
       properties:
         income: { $ref: '#/components/schemas/Money' }
@@ -5654,6 +5787,7 @@ components:
         note: { type: [string, 'null'], maxLength: 500 }
         tag_ids: { $ref: '#/components/schemas/Ids' }
         splits: { type: array, items: { $ref: '#/components/schemas/SplitInput' }, description: 'Σ owed_amount ≤ amount; expense / income only.' }
+        paid_by: { oneOf: [{ $ref: '#/components/schemas/PaidByInput' }, { type: 'null' }], description: 'Someone paid (part of) it for me (0.4.0-3): amount = the bill; the wallet moves amount − paid_by.amount and the debt "I owe them" is made in the same call (the answer''s person_balance).' }
         my_share: { type: [number, 'null'], exclusiveMinimum: 0 }
         source_project_transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Event resolve flow only. '}
     UpdateTransactionRequest:
@@ -5669,6 +5803,18 @@ components:
         transfer_to_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         tag_ids: { $ref: '#/components/schemas/Ids' }
         also_update_link: { type: boolean, description: 'Also change the linked side (an event bill made from this row, a recurring item); the app asks at save.' }
+        link_mode: { type: string, enum: [personal, split, paid, event], description: '0.4.0-3 B3: switch how the bill is shared (see updateTransaction).' }
+        splits: { type: array, items: { $ref: '#/components/schemas/SplitEdit' }, description: 'Replaces the splits (as PUT /transactions/{id}/splits); with link_mode split, or alone on a split / personal row.' }
+        event:
+          type: object
+          description: 'link_mode event: the event and the bill''s people (as AddBillsRequest payer / members; default I paid, nobody else).'
+          required: [project_id]
+          properties:
+            project_id: { $ref: '#/components/schemas/Uuid' }
+            payer: { oneOf: [{ $ref: '#/components/schemas/BillPerson' }, { type: 'null' }] }
+            members: { type: array, items: { $ref: '#/components/schemas/BillMember' } }
+        apply_to_event: { type: boolean, description: '"แก้ในอีเวนต์ด้วย": the row''s amount / date / description / note (+ an origin''s tags) go to its event bill.' }
+        paid_by: { oneOf: [{ $ref: '#/components/schemas/PaidByInput' }, { type: 'null' }], description: 'Absent = unchanged; null = nobody paid for me any more (the debt goes, the wallet takes the whole amount); an object sets / replaces it (another person = the old debt goes, a new one comes). The debt follows the row''s amount part, date and description. A lower amount below paid_by.amount → 400 PAID_BY_EXCEEDS_AMOUNT. Not on a row with splits / in an event (400 LINK_MODE_CONFLICT). A partner-mirrored row (paid_by.source partner) rejects amount / date / account_id / paid_by with 409 PAID_BY_LOCKED.' }
     SplitEdit:
       type: object
       required: [owed_amount]
@@ -5718,11 +5864,14 @@ components:
         transfer_to_account_id: { $ref: '#/components/schemas/Uuid' }
         tag_ids: { $ref: '#/components/schemas/Ids' }
         splits: { type: array, items: { type: object, properties: { person_name: { type: string }, contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }, owed_amount: { type: number } } }, description: 'May be incomplete or unbalanced; validated at submit. '}
+        paid_by: { type: object, properties: { contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }, person_name: { type: string }, amount: { type: number } }, description: 'As POST /transactions paid_by (0.4.0-3); validated at submit (INVALID_PAID_BY, PAID_BY_EXCEEDS_AMOUNT, LINK_MODE_CONFLICT with splits / project_id).' }
         project_id: { $ref: '#/components/schemas/Uuid' }
+        payer: { $ref: '#/components/schemas/BillPerson', description: 'With project_id (0.4.0-3): as AddBillsRequest.payer.' }
+        members: { type: array, items: { $ref: '#/components/schemas/BillMember' }, description: 'With project_id (0.4.0-3): as AddBillsRequest.members. Payer / members without project_id, or with splits / paid_by → LINK_MODE_CONFLICT at submit; someone else paid and I have no share → NO_SHARE.' }
     DraftResolved:
       type: object
       description: 'Read-only; the draft''s ids resolved so the page renders without other calls. A dangling id (deleted account / category / event …) is `null` here and listed in `missing`.'
-      required: [account, transfer_to_account, category, tags, project, goal, splits, missing]
+      required: [account, transfer_to_account, category, tags, project, goal, splits, paid_by, link_mode, missing]
       properties:
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
         transfer_to_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
@@ -5739,9 +5888,37 @@ components:
             properties:
               person: { $ref: '#/components/schemas/PersonRef' }
               owed_amount: { type: number }
+        paid_by:
+          oneOf:
+            - type: object
+              required: [person, amount, my_paid]
+              properties:
+                person: { $ref: '#/components/schemas/PersonRef' }
+                amount: { type: number }
+                my_paid: { type: [number, 'null'], description: 'draft amount − paid_by.amount; null while the draft has no amount.' }
+            - type: 'null'
+        link_mode: { type: string, enum: [personal, split, paid, event], description: 'The quick-create tab the draft was saved with (project_id → event, splits → split, paid_by → paid).' }
+        bill_people:
+          description: 'An event draft''s payer / members with names (null without them). name is empty for a plain me (show ฉัน).'
+          oneOf:
+            - type: object
+              required: [payer, members]
+              properties:
+                payer: { $ref: '#/components/schemas/ResolvedBillPerson' }
+                members: { type: array, items: { $ref: '#/components/schemas/ResolvedBillPerson' } }
+            - type: 'null'
         missing:
           type: array
           items: { type: string, enum: [account_id, transfer_to_account_id, category_id, tag_ids, project_id, contact_id, goal_id] }
+    ResolvedBillPerson:
+      type: object
+      required: [me, member_id, contact_id, name]
+      properties:
+        me: { type: boolean }
+        member_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        name: { type: string }
+        share: { type: number, description: 'Members only.' }
     SubmitError:
       type: object
       required: [code, message]
@@ -5749,7 +5926,7 @@ components:
         code:
           type: string
           description: |
-            MISSING_TYPE, MISSING_AMOUNT, MISSING_DATE, MISSING_ACCOUNT, WALLET_NOT_TRACKED, GOAL_NOT_ACTIVE, INVALID_SPLIT, SPLITS_EXCEED_AMOUNT, ACCOUNT_NOT_FOUND, CATEGORY_NOT_FOUND, CATEGORY_TYPE_MISMATCH, TRANSFER_SAME_ACCOUNT, TRANSFER_NEEDS_WALLETS, SPLITS_ON_TRANSFER, CONTACT_NOT_FOUND, TAG_NOT_FOUND, PROJECT_NOT_FOUND, PROJECT_NOT_ACTIVE, PROJECT_LOCKED, PROJECT_NOT_MEMBER, PROJECT_READ_ONLY, TX_NOT_BILLABLE, DEBT_NOT_FOUND, DEBT_ALREADY_SETTLED, OVERPAYMENT, TRANSACTION_NOT_FOUND, NOT_FOUND, SUBMIT_FAILED.
+            MISSING_TYPE, MISSING_AMOUNT, MISSING_DATE, MISSING_ACCOUNT, WALLET_NOT_TRACKED, GOAL_NOT_ACTIVE, INVALID_SPLIT, SPLITS_EXCEED_AMOUNT, INVALID_PAID_BY, PAID_BY_EXPENSE_ONLY, PAID_BY_EXCEEDS_AMOUNT, LINK_MODE_CONFLICT, INVALID_BILL_PEOPLE, NO_SHARE, ACCOUNT_NOT_FOUND, CATEGORY_NOT_FOUND, CATEGORY_TYPE_MISMATCH, TRANSFER_SAME_ACCOUNT, TRANSFER_NEEDS_WALLETS, SPLITS_ON_TRANSFER, CONTACT_NOT_FOUND, TAG_NOT_FOUND, PROJECT_NOT_FOUND, PROJECT_NOT_ACTIVE, PROJECT_LOCKED, PROJECT_NOT_MEMBER, PROJECT_READ_ONLY, TX_NOT_BILLABLE, DEBT_NOT_FOUND, DEBT_ALREADY_SETTLED, OVERPAYMENT, TRANSACTION_NOT_FOUND, NOT_FOUND, SUBMIT_FAILED.
         message: { type: string }
     PendingTransaction:
       type: object
@@ -5757,7 +5934,7 @@ components:
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         source: { type: string, description: 'manual now; project_copy, project_update, ocr, chat later.' }
-        kind: { type: string, enum: [create, settle_debt, update_tx, saving], description: 'saving = on submit, a saving entry (`draft.amount` from `draft.account_id` into `draft.goal_id`, none = spare); never a transaction. settle_debt = on submit, a debt entry with target_debt_id''s person in the opposite direction (repaying it), into draft.account_id (none = ledger-only).' }
+        kind: { type: string, enum: [create, settle_debt, update_tx, saving], description: 'saving = on submit, a saving entry (`draft.amount` from `draft.account_id` into `draft.goal_id`, none = spare); never a transaction. settle_debt = on submit, a REPAYMENT transaction to / from target_debt_id''s person (a paid debt → receive = income; a received debt → pay = expense), on draft.account_id (none = no wallet); the debt itself is not touched (0.4.0-3).' }
         draft: { $ref: '#/components/schemas/Draft' }
         resolved: { $ref: '#/components/schemas/DraftResolved' }
         target_debt_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
@@ -6641,7 +6818,8 @@ components:
         summary:
           type: object
           description: 'saved = in_goals + spare (active goals and spare; the same numbers as Home / More).'
-          required: [saved, in_goals, spare, currency, saved_total, month_short_total, month_plan_total, month_saved_total, unallocated]
+          required: [saved, in_goals, spare, currency, saved_total, month_short_total, month_plan_total, month_saved_total, unallocated,
+            target_total, target_saved_total, target_short_total, target_percent, count_short, count_done, count_no_target]
           properties:
             saved: { $ref: '#/components/schemas/Money' }
             in_goals: { $ref: '#/components/schemas/Money' }
@@ -6652,6 +6830,13 @@ components:
             month_plan_total: { $ref: '#/components/schemas/Money', description: 'Σ the listed goals'' month_plan (the card bar''s whole).' }
             month_saved_total: { $ref: '#/components/schemas/Money', description: 'Σ the listed goals'' month_saved (the card bar''s part: "ออมแล้ว X / Y").' }
             unallocated: { $ref: '#/components/schemas/Money', description: 'The spare bucket (saved money with no goal).' }
+            target_total: { $ref: '#/components/schemas/Money', description: 'Long-term hero ring: Σ target_amount of the listed ACTIVE goals that have a target (completed / archived goals are left out, so those lists report 0).' }
+            target_saved_total: { $ref: '#/components/schemas/Money', description: 'Σ min(saved_amount, target_amount) per goal of the same set (capped per goal: a surplus never covers another goal''s gap). target_total − target_saved_total = target_short_total, always.' }
+            target_short_total: { $ref: '#/components/schemas/Money', description: 'Σ max(0, target_amount − saved_amount) per goal of the same set (= target_total − target_saved_total).' }
+            target_percent: { type: integer, minimum: 0, maximum: 100, description: 'floor(target_saved_total / target_total × 100) from the capped sum (100 only when nothing is short); 0 when target_total is 0.' }
+            count_short: { type: integer, minimum: 0, description: 'Listed goals with a target, not reached, not completed (hero filter chip).' }
+            count_done: { type: integer, minimum: 0, description: 'Listed goals that reached their target or are completed.' }
+            count_no_target: { type: integer, minimum: 0, description: 'Listed goals with no target (ongoing) and not completed. count_short + count_done + count_no_target = len(data).' }
         spare: { $ref: '#/components/schemas/SavingSpare' }
         data: { type: array, items: { $ref: '#/components/schemas/SavingGoal' } }
     SavingGoalDetail:
@@ -9730,10 +9915,10 @@ components:
       properties:
         key: { $ref: '#/components/schemas/PersonKey' }
         person: { $ref: '#/components/schemas/PersonRef' }
-        net: { $ref: '#/components/schemas/Money', description: 'Σ paid − Σ received. > 0 = they owe me (ติดคุณ), < 0 = I owe them (คุณติด), 0 = หายกัน.' }
-        open_count: { type: integer, minimum: 0, description: 'Entries not labelled paid.' }
-        entry_count: { type: integer, minimum: 0 }
-        cleared_at: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The CYCLE boundary: the date of the last entry after which the running balance (entries in book order: date, created) was 0; null when it never was. Entries after it = the current cycle.' }
+        net: { $ref: '#/components/schemas/Money', description: 'Σ signed debts + Σ signed repayments: debt paid +, debt received −, repayment I paid (expense) +, repayment I received (income) −. A debt''s own linked transaction never counts. > 0 = they owe me (รอรับ), < 0 = I owe them (รอจ่าย), 0 = หายกัน.' }
+        open_count: { type: integer, minimum: 0, description: 'Debt entries not labelled paid (repayments are never open).' }
+        entry_count: { type: integer, minimum: 0, description: 'Statement lines: debts + repayments.' }
+        cleared_at: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The CYCLE boundary: the date of the last line (debt or repayment) after which the running balance (book order: date, created, id) was 0; null when it never was. Lines after it = the current cycle.' }
         days_outstanding: { type: [integer, 'null'], description: 'Age in days (user timezone) of the oldest entry of the CURRENT cycle not labelled paid; null when there is none.' }
         last_activity_at: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The latest entry date (null with no entries).' }
       example:
@@ -9760,8 +9945,8 @@ components:
       description: 'The text to send a person (Thai, both directions).'
       required: [text, entries, net]
       properties:
-        text: { type: string, description: 'Multi-line: "สรุปยอดกับ <name>", one "• <date> <what> <±amount> <unit> (<description>)" line per CURRENT-cycle entry, oldest first (+ = I paid for them, − = they paid me), then the total: they owe me / I owe them / cleared.' }
-        entries: { type: integer, description: 'Entries listed (the current cycle).' }
+        text: { type: string, description: 'Multi-line: "สรุปยอดกับ <name>", one "• <date> <what> <±amount> <unit> (<description>)" line per CURRENT-cycle statement line (debts and repayments), oldest first (+ = I paid for them / ฉันจ่ายคืน, − = they paid me / ได้รับคืนจาก), then the total: they owe me / I owe them / cleared.' }
+        entries: { type: integer, description: 'Lines listed (the current cycle).' }
         net: { $ref: '#/components/schemas/Money' }
     ArchivedItem:
       type: object
@@ -9811,10 +9996,11 @@ components:
         Where a split-sourced entry came from (such an entry edits only description / note / paid):
         `transaction` = a split on my bill (id = that transaction, title = its description or category name);
         `event` = a split on an event board (id = the event, title = the event name);
-        `partner` = another user's split on me (id = null, title = their display name).
+        `partner` = another user's split on me (id = my expense of it, the transaction with paid_by.source partner, or null when I deleted it / it is from before 0.4.0-3; title = their display name);
+        `paid_by` = someone paid (part of) my expense (0.4.0-3; id = that transaction, title = its description or category name). Edit or delete the transaction; DELETE /personal-debts/{id} → 409 DEBT_MANAGED_BY_TX. Deleting a `partner` entry that has my expense deletes the expense too (it has no wallet).
       required: [kind, id, title]
       properties:
-        kind: { type: string, enum: [transaction, event, partner] }
+        kind: { type: string, enum: [transaction, event, partner, paid_by] }
         id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         title: { type: [string, 'null'] }
     DebtEntryTx:
@@ -9861,7 +10047,7 @@ components:
         data: { type: array, items: { $ref: '#/components/schemas/DebtEntry' } }
         pagination: { $ref: '#/components/schemas/Page' }
     DebtPersonPage:
-      description: 'The person page in one call: the balance, counts, the CURRENT-cycle entries (first page; `?cycle=earlier` / `all` and the entries route page the rest) and the summary message to send.'
+      description: 'The person page in one call: the balance, counts, the CURRENT-cycle statement (debts AND repayments interleaved, newest first; `?cycle=earlier` / `all` page the rest) and the summary message to send.'
       allOf:
         - { $ref: '#/components/schemas/DebtPerson' }
         - type: object
@@ -9869,13 +10055,14 @@ components:
           properties:
             counts:
               type: object
+              description: 'Over the statement lines (debts + repayments).'
               required: [entries, money, current, earlier]
               properties:
-                entries: { type: integer, description: 'All entries (tab "รายการหนี้").' }
-                money: { type: integer, description: 'Entries with a wallet transaction (tab "ประวัติการจ่าย").' }
-                current: { type: integer, description: 'Entries of the CURRENT cycle (after the last time the balance hit 0).' }
-                earlier: { type: integer, description: 'Entries of earlier cycles (the ones a hidden "รอบก่อนหน้า" fold holds).' }
-            items: { type: array, items: { $ref: '#/components/schemas/DebtEntry' } }
+                entries: { type: integer, description: 'All statement lines (debts + repayments).' }
+                money: { type: integer, description: 'Lines with money: debts with a wallet transaction + every repayment.' }
+                current: { type: integer, description: 'Lines of the CURRENT cycle (after the last time the balance hit 0).' }
+                earlier: { type: integer, description: 'Lines of earlier cycles (the ones a hidden "รอบก่อนหน้า" fold holds).' }
+            items: { type: array, items: { $ref: '#/components/schemas/DebtStatementItem' } }
             summary_message: { $ref: '#/components/schemas/DebtSummaryMessage' }
             pagination: { $ref: '#/components/schemas/Page' }
     DebtEntryDetail:
@@ -9918,6 +10105,7 @@ components:
         tag_ids: { $ref: '#/components/schemas/Ids', description: 'Go on the transaction: needs create_transaction true, or an account_id.' }
         mark_paid_ids: { $ref: '#/components/schemas/Ids', description: 'Entries of the same person to label paid in the same call.' }
         person_name: { type: string, minLength: 1, maxLength: 100, description: '`n:` keys only: the shown spelling of a typed name.' }
+        bill_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.0-3 B3: the event resolve sheet''s "as debt": the event bill this debt settles a share of (I must be an active member: else 400 BILL_NOT_FOUND). The entry gets source {kind: event, id: the event}; unlike split-sourced entries its money stays editable.' }
     DebtEntryUpdateRequest:
       type: object
       description: 'Partial. A split-sourced entry accepts only description / note / paid.'
@@ -9933,6 +10121,76 @@ components:
         tag_ids: { $ref: '#/components/schemas/Ids' }
         key: { $ref: '#/components/schemas/PersonKey' }
         person_name: { type: string, minLength: 1, maxLength: 100 }
+    RepaymentPerson:
+      type: object
+      description: 'The debt person of a repayment transaction (Transaction.repayment_person).'
+      required: [key, name, contact_id, person]
+      properties:
+        key: { $ref: '#/components/schemas/PersonKey' }
+        name: { type: string, description: 'Same as person.name: the live contact name, or the typed name.' }
+        contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Null = a typed name (or the contact was deleted).' }
+        person: { $ref: '#/components/schemas/PersonRef' }
+    DebtStatementItem:
+      type: object
+      description: |
+        One line of a person's statement ("ที่มาของยอด"): a DEBT entry or a REPAYMENT transaction, interleaved by date (book order: date, created_at, id).
+        `direction` follows the sign: paid = net + (a debt I paid for them / a repayment I paid back, expense), received = net − (a debt they paid for me / a repayment I got back, income).
+        A debt opens GET /personal-debts/{id}; a repayment opens GET /transactions/{id} (`id` is the transaction id).
+      required: [kind, id, key, direction, amount, signed_amount, date, description, note, paid, source, transaction, in_current_cycle, created_at, updated_at]
+      properties:
+        kind: { type: string, enum: [debt, repayment] }
+        id: { $ref: '#/components/schemas/Uuid', description: 'debt = the entry id; repayment = the transaction id.' }
+        key: { $ref: '#/components/schemas/PersonKey' }
+        direction: { type: string, enum: [paid, received] }
+        amount: { $ref: '#/components/schemas/Money', description: 'Always > 0.' }
+        signed_amount: { $ref: '#/components/schemas/Money', description: 'What the line adds to net: + for paid, − for received.' }
+        date: { $ref: '#/components/schemas/Date' }
+        description: { type: [string, 'null'], maxLength: 200 }
+        note: { type: [string, 'null'], maxLength: 500 }
+        paid: { type: [boolean, 'null'], description: 'Debts: the "จ่ายแล้ว" label (never changes a number). Null on a repayment.' }
+        source: { oneOf: [{ $ref: '#/components/schemas/DebtSource' }, { type: 'null' }], description: 'Debts only: the split source (null = manual). Null on a repayment.' }
+        transaction: { oneOf: [{ $ref: '#/components/schemas/DebtEntryTx' }, { type: 'null' }], description: 'Debt: its linked wallet transaction (does NOT count in net; null = ledger-only). Repayment: the transaction itself (account null = no wallet).' }
+        in_current_cycle: { type: [boolean, 'null'], description: 'true = after the cycle boundary (cleared_at).' }
+        created_at: { $ref: '#/components/schemas/DateTime' }
+        updated_at: { $ref: '#/components/schemas/DateTime' }
+      example:
+        kind: repayment
+        id: 0191c2a0-0000-7000-8000-0000000000f2
+        key: n:lee
+        direction: paid
+        amount: 400
+        signed_amount: 400
+        date: '2026-10-20'
+        description: 'จ่ายคืนลี'
+        note: null
+        paid: null
+        source: null
+        transaction: { id: 0191c2a0-0000-7000-8000-0000000000f2, account: null }
+        in_current_cycle: true
+        created_at: '2026-10-20T09:30:00Z'
+        updated_at: '2026-10-20T09:30:00Z'
+    DebtRepaymentCreateRequest:
+      type: object
+      required: [kind, amount]
+      properties:
+        kind: { type: string, enum: [pay, receive], description: 'pay = I pay them back (expense, Debt Paid, net +); receive = they pay me back (income, Debt Received, net −).' }
+        amount: { type: number, exclusiveMinimum: 0 }
+        date: { $ref: '#/components/schemas/Date', description: 'Default = today.' }
+        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The wallet (optional, as on POST /transactions: none = no balance moves).' }
+        description: { type: [string, 'null'], maxLength: 200 }
+        note: { type: [string, 'null'], maxLength: 500 }
+        tag_ids: { $ref: '#/components/schemas/Ids', description: 'Tags on the transaction.' }
+        mark_paid_ids: { $ref: '#/components/schemas/Ids', description: 'Debt entries of the same person to label paid in the same call (label only, numbers never change).' }
+        person_name: { type: string, minLength: 1, maxLength: 100, description: '`n:` keys only: the shown spelling of a typed name.' }
+    DebtRepaymentResult:
+      type: object
+      description: 'The repayment as a full transaction row (same view as GET /transactions/{id}, with repayment_person), its statement line, the person''s new balance and the touched wallet balance.'
+      required: [transaction, item, person_balance, account_balances]
+      properties:
+        transaction: { $ref: '#/components/schemas/Transaction' }
+        item: { $ref: '#/components/schemas/DebtStatementItem' }
+        person_balance: { $ref: '#/components/schemas/DebtPerson' }
+        account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
     DebtLink:
       type: object
       description: 'On a transaction that IS a debt entry''s wallet side (one record with the entry).'
@@ -10009,14 +10267,15 @@ components:
         pagination: { $ref: '#/components/schemas/Page' }
     EventMember:
       type: object
-      required: [id, user_id, name, icon_code, is_me, linked, role, status, invited_at, joined_at, left_at]
+      required: [id, user_id, name, icon_code, is_me, linked, contact_id, role, status, invited_at, joined_at, left_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
-        user_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        user_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The linked user (an app account), else null.' }
         name: { type: string, description: 'Live profile name for an app user, else the typed name.' }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
         is_me: { type: boolean }
         linked: { type: boolean, description: 'An app user (user_id set).' }
+        contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.0-3: MY contact for this member (linked member → my contact linked to that user; typed member → my contact with the same name, case-insensitive). Lets the bill form tell a picked contact that is already a member from a new person (ใหม่ · เพิ่มเข้าอีเวนต์). Null when none (and on my own row).' }
         role: { type: string, enum: [owner, contributor, viewer] }
         status: { type: string, enum: [pending, active, left] }
         invited_at: { oneOf: [{ $ref: '#/components/schemas/DateTime' }, { type: 'null' }] }
@@ -10169,6 +10428,7 @@ components:
         row: { oneOf: [{ $ref: '#/components/schemas/BoardRow' }, { type: 'null' }], description: 'The bill the write created / changed (after a split-row delete or a tick: its parent).' }
         removed_row_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'A bill (parent) that left the board.' }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' }, description: 'Wallets a linked transaction moved on (else []).' }
+        my_transaction: { $ref: '#/components/schemas/Transaction', description: '0.4.0-3 B3, bill edits only (absent otherwise): MY transaction linked to the edited bill (made from it, or my copy), after the edit. Its event_bill.in_sync / differences tell the app whether to ask "แก้ในสมุดของฉันด้วยไหม?" (send apply_to_my_tx, or POST /transactions/{id}/apply-event later).' }
     AddBillsResult:
       allOf:
         - { $ref: '#/components/schemas/EventPatch' }
@@ -10216,11 +10476,45 @@ components:
     EventBillLink:
       type: object
       description: 'On a transaction that is in an event.'
-      required: [event, bill_id, linked]
+      required: [event, bill_id, linked, payer, bill_amount, members, kind, in_sync, differences]
       properties:
         event: { $ref: '#/components/schemas/EventRef' }
         bill_id: { $ref: '#/components/schemas/Uuid', description: 'The board bill (parent) it belongs to.' }
         linked: { type: boolean, description: 'true = the bill was made from this transaction (linked by prompt: an edit asks whether to update the other side, also_update_link); false = my personal copy of my share.' }
+        payer: { oneOf: [{ $ref: '#/components/schemas/MemberRef' }, { type: 'null' }], description: '0.4.0-3: who paid the bill (is_me = I did). Detail and write answers; null on list rows.' }
+        bill_amount: { $ref: '#/components/schemas/Money', description: 'The whole bill (0 on list rows).' }
+        members: { type: [array, 'null'], items: { $ref: '#/components/schemas/BillShare' }, description: 'Everyone in the bill with their share, the payer first (the rest of the bill); rebuilds the quick-create อีเวนต์ tab. Null on list rows.' }
+        kind: { type: string, enum: [origin, copy], description: '0.4.0-3 B3: origin = the bill was made from this transaction (amount = the bill); copy = my share of a bill (amount = my share).' }
+        in_sync: { type: [boolean, 'null'], description: 'Live: true when this transaction matches its bill (amount as the kind says, date, description, note; tags are not compared). Null on list rows and on another member''s row.' }
+        differences: { type: [array, 'null'], items: { $ref: '#/components/schemas/BillDifference' }, description: 'Live, what differs (mine vs the event''s). [] when in sync; null on list rows / another member''s row.' }
+    BillDifference:
+      type: object
+      required: [field, mine, event]
+      properties:
+        field: { type: string, enum: [amount, date, description, note] }
+        mine: { description: 'number | date string | string | null' }
+        event: { description: 'number | date string | string | null' }
+    BillShare:
+      type: object
+      required: [member, share]
+      properties:
+        member: { $ref: '#/components/schemas/MemberRef' }
+        share: { $ref: '#/components/schemas/Money' }
+    BillPerson:
+      type: object
+      description: 'One person of a new event bill (0.4.0-3): `me: true`, an event `member_id`, one of my `contact_id`s or a typed `person_name`. A contact / name that is not a member yet is ADDED to the event (any member who may add bills; a linked contact joins as a linked member and gets project_added).'
+      properties:
+        me: { type: boolean }
+        member_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        person_name: { type: string, maxLength: 100 }
+    BillMember:
+      allOf:
+        - { $ref: '#/components/schemas/BillPerson' }
+        - type: object
+          required: [share]
+          properties:
+            share: { type: number, minimum: 0, description: 'Their share of the bill. The payer''s own share is the rest of the bill (its listed share is ignored).' }
     ProjectCreateRequest:
       type: object
       required: [name]
@@ -10255,13 +10549,22 @@ components:
         new_transaction: { oneOf: [{ $ref: '#/components/schemas/CreateTransactionRequest' }, { type: 'null' }] }
         transaction_ids: { $ref: '#/components/schemas/Ids' }
         move: { type: boolean }
+        payer: { oneOf: [{ $ref: '#/components/schemas/BillPerson' }, { type: 'null' }], description: 'As on AddBillsRequest.' }
+        members: { type: array, items: { $ref: '#/components/schemas/BillMember' }, description: 'As on AddBillsRequest.' }
     AddBillsRequest:
       type: object
-      description: 'new_transaction and / or transaction_ids (at least one).'
+      description: |
+        new_transaction and / or transaction_ids (at least one).
+        **payer / members (0.4.0-3, quick create tab อีเวนต์)** go with new_transaction only (400 VALIDATION_ERROR otherwise); with them new_transaction.splits and paid_by must be empty (400 LINK_MODE_CONFLICT). new_transaction.amount = the BILL.
+        - payer (default me): who paid. members: who is in the bill and their shares (Σ of the non-payer shares ≤ the bill: 400 SPLITS_EXCEED_AMOUNT; a person listed twice: 400 VALIDATION_ERROR; member_id not in the event: 400 MEMBER_NOT_IN_PROJECT; foreign contact: 400 CONTACT_NOT_FOUND). The payer's share = the rest of the bill.
+        - payer = me: as before — my transaction is the whole bill on my wallet (event_bill.linked), the other members' shares are its splits on the board.
+        - payer = someone else (expense only, else 400 VALIDATION_ERROR): the board bill is theirs; every other member's share (mine too) is a split; MY transaction is my share as an expense with NO wallet (account_id ignored), my category / description / note / tags, `event_bill.linked: false`; new_transaction_id = it (null when I have no share). A linked payer gets project_tx_recorded_for_you.
       properties:
         new_transaction: { oneOf: [{ $ref: '#/components/schemas/CreateTransactionRequest' }, { type: 'null' }] }
         transaction_ids: { $ref: '#/components/schemas/Ids' }
         move: { type: boolean }
+        payer: { oneOf: [{ $ref: '#/components/schemas/BillPerson' }, { type: 'null' }] }
+        members: { type: array, items: { $ref: '#/components/schemas/BillMember' } }
     ProjectAddMemberRequest:
       type: object
       description: 'A typed person (display_name + ad_hoc) or an email invite (email + display_name).'
@@ -10308,7 +10611,8 @@ components:
         note: { type: [string, 'null'], maxLength: 500 }
         tag_ids: { $ref: '#/components/schemas/Ids' }
         splits: { type: array, items: { $ref: '#/components/schemas/ProjectSplitInput' } }
-        also_update_link: { type: boolean, description: 'My own linked bill: also change my transaction (amount / date). Ignored for anyone else (the owner gets "อัปเดตตาม").' }
+        also_update_link: { type: boolean, description: 'Same as apply_to_my_tx (kept for older clients).' }
+        apply_to_my_tx: { type: boolean, description: '0.4.0-3 B3 "แก้ในสมุดของฉันด้วย": MY transaction linked to this bill (made from it, or my copy, also a copy pointing at one of its split rows) takes the bill after the edit: amount (the bill / my share), date, description, note, matching tags added. Without it, the answer''s my_transaction shows in_sync / differences so the app can ask (or POST /transactions/{id}/apply-event later). Other people with a linked transaction get project_tx_changed.' }
     ProjectMarkRequest:
       type: object
       required: [marked]

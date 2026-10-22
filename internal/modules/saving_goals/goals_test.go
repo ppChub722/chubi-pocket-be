@@ -594,3 +594,88 @@ func TestOpenEndedGoal(t *testing.T) {
 	}
 	f.call("POST", "/saving-goals", "", map[string]any{"name": "Bad", "target_amount": 0}, http.StatusBadRequest, nil)
 }
+
+func TestListLongTermTotals(t *testing.T) {
+	f := newGoalFix(t)
+	var l GoalList
+	f.call("GET", "/saving-goals", "listSavingGoals", nil, http.StatusOK, &l)
+	s := l.Summary
+	if len(l.Data) != 0 || s.TargetTotal != 0 || s.TargetSavedTotal != 0 || s.TargetShortTotal != 0 || s.TargetPercent != 0 ||
+		s.CountShort != 0 || s.CountDone != 0 || s.CountNoTarget != 0 {
+		t.Fatalf("empty list summary = %+v", s)
+	}
+
+	over := f.goal("Over", 1000, nil)
+	f.save(f.kbank, &over, 1500)
+	reached := f.goal("Reached", 2000, nil)
+	f.save(f.kbank, &reached, 2000)
+	short := f.goal("Short", 10000, nil)
+	f.save(f.kbank, &short, 2500)
+	var d GoalDetail
+	f.call("POST", "/saving-goals", "createSavingGoal", map[string]any{"name": "Ongoing"}, http.StatusCreated, &d)
+	ongoing := d.Goal.ID
+	f.save(f.kbank, &ongoing, 700)
+	done := f.goal("Done", 5000, nil)
+	f.save(f.kbank, &done, 5000)
+	f.call("POST", "/saving-goals/"+done.String()+"/close", "closeSavingGoal", map[string]any{"to": "wallets"}, http.StatusOK, nil)
+
+	f.call("GET", "/saving-goals", "listSavingGoals", nil, http.StatusOK, &l)
+	s = l.Summary
+	// Active goals with a target: Over 1500/1000 (capped to 1000), Reached 2000/2000, Short 2500/10000.
+	// Over's surplus never covers Short's gap.
+	if s.TargetTotal != 13000 || s.TargetSavedTotal != 5500 || s.TargetShortTotal != 7500 || s.TargetPercent != 42 {
+		t.Errorf("active target totals = %+v", s)
+	}
+	if round2(s.TargetTotal-s.TargetSavedTotal) != s.TargetShortTotal {
+		t.Errorf("target_total - target_saved_total != target_short_total: %+v", s)
+	}
+	if s.CountShort != 1 || s.CountDone != 2 || s.CountNoTarget != 1 || s.CountShort+s.CountDone+s.CountNoTarget != len(l.Data) {
+		t.Errorf("active counts = %+v (len %d)", s, len(l.Data))
+	}
+
+	f.call("GET", "/saving-goals?status=completed", "listSavingGoals", nil, http.StatusOK, &l)
+	s = l.Summary
+	if len(l.Data) != 1 || s.CountDone != 1 || s.CountShort != 0 || s.CountNoTarget != 0 ||
+		s.TargetTotal != 0 || s.TargetSavedTotal != 0 || s.TargetShortTotal != 0 || s.TargetPercent != 0 {
+		t.Errorf("completed list summary = %+v", s)
+	}
+}
+
+func TestLongTermTotalsBuckets(t *testing.T) {
+	tgt := func(v float64) *float64 { return &v }
+	goals := []GoalView{
+		{State: StateActive, TargetAmount: tgt(1000), SavedAmount: 3000},  // over → done
+		{State: StateActive, TargetAmount: tgt(1000), SavedAmount: 999.9}, // short
+		{State: StateActive, SavedAmount: 50},                             // ongoing
+		{State: StateCompleted, TargetAmount: tgt(500)},                   // completed → done, not summed
+		{State: StateCompleted},                                           // completed, no target → done
+		{State: StateArchived, TargetAmount: tgt(800), SavedAmount: 100},  // short, not summed
+	}
+	var s ListSummary
+	longTermTotals(&s, goals)
+	if s.CountDone != 3 || s.CountShort != 2 || s.CountNoTarget != 1 {
+		t.Errorf("counts = %+v", s)
+	}
+	// Over (3000/1000) is capped to 1000 and does not hide Short's 0.1 gap.
+	if s.TargetTotal != 2000 || s.TargetSavedTotal != 1999.9 || s.TargetShortTotal != 0.1 || s.TargetPercent != 99 {
+		t.Errorf("totals = %+v", s)
+	}
+	if round2(s.TargetTotal-s.TargetSavedTotal) != s.TargetShortTotal {
+		t.Errorf("identity broken: %+v", s)
+	}
+	var full ListSummary
+	longTermTotals(&full, []GoalView{{State: StateActive, TargetAmount: tgt(1000), SavedAmount: 5000}})
+	if full.TargetSavedTotal != 1000 || full.TargetShortTotal != 0 || full.TargetPercent != 100 {
+		t.Errorf("over only = %+v", full)
+	}
+	var one ListSummary
+	longTermTotals(&one, []GoalView{{State: StateActive, TargetAmount: tgt(3), SavedAmount: 0.87}})
+	if one.TargetPercent != 29 {
+		t.Errorf("floor percent = %d, want 29", one.TargetPercent)
+	}
+	var none ListSummary
+	longTermTotals(&none, nil)
+	if none != (ListSummary{}) {
+		t.Errorf("empty = %+v", none)
+	}
+}

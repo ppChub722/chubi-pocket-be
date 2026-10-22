@@ -19,6 +19,7 @@ const (
 	SourceTransaction = "transaction" // a split on my bill (source_transaction_id)
 	SourceEvent       = "event"       // a split on an event board
 	SourcePartner     = "partner"     // another user's split on me (the mirror)
+	SourcePaidBy      = "paid_by"     // someone paid (part of) my expense (paid_for_transaction_id)
 )
 
 type Entry struct {
@@ -39,7 +40,10 @@ type Entry struct {
 	Note                       *string
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
-	CounterpartDebtID *uuid.UUID
+	CounterpartDebtID          *uuid.UUID
+	// PaidForTransactionID — the expense this debt is the "someone paid for me" part of (0.4.0-3):
+	// my own paid_by (source paid_by) or a partner's split mirrored into my book (source partner).
+	PaidForTransactionID *uuid.UUID
 }
 
 func (e *Entry) Key() string { return shared.DebtKey(e.ContactID, e.PersonName) }
@@ -70,19 +74,19 @@ type EntryTx struct {
 }
 
 type DebtEntry struct {
-	ID          uuid.UUID   `json:"id"`
-	Key         string      `json:"key"`
-	Direction   string      `json:"direction"`
-	Amount      float64     `json:"amount"`
-	Date        string      `json:"date"`
-	Description *string     `json:"description"`
-	Note        *string     `json:"note"`
-	Paid        bool        `json:"paid"`
-	Source      *DebtSource `json:"source"`
-	Transaction *EntryTx    `json:"transaction"`
-	CreatedAt   time.Time   `json:"created_at"`
-	InCurrentCycle *bool     `json:"in_current_cycle"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID             uuid.UUID   `json:"id"`
+	Key            string      `json:"key"`
+	Direction      string      `json:"direction"`
+	Amount         float64     `json:"amount"`
+	Date           string      `json:"date"`
+	Description    *string     `json:"description"`
+	Note           *string     `json:"note"`
+	Paid           bool        `json:"paid"`
+	Source         *DebtSource `json:"source"`
+	Transaction    *EntryTx    `json:"transaction"`
+	CreatedAt      time.Time   `json:"created_at"`
+	InCurrentCycle *bool       `json:"in_current_cycle"`
+	UpdatedAt      time.Time   `json:"updated_at"`
 }
 
 type DebtPerson struct {
@@ -99,13 +103,13 @@ type DebtPerson struct {
 }
 
 type DebtTotals struct {
-	OwedToMe  float64 `json:"owed_to_me"`
-	IOwe      float64 `json:"i_owe"`
-	Net       float64 `json:"net"`
-	OpenCount int     `json:"open_count"`
-	OwedToMePeople   int `json:"owed_to_me_people"`
-	IOwePeople       int `json:"i_owe_people"`
-	Over30DaysPeople int `json:"over_30_days_people"`
+	OwedToMe         float64 `json:"owed_to_me"`
+	IOwe             float64 `json:"i_owe"`
+	Net              float64 `json:"net"`
+	OpenCount        int     `json:"open_count"`
+	OwedToMePeople   int     `json:"owed_to_me_people"`
+	IOwePeople       int     `json:"i_owe_people"`
+	Over30DaysPeople int     `json:"over_30_days_people"`
 }
 
 type PeopleList struct {
@@ -121,10 +125,62 @@ type EntryCounts struct {
 	Earlier int `json:"earlier"`
 }
 
+const (
+	ItemDebt      = "debt"
+	ItemRepayment = "repayment"
+)
+
+// StatementItem — one line of a person's statement ("ที่มาของยอด"): a debt entry or a repayment
+// transaction. Direction follows the sign: paid = net + (a debt I paid for them / a repayment I
+// paid back), received = net −.
+type StatementItem struct {
+	Kind           string      `json:"kind"` // debt | repayment
+	ID             uuid.UUID   `json:"id"`   // the debt entry id, or the repayment's transaction id
+	Key            string      `json:"key"`
+	Direction      string      `json:"direction"`
+	Amount         float64     `json:"amount"`
+	SignedAmount   float64     `json:"signed_amount"`
+	Date           string      `json:"date"`
+	Description    *string     `json:"description"`
+	Note           *string     `json:"note"`
+	Paid           *bool       `json:"paid"`        // the debt's "จ่ายแล้ว" label; null on a repayment
+	Source         *DebtSource `json:"source"`      // debts only (split source); null on a repayment
+	Transaction    *EntryTx    `json:"transaction"` // a debt's linked tx, or the repayment tx itself
+	InCurrentCycle *bool       `json:"in_current_cycle"`
+	CreatedAt      time.Time   `json:"created_at"`
+	UpdatedAt      time.Time   `json:"updated_at"`
+}
+
+const (
+	RepayPay     = "pay"     // I pay them back: an expense (Debt Paid), net +
+	RepayReceive = "receive" // they pay me back: an income (Debt Received), net −
+)
+
+type RepaymentRequest struct {
+	Kind        string      `json:"kind"         binding:"required,oneof=pay receive"`
+	Amount      float64     `json:"amount"       binding:"required,gt=0"`
+	Date        *string     `json:"date"         binding:"omitempty,datetime=2006-01-02"`
+	AccountID   *uuid.UUID  `json:"account_id"`
+	Description *string     `json:"description"  binding:"omitempty,max=200"`
+	Note        *string     `json:"note"         binding:"omitempty,max=500"`
+	TagIDs      []uuid.UUID `json:"tag_ids"`
+	MarkPaidIDs []uuid.UUID `json:"mark_paid_ids"`
+	PersonName  *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
+}
+
+// RepaymentResult — the repayment transaction (same view as GET /transactions/{id}), its statement
+// line, the person's new balance and the touched wallet balances.
+type RepaymentResult struct {
+	Transaction     *transactions.TransactionDetail `json:"transaction"`
+	Item            StatementItem                   `json:"item"`
+	PersonBalance   DebtPerson                      `json:"person_balance"`
+	AccountBalances []shared.WalletBalance          `json:"account_balances"`
+}
+
 type PersonPage struct {
 	DebtPerson
-	Counts EntryCounts `json:"counts"`
-	Items  []DebtEntry `json:"items"`
+	Counts         EntryCounts     `json:"counts"`
+	Items          []StatementItem `json:"items"`
 	SummaryMessage *SummaryMessage `json:"summary_message"`
 	Pagination     shared.Page     `json:"pagination"`
 }
@@ -162,30 +218,33 @@ type SplitChangeResult struct {
 }
 
 type CreateEntryRequest struct {
-	Direction   string      `json:"direction"    binding:"required,oneof=paid received"`
-	Amount      float64     `json:"amount"       binding:"required,gt=0"`
-	Date        *string     `json:"date"         binding:"omitempty,datetime=2006-01-02"`
-	AccountID   *uuid.UUID  `json:"account_id"`
+	Direction         string      `json:"direction"    binding:"required,oneof=paid received"`
+	Amount            float64     `json:"amount"       binding:"required,gt=0"`
+	Date              *string     `json:"date"         binding:"omitempty,datetime=2006-01-02"`
+	AccountID         *uuid.UUID  `json:"account_id"`
 	CreateTransaction *bool       `json:"create_transaction"`
 	Description       *string     `json:"description"  binding:"omitempty,max=200"`
 	Note              *string     `json:"note"         binding:"omitempty,max=500"`
 	TagIDs            []uuid.UUID `json:"tag_ids"`
 	MarkPaidIDs       []uuid.UUID `json:"mark_paid_ids"`
-	PersonName  *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
+	PersonName        *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
+	// BillID (0.4.0-3) — the event bill this debt settles a share of (the resolve sheet's "as
+	// debt"): the entry keeps source event + the bill + its event.
+	BillID *uuid.UUID `json:"bill_id"`
 }
 
 type UpdateEntryRequest struct {
-	Direction   *string     `json:"direction"    binding:"omitempty,oneof=paid received"`
-	Amount      *float64    `json:"amount"       binding:"omitempty,gt=0"`
-	Date        *string     `json:"date"         binding:"omitempty,datetime=2006-01-02"`
-	AccountID   *uuid.UUID  `json:"account_id"`
-	CreateTransaction *bool   `json:"create_transaction"`
-	Description       *string `json:"description"  binding:"omitempty,max=200"`
-	Note              *string `json:"note"         binding:"omitempty,max=500"`
-	Paid              *bool   `json:"paid"`
-	TagIDs      []uuid.UUID `json:"tag_ids"`
-	Key         *string     `json:"key"`
-	PersonName  *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
+	Direction         *string     `json:"direction"    binding:"omitempty,oneof=paid received"`
+	Amount            *float64    `json:"amount"       binding:"omitempty,gt=0"`
+	Date              *string     `json:"date"         binding:"omitempty,datetime=2006-01-02"`
+	AccountID         *uuid.UUID  `json:"account_id"`
+	CreateTransaction *bool       `json:"create_transaction"`
+	Description       *string     `json:"description"  binding:"omitempty,max=200"`
+	Note              *string     `json:"note"         binding:"omitempty,max=500"`
+	Paid              *bool       `json:"paid"`
+	TagIDs            []uuid.UUID `json:"tag_ids"`
+	Key               *string     `json:"key"`
+	PersonName        *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
 
 	present map[string]bool
 }

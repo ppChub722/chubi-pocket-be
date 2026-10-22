@@ -17,7 +17,7 @@ import (
 var (
 	// ErrQuickTxNotFound — a listed transaction_id doesn't exist or isn't the caller's (404
 	// TX_NOT_FOUND; not-owned = not-found, no info leak).
-	ErrQuickTxNotFound = errors.New("transaction not found or not owned")
+	ErrQuickTxNotFound         = errors.New("transaction not found or not owned")
 	ErrQuickTxAlreadyInProject = errors.New("transaction is already in a project")
 	// ErrQuickTxNotBillable — transfer rows can't become board parents (project_transactions.type is
 	// expense|income only).
@@ -27,7 +27,7 @@ var (
 	ErrQuickTxIsRepayment = errors.New("a debt entry's transaction can't be pulled into a project")
 	// ErrQuickTxSystemRow — a row in a system category (opening balance, balance adjustment) can't
 	// join a project (422 TX_NOT_BILLABLE).
-	ErrQuickTxSystemRow = errors.New("an opening balance or balance adjustment can't be pulled into a project")
+	ErrQuickTxSystemRow  = errors.New("an opening balance or balance adjustment can't be pulled into a project")
 	ErrQuickNothingToAdd = errors.New("new_transaction or transaction_ids is required")
 	// ErrQuickTxSplitPaid — a split on the bill is labelled paid (its repayment is in the person's
 	// ledger); its splits can't move onto a board (422 TX_SPLIT_PAID).
@@ -43,9 +43,9 @@ type quickBill struct {
 	Date        string // YYYY-MM-DD
 	Description *string
 	Note        *string
-	TagNames []string
+	TagNames    []string
 
-	splits []quickDebt
+	splits        []quickDebt
 	clearPersonal bool
 }
 
@@ -88,7 +88,7 @@ func (s *Service) QuickCreate(
 		byName:    map[string]uuid.UUID{},
 	}
 	res, err := s.pullBillsTx(ctx, tx, p, owner.ID, owner.DisplayName, mb,
-		req.NewTransaction, req.TransactionIDs, req.Move)
+		req.NewTransaction, req.TransactionIDs, req.Move, req.BillPeople)
 	if err != nil {
 		return nil, err
 	}
@@ -153,18 +153,20 @@ func (s *Service) AddBills(
 	return &AddBillsResult{EventPatch: *p, NewTransactionID: res.newTxID, Rows: rows}, nil
 }
 
+// AddNewBillTx — a pending event draft: one new bill (with its payer / members when set). It answers
+// ErrNoShareToCopy when someone else paid and I have no share (no transaction of mine to record).
 func (s *Service) AddNewBillTx(
-	ctx context.Context, tx pgx.Tx, callerUserID, projectID uuid.UUID, bill transactions.CreateRequest,
+	ctx context.Context, tx pgx.Tx, callerUserID, projectID uuid.UUID, bill transactions.CreateRequest, people BillPeople,
 ) (uuid.UUID, error) {
 	if err := s.checkNewBill(&bill, nil); err != nil {
 		return uuid.Nil, err
 	}
-	res, err := s.addBillsTx(ctx, tx, callerUserID, projectID, AddBillsRequest{NewTransaction: &bill})
+	res, err := s.addBillsTx(ctx, tx, callerUserID, projectID, AddBillsRequest{NewTransaction: &bill, BillPeople: people})
 	if err != nil {
 		return uuid.Nil, err
 	}
 	if res.newTxID == nil {
-		return uuid.Nil, ErrQuickNothingToAdd // unreachable: a new bill was passed
+		return uuid.Nil, ErrNoShareToCopy
 	}
 	return *res.newTxID, nil
 }
@@ -172,20 +174,33 @@ func (s *Service) AddNewBillTx(
 func (s *Service) addBillsTx(
 	ctx context.Context, tx pgx.Tx, callerUserID, projectID uuid.UUID, req AddBillsRequest,
 ) (*pulled, error) {
-	if err := s.store.AssertWritable(ctx, projectID, "create_pt"); err != nil {
+	p, me, mb, err := s.billWriterTx(ctx, tx, callerUserID, projectID)
+	if err != nil {
 		return nil, err
+	}
+	return s.pullBillsTx(ctx, tx, p, me.ID, me.DisplayName, mb,
+		req.NewTransaction, req.TransactionIDs, req.Move, req.BillPeople)
+}
+
+// billWriterTx — the event, my member row and a member builder seeded with its members, for a
+// caller who may add bills.
+func (s *Service) billWriterTx(
+	ctx context.Context, tx pgx.Tx, callerUserID, projectID uuid.UUID,
+) (*Project, *ProjectMember, *quickMemberBuilder, error) {
+	if err := s.store.AssertWritable(ctx, projectID, "create_pt"); err != nil {
+		return nil, nil, nil, err
 	}
 	me, err := s.store.AssertCanWrite(ctx, projectID, callerUserID)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	p, err := s.store.GetByID(ctx, projectID)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	existing, err := s.store.ListMembers(ctx, projectID)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	mb := &quickMemberBuilder{
 		svc: s, tx: tx, projectID: projectID, callerUserID: callerUserID,
@@ -203,8 +218,27 @@ func (s *Service) addBillsTx(
 			mb.byName[strings.ToLower(strings.TrimSpace(m.DisplayName))] = m.ID
 		}
 	}
-	return s.pullBillsTx(ctx, tx, p, me.ID, me.DisplayName, mb,
-		req.NewTransaction, req.TransactionIDs, req.Move)
+	return p, me, mb, nil
+}
+
+// dispatchAddedTx — project_added to the linked users a member builder added.
+func (s *Service) dispatchAddedTx(ctx context.Context, tx pgx.Tx, p *Project, mb *quickMemberBuilder, actorName string) error {
+	if s.notifs == nil {
+		return nil
+	}
+	for _, added := range mb.notifyLinked {
+		if err := s.notifs.DispatchProjectAdded(ctx, tx, added.userID, mb.callerUserID,
+			notifications.ProjectAddedPayload{
+				ProjectMemberID:  added.memberID,
+				ProjectID:        p.ID,
+				ProjectName:      p.Name,
+				AdderUserID:      mb.callerUserID,
+				AdderDisplayName: actorName,
+			}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkNewBill — at least one bill; a new bill must be a plain expense / income.
@@ -230,11 +264,28 @@ func (s *Service) checkNewBill(req *transactions.CreateRequest, txIDs []uuid.UUI
 func (s *Service) pullBillsTx(
 	ctx context.Context, tx pgx.Tx, p *Project, actorMemberID uuid.UUID, actorName string,
 	mb *quickMemberBuilder, newReq *transactions.CreateRequest, txIDs []uuid.UUID, move bool,
+	people BillPeople,
 ) (*pulled, error) {
 	callerUserID := mb.callerUserID
 	bills := []quickBill{}
 	seen := map[uuid.UUID]bool{}
 	out := &pulled{}
+
+	if people.Set() {
+		if newReq == nil {
+			return nil, ErrBadBillPeople
+		}
+		rowID, mine, err := s.addPeopleBillTx(ctx, tx, p, actorMemberID, mb, *newReq, people, nil)
+		if err != nil {
+			return nil, err
+		}
+		out.rowIDs = append(out.rowIDs, rowID)
+		out.newTxID = mine
+		if mine != nil {
+			seen[*mine] = true
+		}
+		newReq = nil
+	}
 
 	if newReq != nil {
 		req := *newReq
@@ -330,19 +381,8 @@ func (s *Service) pullBillsTx(
 		out.rowIDs = append(out.rowIDs, pt.ID)
 	}
 
-	if s.notifs != nil {
-		for _, added := range mb.notifyLinked {
-			if err := s.notifs.DispatchProjectAdded(ctx, tx, added.userID, callerUserID,
-				notifications.ProjectAddedPayload{
-					ProjectMemberID:  added.memberID,
-					ProjectID:        p.ID,
-					ProjectName:      p.Name,
-					AdderUserID:      callerUserID,
-					AdderDisplayName: actorName,
-				}); err != nil {
-				return nil, err
-			}
-		}
+	if err := s.dispatchAddedTx(ctx, tx, p, mb, actorName); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -381,12 +421,13 @@ func (s *Service) loadQuickBillTx(
 		projectID *uuid.UUID
 		repaysID  *uuid.UUID
 		isSystem  bool
+		paidBy    bool
 	)
 	err := tx.QueryRow(ctx, `
 		SELECT t.id, t.user_id, t.project_id, t.account_id, t.type, t.amount,
 		       COALESCE(a.currency, u.currency, 'THB'), to_char(t.date, 'YYYY-MM-DD'),
 		       t.description, t.note, t.source_personal_debt_id,
-		       COALESCE(c.is_system, FALSE)
+		       COALESCE(c.is_system, FALSE), t.paid_by_amount IS NOT NULL
 		FROM transactions t
 		JOIN users u ON u.id = t.user_id
 		LEFT JOIN accounts a ON a.id = t.account_id
@@ -395,7 +436,7 @@ func (s *Service) loadQuickBillTx(
 		FOR UPDATE OF t`, txID).Scan(
 		&bill.TxID, &ownerID, &projectID, &bill.AccountID, &bill.Type,
 		&bill.Amount, &bill.Currency, &bill.Date, &bill.Description, &bill.Note,
-		&repaysID, &isSystem,
+		&repaysID, &isSystem, &paidBy,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrQuickTxNotFound
@@ -414,6 +455,9 @@ func (s *Service) loadQuickBillTx(
 	}
 	if isSystem {
 		return nil, ErrQuickTxSystemRow
+	}
+	if paidBy {
+		return nil, transactions.ErrLinkModeConflict // someone paid it for me: one way at a time
 	}
 	if projectID != nil {
 		if !move || *projectID == targetProjectID {

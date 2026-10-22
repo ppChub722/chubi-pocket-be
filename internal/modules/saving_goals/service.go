@@ -536,8 +536,45 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, mo
 	}
 	out.Summary.MonthShortTotal = round2(out.Summary.MonthShortTotal)
 	out.Summary.MonthPlanTotal, out.Summary.MonthSavedTotal = round2(out.Summary.MonthPlanTotal), round2(out.Summary.MonthSavedTotal)
+	longTermTotals(&out.Summary, out.Data)
 	sortGoals(out.Data, sortBy)
 	return out, nil
+}
+
+// longTermTotals fills the hero ring (target_*) and the filter-chip counts.
+// The target_* sums cover the listed ACTIVE goals with a target: a completed goal
+// holds no money and an archived one is out of every calc. Each listed goal lands in
+// exactly one count: completed → done; no target → no_target; reached → done; else short.
+func longTermTotals(sum *ListSummary, goals []GoalView) {
+	var target, saved float64
+	for _, v := range goals {
+		reached := v.TargetAmount != nil && v.SavedAmount >= *v.TargetAmount-0.004
+		switch {
+		case v.State == StateCompleted:
+			sum.CountDone++
+		case v.TargetAmount == nil:
+			sum.CountNoTarget++
+		case reached:
+			sum.CountDone++
+		default:
+			sum.CountShort++
+		}
+		if v.TargetAmount == nil || v.State != StateActive {
+			continue
+		}
+		// saved is capped per goal, so target_total − target_saved_total = target_short_total.
+		capped := math.Max(0, math.Min(v.SavedAmount, *v.TargetAmount))
+		target += *v.TargetAmount
+		saved += capped
+	}
+	sum.TargetTotal, sum.TargetSavedTotal = round2(target), round2(saved)
+	sum.TargetShortTotal = round2(sum.TargetTotal - sum.TargetSavedTotal)
+	if sum.TargetTotal > 0 {
+		sum.TargetPercent = int(math.Min(100, math.Floor(sum.TargetSavedTotal/sum.TargetTotal*100+1e-9)))
+		if sum.TargetPercent < 0 {
+			sum.TargetPercent = 0
+		}
+	}
 }
 
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int, withDeletePreview bool) (*GoalDetail, error) {
@@ -648,7 +685,7 @@ func sortGoals(v []GoalView, by string) {
 			}
 			return a.RemainingAmount != nil && *a.RemainingAmount < *b.RemainingAmount
 		},
-		"name":      func(a, b *GoalView) bool { return strings.ToLower(a.Name) < strings.ToLower(b.Name) },
+		"name": func(a, b *GoalView) bool { return strings.ToLower(a.Name) < strings.ToLower(b.Name) },
 	}[by]
 	if less == nil {
 		return

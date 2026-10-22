@@ -13,11 +13,17 @@ func TodaySQL(userParam string) string {
 	 WHERE up.user_id = ` + userParam + ` LIMIT 1), 'Asia/Bangkok'))::date`
 }
 
-// SignedTxSQL is a transaction's effect on its wallet: + income, - expense, and
-// for a transfer the sign of its side (TRANSFER_OUT is minus). txAlias is the
-// transactions alias.
+// CashAmountSQL is what a transaction moves on its wallet: the amount minus the
+// part someone else paid (paid_by_amount, 0.4.0-3).
+func CashAmountSQL(txAlias string) string {
+	return `(` + txAlias + `.amount - COALESCE(` + txAlias + `.paid_by_amount, 0))`
+}
+
+// SignedTxSQL is a transaction's effect on its wallet: + income, - expense (its
+// cash part), and for a transfer the sign of its side (TRANSFER_OUT is minus).
+// txAlias is the transactions alias.
 func SignedTxSQL(txAlias string) string {
-	return `(CASE ` + txAlias + `.type WHEN 'income' THEN ` + txAlias + `.amount WHEN 'expense' THEN -` + txAlias + `.amount
+	return `(CASE ` + txAlias + `.type WHEN 'income' THEN ` + txAlias + `.amount WHEN 'expense' THEN -` + CashAmountSQL(txAlias) + `
 		WHEN 'transfer' THEN CASE WHEN (SELECT fc.system_kind FROM categories fc WHERE fc.id = ` + txAlias + `.category_id) = 'TRANSFER_OUT'
 			THEN -` + txAlias + `.amount ELSE ` + txAlias + `.amount END
 		ELSE 0 END)`

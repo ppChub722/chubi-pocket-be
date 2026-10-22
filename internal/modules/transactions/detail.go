@@ -28,14 +28,33 @@ type rowFacts struct {
 	debtName      *string
 	debtDirection *string
 	debtPaid      *bool
-	billID *uuid.UUID
-	recItemID   *uuid.UUID
-	recItemUser *uuid.UUID
-	recItemSeq  *int
-	recID       *uuid.UUID
-	recName     *string
-	recIcon     []byte
-	recTotal    *int
+	billID        *uuid.UUID
+	recItemID     *uuid.UUID
+	recItemUser   *uuid.UUID
+	recItemSeq    *int
+	recID         *uuid.UUID
+	recName       *string
+	recIcon       []byte
+	recTotal      *int
+	// the paid-by debt (personal_debts.paid_for_transaction_id = the row)
+	pbID        *uuid.UUID
+	pbKind      *string
+	pbContactID *uuid.UUID
+	pbName      *string
+	pbPaid      *bool
+}
+
+// linkMode — how the row's bill is shared (one way at a time).
+func linkMode(r *Transaction, f rowFacts) string {
+	switch {
+	case inEvent(r) || f.eventBill:
+		return LinkEvent
+	case f.splitCount > 0:
+		return LinkSplit
+	case r.PaidByAmount != nil:
+		return LinkPaid
+	}
+	return LinkPersonal
 }
 
 func buildDetails(
@@ -59,6 +78,12 @@ func buildDetails(
 		r := &rows[i]
 		if f, ok := facts[r.ID]; ok && f.debtContactID != nil && r.UserID == callerID {
 			debtContacts = append(debtContacts, *f.debtContactID)
+		}
+		if r.RepayContactID != nil && r.UserID == callerID {
+			debtContacts = append(debtContacts, *r.RepayContactID)
+		}
+		if f, ok := facts[r.ID]; ok && f.pbContactID != nil && r.UserID == callerID {
+			debtContacts = append(debtContacts, *f.pbContactID)
 		}
 		if r.AccountID != nil {
 			accIDs = append(accIDs, *r.AccountID)
@@ -93,9 +118,21 @@ func buildDetails(
 	if err != nil {
 		return nil, err
 	}
-	var splits map[uuid.UUID][]SplitRef
+	var (
+		splits     map[uuid.UUID][]SplitRef
+		billPeople map[uuid.UUID]shared.EventBillPeople
+	)
 	if withSplits {
 		if splits, err = loadSplits(ctx, q, callerID, ids); err != nil {
+			return nil, err
+		}
+		var billIDs []uuid.UUID
+		for _, f := range facts {
+			if f.billID != nil {
+				billIDs = append(billIDs, *f.billID)
+			}
+		}
+		if billPeople, err = shared.LoadEventBillPeople(ctx, q, callerID, billIDs); err != nil {
 			return nil, err
 		}
 	}
@@ -142,6 +179,13 @@ func buildDetails(
 				Paid:      f.debtPaid != nil && *f.debtPaid,
 			}
 		}
+		if r.RepayPersonName != nil && r.UserID == callerID {
+			p := shared.ResolvePerson(debtPersons, shared.PersonKey{ContactID: r.RepayContactID, Snapshot: *r.RepayPersonName})
+			d.RepaymentPerson = &RepaymentPerson{
+				Key: shared.DebtKey(r.RepayContactID, *r.RepayPersonName), Name: p.Name,
+				ContactID: r.RepayContactID, Person: p,
+			}
+		}
 		if f.recItemID != nil && f.recItemUser != nil && *f.recItemUser == callerID {
 			link := &shared.RecurringItemLink{ItemID: *f.recItemID, Seq: f.recItemSeq, Total: f.recTotal}
 			if f.recID != nil {
@@ -153,15 +197,45 @@ func buildDetails(
 			d.RecurringItem = link
 		}
 		if d.Project != nil && f.billID != nil {
-			d.EventBill = &EventBillLink{Event: *d.Project, BillID: *f.billID, Linked: f.eventBill}
+			d.EventBill = &EventBillLink{Event: *d.Project, BillID: *f.billID, Linked: f.eventBill, Kind: "copy"}
+			if f.eventBill {
+				d.EventBill.Kind = "origin"
+			}
+			if bp, ok := billPeople[*f.billID]; ok {
+				payer := bp.Payer
+				eb := d.EventBill
+				eb.Payer, eb.BillAmount, eb.Members = &payer, bp.Amount, bp.Members
+				if r.UserID == callerID {
+					eb.Differences = bp.Differences(f.eventBill, r.Amount, r.Date, r.Description, r.Note)
+					inSync := len(eb.Differences) == 0
+					eb.InSync = &inSync
+				}
+			}
 		}
 		d.Currency = f.currency
 		d.MyShare = f.myShare
 		d.SplitCount, d.HasSplits = f.splitCount, f.splitCount > 0
 		own := r.UserID == callerID
+		d.WalletAmount = r.Cash()
+		d.LinkMode = linkMode(&r, f)
+		if r.PaidByAmount != nil && f.pbID != nil && own {
+			name := ""
+			if f.pbName != nil {
+				name = *f.pbName
+			}
+			src := PaidBySourceMe
+			if f.pbKind != nil && *f.pbKind == "partner" {
+				src = PaidBySourcePartner
+			}
+			d.PaidBy = &PaidBy{
+				DebtID: *f.pbID, Key: shared.DebtKey(f.pbContactID, name),
+				Person: shared.ResolvePerson(debtPersons, shared.PersonKey{ContactID: f.pbContactID, Snapshot: name}),
+				Amount: *r.PaidByAmount, MyPaid: r.Cash(), Source: src, Paid: f.pbPaid != nil && *f.pbPaid,
+			}
+		}
 		d.CanSplit = f.billable
 		d.CanEditSplits = f.billable && own
-		d.CanJoinEvent = f.billable && own && (f.eventBill || !f.closed)
+		d.CanJoinEvent = f.billable && own && (f.eventBill || !f.closed) && r.PaidByAmount == nil
 		d.IsLocked = r.AccountID != nil && !f.callerActive
 		d.CanEditCategory = own && !d.IsLocked && f.billable
 		if r.AccountID != nil && f.activeMembers > 1 {
@@ -216,8 +290,10 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		       peer.id, peer.account_id, c.system_kind, pc.system_kind,
 		       de.counterparty_contact_id, de.counterparty_person_name, de.direction, de.paid,
 		       COALESCE(bp.parent_project_transaction_id, bp.id),
-		       ri.id, ri.user_id, ri.seq, rr.id, rr.name, rr.icon_code, rr.total_count
+		       ri.id, ri.user_id, ri.seq, rr.id, rr.name, rr.icon_code, rr.total_count,
+		       pb.id, pb.source_kind, pb.counterparty_contact_id, pb.counterparty_person_name, pb.paid
 		FROM transactions t
+		LEFT JOIN personal_debts pb ON pb.paid_for_transaction_id = t.id
 		LEFT JOIN recurring_items ri ON ri.transaction_id = t.id
 		LEFT JOIN recurring_rules rr ON rr.id = ri.rule_id
 		LEFT JOIN personal_debts de ON de.id = t.source_personal_debt_id
@@ -246,7 +322,8 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 			&f.closed, &f.activeMembers, &f.callerActive, &f.authorName, &f.authorIcon,
 			&f.peerID, &f.peerAccountID, &f.kind, &f.peerKind,
 			&f.debtContactID, &f.debtName, &f.debtDirection, &f.debtPaid, &f.billID,
-			&f.recItemID, &f.recItemUser, &f.recItemSeq, &f.recID, &f.recName, &f.recIcon, &f.recTotal); err != nil {
+			&f.recItemID, &f.recItemUser, &f.recItemSeq, &f.recID, &f.recName, &f.recIcon, &f.recTotal,
+			&f.pbID, &f.pbKind, &f.pbContactID, &f.pbName, &f.pbPaid); err != nil {
 			return nil, fmt.Errorf("row facts scan: %w", err)
 		}
 		out[id] = f

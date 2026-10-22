@@ -56,6 +56,9 @@ func (s *Service) createMirrorTx(ctx context.Context, tx pgx.Tx, splitter *Entry
 		return nil, fmt.Errorf("link mirror: %w", err)
 	}
 	mirror.CounterpartDebtID = &splitter.ID
+	if err := s.mirrorExpenseTx(ctx, tx, splitter, mirror); err != nil {
+		return nil, err
+	}
 	return mirror, nil
 }
 
@@ -78,7 +81,7 @@ func (s *Service) splitToPartnerTx(ctx context.Context, tx pgx.Tx, splitter *Ent
 	}
 	return s.notifs.DispatchSplitCreated(ctx, tx, partnerUserID, splitter.UserID, notifications.SplitCreatedPayload{
 		SplitID:             splitter.ID,
-		ParentKind:          "transaction",
+		ParentKind:          "transaction", // a split, or a paid_by on the splitter's expense
 		ParentID:            parentTxID,
 		ProjectID:           splitter.ProjectID,
 		SplitterDisplayName: displayNameTx(ctx, tx, splitter.UserID),
@@ -87,6 +90,7 @@ func (s *Service) splitToPartnerTx(ctx context.Context, tx pgx.Tx, splitter *Ent
 		Description:         splitter.Description,
 		Note:                splitter.Note,
 		RecipientDebtID:     mirrorID,
+		RecipientDirection:  opposite(splitter.Direction),
 	}, d.Auto)
 }
 

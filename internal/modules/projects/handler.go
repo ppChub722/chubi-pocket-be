@@ -1,10 +1,10 @@
 package projects
 
 import (
-	"strings"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -417,6 +417,21 @@ func (h *Handler) CopyToPersonal(c *gin.Context) {
 	reply(c, http.StatusCreated, out, err)
 }
 
+// ApplyEventToTx — POST /transactions/:id/apply-event: my transaction takes its event bill as it is
+// now (0.4.0-3 B3).
+func (h *Handler) ApplyEventToTx(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c) // :id is the transaction here
+	if !ok {
+		return
+	}
+	out, err := h.service.ApplyEventToTx(c.Request.Context(), userID, id)
+	if err != nil {
+		mapQuickCreateError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
 func (h *Handler) AddBills(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -604,6 +619,16 @@ func mapQuickCreateError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusUnprocessableEntity, "TX_NOT_BILLABLE", err.Error(), nil)
 	case errors.Is(err, ErrBillNotInProject):
 		response.NotFound(c, "TX_NOT_IN_PROJECT", "Transaction is not in this project")
+	case errors.Is(err, transactions.ErrTxNotFound):
+		response.NotFound(c, "NOT_FOUND", "Transaction not found")
+	case errors.Is(err, transactions.ErrLinkModeConflict):
+		response.BadRequest(c, "LINK_MODE_CONFLICT", err.Error(), nil)
+	case errors.Is(err, ErrBadBillPeople), errors.Is(err, ErrPayerIncome):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, ErrSplitsExceedParent):
+		response.BadRequest(c, "SPLITS_EXCEED_AMOUNT", "Shares add up to more than the bill", nil)
+	case errors.Is(err, ErrMemberNotInProject):
+		response.BadRequest(c, "MEMBER_NOT_IN_PROJECT", "Member does not belong to this event", nil)
 	case errors.Is(err, transactions.ErrAccountArchived):
 		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, transactions.ErrAccountForbidden):

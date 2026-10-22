@@ -24,13 +24,16 @@ func NewStore(db *pgxpool.Pool) *Store {
 func (s *Store) Pool() *pgxpool.Pool { return s.db }
 
 var (
-	ErrEntryNotFound = errors.New("debt entry not found")
-	ErrPersonNotFound = errors.New("no entries with this person")
-	ErrContactNotFound = errors.New("contact not found")
-	ErrTagsNeedWallet = errors.New("tags go on the wallet transaction: pick a wallet first")
+	ErrEntryNotFound      = errors.New("debt entry not found")
+	ErrPersonNotFound     = errors.New("no entries with this person")
+	ErrContactNotFound    = errors.New("contact not found")
+	ErrTagsNeedWallet     = errors.New("tags go on the wallet transaction: pick a wallet first")
 	ErrLedgerOnlyNoWallet = errors.New("a ledger-only entry has no wallet or tags: turn create_transaction on to use them")
-	ErrMarkPaidNotFound = errors.New("an entry to mark paid is not one of this person's")
-	ErrManagedBySource = errors.New("this entry comes from a split: only its description, note and paid label can change here")
+	ErrMarkPaidNotFound   = errors.New("an entry to mark paid is not one of this person's")
+	ErrManagedBySource    = errors.New("this entry comes from a split: only its description, note and paid label can change here")
+	ErrBillNotFound       = errors.New("bill not found in an event you are a member of")
+	// ErrManagedByTx — a paid-by debt is one record with its expense: edit or delete the transaction.
+	ErrManagedByTx = errors.New("this debt is the paid-by part of a transaction: edit or delete the transaction instead")
 )
 
 type querier interface {
@@ -58,7 +61,7 @@ const entryColumns = `id, user_id, direction,
 	counterparty_contact_id, counterparty_person_name,
 	source_transaction_id, source_project_transaction_id, project_id,
 	amount, currency, to_char(date, 'YYYY-MM-DD'), paid, source_kind, description, note,
-	created_at, updated_at, counterpart_debt_id`
+	created_at, updated_at, counterpart_debt_id, paid_for_transaction_id`
 
 func scanEntry(row pgx.Row) (*Entry, error) {
 	var e Entry
@@ -67,7 +70,7 @@ func scanEntry(row pgx.Row) (*Entry, error) {
 		&e.ContactID, &e.PersonName,
 		&e.SourceTransactionID, &e.SourceProjectTransactionID, &e.ProjectID,
 		&e.Amount, &e.Currency, &e.Date, &e.Paid, &e.SourceKind, &e.Description, &e.Note,
-		&e.CreatedAt, &e.UpdatedAt, &e.CounterpartDebtID,
+		&e.CreatedAt, &e.UpdatedAt, &e.CounterpartDebtID, &e.PaidForTransactionID,
 	)
 	return &e, err
 }
@@ -110,13 +113,13 @@ func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 		(id, user_id, direction, counterparty_contact_id, counterparty_person_name,
 		 source_transaction_id, source_project_transaction_id, project_id,
 		 amount, currency, date, paid, source_kind, description, note,
-		 created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::date, $12, $13, $14, $15, $2, $2)
+		 created_by_user_id, updated_by_user_id, paid_for_transaction_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::date, $12, $13, $14, $15, $2, $2, $16)
 		RETURNING `+entryColumns,
 		id, e.UserID, e.Direction, e.ContactID, strings.TrimSpace(e.PersonName),
 		e.SourceTransactionID, e.SourceProjectTransactionID, e.ProjectID,
 		e.Amount, strings.ToUpper(e.Currency), e.Date, e.Paid, e.SourceKind,
-		shared.CleanText(e.Description), shared.CleanText(e.Note)))
+		shared.CleanText(e.Description), shared.CleanText(e.Note), e.PaidForTransactionID))
 	if err != nil {
 		return nil, fmt.Errorf("insert entry: %w", err)
 	}
@@ -127,14 +130,15 @@ func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 	return row, nil
 }
 
+// ledgerSQL — the caller's ($1) person ledger: debts + repayment transactions (shared.DebtLedgerSQL).
+var ledgerSQL = `(` + shared.DebtLedgerSQL("$1") + `)`
+
+// peopleSQL — one row per person over the ledger (debts AND repayments, signed); keyFilter is
+// appended to the ledger's WHERE (alias l).
 func peopleSQL(keyFilter string) string {
 	return `
 		WITH e AS (
-			SELECT ` + shared.DebtKeySQL("pd") + ` AS key, pd.id,
-			       pd.counterparty_contact_id AS cid, pd.counterparty_person_name AS snap,
-			       ` + shared.DebtSignedSQL("pd") + ` AS signed, pd.paid, pd.date, pd.created_at
-			FROM personal_debts pd
-			WHERE pd.user_id = $1 ` + keyFilter + `
+			SELECT l.* FROM ` + ledgerSQL + ` l WHERE TRUE ` + keyFilter + `
 		), e2 AS (
 			-- the running balance in book order; a cycle ends where it hits 0
 			SELECT e.*, ROW_NUMBER() OVER w AS rn, SUM(signed) OVER w AS run
@@ -258,7 +262,7 @@ func (s *Store) totals(ctx context.Context, q shared.Querier, userID uuid.UUID) 
 func (s *Store) personBalance(ctx context.Context, q shared.Querier, userID uuid.UUID, k shared.DebtPersonKey) (DebtPerson, bool, error) {
 	key := k.Key()
 	rows, err := q.Query(ctx, `SELECT key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD'), cleared_at, days_out
-		FROM (`+peopleSQL("AND "+shared.DebtKeySQL("pd")+" = $2")+`) p`, userID, key)
+		FROM (`+peopleSQL("AND l.key = $2")+`) p`, userID, key)
 	if err != nil {
 		return DebtPerson{}, false, fmt.Errorf("person balance: %w", err)
 	}
@@ -296,15 +300,20 @@ func (s *Store) personBalance(ctx context.Context, q shared.Querier, userID uuid
 const entryViewSQL = `SELECT pd.id, ` + `pd.direction, pd.counterparty_contact_id, pd.counterparty_person_name,
 		pd.amount, to_char(pd.date, 'YYYY-MM-DD'), pd.description, pd.note, pd.paid, pd.source_kind,
 		CASE pd.source_kind WHEN 'transaction' THEN pd.source_transaction_id
-		                    WHEN 'event' THEN pd.project_id END,
+		                    WHEN 'event' THEN pd.project_id
+		                    WHEN 'paid_by' THEN pd.paid_for_transaction_id
+		                    WHEN 'partner' THEN pd.paid_for_transaction_id END,
 		CASE pd.source_kind WHEN 'transaction' THEN COALESCE(st.description, sc.name)
 		                    WHEN 'event' THEN sp.name
+		                    WHEN 'paid_by' THEN COALESCE(ft.description, fc.name)
 		                    WHEN 'partner' THEN ou.display_name END,
 		t.id, t.account_id, pd.created_at, pd.updated_at
 	FROM personal_debts pd
 	LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id
 	LEFT JOIN transactions st ON st.id = pd.source_transaction_id
 	LEFT JOIN categories sc ON sc.id = st.category_id
+	LEFT JOIN transactions ft ON ft.id = pd.paid_for_transaction_id
+	LEFT JOIN categories fc ON fc.id = ft.category_id
 	LEFT JOIN projects sp ON sp.id = pd.project_id
 	LEFT JOIN personal_debts op ON op.id = pd.counterpart_debt_id
 	LEFT JOIN users ou ON ou.id = op.user_id`
@@ -449,11 +458,14 @@ func (s *Store) listEntries(ctx context.Context, userID uuid.UUID, key string, f
 	return out, total, err
 }
 
+// entryCounts — over the statement (debts + repayments): money = debts with a wallet transaction +
+// every repayment.
 func (s *Store) entryCounts(ctx context.Context, userID uuid.UUID, key string) (EntryCounts, error) {
 	var c EntryCounts
-	err := s.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(t.id) FROM personal_debts pd
-		LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id
-		WHERE pd.user_id = $1 AND `+shared.DebtKeySQL("pd")+` = $2`, userID, key).Scan(&c.Entries, &c.Money)
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*),
+		       COUNT(*) FILTER (WHERE l.kind = 'repayment'
+		           OR EXISTS (SELECT 1 FROM transactions t WHERE t.source_personal_debt_id = l.id))
+		FROM `+ledgerSQL+` l WHERE l.key = $2`, userID, key).Scan(&c.Entries, &c.Money)
 	if err != nil {
 		return c, err
 	}
@@ -465,12 +477,171 @@ func (s *Store) entryCounts(ctx context.Context, userID uuid.UUID, key string) (
 		c.Current = c.Entries
 		return c, nil
 	}
-	err = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM personal_debts pd
-		WHERE pd.user_id = $1 AND `+shared.DebtKeySQL("pd")+` = $2
-		  AND (pd.date, pd.created_at, pd.id) > ($3::date, $4::timestamptz, $5::uuid)`,
+	err = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM `+ledgerSQL+` l
+		WHERE l.key = $2 AND (l.date, l.created_at, l.id) > ($3::date, $4::timestamptz, $5::uuid)`,
 		userID, key, mark.Date, mark.Created, mark.ID).Scan(&c.Current)
 	c.Earlier = c.Entries - c.Current
 	return c, err
+}
+
+// listStatement — the person's statement ("ที่มาของยอด"): debts and repayment transactions
+// interleaved, newest first (asc = oldest first), limited to a cycle (current | earlier | "" all).
+func (s *Store) listStatement(ctx context.Context, userID uuid.UUID, key, cycle string, asc bool, page, perPage int) ([]StatementItem, int, error) {
+	where := []string{"l.key = $2"}
+	args := []any{userID, key}
+	mark, err := s.cycleBoundary(ctx, s.db, userID, key)
+	if err != nil {
+		return nil, 0, err
+	}
+	switch {
+	case mark != nil && (cycle == "current" || cycle == "earlier"):
+		op := ">"
+		if cycle == "earlier" {
+			op = "<="
+		}
+		args = append(args, mark.Date, mark.Created, mark.ID)
+		where = append(where, fmt.Sprintf("(l.date, l.created_at, l.id) %s ($3::date, $4::timestamptz, $5::uuid)", op))
+	case mark == nil && cycle == "earlier":
+		where = append(where, "FALSE")
+	}
+	w := strings.Join(where, " AND ")
+	var total int
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM `+ledgerSQL+` l WHERE `+w, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("statement count: %w", err)
+	}
+	order := "l.date DESC, l.created_at DESC, l.id DESC"
+	if asc {
+		order = "l.date, l.created_at, l.id"
+	}
+	args = append(args, perPage, (page-1)*perPage)
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`SELECT l.kind, l.id FROM `+ledgerSQL+` l WHERE %s ORDER BY %s
+		LIMIT $%d OFFSET $%d`, w, order, len(args)-1, len(args)), args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("statement: %w", err)
+	}
+	type line struct {
+		kind string
+		id   uuid.UUID
+	}
+	var (
+		lines             []line
+		debtIDs, repayIDs []uuid.UUID
+	)
+	for rows.Next() {
+		var l line
+		if err := rows.Scan(&l.kind, &l.id); err != nil {
+			rows.Close()
+			return nil, 0, fmt.Errorf("statement scan: %w", err)
+		}
+		lines = append(lines, l)
+		if l.kind == "debt" {
+			debtIDs = append(debtIDs, l.id)
+		} else {
+			repayIDs = append(repayIDs, l.id)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	byID := map[uuid.UUID]StatementItem{}
+	if len(debtIDs) > 0 {
+		debts, err := loadViews(ctx, s.db, `WHERE pd.user_id = $1 AND pd.id = ANY($2)`, userID, debtIDs)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, d := range debts {
+			byID[d.ID] = debtItem(d)
+		}
+	}
+	repays, err := loadRepayments(ctx, s.db, userID, repayIDs)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, r := range repays {
+		byID[r.ID] = r
+	}
+	out := make([]StatementItem, 0, len(lines))
+	for _, l := range lines {
+		it, ok := byID[l.id]
+		if !ok {
+			continue
+		}
+		cur := mark.after(it.Date, it.CreatedAt, it.ID)
+		it.InCurrentCycle = &cur
+		out = append(out, it)
+	}
+	return out, total, nil
+}
+
+func debtItem(d DebtEntry) StatementItem {
+	paid := d.Paid
+	signed := d.Amount
+	if d.Direction != DirectionPaid {
+		signed = -d.Amount
+	}
+	return StatementItem{
+		Kind: ItemDebt, ID: d.ID, Key: d.Key, Direction: d.Direction, Amount: d.Amount, SignedAmount: signed,
+		Date: d.Date, Description: d.Description, Note: d.Note, Paid: &paid, Source: d.Source,
+		Transaction: d.Transaction, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
+	}
+}
+
+// loadRepayments — repayment transactions as statement items (pay = expense = direction paid, net +;
+// receive = income = direction received, net −).
+func loadRepayments(ctx context.Context, q shared.Querier, userID uuid.UUID, ids []uuid.UUID) ([]StatementItem, error) {
+	out := make([]StatementItem, 0, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.Query(ctx, `SELECT t.id, t.repay_contact_id, t.repay_person_name, t.type, t.amount,
+		       to_char(t.date, 'YYYY-MM-DD'), t.description, t.note, t.account_id, t.created_at, t.updated_at
+		FROM transactions t
+		WHERE t.user_id = $1 AND t.id = ANY($2) AND t.repay_person_name IS NOT NULL`, userID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("repayments: %w", err)
+	}
+	var accIDs []uuid.UUID
+	accOf := map[int]uuid.UUID{}
+	for rows.Next() {
+		var (
+			it    StatementItem
+			cid   *uuid.UUID
+			name  string
+			typ   string
+			accID *uuid.UUID
+		)
+		if err := rows.Scan(&it.ID, &cid, &name, &typ, &it.Amount, &it.Date, &it.Description, &it.Note,
+			&accID, &it.CreatedAt, &it.UpdatedAt); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("repayments scan: %w", err)
+		}
+		it.Kind, it.Key = ItemRepayment, shared.DebtKey(cid, name)
+		it.Direction, it.SignedAmount = DirectionPaid, it.Amount
+		if typ == "income" {
+			it.Direction, it.SignedAmount = DirectionReceived, -it.Amount
+		}
+		it.Transaction = &EntryTx{ID: it.ID}
+		if accID != nil {
+			accOf[len(out)] = *accID
+			accIDs = append(accIDs, *accID)
+		}
+		out = append(out, it)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	refs, err := shared.LoadAccountRefs(ctx, q, accIDs)
+	if err != nil {
+		return nil, err
+	}
+	for i, id := range accOf {
+		if r, ok := refs[id]; ok {
+			out[i].Transaction.Account = &r
+		}
+	}
+	return out, nil
 }
 
 func entryTxID(ctx context.Context, q querier, entryID uuid.UUID) (*uuid.UUID, error) {
@@ -489,11 +660,15 @@ func (s *Store) UnlinkedNames(ctx context.Context, userID uuid.UUID) ([]struct {
 	Name  string
 	Count int
 }, error) {
-	rows, err := s.db.Query(ctx, `SELECT counterparty_person_name, COUNT(*)
-		FROM personal_debts
-		WHERE user_id = $1 AND counterparty_contact_id IS NULL AND counterparty_person_name <> ''
-		GROUP BY counterparty_person_name
-		ORDER BY COUNT(*) DESC, LOWER(counterparty_person_name)`, userID)
+	rows, err := s.db.Query(ctx, `SELECT name, COUNT(*) FROM (
+			SELECT counterparty_person_name AS name FROM personal_debts
+			WHERE user_id = $1 AND counterparty_contact_id IS NULL AND counterparty_person_name <> ''
+			UNION ALL
+			SELECT repay_person_name FROM transactions
+			WHERE user_id = $1 AND repay_contact_id IS NULL AND repay_person_name <> ''
+		) x
+		GROUP BY name
+		ORDER BY COUNT(*) DESC, LOWER(name)`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("unlinked names: %w", err)
 	}
@@ -547,14 +722,22 @@ func (s *Store) AbsorbForContact(ctx context.Context, userID, contactID uuid.UUI
 	if err != nil {
 		return 0, fmt.Errorf("absorb: %w", err)
 	}
-	if tag.RowsAffected() > 0 {
+	repays, err := tx.Exec(ctx, `UPDATE transactions
+		SET repay_contact_id = $1, repay_person_name = $2, updated_by_user_id = $3
+		WHERE user_id = $3 AND repay_person_name IS NOT NULL AND repay_contact_id IS NULL
+		  AND LOWER(TRIM(repay_person_name)) = ANY($4::text[])`,
+		contactID, displayName, userID, lowered)
+	if err != nil {
+		return 0, fmt.Errorf("absorb repayments: %w", err)
+	}
+	if tag.RowsAffected()+repays.RowsAffected() > 0 {
 		_, _ = tx.Exec(ctx, `UPDATE contacts SET last_used_at = NOW() WHERE id = $1 AND user_id = $2`,
 			contactID, userID)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	return int(tag.RowsAffected() + repays.RowsAffected()), nil
 }
 
 func (s *Store) RestoreOnContactDeleteTx(ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID) (int, error) {
@@ -576,7 +759,15 @@ func (s *Store) RestoreOnContactDeleteTx(ctx context.Context, tx pgx.Tx, userID,
 	if err != nil {
 		return 0, fmt.Errorf("restore on delete: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	// Repayments too: the FK nulls the contact, the typed name keeps the person (level 1).
+	repays, err := tx.Exec(ctx, `UPDATE transactions
+		SET repay_person_name = $1, updated_by_user_id = $2
+		WHERE user_id = $2 AND repay_contact_id = $3`,
+		displayName, userID, contactID)
+	if err != nil {
+		return 0, fmt.Errorf("restore repayments on delete: %w", err)
+	}
+	return int(tag.RowsAffected() + repays.RowsAffected()), nil
 }
 
 func round2(f float64) float64 {

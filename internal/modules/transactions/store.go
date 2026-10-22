@@ -59,11 +59,13 @@ func (s *Store) LookupSourcePTTx(
 const txColumns = `id, user_id, account_id, type, amount, category_id,
 	to_char(date, 'YYYY-MM-DD') AS date, description, note, transfer_group_id,
 	source_personal_debt_id, source_project_transaction_id, project_id,
+	repay_contact_id, repay_person_name, paid_by_amount,
 	created_at, updated_at`
 
 const txColumnsT = `t.id, t.user_id, t.account_id, t.type, t.amount, t.category_id,
 	to_char(t.date, 'YYYY-MM-DD') AS date, t.description, t.note, t.transfer_group_id,
 	t.source_personal_debt_id, t.source_project_transaction_id, t.project_id,
+	t.repay_contact_id, t.repay_person_name, t.paid_by_amount,
 	t.created_at, t.updated_at`
 
 func scanTx(row pgx.Row) (*Transaction, error) {
@@ -72,10 +74,15 @@ func scanTx(row pgx.Row) (*Transaction, error) {
 		&t.ID, &t.UserID, &t.AccountID, &t.Type, &t.Amount, &t.CategoryID,
 		&t.Date, &t.Description, &t.Note, &t.TransferGroupID,
 		&t.SourcePersonalDebtID, &t.SourceProjectTransactionID, &t.ProjectID,
+		&t.RepayContactID, &t.RepayPersonName, &t.PaidByAmount,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
 	return &t, err
 }
+
+// reportableRow — the row's category counts in reports (shared.ReportableCategoryPredicate; no
+// category counts).
+const reportableRow = `COALESCE((SELECT rc.include_in_report FROM categories rc WHERE rc.id = t.category_id), TRUE)`
 
 func txVisible(txAlias, userParam string) string {
 	return "(" + txAlias + ".user_id = " + userParam + " OR " +
@@ -225,13 +232,16 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	if f.CanJoinEvent {
 		whereClauses = append(whereClauses, `t.user_id = $1 AND t.type IN ('expense', 'income')
 			AND t.project_id IS NULL AND t.source_personal_debt_id IS NULL AND t.source_project_transaction_id IS NULL
+			AND t.paid_by_amount IS NULL
 			AND NOT EXISTS (SELECT 1 FROM categories jc WHERE jc.id = t.category_id AND jc.is_system)
 			AND NOT EXISTS (SELECT 1 FROM personal_debts jd WHERE jd.source_transaction_id = t.id AND jd.user_id = t.user_id AND jd.paid)`)
 	}
 	if f.CounterpartyKey != "" {
 		args = append(args, f.CounterpartyKey)
-		whereClauses = append(whereClauses, fmt.Sprintf(`t.user_id = $1 AND EXISTS (SELECT 1 FROM personal_debts kd
-			WHERE kd.id = t.source_personal_debt_id AND kd.user_id = t.user_id AND %s = $%d)`, shared.DebtKeySQL("kd"), len(args)))
+		// The person's money: debts' linked transactions and the repayments to / from them.
+		whereClauses = append(whereClauses, fmt.Sprintf(`t.user_id = $1 AND (EXISTS (SELECT 1 FROM personal_debts kd
+			WHERE kd.id = t.source_personal_debt_id AND kd.user_id = t.user_id AND %[1]s = $%[3]d)
+			OR (t.repay_person_name IS NOT NULL AND %[2]s = $%[3]d))`, shared.DebtKeySQL("kd"), shared.RepayKeySQL("t"), len(args)))
 	}
 
 	where := strings.Join(whereClauses, " AND ")
@@ -241,11 +251,13 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		totals Totals
 	)
 	share := shared.ShareAmountExpr("t")
-	// The list shows future-dated rows, the totals count them from their day.
+	// The list shows future-dated rows, the totals count them from their day. Like reports, the
+	// income / expense totals leave out categories kept out of reports (Debt Paid / Received, …).
 	due := `t.date <= ` + shared.TodaySQL("$1")
+	counted := due + ` AND ` + reportableRow
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*),
-		COALESCE(SUM(`+share+`) FILTER (WHERE t.type = 'income' AND `+due+`), 0),
-		COALESCE(SUM(`+share+`) FILTER (WHERE t.type = 'expense' AND `+due+`), 0),
+		COALESCE(SUM(`+share+`) FILTER (WHERE t.type = 'income' AND `+counted+`), 0),
+		COALESCE(SUM(`+share+`) FILTER (WHERE t.type = 'expense' AND `+counted+`), 0),
 		COUNT(*) FILTER (WHERE t.type <> 'transfer' AND `+due+`)
 		FROM transactions t WHERE `+where, args...).Scan(&total, &totals.Income, &totals.Expense, &totals.Count)
 	if err != nil {
@@ -364,13 +376,14 @@ func (s *Store) InsertRowTx(ctx context.Context, tx pgx.Tx, t *Transaction) (*Tr
 	q := `INSERT INTO transactions
 		(id, user_id, account_id, type, amount, category_id, date, note,
 		 transfer_group_id, source_personal_debt_id, source_project_transaction_id, project_id,
-		 description, created_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $2)
+		 description, repay_contact_id, repay_person_name, paid_by_amount, created_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16, $2)
 		RETURNING ` + txColumns
 	created, err := scanTx(tx.QueryRow(ctx, q,
 		t.ID, t.UserID, t.AccountID, string(t.Type), t.Amount, t.CategoryID,
 		t.Date, shared.CleanText(t.Note), t.TransferGroupID,
-		t.SourcePersonalDebtID, t.SourceProjectTransactionID, t.ProjectID, shared.CleanText(t.Description)))
+		t.SourcePersonalDebtID, t.SourceProjectTransactionID, t.ProjectID, shared.CleanText(t.Description),
+		t.RepayContactID, t.RepayPersonName, t.PaidByAmount))
 	if err != nil {
 		return nil, fmt.Errorf("insert tx: %w", err)
 	}
@@ -384,9 +397,14 @@ func (s *Store) UpdateRowTx(
 	description *string, descriptionChange bool,
 	note *string, noteChange bool,
 	accountID *uuid.UUID, accountIDChange bool,
+	paidBy *float64, paidByChange bool,
 ) (*Transaction, error) {
 	q := `UPDATE transactions SET updated_by_user_id = $1`
 	args := []any{userID}
+	if paidByChange {
+		args = append(args, paidBy)
+		q += fmt.Sprintf(", paid_by_amount = $%d", len(args))
+	}
 	if amount != nil {
 		args = append(args, *amount)
 		q += fmt.Sprintf(", amount = $%d", len(args))

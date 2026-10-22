@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -38,10 +39,10 @@ var (
 	ErrTransferEditCurrency        = errors.New("cannot edit currency on a transfer; delete and recreate")
 	ErrTransferCategoryEdit        = errors.New("cannot change category on a transfer; delete and recreate")
 	// tag_ids / PUT /:id/tags: every id must be one of the caller's tags.
-	ErrTagNotFound = errors.New("tag not found")
+	ErrTagNotFound                = errors.New("tag not found")
 	ErrSystemTransactionImmutable = errors.New("transactions in a system category cannot be edited or deleted directly; use the account-level operation that created them")
-	ErrCategoryAuthorOnly = errors.New("only the row's author may change its category")
-	ErrRowLocked          = errors.New("membership on this account has ended; the row is read-only for you")
+	ErrCategoryAuthorOnly         = errors.New("only the row's author may change its category")
+	ErrRowLocked                  = errors.New("membership on this account has ended; the row is read-only for you")
 )
 
 type (
@@ -58,6 +59,7 @@ type Service struct {
 	debtLinks    DebtLinks
 	eventBills   EventBillSyncer
 	billDeleter  EventBillDeleter
+	eventLinks   EventLinks
 	recurring    RecurringLinks
 }
 
@@ -212,7 +214,17 @@ func (s *Service) CreateWrite(ctx context.Context, userID uuid.UUID, req CreateR
 			touched = append(touched, *rows[i].AccountID)
 		}
 	}
-	return s.writeResult(ctx, rows, touched)
+	out, err := s.writeResult(ctx, rows, touched)
+	if err != nil {
+		return nil, err
+	}
+	// paid_by: the person's new balance (the debt "I owe them" came with the save).
+	if len(rows) == 1 && rows[0].PaidBy != nil && s.debtLinks != nil {
+		if out.PersonBalance, err = s.debtLinks.PersonBalanceByKey(ctx, userID, rows[0].PaidBy.Key); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) writeResult(ctx context.Context, rows []TransactionDetail, touched []uuid.UUID) (*WriteResult, error) {
@@ -250,6 +262,20 @@ func (s *Service) validateCreateCommon(req CreateRequest) error {
 	if req.ProjectID != nil {
 		return ErrProjectIDNotAllowed
 	}
+	if req.PaidBy != nil {
+		if err := checkPaidByInput(req.Type, req.PaidBy); err != nil {
+			return err
+		}
+		if len(req.Splits) > 0 || req.SourceProjectTransactionID != nil {
+			return ErrLinkModeConflict
+		}
+		if req.PaidBy.Amount > req.Amount+paidByEps {
+			return ErrPaidByExceedsAmount
+		}
+		if s.debtLinks == nil {
+			return ErrSplitsNotSupportedYet
+		}
+	}
 	if req.SourceProjectTransactionID != nil && req.Type == TypeTransfer {
 		return ErrSplitsOnTransfer
 	}
@@ -278,6 +304,14 @@ func (s *Service) validateCreateCommon(req CreateRequest) error {
 }
 
 func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, req CreateRequest) (*TransactionDetail, error) {
+	var paidBy *float64
+	if req.PaidBy != nil {
+		pb := req.PaidBy.Amount
+		paidBy = &pb
+		if math.Abs(pb-req.Amount) < paidByEps {
+			req.AccountID = nil // they paid it all: nothing leaves a wallet
+		}
+	}
 	var currency string
 	if req.AccountID != nil {
 		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*req.AccountID}); err != nil {
@@ -332,6 +366,7 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 		Note:                       req.Note,
 		ProjectID:                  projectID,
 		SourceProjectTransactionID: req.SourceProjectTransactionID,
+		PaidByAmount:               paidBy,
 	}
 	created, err := s.store.InsertRowTx(ctx, tx, row)
 	if err != nil {
@@ -339,12 +374,17 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	}
 
 	if req.AccountID != nil {
-		delta := signedDelta(req.Type, req.Amount, false)
+		delta := signedDelta(req.Type, created.Cash(), false)
 		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *req.AccountID, delta); err != nil {
 			return nil, err
 		}
 	}
 
+	if req.PaidBy != nil {
+		if _, err := s.debtLinks.SetPaidByTx(ctx, tx, userID, created, req.PaidBy); err != nil {
+			return nil, err
+		}
+	}
 	if len(req.Splits) > 0 {
 		if err := s.debtsCreator(ctx, tx, created.ID, userID, string(created.Type), currency, created.Description, req.Splits); err != nil {
 			return nil, err
@@ -444,20 +484,30 @@ func (s *Service) UpdateInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUI
 	if err := s.authorizeRowMutation(ctx, userID, current, req); err != nil {
 		return err
 	}
-	if err := s.checkNotSystemRow(ctx, current); err != nil {
-		return err
+	// A debt entry's wallet side is edited from the entry (system row here); a repayment is editable.
+	var check error
+	if current.SourcePersonalDebtID != nil {
+		check = s.checkNotSystemRow(ctx, current)
+	} else {
+		check = s.checkLinkedEdit(ctx, userID, current, req, false)
 	}
-	if _, err = s.updateSingleInTx(ctx, tx, userID, current, req); err != nil {
+	if check != nil {
+		return check
+	}
+	if _, _, err = s.updateSingleInTx(ctx, tx, userID, current, req); err != nil {
 		return err
 	}
 	return s.replaceTagsIfSent(ctx, tx, userID, id, req)
 }
 
 type updated struct {
-	rows    []Transaction
-	group   *uuid.UUID // transfers
-	touched []uuid.UUID
+	rows      []Transaction
+	group     *uuid.UUID // transfers
+	touched   []uuid.UUID
 	debtEntry *uuid.UUID
+	debtKey   string // a repayment's person
+	// personKeys — the debt people the row touched before / after (its splits, its paid-by debt).
+	personKeys []string
 }
 
 func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (any, error) {
@@ -484,79 +534,157 @@ func (s *Service) UpdateWrite(ctx context.Context, userID, id uuid.UUID, req Upd
 	if err != nil {
 		return nil, err
 	}
-	if u.debtEntry != nil && s.debtLinks != nil {
+	switch {
+	case s.debtLinks == nil:
+	case u.debtEntry != nil:
 		if out.PersonBalance, err = s.debtLinks.PersonBalanceByEntry(ctx, userID, *u.debtEntry); err != nil {
 			return nil, err
+		}
+	case u.debtKey != "":
+		if out.PersonBalance, err = s.debtLinks.PersonBalanceByKey(ctx, userID, u.debtKey); err != nil {
+			return nil, err
+		}
+	}
+	if s.debtLinks != nil {
+		for _, k := range u.personKeys {
+			b, err := s.debtLinks.PersonBalanceByKey(ctx, userID, k)
+			if err != nil {
+				return nil, err
+			}
+			out.PersonBalances = append(out.PersonBalances, b)
 		}
 	}
 	return out, nil
 }
 
 func (s *Service) update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (*updated, error) {
-	tx, err := s.store.Pool().Begin(ctx)
+	u, _, err := s.updateOrPreview(ctx, userID, id, req, false)
+	return u, err
+}
+
+// Preview — PUT /transactions/{id}?preview=true: the whole edit runs in a savepoint and is rolled
+// back; the answer says what it would do (the row, every touched person's and wallet's balance).
+func (s *Service) Preview(ctx context.Context, userID, id uuid.UUID, req UpdateRequest) (*PreviewResult, error) {
+	_, p, err := s.updateOrPreview(ctx, userID, id, req, true)
+	return p, err
+}
+
+func (s *Service) updateOrPreview(ctx context.Context, userID, id uuid.UUID, req UpdateRequest, preview bool) (*updated, *PreviewResult, error) {
+	outer, err := s.store.Pool().Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+		return nil, nil, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer outer.Rollback(ctx)
+	tx := outer
+	if preview {
+		if tx, err = outer.Begin(ctx); err != nil { // a savepoint: the "before" stays readable
+			return nil, nil, fmt.Errorf("savepoint: %w", err)
+		}
+		defer tx.Rollback(ctx)
+	}
 
 	current, err := s.store.GetByID(ctx, userID, id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var out updated
 	if current.Type == TypeTransfer {
 		outRow, inRow, touched, err := s.updateTransferInTx(ctx, tx, userID, current, req)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		out = updated{rows: []Transaction{*outRow, *inRow}, group: current.TransferGroupID, touched: touched}
+		if err := s.replaceTagsIfSent(ctx, tx, userID, id, req); err != nil {
+			return nil, nil, err
+		}
 	} else {
 		if err := s.authorizeRowMutation(ctx, userID, current, req); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		if current.SourcePersonalDebtID != nil {
-			if err := checkDebtTxEdit(userID, current, req, false); err != nil {
-				return nil, err
-			}
-		} else if err := s.checkNotSystemRow(ctx, current); err != nil {
-			// Non-transfer with a system category (Opening Balance / Adjustment) is read-only — the user
-			// can't directly edit the auto-created bookkeeping row.
-			return nil, err
+		// Non-transfer with a system category (Opening Balance / Adjustment) is read-only — the user
+		// can't directly edit the auto-created bookkeeping row; a debt's wallet side and a repayment
+		// are the exceptions.
+		if err := s.checkLinkedEdit(ctx, userID, current, req, false); err != nil {
+			return nil, nil, err
+		}
+		if out.personKeys, err = personKeysTx(ctx, tx, userID, current.ID); err != nil {
+			return nil, nil, err
 		}
 		bill, err := linkedBillTx(ctx, tx, current)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		row, err := s.updateSingleInTx(ctx, tx, userID, current, req)
+		// 0.4.0-3 B3: a link-mode switch first drops the old mode's data (splits, paid-by debt, event).
+		join, err := s.switchModeTx(ctx, tx, userID, current, &req)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		if bill != nil && req.AlsoUpdateLink && s.eventBills != nil && (row.Amount != current.Amount || row.Date != current.Date) {
+		if current, err = reloadTx(ctx, tx, id); err != nil {
+			return nil, nil, err
+		}
+		row, paidByKey, err := s.updateSingleInTx(ctx, tx, userID, current, req)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := s.replaceTagsIfSent(ctx, tx, userID, id, req); err != nil {
+			return nil, nil, err
+		}
+		if req.Splits != nil {
+			if err := s.applySplitsTx(ctx, tx, userID, row, *req.Splits); err != nil {
+				return nil, nil, err
+			}
+		}
+		switch {
+		case join != nil:
+			if s.eventLinks == nil {
+				return nil, nil, ErrSplitsNotSupportedYet
+			}
+			if err := s.eventLinks.JoinTx(ctx, tx, userID, row, join.ProjectID, join.BillPeople); err != nil {
+				return nil, nil, err
+			}
+		case (req.ApplyToEvent || req.AlsoUpdateLink) && inEvent(row) && s.eventLinks != nil:
+			if err := s.eventLinks.PushTx(ctx, tx, userID, row); err != nil {
+				return nil, nil, err
+			}
+		case bill != nil && req.AlsoUpdateLink && s.eventBills != nil && (row.Amount != current.Amount || row.Date != current.Date):
 			if err := s.eventBills(ctx, tx, userID, *bill, row.Amount, row.Date); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		if req.AlsoUpdateLink && s.recurring != nil {
 			tagIDs, tagsSet := req.TagIDsChange()
 			if err := s.recurring.TxEditedTx(ctx, tx, userID, row, tagIDs, tagsSet); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		if row.SourcePersonalDebtID != nil && s.debtLinks != nil {
 			if err := s.debtLinks.TxEditedTx(ctx, tx, userID, *row.SourcePersonalDebtID, row); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
-		out = updated{rows: []Transaction{*row}, touched: nonNilIDs(current.AccountID, row.AccountID), debtEntry: row.SourcePersonalDebtID}
+		if row, err = reloadTx(ctx, tx, id); err != nil {
+			return nil, nil, err
+		}
+		after, err := personKeysTx(ctx, tx, userID, row.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		out.personKeys = unionKeys(out.personKeys, after)
+		out.rows, out.touched = []Transaction{*row}, nonNilIDs(current.AccountID, row.AccountID)
+		out.debtEntry, out.debtKey = row.SourcePersonalDebtID, repayKey(row)
+		if paidByKey != "" {
+			out.debtKey = paidByKey
+		}
 	}
-	if err := s.replaceTagsIfSent(ctx, tx, userID, id, req); err != nil {
-		return nil, err
+	if preview {
+		p, err := s.previewResult(ctx, outer, tx, userID, &out)
+		return nil, p, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
+		return nil, nil, fmt.Errorf("commit: %w", err)
 	}
-	return &out, nil
+	return &out, nil, nil
 }
 
 func (s *Service) replaceTagsIfSent(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, req UpdateRequest) error {
@@ -615,69 +743,88 @@ func (s *Service) assertWritable(ctx context.Context, ids ...*uuid.UUID) error {
 func (s *Service) updateSingleInTx(
 	ctx context.Context, tx pgx.Tx, userID uuid.UUID,
 	current *Transaction, req UpdateRequest,
-) (*Transaction, error) {
+) (*Transaction, string, error) {
+	// paid_by first: it may drop the wallet (they paid it all).
+	plan, err := s.planPaidBy(ctx, tx, current, &req)
+	if err != nil {
+		return nil, "", err
+	}
 	newAccID, accChange := req.AccountIDChange()
 
 	newCatID, catChange := req.CategoryIDChange()
 	if catChange && newCatID != nil {
 		c, err := s.cats.GetCategoryRow(ctx, userID, *newCatID)
 		if err != nil {
-			return nil, ErrCategoryForbidden
+			return nil, "", ErrCategoryForbidden
 		}
 		if c.IsSystem {
-			return nil, ErrSystemCategoryNotAllowed
+			return nil, "", ErrSystemCategoryNotAllowed
 		}
 		if c.Type != string(current.Type) {
-			return nil, ErrCategoryTypeMismatch
+			return nil, "", ErrCategoryTypeMismatch
 		}
 	}
 
+	// The wallet moves the cash part only (amount − paid_by).
 	effectiveAmount := current.Amount
 	if req.Amount != nil {
 		effectiveAmount = *req.Amount
+	}
+	oldCash, newCash := current.Cash(), effectiveAmount
+	if plan.amount != nil {
+		newCash -= *plan.amount
 	}
 
 	if accChange {
 		if current.AccountID != nil {
 			if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*current.AccountID}); err != nil {
-				return nil, err
+				return nil, "", err
 			}
-			oldDelta := signedDelta(current.Type, current.Amount, false)
+			oldDelta := signedDelta(current.Type, oldCash, false)
 			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *current.AccountID, -oldDelta); err != nil {
-				return nil, err
+				return nil, "", err
 			}
 		}
 		if newAccID != nil {
 			if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*newAccID}); err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *newAccID); err != nil {
-				return nil, err
+				return nil, "", err
 			}
-			newDelta := signedDelta(current.Type, effectiveAmount, false)
+			newDelta := signedDelta(current.Type, newCash, false)
 			if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *newAccID, newDelta); err != nil {
-				return nil, err
+				return nil, "", err
 			}
 		}
-	} else if req.Amount != nil && *req.Amount != current.Amount && current.AccountID != nil {
+	} else if newCash != oldCash && current.AccountID != nil {
 		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*current.AccountID}); err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		oldDelta := signedDelta(current.Type, current.Amount, false)
-		newDelta := signedDelta(current.Type, *req.Amount, false)
+		oldDelta := signedDelta(current.Type, oldCash, false)
+		newDelta := signedDelta(current.Type, newCash, false)
 		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *current.AccountID, newDelta-oldDelta); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 
 	descVal, descChanged := req.DescriptionChange()
 	noteVal, noteChanged := req.NoteChange()
-	return s.store.UpdateRowTx(ctx, tx, userID, current.ID,
+	row, err := s.store.UpdateRowTx(ctx, tx, userID, current.ID,
 		req.Amount, req.Date,
 		newCatID, catChange,
 		descVal, descChanged,
 		noteVal, noteChanged,
-		newAccID, accChange)
+		newAccID, accChange,
+		plan.amount, plan.sent)
+	if err != nil {
+		return nil, "", err
+	}
+	key, err := s.syncPaidByTx(ctx, tx, userID, row, plan)
+	if err != nil {
+		return nil, "", err
+	}
+	return row, key, nil
 }
 
 func (s *Service) transferPair(ctx context.Context, current *Transaction) (outRow, inRow *Transaction, err error) {
@@ -796,12 +943,12 @@ func (s *Service) updateTransferInTx(
 	noteVal, noteChanged := req.NoteChange()
 
 	updatedOut, err := s.store.UpdateRowTx(ctx, tx, userID, outRow.ID,
-		req.Amount, req.Date, nil, false, descVal, descChanged, noteVal, noteChanged, newOutAccID, outAccChange)
+		req.Amount, req.Date, nil, false, descVal, descChanged, noteVal, noteChanged, newOutAccID, outAccChange, nil, false)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	updatedIn, err := s.store.UpdateRowTx(ctx, tx, userID, inRow.ID,
-		req.Amount, req.Date, nil, false, descVal, descChanged, noteVal, noteChanged, newInAccID, inAccChange)
+		req.Amount, req.Date, nil, false, descVal, descChanged, noteVal, noteChanged, newInAccID, inAccChange, nil, false)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -835,7 +982,7 @@ func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID, alsoDel
 	}
 	out := &DeleteResult{ID: id, AccountBalances: balances, DebtEntryID: d.debtEntry,
 		RecurringItemID: d.item, BillID: d.bill}
-	if d.debtEntry != nil && s.debtLinks != nil {
+	if d.debtKey != "" && s.debtLinks != nil {
 		if out.PersonBalance, err = s.debtLinks.PersonBalanceByKey(ctx, userID, d.debtKey); err != nil {
 			return nil, err
 		}
@@ -881,15 +1028,19 @@ func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLi
 		}
 		// Non-transfer with a system category (Opening Balance, Adjustment) is undeletable — silently
 		// dropping it would leave the cached `accounts.balance` honest but the audit trail would lie.
-		if current.SourcePersonalDebtID != nil {
-			if err := checkDebtTxEdit(userID, current, UpdateRequest{}, true); err != nil {
-				return nil, err
-			}
-		} else if err := s.checkNotSystemRow(ctx, current); err != nil {
+		if err := s.checkLinkedEdit(ctx, userID, current, UpdateRequest{}, true); err != nil {
+			return nil, err
+		}
+		paidByKey, err := s.paidByDeletingTx(ctx, tx, userID, current)
+		if err != nil {
 			return nil, err
 		}
 		if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
 			return nil, err
+		}
+		out.debtKey = repayKey(current) // a repayment: deleting it is deleting the repayment
+		if paidByKey != "" {
+			out.debtKey = paidByKey
 		}
 		if current.SourcePersonalDebtID != nil && s.debtLinks != nil {
 			key, err := s.debtLinks.TxDeletedTx(ctx, tx, userID, *current.SourcePersonalDebtID)
@@ -961,7 +1112,7 @@ func (s *Service) deleteSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*current.AccountID}); err != nil {
 			return err
 		}
-		delta := signedDelta(current.Type, current.Amount, false)
+		delta := signedDelta(current.Type, current.Cash(), false)
 		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *current.AccountID, -delta); err != nil {
 			return err
 		}
@@ -1281,6 +1432,9 @@ func (s *Service) EditSplits(ctx context.Context, userID, id uuid.UUID, edits []
 	}
 	if err := s.checkNotSystemRow(ctx, current); err != nil {
 		return nil, err
+	}
+	if current.PaidByAmount != nil && len(edits) > 0 {
+		return nil, ErrLinkModeConflict
 	}
 	var sum float64
 	for _, e := range edits {

@@ -48,7 +48,7 @@ type Counts struct {
 	DebtsSummary   DebtsSummary   `json:"debts_summary"`
 	BudgetsSummary BudgetsSummary `json:"budgets_summary"`
 	Recurring      RecurringCount `json:"recurring"`
-	Archived int `json:"archived"`
+	Archived       int            `json:"archived"`
 }
 
 type MeCounts struct {
@@ -116,9 +116,9 @@ var countsSQL = `SELECT
 	(SELECT COUNT(*) FROM contacts WHERE user_id = $1 AND status = 'active'),
 	(SELECT COUNT(*) FROM projects p WHERE p.status = 'active' AND (p.owner_user_id = $1 OR EXISTS (
 		SELECT 1 FROM project_members m WHERE m.project_id = p.id AND m.user_id = $1 AND m.status = 'active'))),
-	(SELECT COUNT(*) FROM (SELECT 1 FROM personal_debts pd WHERE pd.user_id = $1
-		GROUP BY ` + shared.DebtKeySQL("pd") + `
-		HAVING ABS(SUM(` + shared.DebtSignedSQL("pd") + `)) > 0.005 OR BOOL_OR(NOT pd.paid)) open_people),
+	(SELECT COUNT(*) FROM (SELECT 1 FROM (` + shared.DebtLedgerSQL("$1") + `) l
+		GROUP BY l.key
+		HAVING ABS(SUM(l.signed)) > 0.005 OR BOOL_OR(NOT l.paid)) open_people),
 	(SELECT COUNT(*) FROM budgets WHERE user_id = $1 AND status = 'active' AND closed_on IS NULL)`
 
 func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string) (*MeCounts, error) {

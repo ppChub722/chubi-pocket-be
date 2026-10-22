@@ -47,7 +47,7 @@ func thaiDate(d string) string {
 }
 
 func (s *Service) summaryMessage(ctx context.Context, userID uuid.UUID, k shared.DebtPersonKey, bal DebtPerson) (*SummaryMessage, error) {
-	items, _, err := s.store.listEntries(ctx, userID, k.Key(), EntryFilter{Cycle: "current", Sort: "date_asc", Page: 1, PerPage: 200})
+	items, _, err := s.store.listStatement(ctx, userID, k.Key(), "current", true, 1, 200)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,12 @@ func (s *Service) summaryMessage(ctx context.Context, userID uuid.UUID, k shared
 	fmt.Fprintf(&b, "สรุปยอดกับ %s\n", name)
 	for _, e := range items {
 		sign, what := "+", "ฉันจ่ายให้"
-		if e.Direction == DirectionReceived {
+		switch {
+		case e.Kind == ItemRepayment && e.Direction == DirectionPaid:
+			what = "ฉันจ่ายคืน"
+		case e.Kind == ItemRepayment:
+			sign, what = "−", "ได้รับคืนจาก"
+		case e.Direction == DirectionReceived:
 			sign, what = "−", "ได้รับจาก"
 		}
 		line := fmt.Sprintf("%s %s %s%s %s", thaiDate(e.Date), what, sign, money(e.Amount), unit)

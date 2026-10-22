@@ -16,9 +16,11 @@ import (
 var ErrNoShareToCopy = errors.New("you have no part in this project row to copy")
 
 func personalCopyTx(ctx context.Context, tx pgx.Tx, userID, ptID uuid.UUID) (id uuid.UUID, amount float64, ok bool) {
+	// A copy may point at the bill or (older resolve flows) at one of its split rows.
 	err := tx.QueryRow(ctx, `
 		SELECT id, amount FROM transactions
-		WHERE user_id = $1 AND source_project_transaction_id = $2
+		WHERE user_id = $1 AND (source_project_transaction_id = $2
+		   OR source_project_transaction_id IN (SELECT c.id FROM project_transactions c WHERE c.parent_project_transaction_id = $2))
 		ORDER BY created_at LIMIT 1`, userID, ptID).Scan(&id, &amount)
 	return id, amount, err == nil
 }

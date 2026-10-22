@@ -31,8 +31,83 @@ type Transaction struct {
 	SourcePersonalDebtID       *uuid.UUID `json:"-"` // the debt entry this row is the wallet side of (see Counterparty)
 	SourceProjectTransactionID *uuid.UUID `json:"source_project_transaction_id"`
 	ProjectID                  *uuid.UUID `json:"-"`
-	CreatedAt                  time.Time  `json:"created_at"`
-	UpdatedAt                  time.Time  `json:"updated_at"`
+	// A repayment (0.4.0-3): the debt person this expense (I paid back) / income (I got paid back)
+	// is tied to. RepayPersonName is set on every repayment; RepayContactID only for a contact.
+	RepayContactID  *uuid.UUID `json:"-"`
+	RepayPersonName *string    `json:"-"`
+	// PaidByAmount (0.4.0-3) — the part of this expense someone else paid (the bill stays Amount; the
+	// wallet moves only Amount − PaidByAmount). nil = I paid it all.
+	PaidByAmount *float64  `json:"-"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// Cash — what the row moves on its wallet: the amount minus the part someone else paid.
+func (t *Transaction) Cash() float64 {
+	if t.PaidByAmount == nil {
+		return t.Amount
+	}
+	return t.Amount - *t.PaidByAmount
+}
+
+// Link modes (0.4.0-3): how the bill is shared, one at a time.
+const (
+	LinkPersonal = "personal" // all mine
+	LinkSplit    = "split"    // I paid, others owe me their part (splits)
+	LinkPaid     = "paid"     // someone else paid (part of) it for me (paid_by)
+	LinkEvent    = "event"    // an event bill
+)
+
+// EventTarget — the event a row switches into, and the bill's people (default: I paid, no splits).
+type EventTarget struct {
+	ProjectID uuid.UUID `json:"project_id" binding:"required"`
+	shared.BillPeople
+}
+
+// PersonDelta — a debt person's balance before / after a write (the preview's dry run).
+type PersonDelta struct {
+	Key    string           `json:"key"`
+	Person shared.PersonRef `json:"person"`
+	Before float64          `json:"before"`
+	After  float64          `json:"after"`
+	Delta  float64          `json:"delta"`
+}
+
+// WalletDelta — a wallet's balance before / after a write (the preview's dry run).
+type WalletDelta struct {
+	AccountID uuid.UUID `json:"account_id"`
+	Before    float64   `json:"before"`
+	After     float64   `json:"after"`
+	Delta     float64   `json:"delta"`
+}
+
+// PreviewResult — PUT /transactions/{id}?preview=true: what the edit would do, nothing saved.
+type PreviewResult struct {
+	Preview bool                `json:"preview"`
+	Rows    []TransactionDetail `json:"rows"`
+	People  []PersonDelta       `json:"people"`
+	Wallets []WalletDelta       `json:"wallets"`
+}
+
+// PaidByInput — who paid (part of) the bill for me: a contact, or a typed name (person_name), and
+// how much they paid (≤ the bill; the rest is mine from the wallet).
+type PaidByInput struct {
+	ContactID  *uuid.UUID `json:"contact_id"`
+	PersonName string     `json:"person_name" binding:"omitempty,max=100"`
+	Amount     float64    `json:"amount"      binding:"required,gt=0"`
+}
+
+// PaidBy — the paid_by view of a row: the debt "I owe them" it made, and the cash split.
+type PaidBy struct {
+	DebtID uuid.UUID        `json:"debt_id"`
+	Key    string           `json:"key"`
+	Person shared.PersonRef `json:"person"`
+	Amount float64          `json:"amount"`  // what they paid
+	MyPaid float64          `json:"my_paid"` // what I paid from the wallet (0 = no wallet)
+	// Source — me (I recorded it) | partner (another user's split on me, mirrored into my book: its
+	// money is locked).
+	Source string `json:"source"`
+	Paid   bool   `json:"paid"` // the debt's "จ่ายแล้ว" label
 }
 
 type SplitInput struct {
@@ -92,21 +167,29 @@ type TransferPeer struct {
 
 type TransactionDetail struct {
 	Transaction
-	Currency string             `json:"currency"`
-	Account  *shared.AccountRef `json:"account"`
+	Currency     string              `json:"currency"`
+	Account      *shared.AccountRef  `json:"account"`
 	Category     *shared.CategoryRef `json:"category"`
 	Tags         []shared.TagRef     `json:"tags"` // the caller's tags on the row
 	Project      *shared.EventRef    `json:"project"`
 	TransferPeer *TransferPeer       `json:"transfer_peer"` // transfer rows only
-	Counterparty *shared.DebtLink `json:"counterparty"`
-	EventBill *EventBillLink `json:"event_bill"`
-	RecurringItem *shared.RecurringItemLink `json:"recurring_item"`
-	MyShare *float64 `json:"my_share"`
-	SplitCount int `json:"split_count"`
-	Splits *[]SplitRef `json:"splits"`
-	CanSplit      bool `json:"can_split"`
-	CanEditSplits bool `json:"can_edit_splits"`
-	CanJoinEvent  bool `json:"can_join_event"`
+	Counterparty *shared.DebtLink    `json:"counterparty"`
+	// RepaymentPerson — set when this row is a repayment to / from a debt person (tx detail
+	// "จ่ายคืนให้ ลี ›"); null otherwise.
+	RepaymentPerson *RepaymentPerson          `json:"repayment_person"`
+	EventBill       *EventBillLink            `json:"event_bill"`
+	RecurringItem   *shared.RecurringItemLink `json:"recurring_item"`
+	MyShare         *float64                  `json:"my_share"`
+	SplitCount      int                       `json:"split_count"`
+	Splits          *[]SplitRef               `json:"splits"`
+	// LinkMode — personal | split | paid | event (the quick-create view the row was saved with).
+	LinkMode string  `json:"link_mode"`
+	PaidBy   *PaidBy `json:"paid_by"`
+	// WalletAmount — what the row moved on its wallet (amount − paid_by.amount).
+	WalletAmount    float64         `json:"wallet_amount"`
+	CanSplit        bool            `json:"can_split"`
+	CanEditSplits   bool            `json:"can_edit_splits"`
+	CanJoinEvent    bool            `json:"can_join_event"`
 	CreatedBy       *shared.UserRef `json:"created_by"`
 	IsLocked        bool            `json:"is_locked"`
 	CanEditCategory bool            `json:"can_edit_category"`
@@ -114,10 +197,30 @@ type TransactionDetail struct {
 	HasSplits bool `json:"-"`
 }
 
+// RepaymentPerson — the debt person of a repayment transaction (name = the live contact name, or
+// the typed name).
+type RepaymentPerson struct {
+	Key       string           `json:"key"`
+	Name      string           `json:"name"`
+	ContactID *uuid.UUID       `json:"contact_id"`
+	Person    shared.PersonRef `json:"person"`
+}
+
 type EventBillLink struct {
 	Event  shared.EventRef `json:"event"`
 	BillID uuid.UUID       `json:"bill_id"`
 	Linked bool            `json:"linked"`
+	// Payer / BillAmount / Members (0.4.0-3, detail and write answers; null / 0 / null on list rows):
+	// who paid the bill and each member's share (the payer first, with the rest of the bill).
+	Payer      *shared.MemberRef  `json:"payer"`
+	BillAmount float64            `json:"bill_amount"`
+	Members    []shared.BillShare `json:"members"`
+	// Kind / InSync / Differences (0.4.0-3 B3, detail and write answers, live): origin = the bill was
+	// made from this transaction (its amount is the bill), copy = my share of someone's bill. My book
+	// and the event book never change each other by themselves; they may differ.
+	Kind        string                  `json:"kind"`
+	InSync      *bool                   `json:"in_sync"`
+	Differences []shared.BillDifference `json:"differences"`
 }
 
 type TransferResponse struct {
@@ -131,29 +234,33 @@ type WriteResult struct {
 	// The debt person's new balance when the row is a debt entry's wallet side (a
 	// personal_debts.DebtPerson; null otherwise).
 	PersonBalance any `json:"person_balance"`
+	// PersonBalances (0.4.0-3 B3) — every person whose balance the write moved (a link-mode switch can
+	// touch several: the split people, the payer). Omitted when none.
+	PersonBalances []any `json:"person_balances,omitempty"`
 }
 
 type DeleteResult struct {
 	ID              uuid.UUID              `json:"id"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
-	DebtEntryID   *uuid.UUID `json:"debt_entry_id"`
-	PersonBalance any        `json:"person_balance"`
-	RecurringItemID *uuid.UUID `json:"recurring_item_id"`
-	BillID          *uuid.UUID `json:"bill_id"`
+	DebtEntryID     *uuid.UUID             `json:"debt_entry_id"`
+	PersonBalance   any                    `json:"person_balance"`
+	RecurringItemID *uuid.UUID             `json:"recurring_item_id"`
+	BillID          *uuid.UUID             `json:"bill_id"`
 }
 
 type CreateRequest struct {
-	Type                TxType     `json:"type"                    binding:"required,oneof=expense income transfer"`
-	AccountID           *uuid.UUID `json:"account_id"              binding:"omitempty"` // nil = no wallet; transfer still requires account (service validates)
-	Amount              float64    `json:"amount"                  binding:"required,gt=0"`
-	CategoryID          *uuid.UUID `json:"category_id"             binding:"omitempty"`
-	Date                string     `json:"date"                    binding:"required,datetime=2006-01-02"`
-	Description         *string    `json:"description"             binding:"omitempty,max=200"`
-	Note                *string    `json:"note"                    binding:"omitempty,max=500"`
-	TransferToAccountID *uuid.UUID `json:"transfer_to_account_id"  binding:"omitempty"`
-	TagIDs []uuid.UUID `json:"tag_ids" binding:"omitempty"`
+	Type                TxType      `json:"type"                    binding:"required,oneof=expense income transfer"`
+	AccountID           *uuid.UUID  `json:"account_id"              binding:"omitempty"` // nil = no wallet; transfer still requires account (service validates)
+	Amount              float64     `json:"amount"                  binding:"required,gt=0"`
+	CategoryID          *uuid.UUID  `json:"category_id"             binding:"omitempty"`
+	Date                string      `json:"date"                    binding:"required,datetime=2006-01-02"`
+	Description         *string     `json:"description"             binding:"omitempty,max=200"`
+	Note                *string     `json:"note"                    binding:"omitempty,max=500"`
+	TransferToAccountID *uuid.UUID  `json:"transfer_to_account_id"  binding:"omitempty"`
+	TagIDs              []uuid.UUID `json:"tag_ids" binding:"omitempty"`
 
 	Splits                     []SplitInput `json:"splits"                         binding:"omitempty,dive"`
+	PaidBy                     *PaidByInput `json:"paid_by"                        binding:"omitempty"`
 	MyShare                    *float64     `json:"my_share"                       binding:"omitempty,gt=0"`
 	ProjectID                  *uuid.UUID   `json:"project_id"                     binding:"omitempty"`
 	SourceProjectTransactionID *uuid.UUID   `json:"source_project_transaction_id"  binding:"omitempty"`
@@ -168,8 +275,25 @@ type UpdateRequest struct {
 	AccountID           *uuid.UUID  `json:"account_id"              binding:"omitempty"`
 	TransferToAccountID *uuid.UUID  `json:"transfer_to_account_id"  binding:"omitempty"`
 	TagIDs              []uuid.UUID `json:"tag_ids"                 binding:"omitempty"`
-	AlsoUpdateLink bool `json:"also_update_link"`
+	AlsoUpdateLink      bool        `json:"also_update_link"`
+	// PaidBy — absent = unchanged; null = nobody paid for me any more (the debt goes); an object
+	// sets / replaces who paid and how much.
+	PaidBy *PaidByInput `json:"paid_by" binding:"omitempty"`
+	// LinkMode (0.4.0-3 B3) — switch how the bill is shared: personal | split | paid | event. The
+	// other modes' data goes (splits / the paid-by debt deleted, the event left); the new mode takes
+	// splits / paid_by / event from this request. Absent = keep the mode (splits may still be sent
+	// to edit a split row).
+	LinkMode *string `json:"link_mode" binding:"omitempty,oneof=personal split paid event"`
+	// Splits — replaces the row's splits (as PUT /transactions/{id}/splits).
+	Splits *[]SplitEdit `json:"splits" binding:"omitempty,dive"`
+	// Event — link_mode event: the event and the bill's payer / members.
+	Event *EventTarget `json:"event" binding:"omitempty"`
+	// ApplyToEvent — "แก้ในอีเวนต์ด้วย": the row's amount / date / description / note (and an
+	// origin's tags) go to its event bill. also_update_link does the same (and reaches a recurring
+	// item).
+	ApplyToEvent bool `json:"apply_to_event"`
 
+	paidByPresent              bool
 	categoryIDPresent          bool
 	descriptionPresent         bool
 	notePresent                bool
@@ -193,7 +317,20 @@ func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
 	_, r.accountIDPresent = probe["account_id"]
 	_, r.transferToAccountIDPresent = probe["transfer_to_account_id"]
 	_, r.tagIDsPresent = probe["tag_ids"]
+	_, r.paidByPresent = probe["paid_by"]
 	return nil
+}
+
+// PaidByChange — the paid_by sent (nil = remove it) and whether it was sent at all.
+func (r *UpdateRequest) PaidByChange() (*PaidByInput, bool) {
+	return r.PaidBy, r.paidByPresent || r.PaidBy != nil
+}
+
+// moneyChange — the request touches the row's money (what a partner's mirrored split locks).
+func (r *UpdateRequest) moneyChange() bool {
+	_, acc := r.AccountIDChange()
+	_, pb := r.PaidByChange()
+	return r.Amount != nil || r.Date != nil || acc || pb || r.LinkMode != nil || r.Splits != nil || r.Event != nil
 }
 
 func (r *UpdateRequest) CategoryIDChange() (*uuid.UUID, bool) {
@@ -228,6 +365,8 @@ func (r *UpdateRequest) MarkPresent(keys ...string) {
 			r.transferToAccountIDPresent = true
 		case "tag_ids":
 			r.tagIDsPresent = true
+		case "paid_by":
+			r.paidByPresent = true
 		}
 	}
 }
@@ -252,13 +391,13 @@ type ListFilter struct {
 	To         *string
 	NoWallet   bool
 
-	AccountIDs  []uuid.UUID // rows on ANY of these wallets
-	CategoryIDs []uuid.UUID // rows in ANY of these categories
-	Types       []TxType    // rows of ANY of these types
-	NoTags      bool        // rows with no tag (OR-ed with TagIDs)
+	AccountIDs           []uuid.UUID // rows on ANY of these wallets
+	CategoryIDs          []uuid.UUID // rows in ANY of these categories
+	Types                []TxType    // rows of ANY of these types
+	NoTags               bool        // rows with no tag (OR-ed with TagIDs)
 	AmountMin, AmountMax *float64
-	TZ                 string
-	RangeFrom, RangeTo time.Time
+	TZ                   string
+	RangeFrom, RangeTo   time.Time
 	// IncludeArchived — rows on archived wallets are hidden unless asked for (or when listing that
 	// wallet itself via AccountID).
 	IncludeArchived bool
@@ -266,7 +405,7 @@ type ListFilter struct {
 	TagIDs          []uuid.UUID // rows having ANY of these tags
 	IncludeChildren bool        // with CategoryID: also its subcategories
 	Uncategorized   bool        // only rows with no category
-	CanJoinEvent bool
+	CanJoinEvent    bool
 	CounterpartyKey string
 	Page            int
 	PerPage         int
@@ -281,11 +420,11 @@ type Totals struct {
 }
 
 type ListResponse struct {
-	Data       []TransactionDetail `json:"data"`
-	Pagination shared.Page         `json:"pagination"`
-	Totals     Totals              `json:"totals"`
-	AvgDailySpend float64      `json:"avg_daily_spend"`
-	Daily         []DailyPoint `json:"daily"`
+	Data          []TransactionDetail `json:"data"`
+	Pagination    shared.Page         `json:"pagination"`
+	Totals        Totals              `json:"totals"`
+	AvgDailySpend float64             `json:"avg_daily_spend"`
+	Daily         []DailyPoint        `json:"daily"`
 }
 
 type SummaryRequest struct {
@@ -304,8 +443,8 @@ type SummaryGroup struct {
 	Category *shared.CategoryRef `json:"category"`
 	Total    float64             `json:"total"`
 	Count    int                 `json:"count"`
-	Income  float64 `json:"income"`
-	Expense float64 `json:"expense"`
+	Income   float64             `json:"income"`
+	Expense  float64             `json:"expense"`
 }
 
 // SummaryResponse — spec schema TransactionSummary (groups is [] without group_by).

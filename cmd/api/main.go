@@ -166,6 +166,7 @@ func main() {
 	projectsService.WithTransactionsService(transactionsService)
 	transactionsService.WithEventBillSyncer(projectsService.SyncBillFromTxTx)
 	transactionsService.WithEventBillDeleter(projectsService.DeleteBillOfTxTx)
+	transactionsService.WithEventLinks(projectsService)
 
 	transactionsService.WithRecurringLinks(recurringService)
 	pendingService.WithSubmitHook(recurringService.OnDraftSubmitted)
@@ -353,6 +354,7 @@ func main() {
 			protected.PUT("/transactions/:id", transactionsHandler.Update)
 			protected.PUT("/transactions/:id/splits", transactionsHandler.EditSplits)
 			protected.PUT("/transactions/:id/tags", transactionsHandler.SetTags)
+			protected.POST("/transactions/:id/apply-event", projectsHandler.ApplyEventToTx)
 			protected.DELETE("/transactions/:id", transactionsHandler.Delete)
 
 			protected.POST("/contacts", contactsHandler.Create)
@@ -378,6 +380,7 @@ func main() {
 			protected.GET("/personal-debts/people/:key", personalDebtsHandler.Person)
 			protected.GET("/personal-debts/people/:key/entries", personalDebtsHandler.Entries)
 			protected.POST("/personal-debts/people/:key/entries", personalDebtsHandler.CreateEntry)
+			protected.POST("/personal-debts/people/:key/repayments", personalDebtsHandler.CreateRepayment)
 			protected.POST("/personal-debts/split-requests/:notification_id/accept", personalDebtsHandler.AcceptSplitRequest)
 			protected.POST("/personal-debts/split-changes/:notification_id/apply", personalDebtsHandler.ApplySplitChange)
 			protected.GET("/personal-debts/:id", personalDebtsHandler.Get)

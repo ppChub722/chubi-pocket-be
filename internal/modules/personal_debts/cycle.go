@@ -19,10 +19,10 @@ type cycleMark struct {
 func (s *Store) cycleBoundary(ctx context.Context, q shared.Querier, userID uuid.UUID, key string) (*cycleMark, error) {
 	rows, err := q.Query(ctx, `
 		SELECT to_char(date, 'YYYY-MM-DD'), created_at, id FROM (
-			SELECT pd.date, pd.created_at, pd.id,
-			       SUM(`+shared.DebtSignedSQL("pd")+`) OVER (ORDER BY pd.date, pd.created_at, pd.id) AS run
-			FROM personal_debts pd
-			WHERE pd.user_id = $1 AND `+shared.DebtKeySQL("pd")+` = $2) x
+			SELECT l.date, l.created_at, l.id,
+			       SUM(l.signed) OVER (ORDER BY l.date, l.created_at, l.id) AS run
+			FROM `+ledgerSQL+` l
+			WHERE l.key = $2) x
 		WHERE ABS(run) < 0.005
 		ORDER BY date DESC, created_at DESC, id DESC LIMIT 1`, userID, key)
 	if err != nil {
@@ -51,4 +51,3 @@ func (m *cycleMark) after(date string, created time.Time, id uuid.UUID) bool {
 	}
 	return id.String() > m.ID.String()
 }
-

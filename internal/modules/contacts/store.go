@@ -382,7 +382,8 @@ func onlyDigits(s string) string {
 func (s *Store) DeletePreview(ctx context.Context, userID uuid.UUID, c *Contact) (*DeletePreview, error) {
 	p := &DeletePreview{Linked: c.LinkedUserID != nil}
 	if err := s.db.QueryRow(ctx, `SELECT
-		(SELECT COUNT(*) FROM personal_debts WHERE user_id = $1 AND counterparty_contact_id = $2),
+		(SELECT COUNT(*) FROM personal_debts WHERE user_id = $1 AND counterparty_contact_id = $2)
+		+ (SELECT COUNT(*) FROM transactions WHERE user_id = $1 AND repay_contact_id = $2),
 		(SELECT COUNT(*) FROM project_members WHERE contact_id = $2)`, userID, c.ID).
 		Scan(&p.DebtRecords, &p.EventMembers); err != nil {
 		return nil, fmt.Errorf("delete preview: %w", err)

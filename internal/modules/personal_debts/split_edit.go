@@ -129,7 +129,7 @@ type identityEdit struct {
 	name      string
 	contactID *uuid.UUID // the split's contact after the edit; nil = a free name
 	newLink   bool       // contactID is a different contact than before
-	replace bool
+	replace   bool
 }
 
 func checkIdentityEditTx(
@@ -267,10 +267,12 @@ func (s *Service) notifySplitChangeTx(
 	}
 	if d.SourceTransactionID != nil {
 		p.ParentID = *d.SourceTransactionID
+	} else if d.PaidForTransactionID != nil {
+		p.ParentID = *d.PaidForTransactionID
 	}
 	actioned := false
 	if dl.Auto {
-		if _, err := applySplitChangeTx(ctx, tx, mirror, p); err != nil {
+		if _, err := s.applySplitChangeTx(ctx, tx, mirror, p); err != nil {
 			return err
 		}
 		actioned = true

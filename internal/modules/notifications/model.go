@@ -23,24 +23,24 @@ const (
 )
 
 type Notification struct {
-	ID              uuid.UUID       `json:"id"`
-	RecipientUserID uuid.UUID       `json:"recipient_user_id"`
-	Type            string          `json:"type"`
-	ActorUserID     *uuid.UUID      `json:"actor_user_id"`
-	Payload         json.RawMessage `json:"payload"`
-	DeepLink        *string         `json:"deep_link"`
-	ReadAt          *time.Time      `json:"read_at"`
-	ActionedAt      *time.Time      `json:"actioned_at"`
-	DismissedAt     *time.Time      `json:"dismissed_at"`
-	CreatedAt       time.Time       `json:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
-	ActorDisplayName *string `json:"actor_display_name,omitempty"`
+	ID               uuid.UUID       `json:"id"`
+	RecipientUserID  uuid.UUID       `json:"recipient_user_id"`
+	Type             string          `json:"type"`
+	ActorUserID      *uuid.UUID      `json:"actor_user_id"`
+	Payload          json.RawMessage `json:"payload"`
+	DeepLink         *string         `json:"deep_link"`
+	ReadAt           *time.Time      `json:"read_at"`
+	ActionedAt       *time.Time      `json:"actioned_at"`
+	DismissedAt      *time.Time      `json:"dismissed_at"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	ActorDisplayName *string         `json:"actor_display_name,omitempty"`
 }
 
 type Settings struct {
-	UserID     uuid.UUID `json:"user_id"`
-	MutedTypes []string  `json:"muted_types"`
-	AutoTypes  []string  `json:"auto_types"`
+	UserID                   uuid.UUID  `json:"user_id"`
+	MutedTypes               []string   `json:"muted_types"`
+	AutoTypes                []string   `json:"auto_types"`
 	DefaultAccountID         *uuid.UUID `json:"default_account_id"`
 	AutoResolveOwnInProjects bool       `json:"-"` // read by projects; set via /users/me
 	CreatedAt                time.Time  `json:"created_at"`
@@ -63,10 +63,10 @@ func contains(list []string, v string) bool {
 }
 
 type UpdateSettingsRequest struct {
-	MutedTypes       *[]string  `json:"muted_types"`
-	AutoTypes        *[]string  `json:"auto_types"`
-	DefaultAccountID *uuid.UUID `json:"default_account_id"`
-	ClearDefaultAccount bool `json:"-"`
+	MutedTypes          *[]string  `json:"muted_types"`
+	AutoTypes           *[]string  `json:"auto_types"`
+	DefaultAccountID    *uuid.UUID `json:"default_account_id"`
+	ClearDefaultAccount bool       `json:"-"`
 }
 
 type ListFilter struct {
@@ -105,8 +105,12 @@ type SplitCreatedPayload struct {
 	Currency            string     `json:"currency"`
 	Description         *string    `json:"description"`
 	Note                *string    `json:"note"`
-	RecipientDebtID *uuid.UUID `json:"recipient_debt_id"`
-	Superseded bool `json:"superseded,omitempty"`
+	RecipientDebtID     *uuid.UUID `json:"recipient_debt_id"`
+	// RecipientDirection (0.4.0-3) — the recipient's side of the debt: received = they owe the
+	// splitter (a split on the splitter's bill), paid = the splitter owes them (the splitter recorded
+	// that the recipient paid for them). Empty on notices from before 0.4.0-3 (= received).
+	RecipientDirection string `json:"recipient_direction,omitempty"`
+	Superseded         bool   `json:"superseded,omitempty"`
 }
 
 type SplitChangedPayload struct {
@@ -119,8 +123,8 @@ type SplitChangedPayload struct {
 	NewAmount           float64   `json:"new_amount"`
 	Currency            string    `json:"currency"`
 	Description         *string   `json:"description"`
-	RecipientDebtID uuid.UUID `json:"recipient_debt_id"`
-	Superseded      bool      `json:"superseded,omitempty"`
+	RecipientDebtID     uuid.UUID `json:"recipient_debt_id"`
+	Superseded          bool      `json:"superseded,omitempty"`
 }
 
 const (
@@ -129,27 +133,27 @@ const (
 )
 
 type ProjectTxRecordedPayload struct {
-	ProjectTransactionID uuid.UUID `json:"project_transaction_id"`
-	ProjectID            uuid.UUID `json:"project_id"`
-	RecorderUserID       uuid.UUID `json:"recorder_user_id"`
-	RecorderDisplayName  string    `json:"recorder_display_name"`
-	Amount               float64   `json:"amount"`
-	Currency             string    `json:"currency"`
-	Type                 string    `json:"type"`
-	Description          *string   `json:"description"`
-	Note                 *string   `json:"note"`
+	ProjectTransactionID  uuid.UUID  `json:"project_transaction_id"`
+	ProjectID             uuid.UUID  `json:"project_id"`
+	RecorderUserID        uuid.UUID  `json:"recorder_user_id"`
+	RecorderDisplayName   string     `json:"recorder_display_name"`
+	Amount                float64    `json:"amount"`
+	Currency              string     `json:"currency"`
+	Type                  string     `json:"type"`
+	Description           *string    `json:"description"`
+	Note                  *string    `json:"note"`
 	PersonalTransactionID *uuid.UUID `json:"personal_transaction_id"`
 }
 
 type ProjectTxChangedPayload struct {
-	ProjectTransactionID uuid.UUID                 `json:"project_transaction_id"`
-	ProjectID            uuid.UUID                 `json:"project_id"`
-	EditorUserID         uuid.UUID                 `json:"editor_user_id"`
-	EditorDisplayName    string                    `json:"editor_display_name"`
-	ChangeKind           string                    `json:"change_kind"` // "edited" | "deleted"
-	Diff                 map[string][2]interface{} `json:"diff,omitempty"`
-	PersonalTransactionID *uuid.UUID `json:"personal_transaction_id"`
-	Suggested *PersonalUpdate `json:"suggested,omitempty"`
+	ProjectTransactionID  uuid.UUID                 `json:"project_transaction_id"`
+	ProjectID             uuid.UUID                 `json:"project_id"`
+	EditorUserID          uuid.UUID                 `json:"editor_user_id"`
+	EditorDisplayName     string                    `json:"editor_display_name"`
+	ChangeKind            string                    `json:"change_kind"` // "edited" | "deleted"
+	Diff                  map[string][2]interface{} `json:"diff,omitempty"`
+	PersonalTransactionID *uuid.UUID                `json:"personal_transaction_id"`
+	Suggested             *PersonalUpdate           `json:"suggested,omitempty"`
 }
 
 type ProjectInvitePayload struct {

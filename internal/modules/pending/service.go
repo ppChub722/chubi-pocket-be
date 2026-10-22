@@ -292,6 +292,17 @@ func createRequest(d Draft) (transactions.CreateRequest, error) {
 			return transactions.CreateRequest{}, &submitErr{"INVALID_SPLIT", "every split amount must be more than 0"}
 		}
 	}
+	if (d.Payer != nil || len(d.Members) > 0) && (d.ProjectID == nil || len(d.Splits) > 0 || d.PaidBy != nil) {
+		return transactions.CreateRequest{}, &submitErr{"LINK_MODE_CONFLICT", "payer / members go with project_id only (no splits, no paid_by)"}
+	}
+	if pb := d.PaidBy; pb != nil {
+		if len(d.Splits) > 0 || d.ProjectID != nil {
+			return transactions.CreateRequest{}, &submitErr{"LINK_MODE_CONFLICT", transactions.ErrLinkModeConflict.Error()}
+		}
+		if pb.Amount <= 0 || (pb.ContactID == nil && strings.TrimSpace(pb.PersonName) == "") {
+			return transactions.CreateRequest{}, &submitErr{"INVALID_PAID_BY", "paid_by needs a person and an amount more than 0"}
+		}
+	}
 	return transactions.CreateRequest{
 		Type:                transactions.TxType(*d.Type),
 		AccountID:           d.AccountID,
@@ -302,7 +313,21 @@ func createRequest(d Draft) (transactions.CreateRequest, error) {
 		Note:                d.Note,
 		TransferToAccountID: d.TransferToAccountID,
 		Splits:              d.Splits,
+		PaidBy:              d.PaidBy,
 	}, nil
+}
+
+// draftLinkMode — the quick-create view a draft was saved with.
+func draftLinkMode(d Draft) string {
+	switch {
+	case d.ProjectID != nil:
+		return transactions.LinkEvent
+	case len(d.Splits) > 0:
+		return transactions.LinkSplit
+	case d.PaidBy != nil:
+		return transactions.LinkPaid
+	}
+	return transactions.LinkPersonal
 }
 
 func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *PendingTransaction) (*uuid.UUID, error) {
@@ -321,7 +346,8 @@ func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *Pending
 		if s.projects == nil {
 			return nil, errors.New("events not available")
 		}
-		txID, err = s.projects.AddNewBillTx(ctx, tx, userID, *p.Draft.ProjectID, req)
+		txID, err = s.projects.AddNewBillTx(ctx, tx, userID, *p.Draft.ProjectID, req,
+			projects.BillPeople{Payer: p.Draft.Payer, Members: p.Draft.Members})
 		if err != nil {
 			return nil, err
 		}
@@ -470,6 +496,14 @@ func toSubmitError(err error) SubmitError {
 		{transactions.ErrSplitsOnTransfer, "SPLITS_ON_TRANSFER"},
 		{transactions.ErrSplitContactNotFound, "CONTACT_NOT_FOUND"},
 		{transactions.ErrSplitsExceedAmount, "SPLITS_EXCEED_AMOUNT"},
+		{transactions.ErrPaidByExpenseOnly, "PAID_BY_EXPENSE_ONLY"},
+		{transactions.ErrPaidByExceedsAmount, "PAID_BY_EXCEEDS_AMOUNT"},
+		{transactions.ErrPaidByPersonRequired, "INVALID_PAID_BY"},
+		{transactions.ErrLinkModeConflict, "LINK_MODE_CONFLICT"},
+		{projects.ErrBadBillPeople, "INVALID_BILL_PEOPLE"},
+		{projects.ErrPayerIncome, "INVALID_BILL_PEOPLE"},
+		{projects.ErrMemberNotInProject, "PROJECT_NOT_MEMBER"},
+		{projects.ErrNoShareToCopy, "NO_SHARE"},
 		{projects.ErrSplitsExceedParent, "SPLITS_EXCEED_AMOUNT"},
 		{projects.ErrProjectNotFound, "PROJECT_NOT_FOUND"},
 		{projects.ErrProjectNotActive, "PROJECT_NOT_ACTIVE"},

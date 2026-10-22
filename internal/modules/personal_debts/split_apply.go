@@ -11,10 +11,19 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
-func applySplitChangeTx(ctx context.Context, tx pgx.Tx, mirror *Entry, p notifications.SplitChangedPayload) (string, error) {
+// applySplitChangeTx — "อัปเดตตาม": my mirror follows the splitter's change, and so does my
+// expense of it (paid_for_transaction_id; wallet-less, so no balance moves).
+func (s *Service) applySplitChangeTx(ctx context.Context, tx pgx.Tx, mirror *Entry, p notifications.SplitChangedPayload) (string, error) {
 	if p.Change == notifications.SplitChangeRemoved {
+		if mirror.PaidForTransactionID != nil && s.txs != nil {
+			if _, err := s.txs.DeleteInTx(ctx, tx, mirror.UserID, *mirror.PaidForTransactionID); err != nil &&
+				!errors.Is(err, transactions.ErrTxNotFound) {
+				return "", fmt.Errorf("remove mirror expense: %w", err)
+			}
+		}
 		if err := removeDebtTx(ctx, tx, mirror); err != nil {
 			return "", fmt.Errorf("remove mirror: %w", err)
 		}
@@ -22,6 +31,11 @@ func applySplitChangeTx(ctx context.Context, tx pgx.Tx, mirror *Entry, p notific
 	}
 	if err := setDebtAmountTx(ctx, tx, mirror.ID, p.NewAmount); err != nil {
 		return "", fmt.Errorf("update mirror: %w", err)
+	}
+	if mirror.PaidForTransactionID != nil && s.txs != nil {
+		if err := s.txs.SetPaidForAmountTx(ctx, tx, *mirror.PaidForTransactionID, p.NewAmount); err != nil {
+			return "", err
+		}
 	}
 	return "updated", nil
 }
@@ -82,7 +96,7 @@ func (s *Service) ApplySplitChange(ctx context.Context, userID, notificationID u
 	if mirror.UserID != userID {
 		return nil, ErrNotSplitChange
 	}
-	result, err := applySplitChangeTx(ctx, tx, mirror, p)
+	result, err := s.applySplitChangeTx(ctx, tx, mirror, p)
 	if err != nil {
 		return nil, err
 	}

@@ -205,7 +205,17 @@ func (h *Handler) Update(c *gin.Context) {
 		return
 	}
 
-	res, err := h.service.UpdateWrite(shared.WithHeaderTZ(c.Request.Context(), c.GetHeader("X-Timezone")), userID, id, req)
+	ctx := shared.WithHeaderTZ(c.Request.Context(), c.GetHeader("X-Timezone"))
+	if c.Query("preview") == "true" {
+		p, err := h.service.Preview(ctx, userID, id, req)
+		if err != nil {
+			mapServiceError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, p)
+		return
+	}
+	res, err := h.service.UpdateWrite(ctx, userID, id, req)
 	if err != nil {
 		mapServiceError(c, err)
 		return
@@ -417,8 +427,18 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, ErrSplitsExceedShare):
 		response.BadRequest(c, "SPLITS_EXCEED_SHARE", err.Error(), nil)
-	case errors.Is(err, ErrAmountInvalid):
+	case errors.Is(err, ErrAmountInvalid), errors.Is(err, ErrPaidByPersonRequired):
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, ErrPaidByExpenseOnly):
+		response.BadRequest(c, "PAID_BY_EXPENSE_ONLY", err.Error(), nil)
+	case errors.Is(err, ErrPaidByExceedsAmount):
+		response.BadRequest(c, "PAID_BY_EXCEEDS_AMOUNT", err.Error(), nil)
+	case errors.Is(err, ErrLinkModeConflict):
+		response.BadRequest(c, "LINK_MODE_CONFLICT", err.Error(), nil)
+	case errors.Is(err, ErrLinkModeInput):
+		response.BadRequest(c, "LINK_MODE_INPUT", err.Error(), nil)
+	case errors.Is(err, ErrPaidByLocked):
+		response.Fail(c, http.StatusConflict, "PAID_BY_LOCKED", err.Error(), nil)
 	default:
 		response.InternalError(c, "Transaction operation failed", err.Error())
 	}

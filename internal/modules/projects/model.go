@@ -2,8 +2,9 @@ package projects
 
 import (
 	"encoding/json"
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"time"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 
 	"github.com/google/uuid"
 
@@ -36,15 +37,15 @@ const (
 )
 
 type Project struct {
-	ID          uuid.UUID
-	OwnerUserID uuid.UUID
-	Name        string
-	Description *string
-	Note        *string
-	StartDate   *string
-	EndDate     *string
-	Status      string
-	IconCode    *shared.IconCode
+	ID            uuid.UUID
+	OwnerUserID   uuid.UUID
+	Name          string
+	Description   *string
+	Note          *string
+	StartDate     *string
+	EndDate       *string
+	Status        string
+	IconCode      *shared.IconCode
 	PlannedAmount *float64
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
@@ -80,40 +81,40 @@ type ProjectTransaction struct {
 	Marks                      []uuid.UUID
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
-	TagNames []string
+	TagNames                   []string
 }
 
 type Event struct {
-	ID            uuid.UUID        `json:"id"`
-	OwnerUserID   uuid.UUID        `json:"owner_user_id"`
-	Name          string           `json:"name"`
-	IconCode      *shared.IconCode `json:"icon_code"`
-	Description   *string          `json:"description"`
-	Note          *string          `json:"note"`
-	Status        string           `json:"status"`
-	StartDate     *string          `json:"start_date"`
-	EndDate       *string          `json:"end_date"`
-	PlannedAmount *float64         `json:"planned_amount"`
-	MembersCount  int              `json:"members_count"`
-	TotalExpense  float64          `json:"total_expense"`
-	TotalIncome   float64          `json:"total_income"`
-	MyNet         float64          `json:"my_net"`
-	MyPaid           float64         `json:"my_paid"`
-	MyShare          float64         `json:"my_share"`
-	MyReceivable     float64         `json:"my_receivable"`
-	MyPayable        float64         `json:"my_payable"`
-	Remaining        *float64        `json:"remaining"`
-	Tags             []shared.TagRef `json:"tags"`
-	MyMemberID       *uuid.UUID      `json:"my_member_id"`
-	MyRole           *string         `json:"my_role"`
-	IsOwner          bool            `json:"is_owner"`
-	IsLocked         bool            `json:"is_locked"`
-	CanAddBill       bool            `json:"can_add_bill"`
-	CanEdit          bool            `json:"can_edit"`
-	CanManageMembers bool            `json:"can_manage_members"`
-	LinkedTxCount    int             `json:"linked_tx_count"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
+	ID               uuid.UUID        `json:"id"`
+	OwnerUserID      uuid.UUID        `json:"owner_user_id"`
+	Name             string           `json:"name"`
+	IconCode         *shared.IconCode `json:"icon_code"`
+	Description      *string          `json:"description"`
+	Note             *string          `json:"note"`
+	Status           string           `json:"status"`
+	StartDate        *string          `json:"start_date"`
+	EndDate          *string          `json:"end_date"`
+	PlannedAmount    *float64         `json:"planned_amount"`
+	MembersCount     int              `json:"members_count"`
+	TotalExpense     float64          `json:"total_expense"`
+	TotalIncome      float64          `json:"total_income"`
+	MyNet            float64          `json:"my_net"`
+	MyPaid           float64          `json:"my_paid"`
+	MyShare          float64          `json:"my_share"`
+	MyReceivable     float64          `json:"my_receivable"`
+	MyPayable        float64          `json:"my_payable"`
+	Remaining        *float64         `json:"remaining"`
+	Tags             []shared.TagRef  `json:"tags"`
+	MyMemberID       *uuid.UUID       `json:"my_member_id"`
+	MyRole           *string          `json:"my_role"`
+	IsOwner          bool             `json:"is_owner"`
+	IsLocked         bool             `json:"is_locked"`
+	CanAddBill       bool             `json:"can_add_bill"`
+	CanEdit          bool             `json:"can_edit"`
+	CanManageMembers bool             `json:"can_manage_members"`
+	LinkedTxCount    int              `json:"linked_tx_count"`
+	CreatedAt        time.Time        `json:"created_at"`
+	UpdatedAt        time.Time        `json:"updated_at"`
 
 	myStatus string
 }
@@ -125,17 +126,21 @@ type EventList struct {
 }
 
 type EventMember struct {
-	ID        uuid.UUID        `json:"id"`
-	UserID    *uuid.UUID       `json:"user_id"`
-	Name      string           `json:"name"`
-	IconCode  *shared.IconCode `json:"icon_code"`
-	IsMe      bool             `json:"is_me"`
-	Linked    bool             `json:"linked"`
-	Role      string           `json:"role"`
-	Status    string           `json:"status"`
-	InvitedAt *time.Time       `json:"invited_at"`
-	JoinedAt  *time.Time       `json:"joined_at"`
-	LeftAt    *time.Time       `json:"left_at"`
+	ID       uuid.UUID        `json:"id"`
+	UserID   *uuid.UUID       `json:"user_id"`
+	Name     string           `json:"name"`
+	IconCode *shared.IconCode `json:"icon_code"`
+	IsMe     bool             `json:"is_me"`
+	Linked   bool             `json:"linked"`
+	// ContactID (0.4.0-3) — MY contact for this member (a linked member: my contact linked to that
+	// user; a typed member: my contact with the same name), so a picked contact can be told apart
+	// from a new person. Null when none.
+	ContactID *uuid.UUID `json:"contact_id"`
+	Role      string     `json:"role"`
+	Status    string     `json:"status"`
+	InvitedAt *time.Time `json:"invited_at"`
+	JoinedAt  *time.Time `json:"joined_at"`
+	LeftAt    *time.Time `json:"left_at"`
 }
 
 type EventMemberList struct {
@@ -159,12 +164,12 @@ type EventTagList struct {
 }
 
 type EventPosition struct {
-	Member shared.MemberRef `json:"member"`
-	Paid   float64          `json:"paid"`
-	Share  float64          `json:"share"`
-	Net    float64          `json:"net"`
-	Receivable float64 `json:"receivable"`
-	Payable    float64 `json:"payable"`
+	Member     shared.MemberRef `json:"member"`
+	Paid       float64          `json:"paid"`
+	Share      float64          `json:"share"`
+	Net        float64          `json:"net"`
+	Receivable float64          `json:"receivable"`
+	Payable    float64          `json:"payable"`
 }
 
 type EventTagTotal struct {
@@ -229,11 +234,11 @@ type BoardRowList struct {
 }
 
 type EventDetail struct {
-	Event   Event         `json:"event"`
-	Summary EventSummary  `json:"summary"`
-	Members []EventMember `json:"members"`
-	Tags    []EventTag    `json:"tags"`
-	Board   BoardRowList  `json:"board"`
+	Event         Event          `json:"event"`
+	Summary       EventSummary   `json:"summary"`
+	Members       []EventMember  `json:"members"`
+	Tags          []EventTag     `json:"tags"`
+	Board         BoardRowList   `json:"board"`
 	DeletePreview *DeletePreview `json:"delete_preview"`
 }
 
@@ -245,6 +250,10 @@ type EventPatch struct {
 	Row             *BoardRow              `json:"row"`
 	RemovedRowID    *uuid.UUID             `json:"removed_row_id"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
+	// MyTransaction (0.4.0-3 B3, bill edits) — my transaction linked to the edited bill, after the
+	// edit: its event_bill.in_sync / differences tell the app whether to ask "แก้ในสมุดของฉันด้วยไหม?"
+	// (apply_to_my_tx, or POST /transactions/{id}/apply-event later). Omitted when I have none.
+	MyTransaction *transactions.TransactionDetail `json:"my_transaction,omitempty"`
 }
 
 type AddBillsResult struct {
@@ -363,13 +372,16 @@ type CreateProjectTransactionRequest struct {
 }
 
 type UpdateProjectTransactionRequest struct {
-	Amount      *float64             `json:"amount"      binding:"omitempty,gt=0"`
-	Date        *string              `json:"date"        binding:"omitempty,datetime=2006-01-02"`
-	Note        *string              `json:"note"        binding:"omitempty,max=500"`
-	Description *string              `json:"description" binding:"omitempty,max=200"`
-	TagIDs      *[]uuid.UUID         `json:"tag_ids"`
-	Splits      *[]ProjectSplitInput `json:"splits"      binding:"omitempty,dive"`
-	AlsoUpdateLink bool `json:"also_update_link"`
+	Amount         *float64             `json:"amount"      binding:"omitempty,gt=0"`
+	Date           *string              `json:"date"        binding:"omitempty,datetime=2006-01-02"`
+	Note           *string              `json:"note"        binding:"omitempty,max=500"`
+	Description    *string              `json:"description" binding:"omitempty,max=200"`
+	TagIDs         *[]uuid.UUID         `json:"tag_ids"`
+	Splits         *[]ProjectSplitInput `json:"splits"      binding:"omitempty,dive"`
+	AlsoUpdateLink bool                 `json:"also_update_link"`
+	// ApplyToMyTx (0.4.0-3) — "แก้ในสมุดของฉันด้วย": my transaction linked to this bill (the one it
+	// was made from, or my copy of my share) takes the bill's new amount / date / description / note.
+	ApplyToMyTx bool `json:"apply_to_my_tx"`
 
 	descriptionPresent bool
 	notePresent        bool
@@ -380,6 +392,12 @@ func (r *UpdateProjectTransactionRequest) UnmarshalJSON(data []byte) error {
 	present, err := shared.DecodeTracked(data, (*alias)(r))
 	r.descriptionPresent, r.notePresent = present["description"], present["note"]
 	return err
+}
+
+// SetText sets description and note (both sent, nil clears).
+func (r *UpdateProjectTransactionRequest) SetText(description, note *string) {
+	r.Description, r.Note = description, note
+	r.descriptionPresent, r.notePresent = true, true
 }
 
 func (r *UpdateProjectTransactionRequest) DescriptionChange() (*string, bool) {
@@ -415,16 +433,25 @@ type EventTagImportRequest struct {
 type QuickCreateRequest struct {
 	Name           string                      `json:"name"            binding:"required,min=1,max=100"`
 	NewTransaction *transactions.CreateRequest `json:"new_transaction" binding:"omitempty"`
-	TransactionIDs []uuid.UUID      `json:"transaction_ids" binding:"omitempty"`
-	IconCode       *shared.IconCode `json:"icon_code"       binding:"omitempty"`
-	Move bool `json:"move"`
+	TransactionIDs []uuid.UUID                 `json:"transaction_ids" binding:"omitempty"`
+	IconCode       *shared.IconCode            `json:"icon_code"       binding:"omitempty"`
+	Move           bool                        `json:"move"`
+	BillPeople
 }
 
 type AddBillsRequest struct {
 	NewTransaction *transactions.CreateRequest `json:"new_transaction" binding:"omitempty"`
 	TransactionIDs []uuid.UUID                 `json:"transaction_ids" binding:"omitempty"`
 	Move           bool                        `json:"move"`
+	BillPeople
 }
+
+// The people of a new event bill (0.4.0-3): shared types, so a transaction PUT can name them too.
+type (
+	BillPerson = shared.BillPerson
+	BillMember = shared.BillMember
+	BillPeople = shared.BillPeople
+)
 
 type ListFilter struct {
 	Status  string
@@ -436,14 +463,14 @@ type ListFilter struct {
 }
 
 type BoardFilter struct {
-	Type    string
-	Mine    bool
-	Q       string
-	TagID   *uuid.UUID
+	Type          string
+	Mine          bool
+	Q             string
+	TagID         *uuid.UUID
 	PayerMemberID *uuid.UUID
-	Sort    string
-	Page    int
-	PerPage int
+	Sort          string
+	Page          int
+	PerPage       int
 }
 
 var _ json.Unmarshaler = (*UpdateProjectRequest)(nil)

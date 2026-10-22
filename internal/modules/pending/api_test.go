@@ -36,6 +36,7 @@ func newAPIEnv(t *testing.T) *apiEnv {
 	pdSvc := personal_debts.NewService(personal_debts.NewStore(pool), txSvc)
 	txSvc.WithDebtsCreator(pdSvc.CreateForTransactionTx)
 	txSvc.WithSplitsEditor(pdSvc.EditForTransactionTx)
+	txSvc.WithDebtLinks(pdSvc)
 	prj := projects.NewService(projects.NewStore(pool))
 	prj.WithTransactionsService(txSvc)
 	svc := NewService(NewStore(pool), txSvc, tags.NewService(tags.NewStore(pool)), pdSvc, prj)

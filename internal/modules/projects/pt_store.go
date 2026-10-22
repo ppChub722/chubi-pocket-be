@@ -285,14 +285,22 @@ func (s *Store) ToggleMark(
 func (s *Store) PTRecipientsForChange(
 	ctx context.Context, ptID, editorUserID uuid.UUID,
 ) ([]uuid.UUID, error) {
+	// The bill's people, and (0.4.0-3) anyone whose transaction is linked to it or to one of its
+	// split rows (a copy).
 	rows, err := s.db.Query(ctx, `
-		SELECT DISTINCT pm.user_id FROM (
-			SELECT transaction_member_id AS member_id FROM project_transactions WHERE id = $1
+		SELECT DISTINCT u FROM (
+			SELECT pm.user_id AS u FROM (
+				SELECT transaction_member_id AS member_id FROM project_transactions WHERE id = $1
+				UNION
+				SELECT transaction_member_id FROM project_transactions WHERE parent_project_transaction_id = $1
+			) sub
+			JOIN project_members pm ON pm.id = sub.member_id
 			UNION
-			SELECT transaction_member_id FROM project_transactions WHERE parent_project_transaction_id = $1
-		) sub
-		JOIN project_members pm ON pm.id = sub.member_id
-		WHERE pm.user_id IS NOT NULL AND pm.user_id <> $2`, ptID, editorUserID)
+			SELECT t.user_id FROM transactions t
+			WHERE t.source_project_transaction_id = $1
+			   OR t.source_project_transaction_id IN (SELECT c.id FROM project_transactions c WHERE c.parent_project_transaction_id = $1)
+		) x
+		WHERE u IS NOT NULL AND u <> $2`, ptID, editorUserID)
 	if err != nil {
 		return nil, fmt.Errorf("recipients: %w", err)
 	}
@@ -322,31 +330,7 @@ func (s *Store) MemberByUserID(ctx context.Context, projectID, userID uuid.UUID)
 }
 
 func LoadMemberRefs(ctx context.Context, q shared.Querier, callerUserID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]shared.MemberRef, error) {
-	out := map[uuid.UUID]shared.MemberRef{}
-	if len(ids) == 0 {
-		return out, nil
-	}
-	rows, err := q.Query(ctx, `SELECT pm.id, pm.user_id,
-			COALESCE(u.display_name, pm.display_name), COALESCE(u.icon_code, pm.icon_code)
-		FROM project_members pm LEFT JOIN users u ON u.id = pm.user_id
-		WHERE pm.id = ANY($1::uuid[])`, uniqueIDs(ids))
-	if err != nil {
-		return nil, fmt.Errorf("member refs: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			r    shared.MemberRef
-			icon []byte
-		)
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Name, &icon); err != nil {
-			return nil, err
-		}
-		r.Icon = shared.IconFromJSON(icon)
-		r.IsMe = r.UserID != nil && *r.UserID == callerUserID
-		out[r.ID] = r
-	}
-	return out, rows.Err()
+	return shared.LoadMemberRefs(ctx, q, callerUserID, ids)
 }
 
 func uniqueIDs(ids []uuid.UUID) []uuid.UUID {

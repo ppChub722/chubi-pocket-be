@@ -105,16 +105,16 @@ type GoalView struct {
 	Currency        string           `json:"currency"`
 	ClosedAt        *time.Time       `json:"closed_at"`
 	Actions         Actions          `json:"actions"`
-	MonthPlan    *float64  `json:"month_plan"`
-	MonthSaved   float64   `json:"month_saved"`
-	MonthShort   *float64  `json:"month_short"`
-	Status       string    `json:"status"`
-	BehindMonths *int      `json:"behind_months"`
-	AutoSave     *AutoSave `json:"auto_save"` // legacy: the first of auto_saves
-	AutoSaves    []AutoSaveItem `json:"auto_saves"`
-	Group        *string   `json:"group"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	MonthPlan       *float64         `json:"month_plan"`
+	MonthSaved      float64          `json:"month_saved"`
+	MonthShort      *float64         `json:"month_short"`
+	Status          string           `json:"status"`
+	BehindMonths    *int             `json:"behind_months"`
+	AutoSave        *AutoSave        `json:"auto_save"` // legacy: the first of auto_saves
+	AutoSaves       []AutoSaveItem   `json:"auto_saves"`
+	Group           *string          `json:"group"`
+	CreatedAt       time.Time        `json:"created_at"`
+	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
 type WalletShare struct {
@@ -165,15 +165,24 @@ type HistoryPoint struct {
 }
 
 type ListSummary struct {
-	Saved   float64 `json:"saved"`
-	InGoals float64 `json:"in_goals"`
-	Spare   float64 `json:"spare"`
+	Saved           float64 `json:"saved"`
+	InGoals         float64 `json:"in_goals"`
+	Spare           float64 `json:"spare"`
 	SavedTotal      float64 `json:"saved_total"`
 	MonthShortTotal float64 `json:"month_short_total"`
 	MonthPlanTotal  float64 `json:"month_plan_total"`
 	MonthSavedTotal float64 `json:"month_saved_total"`
 	Unallocated     float64 `json:"unallocated"`
 	Currency        string  `json:"currency"`
+	// Long-term progress (the hero ring): active listed goals that have a target.
+	TargetTotal      float64 `json:"target_total"`
+	TargetSavedTotal float64 `json:"target_saved_total"`
+	TargetShortTotal float64 `json:"target_short_total"` // Σ max(0, target − saved) per goal
+	TargetPercent    int     `json:"target_percent"`     // floor(saved / target × 100), 0–100
+	// Filter-chip counts; every listed goal is in exactly one (sum = len(data)).
+	CountShort    int `json:"count_short"`     // has a target, not reached, not completed
+	CountDone     int `json:"count_done"`      // reached or completed
+	CountNoTarget int `json:"count_no_target"` // no target (ongoing)
 }
 
 type GoalList struct {
@@ -183,16 +192,16 @@ type GoalList struct {
 }
 
 type GoalDetail struct {
-	Goal     GoalView       `json:"goal"`
-	ByWallet []WalletShare  `json:"by_wallet"`
-	History  []HistoryPoint `json:"history"`
-	Entries  EntryList      `json:"entries"`
+	Goal          GoalView       `json:"goal"`
+	ByWallet      []WalletShare  `json:"by_wallet"`
+	History       []HistoryPoint `json:"history"`
+	Entries       EntryList      `json:"entries"`
 	DeletePreview *DeletePreview `json:"delete_preview"`
 }
 
 type SpareDetail struct {
-	Spare    Spare          `json:"spare"`
-	History  []HistoryPoint `json:"history"`
+	Spare     Spare          `json:"spare"`
+	History   []HistoryPoint `json:"history"`
 	AutoSave  *AutoSave      `json:"auto_save"` // legacy: the first of auto_saves
 	AutoSaves []AutoSaveItem `json:"auto_saves"`
 	Entries   EntryList      `json:"entries"`
@@ -204,10 +213,10 @@ type WalletOut struct {
 }
 
 type WriteResult struct {
-	Entries []Entry     `json:"entries"`
-	Goals   []GoalView  `json:"goals"`
-	Spare   Spare       `json:"spare"`
-	Wallets []WalletOut `json:"wallets"`
+	Entries   []Entry      `json:"entries"`
+	Goals     []GoalView   `json:"goals"`
+	Spare     Spare        `json:"spare"`
+	Wallets   []WalletOut  `json:"wallets"`
 	GoalPage  *GoalDetail  `json:"goal_page"`
 	SparePage *SpareDetail `json:"spare_page"`
 }

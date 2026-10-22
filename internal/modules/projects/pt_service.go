@@ -111,9 +111,7 @@ func (s *Service) UpdateProjectTransaction(
 	}
 	defer tx.Rollback(ctx)
 
-	amountChange := req.Amount != nil && math.Abs(*req.Amount-current.Amount) > 0.005
-	dateChange := req.Date != nil && *req.Date != current.Date
-	origin, err := linkedOriginTx(ctx, tx, ptID)
+	mine, err := myLinkedTxTx(ctx, tx, callerUserID, ptID)
 	if err != nil {
 		return nil, err
 	}
@@ -122,23 +120,30 @@ func (s *Service) UpdateProjectTransaction(
 	if err != nil {
 		return nil, err
 	}
+	// "แก้ในสมุดของฉันด้วย": my linked transaction takes the bill as it is now (apply_to_my_tx; the
+	// old also_update_link does the same).
 	var touched []uuid.UUID
-	if origin != nil && origin.userID == callerUserID && req.AlsoUpdateLink && (amountChange || dateChange) {
+	if mine != nil && (req.ApplyToMyTx || req.AlsoUpdateLink) {
 		if s.txs == nil {
 			return nil, errors.New("transactions module not wired")
 		}
-		up := transactions.UpdateRequest{Amount: req.Amount, Date: req.Date}
-		if err := s.txs.UpdateInTx(ctx, tx, callerUserID, origin.id, up); err != nil {
+		if touched, err = s.applyBillToTxTx(ctx, tx, callerUserID, *mine); err != nil {
 			return nil, fmt.Errorf("linked transaction: %w", err)
-		}
-		if origin.accountID != nil {
-			touched = append(touched, *origin.accountID)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return s.patch(ctx, callerUserID, projectID, &updated.ID, nil, touched)
+	p, err := s.patch(ctx, callerUserID, projectID, &updated.ID, nil, touched)
+	if err != nil {
+		return nil, err
+	}
+	if mine != nil && s.txs != nil {
+		if p.MyTransaction, err = s.txs.Get(ctx, callerUserID, *mine); err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
 }
 
 func (s *Service) applyBillEditTx(

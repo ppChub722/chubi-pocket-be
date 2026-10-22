@@ -761,3 +761,57 @@ func TestAccountPageNumbers(t *testing.T) {
 		}
 	}
 }
+
+// TestWalletFlowCashAndDebtCategories — 0.4.0-3: the wallet card's month out counts what left the
+// wallet (a bill of 123 that Lee paid 13 of = 110) and skips Debt Paid / Received rows.
+func TestWalletFlowCashAndDebtCategories(t *testing.T) {
+	e := newAccEnv(t)
+	ctx := context.Background()
+	owner := testdb.User(t, e.pool)
+	e.seedCategories(owner)
+	r := e.as(owner)
+	bank := dec[aJSON](t, e.call(r, "createAccount", "POST", "/api/v1/accounts",
+		map[string]any{"name": "Bank", "type": "bank", "balance": 1000}, http.StatusCreated)).ID
+	today := time.Now().UTC().Format("2006-01-02")
+	ins := func(typ string, amount float64, paidBy *float64, kind string) {
+		t.Helper()
+		if _, err := e.pool.Exec(ctx, `INSERT INTO transactions (id, user_id, account_id, type, amount, date, paid_by_amount, category_id, created_by_user_id)
+			VALUES ($1, $2, $3, $4, $5, $6::date, $7, (SELECT id FROM categories WHERE user_id = $2 AND system_kind = NULLIF($8, '')), $2)`,
+			uuid.New(), owner, bank, typ, amount, today, paidBy, kind); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lee := 13.0
+	ins("expense", 123, &lee, "")         // the wallet paid 110
+	ins("expense", 400, nil, "DEBT_PAID") // a repayment: not spending
+	ins("income", 30, nil, "DEBT_RECEIVED")
+	ins("income", 50, nil, "")
+
+	var list struct {
+		Data []struct {
+			ID       uuid.UUID `json:"id"`
+			MonthIn  float64   `json:"month_in"`
+			MonthOut float64   `json:"month_out"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(e.call(r, "listAccounts", "GET", "/api/v1/accounts", nil, http.StatusOK), &list); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range list.Data {
+		if a.ID == bank && (a.MonthIn != 50 || a.MonthOut != 110) {
+			t.Errorf("bank card = in %v out %v, want 50 / 110", a.MonthIn, a.MonthOut)
+		}
+	}
+	var got struct {
+		Summary struct {
+			TotalIncome  float64 `json:"total_income"`
+			TotalExpense float64 `json:"total_expense"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(e.call(r, "getAccount", "GET", "/api/v1/accounts/"+bank.String()+"?include=summary", nil, http.StatusOK), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Summary.TotalIncome != 50 || got.Summary.TotalExpense != 110 {
+		t.Errorf("bank summary = %+v, want in 50 out 110", got.Summary)
+	}
+}

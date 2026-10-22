@@ -209,6 +209,7 @@ func newQCFixture(t *testing.T) *qcFixture {
 	txSvc.WithDebtLinks(pdSvc)
 	txSvc.WithEventBillSyncer(f.svc.SyncBillFromTxTx)
 	txSvc.WithEventBillDeleter(f.svc.DeleteBillOfTxTx)
+	txSvc.WithEventLinks(f.svc)
 
 	t.Cleanup(func() { f.cleanup(t) })
 
