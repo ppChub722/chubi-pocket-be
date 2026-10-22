@@ -100,7 +100,8 @@ func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey, cycle st
 	if err != nil {
 		return nil, err
 	}
-	return &PersonPage{DebtPerson: bal, Counts: counts, Items: items, SummaryMessage: msg, Pagination: shared.NewPage(page, perPage, total)}, nil
+	return &PersonPage{DebtPerson: bal, Counts: counts, Items: items, Days: statementDays(items), SummaryMessage: msg,
+		Pagination: shared.NewPage(page, perPage, total)}, nil
 }
 
 func (s *Service) Entries(ctx context.Context, userID uuid.UUID, rawKey string, f EntryFilter) (*EntryList, error) {
@@ -185,31 +186,61 @@ func resolvePerson(ctx context.Context, q querier, userID uuid.UUID, rawKey stri
 }
 
 func (s *Service) CreateEntry(ctx context.Context, userID uuid.UUID, rawKey string, req CreateEntryRequest) (*WriteResult, error) {
-	createTx := req.AccountID != nil
-	if req.CreateTransaction != nil {
-		createTx = *req.CreateTransaction
-	}
-	if req.CreateTransaction == nil && req.AccountID == nil && len(req.TagIDs) > 0 {
-		return nil, ErrTagsNeedWallet // the old contract, for clients that don't send create_transaction
-	}
-	if !createTx && (req.AccountID != nil || len(req.TagIDs) > 0) {
-		return nil, ErrLedgerOnlyNoWallet
-	}
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-
-	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
+	e, touched, err := s.createEntryTx(ctx, tx, userID, rawKey, req)
 	if err != nil {
 		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	out, err := s.writeResult(ctx, userID, e.ID, touched, nil)
+	if err != nil {
+		return nil, err
+	}
+	bc := transactions.NewPersonDelta(out.PersonBalance.Key, out.PersonBalance.Person,
+		out.PersonBalance.Net-e.Signed(), out.PersonBalance.Net)
+	out.BalanceChange = &bc
+	return out, nil
+}
+
+// PreviewEntry — POST …/entries?preview=true (the debt quick create's result box): the write runs
+// and is rolled back; the answer is the person's balance before → after and the wallet's.
+func (s *Service) PreviewEntry(ctx context.Context, userID uuid.UUID, rawKey string, req CreateEntryRequest) (*DebtPreview, error) {
+	return s.preview(ctx, userID, nonNil(req.AccountID), func(tx pgx.Tx) (string, float64, error) {
+		e, _, err := s.createEntryTx(ctx, tx, userID, rawKey, req)
+		if err != nil {
+			return "", 0, err
+		}
+		return e.Key(), e.Signed(), nil
+	})
+}
+
+// createEntryTx — POST …/entries' write: the debt (and its wallet transaction, when asked).
+func (s *Service) createEntryTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, rawKey string, req CreateEntryRequest) (*Entry, []uuid.UUID, error) {
+	createTx := req.AccountID != nil
+	if req.CreateTransaction != nil {
+		createTx = *req.CreateTransaction
+	}
+	if req.CreateTransaction == nil && req.AccountID == nil && len(req.TagIDs) > 0 {
+		return nil, nil, ErrTagsNeedWallet // the old contract, for clients that don't send create_transaction
+	}
+	if !createTx && (req.AccountID != nil || len(req.TagIDs) > 0) {
+		return nil, nil, ErrLedgerOnlyNoWallet
+	}
+	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
+	if err != nil {
+		return nil, nil, err
 	}
 	date := ""
 	if req.Date != nil {
 		date = *req.Date
 	} else if date, err = today(ctx, tx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	entry := &Entry{
 		UserID: userID, Direction: req.Direction, ContactID: contactID, PersonName: name,
@@ -222,17 +253,17 @@ func (s *Service) CreateEntry(ctx context.Context, userID uuid.UUID, rawKey stri
 			JOIN project_members pm ON pm.project_id = pt.project_id AND pm.user_id = $2 AND pm.status = 'active'
 			WHERE pt.id = $1`, *req.BillID, userID).Scan(&projectID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrBillNotFound
+			return nil, nil, ErrBillNotFound
 		}
 		if err != nil {
-			return nil, fmt.Errorf("debt bill: %w", err)
+			return nil, nil, fmt.Errorf("debt bill: %w", err)
 		}
 		kind := SourceEvent
 		entry.SourceKind, entry.SourceProjectTransactionID, entry.ProjectID = &kind, req.BillID, &projectID
 	}
 	e, err := insertEntryTx(ctx, tx, entry)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var touched []uuid.UUID
 	if createTx {
@@ -240,19 +271,55 @@ func (s *Service) CreateEntry(ctx context.Context, userID uuid.UUID, rawKey stri
 			Direction: e.Direction, AccountID: req.AccountID, Amount: e.Amount, Date: e.Date,
 			Description: e.Description, Note: e.Note, TagIDs: req.TagIDs,
 		}); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if req.AccountID != nil {
 			touched = append(touched, *req.AccountID)
 		}
 	}
 	if err := markPaidTx(ctx, tx, userID, e.Key(), req.MarkPaidIDs); err != nil {
+		return nil, nil, err
+	}
+	return e, touched, nil
+}
+
+// preview — run write in a DB transaction that is always rolled back, and read the person's balance
+// and the wallets before / after (write answers the person's key and the signed amount it added).
+func (s *Service) preview(ctx context.Context, userID uuid.UUID, wallets []uuid.UUID,
+	write func(tx pgx.Tx) (string, float64, error)) (*DebtPreview, error) {
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	before, err := shared.LoadWalletBalances(ctx, tx, wallets)
+	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
+	key, signed, err := write(tx)
+	if err != nil {
+		return nil, err
 	}
-	return s.writeResult(ctx, userID, e.ID, touched, nil)
+	after, err := s.balanceOfKey(ctx, tx, userID, key)
+	if err != nil {
+		return nil, err
+	}
+	afterW, err := shared.LoadWalletBalances(ctx, tx, wallets)
+	if err != nil {
+		return nil, err
+	}
+	out := &DebtPreview{Preview: true,
+		People:  []transactions.PersonDelta{transactions.NewPersonDelta(key, after.Person, after.Net-signed, after.Net)},
+		Wallets: []transactions.WalletDelta{}}
+	was := map[uuid.UUID]float64{}
+	for _, b := range before {
+		was[b.AccountID] = b.Balance
+	}
+	for _, a := range afterW {
+		out.Wallets = append(out.Wallets, transactions.WalletDelta{AccountID: a.AccountID, Before: was[a.AccountID],
+			After: a.Balance, Delta: round2(a.Balance - was[a.AccountID])})
+	}
+	return out, nil
 }
 
 func markPaidTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, key string, ids []uuid.UUID) error {
@@ -493,35 +560,65 @@ func (s *Service) CreateRepayment(ctx context.Context, userID uuid.UUID, rawKey 
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-
-	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
+	row, key, err := s.createRepaymentTx(ctx, tx, userID, rawKey, req)
 	if err != nil {
 		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	out, err := s.repaymentResult(ctx, userID, row.ID, key, nonNil(req.AccountID))
+	if err != nil {
+		return nil, err
+	}
+	// An overpaid settle is allowed: the balance simply crosses 0 (balance_change.flipped says so).
+	bc := transactions.NewPersonDelta(key, out.PersonBalance.Person, out.PersonBalance.Net-repaySigned(req), out.PersonBalance.Net)
+	out.BalanceChange = &bc
+	return out, nil
+}
+
+// PreviewRepayment — POST …/repayments?preview=true: the settle's before → after, nothing saved.
+func (s *Service) PreviewRepayment(ctx context.Context, userID uuid.UUID, rawKey string, req RepaymentRequest) (*DebtPreview, error) {
+	return s.preview(ctx, userID, nonNil(req.AccountID), func(tx pgx.Tx) (string, float64, error) {
+		_, key, err := s.createRepaymentTx(ctx, tx, userID, rawKey, req)
+		return key, repaySigned(req), err
+	})
+}
+
+// repaySigned — a repayment's effect on the balance: pay +, receive −.
+func repaySigned(req RepaymentRequest) float64 {
+	if req.Kind == RepayPay {
+		return req.Amount
+	}
+	return -req.Amount
+}
+
+func (s *Service) createRepaymentTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, rawKey string, req RepaymentRequest) (*transactions.Transaction, string, error) {
+	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
+	if err != nil {
+		return nil, "", err
 	}
 	date := ""
 	if req.Date != nil {
 		date = *req.Date
 	} else if date, err = today(ctx, tx); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	row, err := s.txs.CreateRepaymentInTx(ctx, tx, userID, transactions.RepayInput{
 		Kind: req.Kind, ContactID: contactID, PersonName: strings.TrimSpace(name), AccountID: req.AccountID,
 		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note, TagIDs: req.TagIDs,
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	key := shared.DebtKey(contactID, name)
 	if err := markPaidTx(ctx, tx, userID, key, req.MarkPaidIDs); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if contactID != nil {
 		_, _ = tx.Exec(ctx, `UPDATE contacts SET last_used_at = NOW() WHERE id = $1 AND user_id = $2`, *contactID, userID)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-	return s.repaymentResult(ctx, userID, row.ID, key, nonNil(req.AccountID))
+	return row, key, nil
 }
 
 func (s *Service) repaymentResult(ctx context.Context, userID, txID uuid.UUID, key string, touched []uuid.UUID) (*RepaymentResult, error) {

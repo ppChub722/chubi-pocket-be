@@ -241,8 +241,7 @@ func (s *Service) previewResult(ctx context.Context, outer, sp pgx.Tx, userID uu
 		if persons[k].Name == "" {
 			persons[k] = p
 		}
-		out.People = append(out.People, PersonDelta{Key: k, Person: persons[k], Before: before, After: afterNet[k],
-			Delta: round2(afterNet[k] - before)})
+		out.People = append(out.People, NewPersonDelta(k, persons[k], before, afterNet[k]))
 	}
 	beforeBal, err := shared.LoadWalletBalances(ctx, outer, walletIDs)
 	if err != nil {

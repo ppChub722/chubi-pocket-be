@@ -87,6 +87,7 @@ type DebtEntry struct {
 	CreatedAt      time.Time   `json:"created_at"`
 	InCurrentCycle *bool       `json:"in_current_cycle"`
 	UpdatedAt      time.Time   `json:"updated_at"`
+	Origin         *DebtOrigin `json:"origin"`
 }
 
 type DebtPerson struct {
@@ -100,6 +101,22 @@ type DebtPerson struct {
 	// null when it never did.
 	ClearedAt       *string `json:"cleared_at"`
 	DaysOutstanding *int    `json:"days_outstanding"`
+	// 0.4.0-3 debt pages: the side (receivable | payable | clear), the first line's date
+	// ("ติดต่อกันตั้งแต่ …") and the latest line for the people row.
+	Side            string        `json:"side"`
+	FirstActivityAt *string       `json:"first_activity_at"`
+	LastActivity    *LastActivity `json:"last_activity"`
+}
+
+// LastActivity — a person's latest line (a debt or a repayment), for the people list row.
+type LastActivity struct {
+	Kind         string    `json:"kind"` // debt | repayment
+	ID           uuid.UUID `json:"id"`   // the debt entry id, or the repayment's transaction id
+	Title        *string   `json:"title"`
+	Direction    string    `json:"direction"` // paid (net +) | received (net −)
+	Amount       float64   `json:"amount"`
+	SignedAmount float64   `json:"signed_amount"`
+	Date         string    `json:"date"`
 }
 
 type DebtTotals struct {
@@ -110,6 +127,18 @@ type DebtTotals struct {
 	OwedToMePeople   int     `json:"owed_to_me_people"`
 	IOwePeople       int     `json:"i_owe_people"`
 	Over30DaysPeople int     `json:"over_30_days_people"`
+	// The debts list hero (0.4.0-3): the same numbers under the page's names.
+	ReceivableTotal float64      `json:"receivable_total"`
+	PayableTotal    float64      `json:"payable_total"`
+	Counts          PeopleCounts `json:"counts"`
+}
+
+// PeopleCounts — the filter chips of the debts list (people shown by default).
+type PeopleCounts struct {
+	All        int `json:"all"`
+	Receivable int `json:"receivable"`
+	Payable    int `json:"payable"`
+	Overdue30  int `json:"overdue_30"`
 }
 
 type PeopleList struct {
@@ -149,6 +178,35 @@ type StatementItem struct {
 	InCurrentCycle *bool       `json:"in_current_cycle"`
 	CreatedAt      time.Time   `json:"created_at"`
 	UpdatedAt      time.Time   `json:"updated_at"`
+	// RunningBalance (0.4.0-3) — the person's balance right after this line (book order over all
+	// lines: date, created_at, id).
+	RunningBalance float64     `json:"running_balance"`
+	Origin         *DebtOrigin `json:"origin"` // debts only (the มาจาก card); null on a repayment
+}
+
+// StatementDay — one day of the statement page: the balance change of that day's lines and the
+// balance at its end (the page's day headers: "เพิ่ม ฿70" / "ลดลง ฿400").
+type StatementDay struct {
+	Date         string     `json:"date"`
+	Change       float64    `json:"change"` // signed: + = they owe me more / I owe less
+	BalanceAfter float64    `json:"balance_after"`
+	Count        int        `json:"count"`
+	lastSeen     *time.Time // the day's latest line so far (created_at)
+}
+
+// DebtOrigin — where a debt came from, for the debt detail's "มาจาก" card (0.4.0-3):
+// split = a split on my bill, paid_by = someone paid (part of) my expense, partner = another user's
+// split on me (my expense of it), event = an event bill (resolve "as debt"), cash = a loan / borrow
+// with its own wallet transaction. Null for a ledger-only debt.
+type DebtOrigin struct {
+	Kind          string             `json:"kind"`
+	TransactionID *uuid.UUID         `json:"transaction_id"`
+	BillID        *uuid.UUID         `json:"bill_id"`
+	EventID       *uuid.UUID         `json:"event_id"`
+	Title         *string            `json:"title"`
+	Amount        *float64           `json:"amount"`
+	Date          *string            `json:"date"`
+	Account       *shared.AccountRef `json:"account"`
 }
 
 const (
@@ -175,12 +233,25 @@ type RepaymentResult struct {
 	Item            StatementItem                   `json:"item"`
 	PersonBalance   DebtPerson                      `json:"person_balance"`
 	AccountBalances []shared.WalletBalance          `json:"account_balances"`
+	// BalanceChange (0.4.0-3) — the person's balance before → after this write; flipped = an overpaid
+	// settle crossed to the other side.
+	BalanceChange *transactions.PersonDelta `json:"balance_change"`
+}
+
+// DebtPreview — POST …/entries or …/repayments with ?preview=true (the debt quick create's result
+// box): the person's balance before → after and each touched wallet's, nothing saved. Same shape as
+// a transaction PUT preview (people / wallets).
+type DebtPreview struct {
+	Preview bool                       `json:"preview"`
+	People  []transactions.PersonDelta `json:"people"`
+	Wallets []transactions.WalletDelta `json:"wallets"`
 }
 
 type PersonPage struct {
 	DebtPerson
 	Counts         EntryCounts     `json:"counts"`
 	Items          []StatementItem `json:"items"`
+	Days           []StatementDay  `json:"days"`
 	SummaryMessage *SummaryMessage `json:"summary_message"`
 	Pagination     shared.Page     `json:"pagination"`
 }
@@ -202,6 +273,7 @@ type WriteResult struct {
 	PreviousPersonBalance *DebtPerson                     `json:"previous_person_balance"`
 	Transaction           *transactions.TransactionDetail `json:"transaction"`
 	AccountBalances       []shared.WalletBalance          `json:"account_balances"`
+	BalanceChange         *transactions.PersonDelta       `json:"balance_change"` // create only (0.4.0-3); null on other writes
 }
 
 type DeleteResult struct {

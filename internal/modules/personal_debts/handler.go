@@ -47,8 +47,10 @@ func (h *Handler) People(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", "sort must be oldest, amount or recent", nil)
 		return
 	}
-	if f.Side != "" && f.Side != "owed_to_me" && f.Side != "i_owe" {
-		response.BadRequest(c, "VALIDATION_ERROR", "side must be owed_to_me or i_owe", nil)
+	switch f.Side {
+	case "", "owed_to_me", "i_owe", "receivable", "payable", "overdue_30":
+	default:
+		response.BadRequest(c, "VALIDATION_ERROR", "side must be receivable, payable, overdue_30 (or owed_to_me / i_owe)", nil)
 		return
 	}
 	out, err := h.service.People(c.Request.Context(), userID, f)
@@ -142,6 +144,15 @@ func (h *Handler) CreateEntry(c *gin.Context) {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 		return
 	}
+	if c.Query("preview") == "true" {
+		p, err := h.service.PreviewEntry(c.Request.Context(), userID, c.Param("key"), req)
+		if err != nil {
+			mapServiceError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, p)
+		return
+	}
 	out, err := h.service.CreateEntry(c.Request.Context(), userID, c.Param("key"), req)
 	if err != nil {
 		mapServiceError(c, err)
@@ -159,6 +170,15 @@ func (h *Handler) CreateRepayment(c *gin.Context) {
 	var req RepaymentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	if c.Query("preview") == "true" {
+		p, err := h.service.PreviewRepayment(c.Request.Context(), userID, c.Param("key"), req)
+		if err != nil {
+			mapServiceError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, p)
 		return
 	}
 	out, err := h.service.CreateRepayment(c.Request.Context(), userID, c.Param("key"), req)

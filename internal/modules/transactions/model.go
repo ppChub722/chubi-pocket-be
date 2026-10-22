@@ -71,6 +71,19 @@ type PersonDelta struct {
 	Before float64          `json:"before"`
 	After  float64          `json:"after"`
 	Delta  float64          `json:"delta"`
+	// SideBefore / SideAfter — receivable | payable | clear; Flipped = the side changed from
+	// receivable to payable or back (an overpaid settle).
+	SideBefore string `json:"side_before"`
+	SideAfter  string `json:"side_after"`
+	Flipped    bool   `json:"flipped"`
+}
+
+// NewPersonDelta fills the delta and the sides from before / after.
+func NewPersonDelta(key string, person shared.PersonRef, before, after float64) PersonDelta {
+	d := PersonDelta{Key: key, Person: person, Before: round2(before), After: round2(after), Delta: round2(after - before),
+		SideBefore: shared.DebtSide(before), SideAfter: shared.DebtSide(after)}
+	d.Flipped = d.SideBefore != "clear" && d.SideAfter != "clear" && d.SideBefore != d.SideAfter
+	return d
 }
 
 // WalletDelta — a wallet's balance before / after a write (the preview's dry run).

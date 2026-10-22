@@ -72,18 +72,30 @@ func RepaySignedSQL(a string) string {
 // DebtLedgerSQL — every signed line of the user's person ledger (userParam = the user id): the
 // debts (personal_debts) and the repayments (transactions with a repay person). A debt's own
 // linked transaction is not a line. Columns: kind (debt | repayment), key, id, cid, snap (the
-// typed-name snapshot), signed, paid (always TRUE on a repayment: never "open"), date, created_at.
+// typed-name snapshot), signed, paid (always TRUE on a repayment: never "open"), date, created_at,
+// descr (the line's description).
 // Wrap it: SELECT … FROM (` + DebtLedgerSQL("$1") + `) l.
 func DebtLedgerSQL(userParam string) string {
 	return `SELECT 'debt' AS kind, ` + DebtKeySQL("lpd") + ` AS key, lpd.id,
 		       lpd.counterparty_contact_id AS cid, lpd.counterparty_person_name AS snap,
-		       ` + DebtSignedSQL("lpd") + ` AS signed, lpd.paid, lpd.date, lpd.created_at
+		       ` + DebtSignedSQL("lpd") + ` AS signed, lpd.paid, lpd.date, lpd.created_at, lpd.description AS descr
 		FROM personal_debts lpd WHERE lpd.user_id = ` + userParam + `
 		UNION ALL
 		SELECT 'repayment', ` + RepayKeySQL("lrt") + `, lrt.id,
 		       lrt.repay_contact_id, lrt.repay_person_name,
-		       ` + RepaySignedSQL("lrt") + `, TRUE, lrt.date, lrt.created_at
+		       ` + RepaySignedSQL("lrt") + `, TRUE, lrt.date, lrt.created_at, lrt.description
 		FROM transactions lrt WHERE lrt.user_id = ` + userParam + ` AND lrt.repay_person_name IS NOT NULL`
+}
+
+// DebtSide — receivable (they owe me) | payable (I owe them) | clear, from a person's net.
+func DebtSide(net float64) string {
+	switch {
+	case net > 0.005:
+		return "receivable"
+	case net < -0.005:
+		return "payable"
+	}
+	return "clear"
 }
 
 type DebtLink struct {

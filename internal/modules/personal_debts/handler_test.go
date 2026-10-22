@@ -596,9 +596,12 @@ func TestDebtCyclesAndSummary(t *testing.T) {
 
 	msg, _ := page["summary_message"].(map[string]any)
 	text, _ := msg["text"].(string)
-	if num(msg, "entries") != 2 || num(msg, "net") != 70 || !strings.Contains(text, "รวม Mom ค้างจ่ายฉัน 70 บาท") ||
-		!strings.Contains(text, "+50") || strings.Contains(text, "100") {
+	if num(msg, "entries") != 2 || num(msg, "net") != 70 || !strings.Contains(text, "รวม ฉันรอรับจาก Mom 70 บาท") ||
+		!strings.Contains(text, "+50") || strings.Contains(text, "100") || strings.Contains(text, "ติด") {
 		t.Errorf("message = %q", text)
+	}
+	if only, _ := msg["text_balance_only"].(string); only != "ยอดกับ Mom ตอนนี้: ฉันรอรับจาก Mom 70 บาท" {
+		t.Errorf("balance-only message = %q", only)
 	}
 }
 

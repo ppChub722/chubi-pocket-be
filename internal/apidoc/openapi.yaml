@@ -4360,14 +4360,14 @@ paths:
       description: |
         One row per person (key `c:<contact_id>` or `n:<lower(name)>`). `sort`: `oldest` (default: days_outstanding desc, none last, then |net| desc), `amount` (|net| desc, then the latest entry), `recent` (the latest entry first).
         Default: only people with something OPEN (net ≠ 0 OR an entry not labelled paid); `all=true` shows everyone.
-        `q` matches the resolved person name (case-insensitive substring). `side=owed_to_me` keeps net > 0, `side=i_owe` net < 0.
-        `totals` cover every person (they ignore q / side / all / paging), so the header boxes stay put while the list filters.
+        `q` matches the resolved person name (case-insensitive substring). `side=receivable` (or owed_to_me) keeps net > 0, `side=payable` (or i_owe) net < 0, `side=overdue_30` (0.4.0-3) people whose oldest open debt of the current cycle is over 30 days.
+        `totals` cover every person (they ignore q / side / all / paging), so the header boxes stay put while the list filters: `receivable_total` / `payable_total` / `net` and `counts {all, receivable, payable, overdue_30}` for the chips (0.4.0-3). Each row carries `side`, `days_outstanding` and `last_activity` (the second line), `first_activity_at`.
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
         - { name: q, in: query, schema: { type: string } }
         - { name: all, in: query, schema: { type: boolean }, description: 'true = include people with nothing open.' }
-        - { name: side, in: query, schema: { type: string, enum: [owed_to_me, i_owe] } }
+        - { name: side, in: query, schema: { type: string, enum: [receivable, payable, overdue_30, owed_to_me, i_owe] } }
         - { name: sort, in: query, schema: { type: string, enum: [oldest, amount, recent], default: oldest } }
       responses:
         '200':
@@ -4417,14 +4417,23 @@ paths:
       description: |
         "จ่ายคืนลี 400" / "รับคืนจาก chalee 82": creates ONE transaction: `pay` = expense in the system category Debt Paid (net +), `receive` = income in Debt Received (net −); both are out of reports. It is linked to the PERSON (not to a debt), shows `repayment_person` on the transaction, and moves the wallet like any transaction (`account_id` optional, as on POST /transactions).
         The person: a `c:` key = that contact (400 CONTACT_NOT_FOUND if not the caller's); an `n:` key = a typed name (`person_name` = the shown spelling). `mark_paid_ids` labels debt entries of the SAME person paid (label only; 400 ENTRY_NOT_FOUND if one is not). `date` default = today.
-        Edit / delete the repayment through PUT / DELETE /transactions/{id} (the link stays; the balance follows). Returns 201 with the transaction, its statement line, the person's new balance and the touched wallet balance.
+        Edit / delete the repayment through PUT / DELETE /transactions/{id} (the link stays; the balance follows). Returns 201 with the transaction, its statement line, the person's new balance, the touched wallet balance and `balance_change` (before → after).
+        **Overpay** (0.4.0-3): allowed; the balance crosses 0 and `balance_change.flipped` is true (รอจ่าย 230, pay 300 → รอรับ 70).
+        **`?preview=true`** (0.4.0-3, the quick create result box): the write runs and is rolled back → 200 `DebtPreview {preview, people: [PersonDelta], wallets: [WalletDelta]}`; same validation and errors.
         Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND / ENTRY_NOT_FOUND, 409 ACCOUNT_ARCHIVED.
+      parameters:
+        - { name: preview, in: query, description: 'true = dry run (200 DebtPreview), nothing saved.', schema: { type: boolean } }
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/DebtRepaymentCreateRequest' }
       responses:
+        '200':
+          description: '?preview=true: what the settle would do.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DebtPreview' }
         '201':
           description: The repayment and everything the pages patch from it.
           content:
@@ -4482,14 +4491,22 @@ paths:
       description: |
         DEBTS only ("ลีจ่ายค่าข้าวให้ 60", "ยืมลี 500"); a repayment is POST …/repayments. Paid = I paid them (net + amount); received = they paid me (net − amount). With `account_id` the BE also writes the LINKED wallet transaction (it moves the wallet but NOT the person's balance) (paid = expense, received = income, system category Debt Paid / Debt Received, description / note copied) and `tag_ids` go on that transaction; without it the entry is ledger-only and `tag_ids` must be empty (400 TAGS_NEED_WALLET).
         The person: a `c:` key = that contact (400 CONTACT_NOT_FOUND if not the caller's); an `n:` key = a typed name (`person_name` sets the shown spelling, default = the key's text as sent). `mark_paid_ids` labels those entries of the SAME person paid in the same call (400 ENTRY_NOT_FOUND if one is not).
-        `date` default = today. Returns 201 with the entry, the person's new balance, the linked transaction (full row) and the touched wallet balances.
-        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAGS_NEED_WALLET / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND / ENTRY_NOT_FOUND.
+        `date` default = today. Returns 201 with the entry, the person's new balance, the linked transaction (full row), the touched wallet balances and `balance_change` (before → after).
+        **`?preview=true`** (0.4.0-3, the quick create result box, with or without a transaction): the write runs and is rolled back → 200 `DebtPreview`; same validation and errors.
+        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAGS_NEED_WALLET / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND / ENTRY_NOT_FOUND / BILL_NOT_FOUND.
+      parameters:
+        - { name: preview, in: query, description: 'true = dry run (200 DebtPreview), nothing saved.', schema: { type: boolean } }
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/DebtEntryCreateRequest' }
       responses:
+        '200':
+          description: '?preview=true: what the record would do.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DebtPreview' }
         '201':
           description: The entry and everything the pages patch from it.
           content:
@@ -5720,27 +5737,8 @@ components:
       properties:
         preview: { type: boolean, const: true }
         rows: { type: array, items: { $ref: '#/components/schemas/Transaction' }, description: 'The row as it would be.' }
-        people:
-          type: array
-          items:
-            type: object
-            required: [key, person, before, after, delta]
-            properties:
-              key: { $ref: '#/components/schemas/PersonKey' }
-              person: { $ref: '#/components/schemas/PersonRef' }
-              before: { $ref: '#/components/schemas/Money', description: 'net now (> 0 they owe me)' }
-              after: { $ref: '#/components/schemas/Money' }
-              delta: { $ref: '#/components/schemas/Money' }
-        wallets:
-          type: array
-          items:
-            type: object
-            required: [account_id, before, after, delta]
-            properties:
-              account_id: { $ref: '#/components/schemas/Uuid' }
-              before: { $ref: '#/components/schemas/Money' }
-              after: { $ref: '#/components/schemas/Money' }
-              delta: { $ref: '#/components/schemas/Money' }
+        people: { type: array, items: { $ref: '#/components/schemas/PersonDelta' } }
+        wallets: { type: array, items: { $ref: '#/components/schemas/WalletDelta' } }
     Totals:
       type: object
       description: 'Money over the WHOLE filtered set (every page). Transfers count in neither side; like reports, income / expense leave out categories kept out of reports (include_in_report false: Debt Paid / Debt Received, opening balance, adjustments, …). count still counts those rows.'
@@ -9911,8 +9909,24 @@ components:
     DebtPerson:
       type: object
       description: 'A person''s balance (people list row, header of the person page, and `person_balance` in every debt write so the FE patches without re-fetching).'
-      required: [key, person, net, open_count, entry_count, last_activity_at, cleared_at, days_outstanding]
+      required: [key, person, net, open_count, entry_count, last_activity_at, cleared_at, days_outstanding, side, first_activity_at, last_activity]
       properties:
+        side: { type: string, enum: [receivable, payable, clear], description: '0.4.0-3: net > 0 รอรับ / net < 0 รอจ่าย / 0.' }
+        first_activity_at: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: '0.4.0-3: the first line''s date ever ("ติดต่อกันตั้งแต่ …").' }
+        last_activity:
+          description: '0.4.0-3: the latest line, for the people row''s second line ("ค่าตั๋ว | 1 ก.ย." / a repayment "คุณจ่ายคืน ฿400 | 10 ต.ค."). Null with no lines.'
+          oneOf:
+            - type: object
+              required: [kind, id, title, direction, amount, signed_amount, date]
+              properties:
+                kind: { type: string, enum: [debt, repayment] }
+                id: { $ref: '#/components/schemas/Uuid', description: 'debt = the entry id; repayment = the transaction id.' }
+                title: { type: [string, 'null'], description: 'Its description (null = none: word it from kind / direction).' }
+                direction: { type: string, enum: [paid, received], description: 'paid = net + (I paid for them / I paid back), received = net −.' }
+                amount: { $ref: '#/components/schemas/Money' }
+                signed_amount: { $ref: '#/components/schemas/Money' }
+                date: { $ref: '#/components/schemas/Date' }
+            - type: 'null'
         key: { $ref: '#/components/schemas/PersonKey' }
         person: { $ref: '#/components/schemas/PersonRef' }
         net: { $ref: '#/components/schemas/Money', description: 'Σ signed debts + Σ signed repayments: debt paid +, debt received −, repayment I paid (expense) +, repayment I received (income) −. A debt''s own linked transaction never counts. > 0 = they owe me (รอรับ), < 0 = I owe them (รอจ่าย), 0 = หายกัน.' }
@@ -9931,8 +9945,19 @@ components:
     DebtTotals:
       type: object
       description: 'The debts header / Home tile / More tile numbers (one rule everywhere). owed_to_me = Σ net of people with net > 0; i_owe = Σ |net| of people with net < 0.'
-      required: [owed_to_me, i_owe, net, open_count, owed_to_me_people, i_owe_people, over_30_days_people]
+      required: [owed_to_me, i_owe, net, open_count, owed_to_me_people, i_owe_people, over_30_days_people, receivable_total, payable_total, counts]
       properties:
+        receivable_total: { $ref: '#/components/schemas/Money', description: '0.4.0-3, = owed_to_me (รอรับ).' }
+        payable_total: { $ref: '#/components/schemas/Money', description: '0.4.0-3, = i_owe (รอจ่าย).' }
+        counts:
+          type: object
+          description: '0.4.0-3: the debts list filter chips (people with something open); side=receivable | payable | overdue_30 lists each.'
+          required: [all, receivable, payable, overdue_30]
+          properties:
+            all: { type: integer }
+            receivable: { type: integer }
+            payable: { type: integer }
+            overdue_30: { type: integer, description: 'Oldest open debt of the current cycle older than 30 days.' }
         owed_to_me: { $ref: '#/components/schemas/Money' }
         i_owe: { $ref: '#/components/schemas/Money' }
         net: { $ref: '#/components/schemas/Money', description: 'owed_to_me − i_owe.' }
@@ -9943,9 +9968,11 @@ components:
     DebtSummaryMessage:
       type: object
       description: 'The text to send a person (Thai, both directions).'
-      required: [text, entries, net]
+      required: [text, text_balance_only, since, entries, net]
       properties:
-        text: { type: string, description: 'Multi-line: "สรุปยอดกับ <name>", one "• <date> <what> <±amount> <unit> (<description>)" line per CURRENT-cycle statement line (debts and repayments), oldest first (+ = I paid for them / ฉันจ่ายคืน, − = they paid me / ได้รับคืนจาก), then the total: they owe me / I owe them / cleared.' }
+        text: { type: string, description: 'Share variant "รอบนี้". Multi-line: "สรุปยอดกับ <name> (ตั้งแต่ <first date>)", one "• <date> <what> <±amount> <unit> (<description>)" line per CURRENT-cycle statement line (debts and repayments), oldest first (+ = I paid for them / ฉันจ่ายคืน, − = they paid me / ได้รับคืนจาก), then "รวม ฉันรอรับจาก <name> …" / "รวม ฉันรอจ่ายให้ <name> …" / cleared (0.4.0-3 wording: never ติด).' }
+        text_balance_only: { type: string, description: '0.4.0-3, share variant "ยอดคงเหลืออย่างเดียว": "ยอดกับ <name> ตอนนี้: ฉันรอรับจาก / รอจ่ายให้ <name> <amount> <unit>".' }
+        since: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The current cycle''s first line date.' }
         entries: { type: integer, description: 'Lines listed (the current cycle).' }
         net: { $ref: '#/components/schemas/Money' }
     ArchivedItem:
@@ -10003,6 +10030,22 @@ components:
         kind: { type: string, enum: [transaction, event, partner, paid_by] }
         id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         title: { type: [string, 'null'] }
+    DebtOrigin:
+      type: object
+      description: |
+        0.4.0-3: where a debt came from, for the debt detail's "มาจาก" card (page-ready; null for a ledger-only debt). kind:
+        `split` = a split on my bill (transaction = the bill), `paid_by` = someone paid (part of) my expense (transaction = it), `partner` = another user's split on me (transaction = my expense of it, or null), `event` = an event bill (bill_id / event_id; resolve "as debt"), `cash` = a loan / borrow with its own wallet transaction (transaction = it).
+        title / amount / date / account are that transaction's (an event: the bill's description or the event name, the bill amount and date, no wallet). The debt itself has no wallet.
+      required: [kind, transaction_id, bill_id, event_id, title, amount, date, account]
+      properties:
+        kind: { type: string, enum: [split, paid_by, partner, event, cash] }
+        transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Opens GET /transactions/{id}.' }
+        bill_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        event_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        title: { type: [string, 'null'] }
+        amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
+        date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }] }
+        account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
     DebtEntryTx:
       type: object
       description: 'The wallet transaction of an entry (light ref for list rows).'
@@ -10012,8 +10055,9 @@ components:
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'Null only for an old floating repayment.' }
     DebtEntry:
       type: object
-      required: [id, key, direction, amount, date, description, note, paid, source, transaction, created_at, in_current_cycle, updated_at]
+      required: [id, key, direction, amount, date, description, note, paid, source, transaction, created_at, in_current_cycle, updated_at, origin]
       properties:
+        origin: { oneOf: [{ $ref: '#/components/schemas/DebtOrigin' }, { type: 'null' }] }
         id: { $ref: '#/components/schemas/Uuid' }
         key: { $ref: '#/components/schemas/PersonKey' }
         direction: { type: string, enum: [paid, received], description: 'paid = I paid them (net +); received = they paid me (net −).' }
@@ -10051,8 +10095,19 @@ components:
       allOf:
         - { $ref: '#/components/schemas/DebtPerson' }
         - type: object
-          required: [counts, items, summary_message, pagination]
+          required: [counts, items, days, summary_message, pagination]
           properties:
+            days:
+              type: array
+              description: '0.4.0-3: the page''s items grouped by day, in the items'' order (day headers: change = the day''s balance change, + = they owe me more / I owe less; balance_after = the balance at the day''s end). A day split across pages shows its part on each page. The "ดูรอบก่อน" divider: counts.earlier > 0, label from cleared_at; ?cycle=earlier pages the earlier cycles.'
+              items:
+                type: object
+                required: [date, change, balance_after, count]
+                properties:
+                  date: { $ref: '#/components/schemas/Date' }
+                  change: { $ref: '#/components/schemas/Money' }
+                  balance_after: { $ref: '#/components/schemas/Money' }
+                  count: { type: integer }
             counts:
               type: object
               description: 'Over the statement lines (debts + repayments).'
@@ -10076,8 +10131,9 @@ components:
     DebtEntryWriteResult:
       type: object
       description: 'Every debt write returns the final state: the entry, the person''s new balance, the linked transaction (full row, null = ledger-only) and the post-write balance of every wallet touched.'
-      required: [entry, person_balance, previous_person_balance, transaction, account_balances]
+      required: [entry, person_balance, previous_person_balance, transaction, account_balances, balance_change]
       properties:
+        balance_change: { oneOf: [{ $ref: '#/components/schemas/PersonDelta' }, { type: 'null' }], description: '0.4.0-3, create only: the person''s balance before → after (flipped = crossed sides). Null on other writes.' }
         entry: { $ref: '#/components/schemas/DebtEntry' }
         person_balance: { $ref: '#/components/schemas/DebtPerson' }
         previous_person_balance: { oneOf: [{ $ref: '#/components/schemas/DebtPerson' }, { type: 'null' }], description: 'Set only when an edit moved the entry to another person (the old person''s new balance).' }
@@ -10136,8 +10192,10 @@ components:
         One line of a person's statement ("ที่มาของยอด"): a DEBT entry or a REPAYMENT transaction, interleaved by date (book order: date, created_at, id).
         `direction` follows the sign: paid = net + (a debt I paid for them / a repayment I paid back, expense), received = net − (a debt they paid for me / a repayment I got back, income).
         A debt opens GET /personal-debts/{id}; a repayment opens GET /transactions/{id} (`id` is the transaction id).
-      required: [kind, id, key, direction, amount, signed_amount, date, description, note, paid, source, transaction, in_current_cycle, created_at, updated_at]
+      required: [kind, id, key, direction, amount, signed_amount, date, description, note, paid, source, transaction, in_current_cycle, created_at, updated_at, running_balance, origin]
       properties:
+        running_balance: { $ref: '#/components/schemas/Money', description: '0.4.0-3: the person''s balance right after this line (book order over ALL their lines).' }
+        origin: { oneOf: [{ $ref: '#/components/schemas/DebtOrigin' }, { type: 'null' }], description: 'Debts: where it came from (sub-line: "ลีจ่ายแทน", "เข้ากระเป๋า …", "แบ่งบิล ฿120"). Null on a repayment (its wallet: transaction.account).' }
         kind: { type: string, enum: [debt, repayment] }
         id: { $ref: '#/components/schemas/Uuid', description: 'debt = the entry id; repayment = the transaction id.' }
         key: { $ref: '#/components/schemas/PersonKey' }
@@ -10185,12 +10243,42 @@ components:
     DebtRepaymentResult:
       type: object
       description: 'The repayment as a full transaction row (same view as GET /transactions/{id}, with repayment_person), its statement line, the person''s new balance and the touched wallet balance.'
-      required: [transaction, item, person_balance, account_balances]
+      required: [transaction, item, person_balance, account_balances, balance_change]
       properties:
         transaction: { $ref: '#/components/schemas/Transaction' }
         item: { $ref: '#/components/schemas/DebtStatementItem' }
         person_balance: { $ref: '#/components/schemas/DebtPerson' }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
+        balance_change: { $ref: '#/components/schemas/PersonDelta', description: '0.4.0-3: before → after. An overpaid settle is allowed: flipped = true (e.g. รอจ่าย 230, pay 300 → รอรับ 70).' }
+    PersonDelta:
+      type: object
+      description: 'A person''s balance before / after a write or a preview (net: > 0 รอรับ, < 0 รอจ่าย).'
+      required: [key, person, before, after, delta, side_before, side_after, flipped]
+      properties:
+        key: { $ref: '#/components/schemas/PersonKey' }
+        person: { $ref: '#/components/schemas/PersonRef' }
+        before: { $ref: '#/components/schemas/Money' }
+        after: { $ref: '#/components/schemas/Money' }
+        delta: { $ref: '#/components/schemas/Money' }
+        side_before: { type: string, enum: [receivable, payable, clear] }
+        side_after: { type: string, enum: [receivable, payable, clear] }
+        flipped: { type: boolean, description: 'receivable ↔ payable (an overpaid settle / an over-sized record).' }
+    WalletDelta:
+      type: object
+      required: [account_id, before, after, delta]
+      properties:
+        account_id: { $ref: '#/components/schemas/Uuid' }
+        before: { $ref: '#/components/schemas/Money' }
+        after: { $ref: '#/components/schemas/Money' }
+        delta: { $ref: '#/components/schemas/Money' }
+    DebtPreview:
+      type: object
+      description: '0.4.0-3: POST …/entries or …/repayments with ?preview=true (the debt quick create''s result box "ลี ตอนนี้ → หลังบันทึก" and the wallet effect). The write runs and is rolled back. Same shape as TransactionPreview minus rows.'
+      required: [preview, people, wallets]
+      properties:
+        preview: { type: boolean, const: true }
+        people: { type: array, items: { $ref: '#/components/schemas/PersonDelta' }, description: 'One person.' }
+        wallets: { type: array, items: { $ref: '#/components/schemas/WalletDelta' }, description: 'The wallet when one is sent ([] = no money moves).' }
     DebtLink:
       type: object
       description: 'On a transaction that IS a debt entry''s wallet side (one record with the entry).'

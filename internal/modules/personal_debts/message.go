@@ -12,10 +12,14 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
+// SummaryMessage — the share sheet's text in its two variants (0.4.0-3): the whole current cycle
+// (text, "รอบนี้") or the balance only (text_balance_only, "ยอดคงเหลืออย่างเดียว").
 type SummaryMessage struct {
-	Text    string  `json:"text"`
-	Entries int     `json:"entries"`
-	Net     float64 `json:"net"`
+	Text            string  `json:"text"`
+	TextBalanceOnly string  `json:"text_balance_only"`
+	Since           *string `json:"since"` // the current cycle's first line date
+	Entries         int     `json:"entries"`
+	Net             float64 `json:"net"`
 }
 
 var thaiMonthsShort = [...]string{"ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."}
@@ -60,8 +64,14 @@ func (s *Service) summaryMessage(ctx context.Context, userID uuid.UUID, k shared
 		unit = "บาท"
 	}
 	name := bal.Person.Name
+	var since *string
 	var b strings.Builder
-	fmt.Fprintf(&b, "สรุปยอดกับ %s\n", name)
+	if len(items) > 0 {
+		since = &items[0].Date
+		fmt.Fprintf(&b, "สรุปยอดกับ %s (ตั้งแต่ %s)\n", name, thaiDate(items[0].Date))
+	} else {
+		fmt.Fprintf(&b, "สรุปยอดกับ %s\n", name)
+	}
 	for _, e := range items {
 		sign, what := "+", "ฉันจ่ายให้"
 		switch {
@@ -78,13 +88,24 @@ func (s *Service) summaryMessage(ctx context.Context, userID uuid.UUID, k shared
 		}
 		b.WriteString("• " + line + "\n")
 	}
+	// Wording (owner 2026-10-21): รอรับ / รอจ่าย, never "ติด".
+	var total string
 	switch {
 	case bal.Net > 0.005:
-		fmt.Fprintf(&b, "รวม %s ค้างจ่ายฉัน %s %s", name, money(bal.Net), unit)
+		total = fmt.Sprintf("ฉันรอรับจาก %s %s %s", name, money(bal.Net), unit)
 	case bal.Net < -0.005:
-		fmt.Fprintf(&b, "รวม ฉันค้างจ่าย %s %s %s", name, money(bal.Net), unit)
+		total = fmt.Sprintf("ฉันรอจ่ายให้ %s %s %s", name, money(bal.Net), unit)
 	default:
-		b.WriteString("ยอดตอนนี้เคลียร์กันหมดแล้ว")
+		total = "ยอดตอนนี้เคลียร์กันหมดแล้ว"
 	}
-	return &SummaryMessage{Text: b.String(), Entries: len(items), Net: bal.Net}, nil
+	if math.Abs(bal.Net) > 0.005 {
+		b.WriteString("รวม " + total)
+	} else {
+		b.WriteString(total)
+	}
+	only := fmt.Sprintf("ยอดกับ %s ตอนนี้: %s", name, total)
+	if math.Abs(bal.Net) <= 0.005 {
+		only = fmt.Sprintf("ยอดกับ %s: %s", name, total)
+	}
+	return &SummaryMessage{Text: b.String(), TextBalanceOnly: only, Since: since, Entries: len(items), Net: bal.Net}, nil
 }

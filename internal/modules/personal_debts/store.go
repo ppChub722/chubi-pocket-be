@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/google/uuid"
@@ -153,14 +154,20 @@ func peopleSQL(keyFilter string) string {
 			       COUNT(*) FILTER (WHERE NOT paid) AS open_count,
 			       COUNT(*) AS entry_count, MAX(date) AS last,
 			       MAX(date) FILTER (WHERE rn = cleared_rn) AS cleared,
-			       MIN(date) FILTER (WHERE NOT paid AND (cleared_rn IS NULL OR rn > cleared_rn)) AS oldest_open
+			       MIN(date) FILTER (WHERE NOT paid AND (cleared_rn IS NULL OR rn > cleared_rn)) AS oldest_open,
+			       MIN(date) AS first,
+			       (ARRAY_AGG(kind ORDER BY rn DESC))[1] AS last_kind,
+			       (ARRAY_AGG(id ORDER BY rn DESC))[1] AS last_id,
+			       (ARRAY_AGG(signed ORDER BY rn DESC))[1] AS last_signed,
+			       (ARRAY_AGG(descr ORDER BY rn DESC))[1] AS last_descr
 			FROM e3 GROUP BY key
 		)
 		SELECT g.key, g.cid, COALESCE(` + shared.PersonNameSQL("c", "lu") + `, g.snap) AS name,
 		       CASE WHEN c.id IS NOT NULL THEN ` + shared.PersonIconSQL("c", "lu") + ` END AS icon,
 		       lu.id AS linked, g.net, g.open_count, g.entry_count, g.last,
 		       to_char(g.cleared, 'YYYY-MM-DD') AS cleared_at,
-		       (` + todayInUserTZ + ` - g.oldest_open) AS days_out
+		       (` + todayInUserTZ + ` - g.oldest_open) AS days_out,
+		       to_char(g.first, 'YYYY-MM-DD') AS first_at, g.last_kind, g.last_id, g.last_signed, g.last_descr
 		FROM g
 		LEFT JOIN contacts c ON c.id = g.cid AND c.user_id = $1
 		LEFT JOIN users lu ON lu.id = c.linked_user_id`
@@ -174,6 +181,10 @@ const TodayInUserTZSQL = todayInUserTZ
 
 const openSQL = `(ABS(p.net) > 0.005 OR p.open_count > 0)`
 
+// peopleCols — the columns scanPerson reads from peopleSQL (alias p).
+const peopleCols = `key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD'), cleared_at, days_out,
+	first_at, last_kind, last_id, last_signed, last_descr`
+
 func scanPerson(rows pgx.Rows) (DebtPerson, error) {
 	var (
 		p      DebtPerson
@@ -182,16 +193,31 @@ func scanPerson(rows pgx.Rows) (DebtPerson, error) {
 		icon   []byte
 		linked *uuid.UUID
 		last   *string
+		la     LastActivity
+		lkind  *string
+		lid    *uuid.UUID
+		signed *float64
 	)
-	if err := rows.Scan(&p.Key, &cid, &name, &icon, &linked, &p.Net, &p.OpenCount, &p.EntryCount, &last, &p.ClearedAt, &p.DaysOutstanding); err != nil {
+	if err := rows.Scan(&p.Key, &cid, &name, &icon, &linked, &p.Net, &p.OpenCount, &p.EntryCount, &last, &p.ClearedAt, &p.DaysOutstanding,
+		&p.FirstActivityAt, &lkind, &lid, &signed, &la.Title); err != nil {
 		return p, err
 	}
 	p.Net = round2(p.Net)
+	p.Side = shared.DebtSide(p.Net)
 	p.Person = shared.PersonRef{Name: name, ContactID: cid, Linked: linked != nil, LinkedUserID: linked}
 	if cid != nil {
 		p.Person.IconCode = shared.IconFromJSON(icon)
 	}
 	p.LastActivityAt = last
+	if lkind != nil && lid != nil && signed != nil && last != nil {
+		la.Kind, la.ID, la.SignedAmount, la.Date = *lkind, *lid, round2(*signed), *last
+		la.Amount = math.Abs(la.SignedAmount)
+		la.Direction = DirectionPaid
+		if la.SignedAmount < 0 {
+			la.Direction = DirectionReceived
+		}
+		p.LastActivity = &la
+	}
 	return p, nil
 }
 
@@ -202,16 +228,18 @@ func (s *Store) listPeople(ctx context.Context, userID uuid.UUID, f PeopleFilter
 		where = append(where, openSQL)
 	}
 	switch f.Side {
-	case "owed_to_me":
+	case "owed_to_me", "receivable":
 		where = append(where, "p.net > 0.005")
-	case "i_owe":
+	case "i_owe", "payable":
 		where = append(where, "p.net < -0.005")
+	case "overdue_30":
+		where = append(where, "p.days_out > 30")
 	}
 	if q := strings.TrimSpace(f.Q); q != "" {
 		args = append(args, "%"+shared.EscapeLike(q)+"%")
 		where = append(where, fmt.Sprintf("p.name ILIKE $%d", len(args)))
 	}
-	base := `SELECT key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD'), cleared_at, days_out
+	base := `SELECT ` + peopleCols + `
 		FROM (` + peopleSQL("") + `) p WHERE ` + strings.Join(where, " AND ")
 	var total int
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM (`+base+`) x`, args...).Scan(&total); err != nil {
@@ -256,12 +284,14 @@ func (s *Store) totals(ctx context.Context, q shared.Querier, userID uuid.UUID) 
 	}
 	t.OwedToMe, t.IOwe = round2(t.OwedToMe), round2(t.IOwe)
 	t.Net = round2(t.OwedToMe - t.IOwe)
+	t.ReceivableTotal, t.PayableTotal = t.OwedToMe, t.IOwe
+	t.Counts = PeopleCounts{All: t.OpenCount, Receivable: t.OwedToMePeople, Payable: t.IOwePeople, Overdue30: t.Over30DaysPeople}
 	return t, rows.Err()
 }
 
 func (s *Store) personBalance(ctx context.Context, q shared.Querier, userID uuid.UUID, k shared.DebtPersonKey) (DebtPerson, bool, error) {
 	key := k.Key()
-	rows, err := q.Query(ctx, `SELECT key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD'), cleared_at, days_out
+	rows, err := q.Query(ctx, `SELECT `+peopleCols+`
 		FROM (`+peopleSQL("AND l.key = $2")+`) p`, userID, key)
 	if err != nil {
 		return DebtPerson{}, false, fmt.Errorf("person balance: %w", err)
@@ -284,7 +314,7 @@ func (s *Store) personBalance(ctx context.Context, q shared.Querier, userID uuid
 	if found {
 		return p, true, nil
 	}
-	p = DebtPerson{Key: key, Person: shared.PersonRef{Name: k.Name}}
+	p = DebtPerson{Key: key, Person: shared.PersonRef{Name: k.Name}, Side: shared.DebtSide(0)}
 	if k.ContactID != nil {
 		persons, err := shared.LoadPersons(ctx, q, userID, []uuid.UUID{*k.ContactID})
 		if err != nil {
@@ -307,14 +337,35 @@ const entryViewSQL = `SELECT pd.id, ` + `pd.direction, pd.counterparty_contact_i
 		                    WHEN 'event' THEN sp.name
 		                    WHEN 'paid_by' THEN COALESCE(ft.description, fc.name)
 		                    WHEN 'partner' THEN ou.display_name END,
-		t.id, t.account_id, pd.created_at, pd.updated_at
+		t.id, t.account_id, pd.created_at, pd.updated_at,
+		-- origin (the มาจาก card): kind, transaction, bill, event, title, amount, date, wallet
+		CASE pd.source_kind WHEN 'transaction' THEN 'split' WHEN 'paid_by' THEN 'paid_by'
+		                    WHEN 'partner' THEN 'partner' WHEN 'event' THEN 'event'
+		                    ELSE CASE WHEN t.id IS NOT NULL THEN 'cash' END END,
+		CASE pd.source_kind WHEN 'transaction' THEN st.id WHEN 'paid_by' THEN ft.id WHEN 'partner' THEN ft.id
+		                    WHEN 'event' THEN NULL ELSE t.id END,
+		CASE WHEN pd.source_kind = 'event' THEN pd.source_project_transaction_id END,
+		CASE WHEN pd.source_kind = 'event' THEN pd.project_id END,
+		CASE pd.source_kind WHEN 'transaction' THEN COALESCE(st.description, sc.name)
+		                    WHEN 'paid_by' THEN COALESCE(ft.description, fc.name)
+		                    WHEN 'partner' THEN COALESCE(ft.description, fc.name, ou.display_name)
+		                    WHEN 'event' THEN COALESCE(bp.description, sp.name)
+		                    ELSE COALESCE(t.description, tc.name) END,
+		(CASE pd.source_kind WHEN 'transaction' THEN st.amount WHEN 'paid_by' THEN ft.amount WHEN 'partner' THEN ft.amount
+		                     WHEN 'event' THEN bp.amount ELSE t.amount END)::float8,
+		to_char(CASE pd.source_kind WHEN 'transaction' THEN st.date WHEN 'paid_by' THEN ft.date WHEN 'partner' THEN ft.date
+		                            WHEN 'event' THEN bp.date ELSE t.date END, 'YYYY-MM-DD'),
+		CASE pd.source_kind WHEN 'transaction' THEN st.account_id WHEN 'paid_by' THEN ft.account_id
+		                    WHEN 'partner' THEN ft.account_id WHEN 'event' THEN NULL ELSE t.account_id END
 	FROM personal_debts pd
 	LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id
+	LEFT JOIN categories tc ON tc.id = t.category_id
 	LEFT JOIN transactions st ON st.id = pd.source_transaction_id
 	LEFT JOIN categories sc ON sc.id = st.category_id
 	LEFT JOIN transactions ft ON ft.id = pd.paid_for_transaction_id
 	LEFT JOIN categories fc ON fc.id = ft.category_id
 	LEFT JOIN projects sp ON sp.id = pd.project_id
+	LEFT JOIN project_transactions bp ON bp.id = pd.source_project_transaction_id
 	LEFT JOIN personal_debts op ON op.id = pd.counterpart_debt_id
 	LEFT JOIN users ou ON ou.id = op.user_id`
 
@@ -324,8 +375,9 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 		return nil, fmt.Errorf("entries: %w", err)
 	}
 	type acc struct {
-		i  int
-		id uuid.UUID
+		i      int
+		id     uuid.UUID
+		origin bool // the origin's wallet (else the linked transaction's)
 	}
 	var (
 		out  = make([]DebtEntry, 0)
@@ -342,9 +394,13 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 			title    *string
 			txID     *uuid.UUID
 			accID    *uuid.UUID
+			o        DebtOrigin
+			oKind    *string
+			oAccount *uuid.UUID
 		)
 		if err := rows.Scan(&v.ID, &v.Direction, &cid, &name, &v.Amount, &v.Date, &v.Description, &v.Note,
-			&v.Paid, &kind, &sourceID, &title, &txID, &accID, &v.CreatedAt, &v.UpdatedAt); err != nil {
+			&v.Paid, &kind, &sourceID, &title, &txID, &accID, &v.CreatedAt, &v.UpdatedAt,
+			&oKind, &o.TransactionID, &o.BillID, &o.EventID, &o.Title, &o.Amount, &o.Date, &oAccount); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("entries scan: %w", err)
 		}
@@ -355,8 +411,16 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 		if txID != nil {
 			v.Transaction = &EntryTx{ID: *txID}
 			if accID != nil {
-				accs = append(accs, acc{len(out), *accID})
+				accs = append(accs, acc{len(out), *accID, false})
 				ids = append(ids, *accID)
+			}
+		}
+		if oKind != nil {
+			o.Kind = *oKind
+			v.Origin = &o
+			if oAccount != nil {
+				accs = append(accs, acc{len(out), *oAccount, true})
+				ids = append(ids, *oAccount)
 			}
 		}
 		out = append(out, v)
@@ -370,7 +434,13 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 		return nil, err
 	}
 	for _, a := range accs {
-		if r, ok := refs[a.id]; ok {
+		r, ok := refs[a.id]
+		if !ok {
+			continue
+		}
+		if a.origin {
+			out[a.i].Origin.Account = &r
+		} else {
 			out[a.i].Transaction.Account = &r
 		}
 	}
@@ -505,8 +575,11 @@ func (s *Store) listStatement(ctx context.Context, userID uuid.UUID, key, cycle 
 		where = append(where, "FALSE")
 	}
 	w := strings.Join(where, " AND ")
+	// The running balance runs over ALL the person's lines (book order), then the cycle filter applies.
+	lines := `(SELECT l.*, SUM(l.signed) OVER (ORDER BY l.date, l.created_at, l.id) AS run
+		FROM ` + ledgerSQL + ` l WHERE l.key = $2) l`
 	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM `+ledgerSQL+` l WHERE `+w, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM `+lines+` WHERE `+w, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("statement count: %w", err)
 	}
 	order := "l.date DESC, l.created_at DESC, l.id DESC"
@@ -514,7 +587,7 @@ func (s *Store) listStatement(ctx context.Context, userID uuid.UUID, key, cycle 
 		order = "l.date, l.created_at, l.id"
 	}
 	args = append(args, perPage, (page-1)*perPage)
-	rows, err := s.db.Query(ctx, fmt.Sprintf(`SELECT l.kind, l.id FROM `+ledgerSQL+` l WHERE %s ORDER BY %s
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`SELECT l.kind, l.id, l.run FROM `+lines+` WHERE %s ORDER BY %s
 		LIMIT $%d OFFSET $%d`, w, order, len(args)-1, len(args)), args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("statement: %w", err)
@@ -522,18 +595,19 @@ func (s *Store) listStatement(ctx context.Context, userID uuid.UUID, key, cycle 
 	type line struct {
 		kind string
 		id   uuid.UUID
+		run  float64
 	}
 	var (
-		lines             []line
+		got               []line
 		debtIDs, repayIDs []uuid.UUID
 	)
 	for rows.Next() {
 		var l line
-		if err := rows.Scan(&l.kind, &l.id); err != nil {
+		if err := rows.Scan(&l.kind, &l.id, &l.run); err != nil {
 			rows.Close()
 			return nil, 0, fmt.Errorf("statement scan: %w", err)
 		}
-		lines = append(lines, l)
+		got = append(got, l)
 		if l.kind == "debt" {
 			debtIDs = append(debtIDs, l.id)
 		} else {
@@ -561,17 +635,42 @@ func (s *Store) listStatement(ctx context.Context, userID uuid.UUID, key, cycle 
 	for _, r := range repays {
 		byID[r.ID] = r
 	}
-	out := make([]StatementItem, 0, len(lines))
-	for _, l := range lines {
+	out := make([]StatementItem, 0, len(got))
+	for _, l := range got {
 		it, ok := byID[l.id]
 		if !ok {
 			continue
 		}
 		cur := mark.after(it.Date, it.CreatedAt, it.ID)
 		it.InCurrentCycle = &cur
+		it.RunningBalance = round2(l.run)
 		out = append(out, it)
 	}
 	return out, total, nil
+}
+
+// statementDays — the page's items grouped by day (in the items' order): each day's balance change
+// and the balance at its end. A day split across pages shows its part on each page.
+func statementDays(items []StatementItem) []StatementDay {
+	out := []StatementDay{}
+	idx := map[string]int{}
+	for _, it := range items {
+		i, ok := idx[it.Date]
+		if !ok {
+			i = len(out)
+			idx[it.Date] = i
+			out = append(out, StatementDay{Date: it.Date, BalanceAfter: it.RunningBalance})
+		}
+		d := &out[i]
+		d.Change = round2(d.Change + it.SignedAmount)
+		d.Count++
+		// the day's last line in book order holds the day's closing balance
+		if d.lastSeen == nil || it.CreatedAt.After(*d.lastSeen) {
+			t := it.CreatedAt
+			d.lastSeen, d.BalanceAfter = &t, it.RunningBalance
+		}
+	}
+	return out
 }
 
 func debtItem(d DebtEntry) StatementItem {
@@ -583,7 +682,7 @@ func debtItem(d DebtEntry) StatementItem {
 	return StatementItem{
 		Kind: ItemDebt, ID: d.ID, Key: d.Key, Direction: d.Direction, Amount: d.Amount, SignedAmount: signed,
 		Date: d.Date, Description: d.Description, Note: d.Note, Paid: &paid, Source: d.Source,
-		Transaction: d.Transaction, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
+		Transaction: d.Transaction, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Origin: d.Origin,
 	}
 }
 

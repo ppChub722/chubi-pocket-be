@@ -53,6 +53,10 @@ func TestPaidByLeeScenario(t *testing.T) {
 		src["id"] != row.ID.String() || src["title"] != "Dinner" || e["transaction"] != nil {
 		t.Errorf("debt = %v", e)
 	}
+	if o := obj(e, "origin"); o["kind"] != "paid_by" || o["transaction_id"] != row.ID.String() || num(o, "amount") != 123 ||
+		obj(o, "account")["id"] != f.wallet.String() {
+		t.Errorf("paid_by origin = %v", o)
+	}
 	f.code("DELETE", "/api/v1/personal-debts/"+pb.DebtID.String(), nil, http.StatusConflict, "DEBT_MANAGED_BY_TX")
 	f.code("PUT", "/api/v1/personal-debts/"+pb.DebtID.String(), map[string]any{"amount": 5}, http.StatusConflict, "ENTRY_MANAGED_BY_SOURCE")
 	f.call("PUT", "/api/v1/personal-debts/"+pb.DebtID.String(), map[string]any{"paid": true}, "updateDebtEntry", http.StatusOK)
