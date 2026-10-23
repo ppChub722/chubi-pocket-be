@@ -92,7 +92,7 @@ func (h *Handler) List(c *gin.Context) {
 		Page: atoiOr(c.Query("page"), 1), PerPage: atoiOr(c.Query("per_page"), 20),
 	}
 	switch f.Status {
-	case "", StatusActive, StatusCompleted, StatusCancelled, StatusArchived, "all", "unsettled", "receivable", "ended":
+	case "", StatusActive, StatusCompleted, StatusCancelled, StatusArchived, "all", "current", "unsettled", "receivable", "payable", "ended":
 	default:
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
 		return
@@ -187,6 +187,28 @@ func (h *Handler) Summary(c *gin.Context) {
 		return
 	}
 	out, err := h.service.Summary(c.Request.Context(), userID, id)
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) ResolvePeople(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	var req ResolvePeopleRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	out, err := h.service.ResolvePeople(c.Request.Context(), userID, id, req)
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) Settle(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.Settle(c.Request.Context(), userID, id)
 	reply(c, http.StatusOK, out, err)
 }
 
@@ -404,6 +426,23 @@ func (h *Handler) ToggleMark(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
+func (h *Handler) SetMyBooks(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	ptID, ok := pathID(c, "pt_id", "project transaction id")
+	if !ok {
+		return
+	}
+	var req MyBooksRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	out, err := h.service.SetMyBooks(c.Request.Context(), userID, id, ptID, req)
+	reply(c, http.StatusOK, out, err)
+}
+
 func (h *Handler) CopyToPersonal(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -560,6 +599,12 @@ func mapServiceError(c *gin.Context, err error) {
 
 	case errors.Is(err, ErrNoShareToCopy):
 		response.Fail(c, http.StatusUnprocessableEntity, "NO_SHARE_TO_COPY", err.Error(), nil)
+	case errors.Is(err, ErrPaybackNotCopyable):
+		response.Fail(c, http.StatusUnprocessableEntity, "PAYBACK_NOT_COPYABLE", err.Error(), nil)
+	case errors.Is(err, ErrBadPayback):
+		response.BadRequest(c, "BAD_PAYBACK", err.Error(), nil)
+	case errors.Is(err, ErrPayerFixed):
+		response.BadRequest(c, "PAYER_FIXED", err.Error(), nil)
 	case errors.Is(err, ErrPTIsChild):
 		response.Fail(c, http.StatusConflict, "PT_IS_CHILD", "Cannot operate on a split-child row directly", nil)
 	case errors.Is(err, ErrSelfSplit):

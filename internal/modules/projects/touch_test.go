@@ -172,10 +172,17 @@ func TestEventsAPI(t *testing.T) {
 			t.Errorf("event numbers = %v", e0)
 		}
 		sm := m(got, "summary")
-		if n(sm, "my_share_total") != 200 || n(sm, "paid_total") != 300 || n(sm, "receivable_total") != 100 ||
-			n(m(sm, "counts"), "active") != 1 || n(m(sm, "counts"), "unsettled") != 1 || n(m(sm, "counts"), "ended") != 0 {
+		cn := m(sm, "counts")
+		if n(sm, "my_share_total") != 200 || n(sm, "paid_total") != 300 || n(sm, "receivable_total") != 100 || n(sm, "payable_total") != 0 ||
+			n(cn, "all") != 1 || n(cn, "active") != 1 || n(cn, "unsettled") != 1 || n(cn, "receivable") != 1 || n(cn, "payable") != 0 || n(cn, "ended") != 0 {
 			t.Errorf("list summary = %v", sm)
 		}
+	}
+	if got := me.do("GET", "/projects?status=current", nil, "listProjects", http.StatusOK); len(list(got, "data")) != 1 {
+		t.Errorf("status=current = %v", got["data"])
+	}
+	if got := me.do("GET", "/projects?status=payable", nil, "listProjects", http.StatusOK); len(list(got, "data")) != 0 {
+		t.Errorf("status=payable = %v", got["data"])
 	}
 	if pos := m(bill, "summary", "my_position"); n(pos, "receivable") != 100 || n(pos, "payable") != 0 {
 		t.Errorf("my position split = %v", pos)
@@ -184,6 +191,31 @@ func TestEventsAPI(t *testing.T) {
 	if len(byTag) != 1 || n(byTag[0].(map[string]any), "share") != 200 || m(byTag[0], "tag")["name"] != "Food" {
 		t.Errorf("by_tag = %v", byTag)
 	}
+
+	// A payback (0.4.0-3): Grandma pays me back her 100 → even; it stays out of the bill totals.
+	pts := "/projects/" + id + "/project-transactions"
+	me.code("POST", pts, map[string]any{"transaction_member_id": gran, "type": "payback", "amount": 100, "date": "2026-10-03",
+		"splits": []map[string]any{{"member_id": myMember, "amount": 50}}}, http.StatusBadRequest, "BAD_PAYBACK")
+	back := me.do("POST", pts, map[string]any{"transaction_member_id": gran, "type": "payback", "amount": 100, "date": "2026-10-03",
+		"splits": []map[string]any{{"member_id": myMember, "amount": 100}}}, "createProjectTransaction", http.StatusCreated)
+	backID := m(back, "row")["id"].(string)
+	if sm := m(back, "summary"); n(m(sm, "my_position"), "net") != 0 || n(m(sm, "my_position"), "received") != 100 ||
+		n(sm, "total_expense") != 300 || n(sm, "transaction_count") != 1 {
+		t.Errorf("after payback = %v", sm)
+	}
+	if st := me.do("GET", "/projects/"+id+"/settle", nil, "getProjectSettle", http.StatusOK); len(list(st, "pairs")) != 0 || len(list(st, "simplified")) != 0 {
+		t.Errorf("settle after payback = %v", st)
+	}
+	me.code("POST", pts+"/"+backID+"/copy", nil, http.StatusUnprocessableEntity, "PAYBACK_NOT_COPYABLE")
+	me.code("PUT", pts+"/"+ptID, map[string]any{"transaction_member_id": gran}, http.StatusBadRequest, "PAYER_FIXED")
+	me.do("DELETE", pts+"/"+backID, nil, "deleteProjectTransaction", http.StatusOK)
+	if st := me.do("GET", "/projects/"+id+"/settle", nil, "getProjectSettle", http.StatusOK); true {
+		pairs := list(st, "pairs")
+		if len(pairs) != 1 || n(pairs[0].(map[string]any), "amount") != 100 || m(pairs[0], "from")["name"] != "Grandma" {
+			t.Errorf("settle = %v (Grandma owes me 100)", st)
+		}
+	}
+
 	me.code("POST", "/projects/"+id+"/project-transactions", map[string]any{
 		"transaction_member_id": myMember, "type": "expense", "amount": 10, "date": "2026-10-02", "tag_ids": []uuid.UUID{uuid.New()},
 	}, http.StatusBadRequest, "TAG_NOT_FOUND")

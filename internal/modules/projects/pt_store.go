@@ -200,6 +200,13 @@ func (s *Store) UpdatePTTx(
 ) (*ProjectTransaction, error) {
 	q := `UPDATE project_transactions SET updated_by_user_id = $1`
 	args := []any{actorUserID}
+	if req.TransactionMemberID != nil {
+		if err := s.assertMembersInProject(ctx, tx, projectID, []uuid.UUID{*req.TransactionMemberID}); err != nil {
+			return nil, err
+		}
+		args = append(args, *req.TransactionMemberID)
+		q += fmt.Sprintf(", transaction_member_id = $%d", len(args))
+	}
 	if req.Amount != nil {
 		args = append(args, *req.Amount)
 		q += fmt.Sprintf(", amount = $%d", len(args))

@@ -9,17 +9,23 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
+// MyShareTotal / PaidTotal: active events. ReceivableTotal / PayableTotal and
+// every count: all events but archived.
 type EventListSummary struct {
 	MyShareTotal    float64     `json:"my_share_total"`
 	PaidTotal       float64     `json:"paid_total"`
 	ReceivableTotal float64     `json:"receivable_total"`
+	PayableTotal    float64     `json:"payable_total"`
 	Counts          EventCounts `json:"counts"`
 }
 
 type EventCounts struct {
-	Active    int `json:"active"`
-	Unsettled int `json:"unsettled"`
-	Ended     int `json:"ended"`
+	All        int `json:"all"`
+	Active     int `json:"active"`
+	Unsettled  int `json:"unsettled"`
+	Receivable int `json:"receivable"`
+	Payable    int `json:"payable"`
+	Ended      int `json:"ended"`
 }
 
 func fillMyNumbers(ctx context.Context, q shared.Querier, callerID uuid.UUID, events map[uuid.UUID]Event, ids []uuid.UUID) error {
@@ -99,19 +105,28 @@ func (s *Service) listSummary(ctx context.Context, userID uuid.UUID) (EventListS
 		return out, err
 	}
 	for _, e := range events {
+		out.Counts.All++
 		switch e.Status {
 		case StatusActive:
 			out.Counts.Active++
 			out.MyShareTotal += e.MyShare
 			out.PaidTotal += e.MyPaid
-			out.ReceivableTotal += e.MyReceivable
 		case StatusCompleted, StatusCancelled:
 			out.Counts.Ended++
+		}
+		if e.MyReceivable > 0 {
+			out.Counts.Receivable++
+			out.ReceivableTotal += e.MyReceivable
+		}
+		if e.MyPayable > 0 {
+			out.Counts.Payable++
+			out.PayableTotal += e.MyPayable
 		}
 		if e.MyReceivable > 0 || e.MyPayable > 0 {
 			out.Counts.Unsettled++
 		}
 	}
-	out.MyShareTotal, out.PaidTotal, out.ReceivableTotal = round2(out.MyShareTotal), round2(out.PaidTotal), round2(out.ReceivableTotal)
+	out.MyShareTotal, out.PaidTotal = round2(out.MyShareTotal), round2(out.PaidTotal)
+	out.ReceivableTotal, out.PayableTotal = round2(out.ReceivableTotal), round2(out.PayableTotal)
 	return out, nil
 }

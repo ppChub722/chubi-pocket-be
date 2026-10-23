@@ -78,12 +78,13 @@ func RepaySignedSQL(a string) string {
 func DebtLedgerSQL(userParam string) string {
 	return `SELECT 'debt' AS kind, ` + DebtKeySQL("lpd") + ` AS key, lpd.id,
 		       lpd.counterparty_contact_id AS cid, lpd.counterparty_person_name AS snap,
-		       ` + DebtSignedSQL("lpd") + ` AS signed, lpd.paid, lpd.date, lpd.created_at, lpd.description AS descr
+		       ` + DebtSignedSQL("lpd") + ` AS signed, lpd.paid, lpd.date, lpd.created_at, lpd.description AS descr,
+		       lpd.due_date
 		FROM personal_debts lpd WHERE lpd.user_id = ` + userParam + `
 		UNION ALL
 		SELECT 'repayment', ` + RepayKeySQL("lrt") + `, lrt.id,
 		       lrt.repay_contact_id, lrt.repay_person_name,
-		       ` + RepaySignedSQL("lrt") + `, TRUE, lrt.date, lrt.created_at, lrt.description
+		       ` + RepaySignedSQL("lrt") + `, TRUE, lrt.date, lrt.created_at, lrt.description, NULL::date
 		FROM transactions lrt WHERE lrt.user_id = ` + userParam + ` AND lrt.repay_person_name IS NOT NULL`
 }
 

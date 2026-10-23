@@ -35,6 +35,7 @@ var (
 	ErrBillNotFound       = errors.New("bill not found in an event you are a member of")
 	// ErrManagedByTx — a paid-by debt is one record with its expense: edit or delete the transaction.
 	ErrManagedByTx = errors.New("this debt is the paid-by part of a transaction: edit or delete the transaction instead")
+	ErrDueBeforeDate = errors.New("due_date can't be before the entry's date")
 )
 
 type querier interface {
@@ -62,7 +63,7 @@ const entryColumns = `id, user_id, direction,
 	counterparty_contact_id, counterparty_person_name,
 	source_transaction_id, source_project_transaction_id, project_id,
 	amount, currency, to_char(date, 'YYYY-MM-DD'), paid, source_kind, description, note,
-	created_at, updated_at, counterpart_debt_id, paid_for_transaction_id`
+	created_at, updated_at, counterpart_debt_id, paid_for_transaction_id, to_char(due_date, 'YYYY-MM-DD')`
 
 func scanEntry(row pgx.Row) (*Entry, error) {
 	var e Entry
@@ -71,7 +72,7 @@ func scanEntry(row pgx.Row) (*Entry, error) {
 		&e.ContactID, &e.PersonName,
 		&e.SourceTransactionID, &e.SourceProjectTransactionID, &e.ProjectID,
 		&e.Amount, &e.Currency, &e.Date, &e.Paid, &e.SourceKind, &e.Description, &e.Note,
-		&e.CreatedAt, &e.UpdatedAt, &e.CounterpartDebtID, &e.PaidForTransactionID,
+		&e.CreatedAt, &e.UpdatedAt, &e.CounterpartDebtID, &e.PaidForTransactionID, &e.DueDate,
 	)
 	return &e, err
 }
@@ -114,13 +115,13 @@ func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 		(id, user_id, direction, counterparty_contact_id, counterparty_person_name,
 		 source_transaction_id, source_project_transaction_id, project_id,
 		 amount, currency, date, paid, source_kind, description, note,
-		 created_by_user_id, updated_by_user_id, paid_for_transaction_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::date, $12, $13, $14, $15, $2, $2, $16)
+		 created_by_user_id, updated_by_user_id, paid_for_transaction_id, due_date)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::date, $12, $13, $14, $15, $2, $2, $16, $17::date)
 		RETURNING `+entryColumns,
 		id, e.UserID, e.Direction, e.ContactID, strings.TrimSpace(e.PersonName),
 		e.SourceTransactionID, e.SourceProjectTransactionID, e.ProjectID,
 		e.Amount, strings.ToUpper(e.Currency), e.Date, e.Paid, e.SourceKind,
-		shared.CleanText(e.Description), shared.CleanText(e.Note), e.PaidForTransactionID))
+		shared.CleanText(e.Description), shared.CleanText(e.Note), e.PaidForTransactionID, e.DueDate))
 	if err != nil {
 		return nil, fmt.Errorf("insert entry: %w", err)
 	}
@@ -156,6 +157,9 @@ func peopleSQL(keyFilter string) string {
 			       MAX(date) FILTER (WHERE rn = cleared_rn) AS cleared,
 			       MIN(date) FILTER (WHERE NOT paid AND (cleared_rn IS NULL OR rn > cleared_rn)) AS oldest_open,
 			       MIN(date) AS first,
+			       -- the earliest due date on each side; the outer select keeps the current side's
+			       MIN(due_date) FILTER (WHERE NOT paid AND signed > 0) AS due_pos,
+			       MIN(due_date) FILTER (WHERE NOT paid AND signed < 0) AS due_neg,
 			       (ARRAY_AGG(kind ORDER BY rn DESC))[1] AS last_kind,
 			       (ARRAY_AGG(id ORDER BY rn DESC))[1] AS last_id,
 			       (ARRAY_AGG(signed ORDER BY rn DESC))[1] AS last_signed,
@@ -167,7 +171,9 @@ func peopleSQL(keyFilter string) string {
 		       lu.id AS linked, g.net, g.open_count, g.entry_count, g.last,
 		       to_char(g.cleared, 'YYYY-MM-DD') AS cleared_at,
 		       (` + todayInUserTZ + ` - g.oldest_open) AS days_out,
-		       to_char(g.first, 'YYYY-MM-DD') AS first_at, g.last_kind, g.last_id, g.last_signed, g.last_descr
+		       to_char(g.first, 'YYYY-MM-DD') AS first_at, g.last_kind, g.last_id, g.last_signed, g.last_descr,
+		       to_char(CASE WHEN g.net > 0.005 THEN g.due_pos WHEN g.net < -0.005 THEN g.due_neg END,
+		               'YYYY-MM-DD') AS next_due
 		FROM g
 		LEFT JOIN contacts c ON c.id = g.cid AND c.user_id = $1
 		LEFT JOIN users lu ON lu.id = c.linked_user_id`
@@ -183,7 +189,7 @@ const openSQL = `(ABS(p.net) > 0.005 OR p.open_count > 0)`
 
 // peopleCols — the columns scanPerson reads from peopleSQL (alias p).
 const peopleCols = `key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD'), cleared_at, days_out,
-	first_at, last_kind, last_id, last_signed, last_descr`
+	first_at, last_kind, last_id, last_signed, last_descr, next_due`
 
 func scanPerson(rows pgx.Rows) (DebtPerson, error) {
 	var (
@@ -199,7 +205,7 @@ func scanPerson(rows pgx.Rows) (DebtPerson, error) {
 		signed *float64
 	)
 	if err := rows.Scan(&p.Key, &cid, &name, &icon, &linked, &p.Net, &p.OpenCount, &p.EntryCount, &last, &p.ClearedAt, &p.DaysOutstanding,
-		&p.FirstActivityAt, &lkind, &lid, &signed, &la.Title); err != nil {
+		&p.FirstActivityAt, &lkind, &lid, &signed, &la.Title, &p.NextDueDate); err != nil {
 		return p, err
 	}
 	p.Net = round2(p.Net)
@@ -337,7 +343,7 @@ const entryViewSQL = `SELECT pd.id, ` + `pd.direction, pd.counterparty_contact_i
 		                    WHEN 'event' THEN sp.name
 		                    WHEN 'paid_by' THEN COALESCE(ft.description, fc.name)
 		                    WHEN 'partner' THEN ou.display_name END,
-		t.id, t.account_id, pd.created_at, pd.updated_at,
+		t.id, t.account_id, pd.created_at, pd.updated_at, to_char(pd.due_date, 'YYYY-MM-DD'),
 		-- origin (the มาจาก card): kind, transaction, bill, event, title, amount, date, wallet
 		CASE pd.source_kind WHEN 'transaction' THEN 'split' WHEN 'paid_by' THEN 'paid_by'
 		                    WHEN 'partner' THEN 'partner' WHEN 'event' THEN 'event'
@@ -399,7 +405,7 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 			oAccount *uuid.UUID
 		)
 		if err := rows.Scan(&v.ID, &v.Direction, &cid, &name, &v.Amount, &v.Date, &v.Description, &v.Note,
-			&v.Paid, &kind, &sourceID, &title, &txID, &accID, &v.CreatedAt, &v.UpdatedAt,
+			&v.Paid, &kind, &sourceID, &title, &txID, &accID, &v.CreatedAt, &v.UpdatedAt, &v.DueDate,
 			&oKind, &o.TransactionID, &o.BillID, &o.EventID, &o.Title, &o.Amount, &o.Date, &oAccount); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("entries scan: %w", err)

@@ -34,6 +34,8 @@ const (
 const (
 	PTTypeExpense = "expense"
 	PTTypeIncome  = "income"
+	// PTTypePayback (0.4.0-3) — "A paid B back": the parent's member pays, its one child receives.
+	PTTypePayback = "payback"
 )
 
 type Project struct {
@@ -167,6 +169,9 @@ type EventPosition struct {
 	Member     shared.MemberRef `json:"member"`
 	Paid       float64          `json:"paid"`
 	Share      float64          `json:"share"`
+	// Sent / Received (0.4.0-3) — paybacks this member made / got; Net = paid - share + sent - received.
+	Sent       float64          `json:"sent"`
+	Received   float64          `json:"received"`
 	Net        float64          `json:"net"`
 	Receivable float64          `json:"receivable"`
 	Payable    float64          `json:"payable"`
@@ -222,8 +227,12 @@ type BoardRow struct {
 	MyShare           float64          `json:"my_share"`
 	Locked            bool             `json:"locked"`
 	Linked            bool             `json:"linked"`
-	SourceTx          *BoardSourceTx   `json:"source_tx"`
-	Children          []BoardSplit     `json:"children"`
+	// MyBooked (0.4.0-3) — my part of this row is in my books: a tx of mine linked to / copied from
+	// it (or a child), a repayment pointing at it, or a debt made from it.
+	MyBooked bool           `json:"my_booked"`
+	MyBooks  MyBooks        `json:"my_books"`
+	SourceTx *BoardSourceTx `json:"source_tx"`
+	Children []BoardSplit   `json:"children"`
 	CreatedAt         time.Time        `json:"created_at"`
 	UpdatedAt         time.Time        `json:"updated_at"`
 }
@@ -359,7 +368,7 @@ type ProjectSplitInput struct {
 
 type CreateProjectTransactionRequest struct {
 	TransactionMemberID uuid.UUID           `json:"transaction_member_id" binding:"required"`
-	Type                string              `json:"type"                  binding:"required,oneof=expense income"`
+	Type                string              `json:"type"                  binding:"required,oneof=expense income payback"`
 	Amount              float64             `json:"amount"                binding:"required,gt=0"`
 	Date                string              `json:"date"                  binding:"required,datetime=2006-01-02"`
 	Note                *string             `json:"note"                  binding:"omitempty,max=500"`
@@ -372,6 +381,8 @@ type CreateProjectTransactionRequest struct {
 }
 
 type UpdateProjectTransactionRequest struct {
+	// TransactionMemberID — paybacks only: who paid back (a bill's payer never changes).
+	TransactionMemberID *uuid.UUID `json:"transaction_member_id"`
 	Amount         *float64             `json:"amount"      binding:"omitempty,gt=0"`
 	Date           *string              `json:"date"        binding:"omitempty,datetime=2006-01-02"`
 	Note           *string              `json:"note"        binding:"omitempty,max=500"`

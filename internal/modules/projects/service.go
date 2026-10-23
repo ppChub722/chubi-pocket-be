@@ -533,9 +533,12 @@ func userDisplayOrEmpty(ctx context.Context, tx pgx.Tx, userID uuid.UUID) string
 	return name
 }
 
+// listDerived drops archived events, so "current" = every event but archived.
 var derivedStatus = map[string]func(e *Event) bool{
+	"current":    func(e *Event) bool { return true },
 	"unsettled":  func(e *Event) bool { return e.MyReceivable > 0 || e.MyPayable > 0 },
 	"receivable": func(e *Event) bool { return e.MyReceivable > 0 },
+	"payable":    func(e *Event) bool { return e.MyPayable > 0 },
 	"ended":      func(e *Event) bool { return e.Status == StatusCompleted || e.Status == StatusCancelled },
 }
 

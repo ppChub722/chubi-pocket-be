@@ -30,6 +30,13 @@ func (s *Service) CreateProjectTransaction(
 		return nil, ErrMemberNotInProject
 	}
 	req.TagNames = nil // names are a Go-side input only
+	payback := req.Type == PTTypePayback
+	if payback {
+		if err := validatePayback(req.TransactionMemberID, req.Amount, req.Splits); err != nil {
+			return nil, err
+		}
+		req.TagIDs = nil
+	}
 
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -46,7 +53,7 @@ func (s *Service) CreateProjectTransaction(
 	}
 	if s.notifs != nil && member.UserID != nil {
 		if *member.UserID == callerUserID {
-			if s.txs != nil {
+			if s.txs != nil && !payback {
 				st, err := s.notifs.SettingsTx(ctx, tx, callerUserID)
 				if err == nil && st.AutoResolveOwnInProjects {
 					if _, err := s.copyToPersonalTx(ctx, tx, callerUserID, member.ID, pt); err != nil &&
@@ -63,6 +70,39 @@ func (s *Service) CreateProjectTransaction(
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return s.patch(ctx, callerUserID, projectID, &pt.ID, nil, nil)
+}
+
+func validatePayback(from uuid.UUID, amount float64, splits []ProjectSplitInput) error {
+	if len(splits) != 1 || splits[0].MemberID == from || math.Abs(splits[0].Amount-amount) > 0.005 {
+		return ErrBadPayback
+	}
+	return nil
+}
+
+// paybackEdit fills in what a payback edit leaves out (the receiver, the payer, the amount), so the
+// one child always carries the whole amount.
+func paybackEdit(ctx context.Context, tx pgx.Tx, current *ProjectTransaction, req *UpdateProjectTransactionRequest) error {
+	from := current.TransactionMemberID
+	if req.TransactionMemberID != nil {
+		from = *req.TransactionMemberID
+	}
+	amount := current.Amount
+	if req.Amount != nil {
+		amount = *req.Amount
+	}
+	var to uuid.UUID
+	if req.Splits != nil && len(*req.Splits) > 0 {
+		to = (*req.Splits)[0].MemberID
+		if len(*req.Splits) != 1 {
+			return ErrBadPayback
+		}
+	} else if err := tx.QueryRow(ctx, `SELECT transaction_member_id FROM project_transactions
+		WHERE parent_project_transaction_id = $1 LIMIT 1`, current.ID).Scan(&to); err != nil {
+		return fmt.Errorf("payback receiver: %w", err)
+	}
+	splits := []ProjectSplitInput{{MemberID: to, Amount: amount}}
+	req.Splits, req.TagIDs = &splits, nil
+	return validatePayback(from, amount, splits)
 }
 
 type originTx struct {
@@ -104,6 +144,9 @@ func (s *Service) UpdateProjectTransaction(
 	if _, err := s.store.AssertCanWrite(ctx, projectID, callerUserID); err != nil {
 		return nil, err
 	}
+	if req.TransactionMemberID != nil && current.Type != PTTypePayback {
+		return nil, ErrPayerFixed
+	}
 
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -111,8 +154,13 @@ func (s *Service) UpdateProjectTransaction(
 	}
 	defer tx.Rollback(ctx)
 
-	mine, err := myLinkedTxTx(ctx, tx, callerUserID, ptID)
-	if err != nil {
+	var mine *uuid.UUID
+	if current.Type == PTTypePayback {
+		// A repayment that points here is not a copy of it: the payback never rewrites it.
+		if err := paybackEdit(ctx, tx, current, &req); err != nil {
+			return nil, err
+		}
+	} else if mine, err = myLinkedTxTx(ctx, tx, callerUserID, ptID); err != nil {
 		return nil, err
 	}
 

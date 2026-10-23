@@ -2923,7 +2923,7 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
-        - { name: status, in: query, description: 'Stored: active (default) | completed | cancelled | archived | all. Derived (never archived): unsettled = I still owe or am owed, receivable = someone owes me, ended = completed or cancelled (the same numbers as the list summary counts).', schema: { type: string, enum: [active, completed, cancelled, archived, all, unsettled, receivable, ended] } }
+        - { name: status, in: query, description: 'Stored: active (default) | completed | cancelled | archived | all. Derived (never archived): current = every event but archived, unsettled = I still owe or am owed, receivable = someone owes me, payable = I owe someone, ended = completed or cancelled (the same numbers as the list summary counts).', schema: { type: string, enum: [active, completed, cancelled, archived, all, current, unsettled, receivable, payable, ended] } }
         - { name: q, in: query, schema: { type: string } }
         - { name: tag_id, in: query, schema: { type: array, items: { $ref: '#/components/schemas/Uuid' } }, style: form, explode: true }
         - { name: sort, in: query, schema: { type: string, enum: [updated_desc, start_date_desc, name_asc] } }
@@ -3397,6 +3397,78 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
       x-breaking: "EventSummary: positions carry member: MemberRef; by_tag is event TagRefs with my share (top 5)."
+  /projects/{id}/people:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Events]
+      summary: People as event members
+      operationId: resolveProjectPeople
+      description: '0.4.0-3, the event bill sheet: the people a bill or payback names (me / member_id / contact_id / person_name), as event members in the same order. Anyone who isn''t a member yet is added (a linked contact gets project_added). Then the sheet writes the row with createProjectTransaction.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [people]
+              properties:
+                people: { type: array, minItems: 1, items: { $ref: '#/components/schemas/BillPerson' } }
+      responses:
+        '200':
+          description: The event after any additions, and the member ids.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/EventPatch' }
+                  - type: object
+                    required: [member_ids]
+                    properties:
+                      member_ids: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /projects/{id}/project-transactions/{pt_id}/my-books:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+      - { name: pt_id, in: path, required: true, schema: { $ref: '#/components/schemas/Uuid' } }
+    put:
+      tags: [Events]
+      summary: Unlink / relink my books' rows of a bill
+      operationId: setProjectTransactionMyBooks
+      description: '0.4.0-3, the event sheet''s "ลงบัญชีของฉัน" on an existing row. unlink: my rows of those kinds stay in my books but lose the link (source / project; the bill''s linked_transaction_id), and remember the row. link: the remembered rows (still unlinked) take the link back; relinked lists the kinds that found any, the app creates the rest. Kinds: tx = my transaction for the row (the bill, or my share), debt = a debt made from it, repay = a repayment pointing at it. Any active member; only my own rows.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MyBooksRequest' }
+      responses:
+        '200':
+          description: The patch + the kinds relinked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MyBooksResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /projects/{id}/settle:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    get:
+      tags: [Events]
+      summary: Who pays whom
+      operationId: getProjectSettle
+      description: '0.4.0-3, the event สรุป tab. Over expense bills and paybacks: each split row owes its parent''s member. pairs = each two members netted; simplified = the fewest transfers over everyone''s net (largest debtor pays largest creditor). from owes to.'
+      responses:
+        '200':
+          description: The settle lines.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventSettle' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /projects/{id}/tags:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
@@ -9935,6 +10007,7 @@ components:
         cleared_at: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The CYCLE boundary: the date of the last line (debt or repayment) after which the running balance (book order: date, created, id) was 0; null when it never was. Lines after it = the current cycle.' }
         days_outstanding: { type: [integer, 'null'], description: 'Age in days (user timezone) of the oldest entry of the CURRENT cycle not labelled paid; null when there is none.' }
         last_activity_at: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The latest entry date (null with no entries).' }
+        next_due_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: '0.4.0-3 "กำหนดจ่าย": the earliest due_date among the unpaid debts on the person''s CURRENT side (net > 0 → direction paid; net < 0 → received). Null when net is 0 or no such entry has one. Days overdue = today (user timezone) − this.' }
       example:
         key: n:mom
         person: { name: Mom, contact_id: null, icon_code: null, linked: false, linked_user_id: null }
@@ -10066,6 +10139,7 @@ components:
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
         paid: { type: boolean, description: 'The "จ่ายแล้ว" label. Never changes a number.' }
+        due_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: '0.4.0-3 "กำหนดจ่าย": optional, never before `date`.' }
         source: { oneOf: [{ $ref: '#/components/schemas/DebtSource' }, { type: 'null' }], description: 'Null = a manual entry (fully editable).' }
         transaction: { oneOf: [{ $ref: '#/components/schemas/DebtEntryTx' }, { type: 'null' }], description: 'Null = ledger-only.' }
         created_at: { $ref: '#/components/schemas/DateTime' }
@@ -10161,6 +10235,7 @@ components:
         tag_ids: { $ref: '#/components/schemas/Ids', description: 'Go on the transaction: needs create_transaction true, or an account_id.' }
         mark_paid_ids: { $ref: '#/components/schemas/Ids', description: 'Entries of the same person to label paid in the same call.' }
         person_name: { type: string, minLength: 1, maxLength: 100, description: '`n:` keys only: the shown spelling of a typed name.' }
+        due_date: { $ref: '#/components/schemas/Date', description: '0.4.0-3 "กำหนดจ่าย" (optional). Before the entry''s date → 400 VALIDATION_ERROR.' }
         bill_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.0-3 B3: the event resolve sheet''s "as debt": the event bill this debt settles a share of (I must be an active member: else 400 BILL_NOT_FOUND). The entry gets source {kind: event, id: the event}; unlike split-sourced entries its money stays editable.' }
     DebtEntryUpdateRequest:
       type: object
@@ -10177,6 +10252,7 @@ components:
         tag_ids: { $ref: '#/components/schemas/Ids' }
         key: { $ref: '#/components/schemas/PersonKey' }
         person_name: { type: string, minLength: 1, maxLength: 100 }
+        due_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: '0.4.0-3 "กำหนดจ่าย": null clears it, absent leaves it. Before the entry''s (new) date → 400 VALIDATION_ERROR.' }
     RepaymentPerson:
       type: object
       description: 'The debt person of a repayment transaction (Transaction.repayment_person).'
@@ -10240,6 +10316,7 @@ components:
         tag_ids: { $ref: '#/components/schemas/Ids', description: 'Tags on the transaction.' }
         mark_paid_ids: { $ref: '#/components/schemas/Ids', description: 'Debt entries of the same person to label paid in the same call (label only, numbers never change).' }
         person_name: { type: string, minLength: 1, maxLength: 100, description: '`n:` keys only: the shown spelling of a typed name.' }
+        bill_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.0-3: an event payback row (in an event I''m an active member of) this repayment records in my books: the transaction gets source_project_transaction_id + project_id, and the row''s my_booked turns true. 404 BILL_NOT_FOUND otherwise.' }
     DebtRepaymentResult:
       type: object
       description: 'The repayment as a full transaction row (same view as GET /transactions/{id}, with repayment_person), its statement line, the person''s new balance and the touched wallet balance.'
@@ -10339,18 +10416,22 @@ components:
         data: { type: array, items: { $ref: '#/components/schemas/Event' } }
         summary:
           type: object
-          description: 'The list''s summary card, over MY events (active member, not archived), the same whatever the list filter. The three totals are over the ACTIVE events: my_share_total = my part of their expense bills, paid_total = what I paid, receivable_total = what others still owe me (Σ my_receivable). counts: active = active events; unsettled = events (active or ended) where I am owed or owe something; ended = completed + cancelled.'
-          required: [my_share_total, paid_total, receivable_total, counts]
+          description: 'The list''s summary card, over MY events (active member, not archived), the same whatever the list filter. my_share_total = my part of the ACTIVE events'' expense bills, paid_total = what I paid in them. receivable_total = Σ my_receivable and payable_total = Σ my_payable over every event (active or ended; 0.4.0-3, was active only). counts: all = every event; active = active events; unsettled = events where I am owed or owe something; receivable / payable = events where I am owed / owe; ended = completed + cancelled.'
+          required: [my_share_total, paid_total, receivable_total, payable_total, counts]
           properties:
             my_share_total: { $ref: '#/components/schemas/Money' }
             paid_total: { $ref: '#/components/schemas/Money' }
             receivable_total: { $ref: '#/components/schemas/Money' }
+            payable_total: { $ref: '#/components/schemas/Money' }
             counts:
               type: object
-              required: [active, unsettled, ended]
+              required: [all, active, unsettled, receivable, payable, ended]
               properties:
+                all: { type: integer }
                 active: { type: integer }
                 unsettled: { type: integer }
+                receivable: { type: integer }
+                payable: { type: integer }
                 ended: { type: integer }
         pagination: { $ref: '#/components/schemas/Page' }
     EventMember:
@@ -10397,15 +10478,50 @@ components:
         data: { type: array, items: { $ref: '#/components/schemas/EventTag' } }
     EventPosition:
       type: object
-      description: 'A member''s standing on expense bills: paid = bills they paid; share = their split rows (a bill without splits is fully its payer''s share); net = paid − share (> 0: the others owe them).'
-      required: [member, paid, share, net, receivable, payable]
+      description: 'A member''s standing: paid = expense bills they paid; share = their split rows (a bill without splits is fully its payer''s share); sent / received = paybacks they made / got (0.4.0-3); net = paid − share + sent − received (> 0: the others owe them).'
+      required: [member, paid, share, sent, received, net, receivable, payable]
       properties:
         member: { $ref: '#/components/schemas/MemberRef' }
         paid: { $ref: '#/components/schemas/Money' }
         share: { $ref: '#/components/schemas/Money' }
+        sent: { $ref: '#/components/schemas/Money' }
+        received: { $ref: '#/components/schemas/Money' }
         net: { $ref: '#/components/schemas/Money' }
         receivable: { $ref: '#/components/schemas/Money', description: 'net when > 0 (others owe them), else 0.' }
         payable: { $ref: '#/components/schemas/Money', description: '−net when < 0 (they owe others), else 0.' }
+    SettleLine:
+      type: object
+      required: [from, to, amount]
+      properties:
+        from: { $ref: '#/components/schemas/MemberRef', description: 'Owes.' }
+        to: { $ref: '#/components/schemas/MemberRef', description: 'Gets.' }
+        amount: { $ref: '#/components/schemas/Money' }
+    MyBooks:
+      type: object
+      description: '0.4.0-3: which parts of my books hold the row.'
+      required: [tx, debt, repay]
+      properties:
+        tx: { type: boolean, description: 'A tx of mine linked to / copied from it or one of its splits.' }
+        debt: { type: boolean, description: 'A debt made from it (bill_id).' }
+        repay: { type: boolean, description: 'A repayment with bill_id = it.' }
+    MyBooksRequest:
+      type: object
+      properties:
+        link: { type: array, items: { type: string, enum: [tx, debt, repay] } }
+        unlink: { type: array, items: { type: string, enum: [tx, debt, repay] } }
+    MyBooksResult:
+      allOf:
+        - { $ref: '#/components/schemas/EventPatch' }
+        - type: object
+          required: [relinked]
+          properties:
+            relinked: { type: array, items: { type: string, enum: [tx, debt, repay] } }
+    EventSettle:
+      type: object
+      required: [pairs, simplified]
+      properties:
+        pairs: { type: array, items: { $ref: '#/components/schemas/SettleLine' } }
+        simplified: { type: array, items: { $ref: '#/components/schemas/SettleLine' } }
     EventTagTotal:
       type: object
       description: 'Expense bills by event tag. tag null = untagged.'
@@ -10441,12 +10557,14 @@ components:
         my_mark: { type: boolean }
     BoardRow:
       type: object
-      description: 'A bill (parent row) with its splits nested, page-ready.'
-      required: [id, project_id, type, amount, date, description, note, transaction_member, record_user_id, tags, marks, my_mark, my_share, locked, linked, source_tx, children, created_at, updated_at]
+      description: 'A bill (parent row) with its splits nested, page-ready. A payback (type payback, 0.4.0-3) is "transaction_member paid children[0].transaction_member back", one child for the whole amount.'
+      required: [id, project_id, type, amount, date, description, note, transaction_member, record_user_id, tags, marks, my_mark, my_share, locked, linked, my_booked, my_books, source_tx, children, created_at, updated_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         project_id: { $ref: '#/components/schemas/Uuid' }
-        type: { type: string, enum: [expense, income] }
+        type: { type: string, enum: [expense, income, payback] }
+        my_booked: { type: boolean, description: '0.4.0-3: my part is in my books: a tx of mine linked to / copied from it or one of its splits, a repayment with bill_id = it, or a debt made from it. Replaces marks as the ✓.' }
+        my_books: { $ref: '#/components/schemas/MyBooks' }
         amount: { $ref: '#/components/schemas/Money' }
         date: { $ref: '#/components/schemas/Date' }
         description: { type: [string, 'null'], maxLength: 200 }
@@ -10681,9 +10799,10 @@ components:
     ProjectCreateTransactionRequest:
       type: object
       required: [transaction_member_id, type, amount, date]
+      description: 'payback (0.4.0-3): transaction_member_id paid back splits[0].member_id; exactly one split for the whole amount (400 BAD_PAYBACK), tag_ids ignored, never auto-copied.'
       properties:
         transaction_member_id: { $ref: '#/components/schemas/Uuid' }
-        type: { type: string, enum: [expense, income] }
+        type: { type: string, enum: [expense, income, payback] }
         amount: { type: number, exclusiveMinimum: 0 }
         date: { $ref: '#/components/schemas/Date' }
         description: { type: [string, 'null'], maxLength: 200 }
@@ -10693,6 +10812,7 @@ components:
     ProjectUpdateTransactionRequest:
       type: object
       properties:
+        transaction_member_id: { $ref: '#/components/schemas/Uuid', description: 'Paybacks only: who paid back (400 PAYER_FIXED on a bill). A payback edit keeps one child for the whole amount: amount alone moves it, splits[0].member_id changes the receiver.' }
         amount: { type: number, exclusiveMinimum: 0 }
         date: { $ref: '#/components/schemas/Date' }
         description: { type: [string, 'null'], maxLength: 200 }

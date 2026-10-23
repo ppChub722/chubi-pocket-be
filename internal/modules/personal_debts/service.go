@@ -242,9 +242,13 @@ func (s *Service) createEntryTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID
 	} else if date, err = today(ctx, tx); err != nil {
 		return nil, nil, err
 	}
+	if req.DueDate != nil && *req.DueDate < date {
+		return nil, nil, ErrDueBeforeDate
+	}
 	entry := &Entry{
 		UserID: userID, Direction: req.Direction, ContactID: contactID, PersonName: name,
 		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note,
+		DueDate: req.DueDate,
 	}
 	if req.BillID != nil {
 		// The event resolve sheet's "as debt" (0.4.0-3 B3): the debt keeps its bill and event.
@@ -413,6 +417,12 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 	if req.Paid != nil {
 		next.Paid = *req.Paid
 	}
+	if req.has("due_date") {
+		next.DueDate = req.DueDate
+	}
+	if next.DueDate != nil && *next.DueDate < next.Date {
+		return nil, ErrDueBeforeDate
+	}
 	if req.Key != nil {
 		if next.ContactID, next.PersonName, err = resolvePerson(ctx, tx, userID, *req.Key, req.PersonName); err != nil {
 			return nil, err
@@ -454,9 +464,10 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 
 	if _, err := tx.Exec(ctx, `UPDATE personal_debts
 		SET direction = $2, amount = $3, date = $4::date, description = $5, note = $6, paid = $7,
-		    counterparty_contact_id = $8, counterparty_person_name = $9, updated_by_user_id = $10
+		    counterparty_contact_id = $8, counterparty_person_name = $9, updated_by_user_id = $10,
+		    due_date = $11::date
 		WHERE id = $1`, e.ID, next.Direction, next.Amount, next.Date, next.Description, next.Note,
-		next.Paid, next.ContactID, next.PersonName, userID); err != nil {
+		next.Paid, next.ContactID, next.PersonName, userID, next.DueDate); err != nil {
 		return nil, fmt.Errorf("update entry: %w", err)
 	}
 
@@ -610,6 +621,22 @@ func (s *Service) createRepaymentTx(ctx context.Context, tx pgx.Tx, userID uuid.
 	})
 	if err != nil {
 		return nil, "", err
+	}
+	if req.BillID != nil {
+		var projectID uuid.UUID
+		err := tx.QueryRow(ctx, `SELECT pt.project_id FROM project_transactions pt
+			JOIN project_members pm ON pm.project_id = pt.project_id AND pm.user_id = $2 AND pm.status = 'active'
+			WHERE pt.id = $1`, *req.BillID, userID).Scan(&projectID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, "", ErrBillNotFound
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("repayment bill: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE transactions SET source_project_transaction_id = $2, project_id = $3
+			WHERE id = $1 AND user_id = $4`, row.ID, *req.BillID, projectID, userID); err != nil {
+			return nil, "", fmt.Errorf("repayment bill link: %w", err)
+		}
 	}
 	key := shared.DebtKey(contactID, name)
 	if err := markPaidTx(ctx, tx, userID, key, req.MarkPaidIDs); err != nil {

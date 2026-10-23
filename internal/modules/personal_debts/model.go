@@ -44,6 +44,7 @@ type Entry struct {
 	// PaidForTransactionID — the expense this debt is the "someone paid for me" part of (0.4.0-3):
 	// my own paid_by (source paid_by) or a partner's split mirrored into my book (source partner).
 	PaidForTransactionID *uuid.UUID
+	DueDate              *string // YYYY-MM-DD; "กำหนดจ่าย" (0.4.0-3)
 }
 
 func (e *Entry) Key() string { return shared.DebtKey(e.ContactID, e.PersonName) }
@@ -82,6 +83,7 @@ type DebtEntry struct {
 	Description    *string     `json:"description"`
 	Note           *string     `json:"note"`
 	Paid           bool        `json:"paid"`
+	DueDate        *string     `json:"due_date"`
 	Source         *DebtSource `json:"source"`
 	Transaction    *EntryTx    `json:"transaction"`
 	CreatedAt      time.Time   `json:"created_at"`
@@ -106,6 +108,9 @@ type DebtPerson struct {
 	Side            string        `json:"side"`
 	FirstActivityAt *string       `json:"first_activity_at"`
 	LastActivity    *LastActivity `json:"last_activity"`
+	// NextDueDate — the earliest due date among the unpaid debts on the person's current side
+	// (net > 0: paid entries; net < 0: received); null when even or none has one.
+	NextDueDate *string `json:"next_due_date"`
 }
 
 // LastActivity — a person's latest line (a debt or a repayment), for the people list row.
@@ -224,6 +229,8 @@ type RepaymentRequest struct {
 	TagIDs      []uuid.UUID `json:"tag_ids"`
 	MarkPaidIDs []uuid.UUID `json:"mark_paid_ids"`
 	PersonName  *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
+	// BillID (0.4.0-3) — an event payback row this repayment records in my books.
+	BillID *uuid.UUID `json:"bill_id"`
 }
 
 // RepaymentResult — the repayment transaction (same view as GET /transactions/{id}), its statement
@@ -300,6 +307,7 @@ type CreateEntryRequest struct {
 	TagIDs            []uuid.UUID `json:"tag_ids"`
 	MarkPaidIDs       []uuid.UUID `json:"mark_paid_ids"`
 	PersonName        *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
+	DueDate           *string     `json:"due_date"     binding:"omitempty,datetime=2006-01-02"`
 	// BillID (0.4.0-3) — the event bill this debt settles a share of (the resolve sheet's "as
 	// debt"): the entry keeps source event + the bill + its event.
 	BillID *uuid.UUID `json:"bill_id"`
@@ -317,6 +325,8 @@ type UpdateEntryRequest struct {
 	TagIDs            []uuid.UUID `json:"tag_ids"`
 	Key               *string     `json:"key"`
 	PersonName        *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
+	// DueDate — null clears it (has("due_date")); absent leaves it.
+	DueDate *string `json:"due_date" binding:"omitempty,datetime=2006-01-02"`
 
 	present map[string]bool
 }

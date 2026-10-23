@@ -44,6 +44,10 @@ var (
 	ErrViewerReadOnly    = errors.New("viewers can't change project transactions")
 	ErrInvalidDateRange = errors.New("end_date must not be before start_date")
 	ErrBadMemberRequest = errors.New("add a member with ad_hoc + display_name, or email + display_name")
+	ErrBadPayback       = errors.New("a payback has exactly one split: the receiver, for the whole amount")
+	ErrPayerFixed       = errors.New("a bill's payer can't change")
+	// ErrPaybackNotCopyable — a payback goes to my books as a repayment, not a copied expense.
+	ErrPaybackNotCopyable = errors.New("a payback can't be copied as an expense")
 )
 
 const projectColumns = `id, owner_user_id, name, description, note,

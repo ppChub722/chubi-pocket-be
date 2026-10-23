@@ -80,6 +80,9 @@ func (s *Service) copyToPersonalTx(
 	if id, _, ok := personalCopyTx(ctx, tx, userID, pt.ID); ok {
 		return id, nil
 	}
+	if pt.Type == PTTypePayback {
+		return uuid.Nil, ErrPaybackNotCopyable
+	}
 	amount, err := copyAmountTx(ctx, tx, pt, memberID)
 	if err != nil {
 		return uuid.Nil, err
