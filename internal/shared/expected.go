@@ -2,6 +2,7 @@ package shared
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,4 +35,53 @@ type ExpectedOccurrence struct {
 // settings have none). recurring.Service implements it.
 type Expecter interface {
 	ExpectedBetween(ctx context.Context, userID uuid.UUID, from, to time.Time) ([]ExpectedOccurrence, error)
+}
+
+type expectedMemoKey struct{}
+
+// ExpectedMemo keeps the occurrences one request already asked for, so a second ask for the
+// same or a narrower window (the counts and the budgets of one page) is answered without
+// reading again.
+type ExpectedMemo struct {
+	mu       sync.Mutex
+	set      bool
+	from, to time.Time
+	occs     []ExpectedOccurrence
+}
+
+// WithExpectedMemo installs the memo; use it only on a request that reads and never writes.
+func WithExpectedMemo(ctx context.Context) context.Context {
+	return context.WithValue(ctx, expectedMemoKey{}, &ExpectedMemo{})
+}
+
+// ExpectedMemoOf is the request's memo, or nil.
+func ExpectedMemoOf(ctx context.Context) *ExpectedMemo {
+	m, _ := ctx.Value(expectedMemoKey{}).(*ExpectedMemo)
+	return m
+}
+
+// Lookup answers [from, to] when the memo holds a window that covers it.
+func (m *ExpectedMemo) Lookup(from, to time.Time) ([]ExpectedOccurrence, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.set || from.Before(m.from) || to.After(m.to) {
+		return nil, false
+	}
+	out := []ExpectedOccurrence{}
+	for _, o := range m.occs {
+		if !o.Date.Before(from) && !o.Date.After(to) {
+			out = append(out, o)
+		}
+	}
+	return out, true
+}
+
+// Remember keeps the widest window it has been given.
+func (m *ExpectedMemo) Remember(from, to time.Time, occs []ExpectedOccurrence) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.set && (from.After(m.from) || to.Before(m.to)) {
+		return
+	}
+	m.set, m.from, m.to, m.occs = true, from, to, occs
 }

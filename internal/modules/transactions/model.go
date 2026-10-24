@@ -447,6 +447,8 @@ type SummaryRequest struct {
 	CategoryID *uuid.UUID
 	Type       *TxType // optional: income | expense — filters rows before grouping
 	GroupBy    string  // empty | day | week | month | category | parent_category | account
+	// GroupsOnly skips the totals read: the caller uses only Groups.
+	GroupsOnly bool
 }
 
 type SummaryGroup struct {

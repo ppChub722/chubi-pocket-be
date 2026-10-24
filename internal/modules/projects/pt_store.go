@@ -18,16 +18,18 @@ const ptColumns = `id, project_id, parent_project_transaction_id,
 	note, description,
 	marks, created_at, updated_at`
 
-func scanPT(row pgx.Row) (*ProjectTransaction, error) {
+func scanPT(row pgx.Row) (*ProjectTransaction, error) { return scanPTAround(row, nil, nil) }
+
+// scanPTAround reads a row of ptColumns with columns before (lead) and after (trail) them.
+func scanPTAround(row pgx.Row, lead, trail []any) (*ProjectTransaction, error) {
 	var pt ProjectTransaction
-	err := row.Scan(
+	dest := append(append([]any{}, lead...),
 		&pt.ID, &pt.ProjectID, &pt.ParentProjectTransactionID,
 		&pt.TransactionMemberID, &pt.RecordUserID,
 		&pt.Type, &pt.Amount, &pt.Currency,
 		&pt.Date, &pt.Note, &pt.Description,
-		&pt.Marks, &pt.CreatedAt, &pt.UpdatedAt,
-	)
-	if err != nil {
+		&pt.Marks, &pt.CreatedAt, &pt.UpdatedAt)
+	if err := row.Scan(append(dest, trail...)...); err != nil {
 		return nil, err
 	}
 	return &pt, nil

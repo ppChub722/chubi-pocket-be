@@ -1210,14 +1210,16 @@ func (s *Service) Summary(ctx context.Context, userID uuid.UUID, req SummaryRequ
 		count        int
 		currency     string
 	)
-	q := `SELECT
+	if !req.GroupsOnly {
+		q := `SELECT
 		COALESCE(SUM(` + shareT + `) FILTER (WHERE t.type = 'income'),  0),
 		COALESCE(SUM(` + shareT + `) FILTER (WHERE t.type = 'expense'), 0),
 		COUNT(*),
 		COALESCE((SELECT currency FROM users WHERE id = $1), 'THB')
 		FROM ` + summaryFrom + ` WHERE ` + where
-	if err := s.store.db.QueryRow(ctx, q, args...).Scan(&totalIncome, &totalExpense, &count, &currency); err != nil {
-		return nil, fmt.Errorf("summary: %w", err)
+		if err := s.store.db.QueryRow(ctx, q, args...).Scan(&totalIncome, &totalExpense, &count, &currency); err != nil {
+			return nil, fmt.Errorf("summary: %w", err)
+		}
 	}
 
 	resp := &SummaryResponse{

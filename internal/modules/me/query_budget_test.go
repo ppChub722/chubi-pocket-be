@@ -39,7 +39,7 @@ func TestMyCountsQueryBudget(t *testing.T) {
 		t.Fatalf("status %d: %s", status, raw)
 	}
 	t.Logf("me/counts with 4 budgets: %d queries", n)
-	if n > 18 {
-		t.Errorf("me/counts ran %d queries, budget 18", n)
+	if n > 6 {
+		t.Errorf("me/counts ran %d queries, budget 6", n)
 	}
 }

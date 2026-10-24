@@ -49,7 +49,7 @@ func TestDashboardQueryBudget(t *testing.T) {
 		t.Fatalf("status %d: %s", status, raw)
 	}
 	t.Logf("dashboard with 4 budgets: %d queries", n)
-	if n > 29 {
-		t.Errorf("dashboard ran %d queries, budget 29", n)
+	if n > 22 {
+		t.Errorf("dashboard ran %d queries, budget 22", n)
 	}
 }

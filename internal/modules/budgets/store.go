@@ -40,17 +40,43 @@ const budgetColumns = `id, user_id, name, description, note, icon_code, amount::
 	tag_names, recurring, freq, interval_n, start_date, anchor_date, end_kind, end_date, end_count,
 	closed_on, status, created_at, updated_at`
 
+// scopeColumns read a budget's scope with the budget itself (one statement, not three):
+// its categories in display order and its wallets.
+const scopeColumns = `(SELECT COALESCE(json_agg(json_build_object('id', bc.category_id, 'include_children', bc.include_children)
+		ORDER BY c.sort_order, c.name), '[]'::json)
+		FROM budget_categories bc JOIN categories c ON c.id = bc.category_id WHERE bc.budget_id = budgets.id),
+	(SELECT COALESCE(json_agg(w.account_id), '[]'::json) FROM budget_wallets w WHERE w.budget_id = budgets.id)`
+
+const budgetSelect = budgetColumns + `, ` + scopeColumns
+
+// scanBudget reads a row of budgetSelect.
 func scanBudget(row pgx.Row) (*Budget, error) {
 	var (
-		b        Budget
-		icon     []byte
-		warn     *int16
-		interval int32
-		count    *int32
+		b                Budget
+		icon             []byte
+		warn             *int16
+		interval         int32
+		count            *int32
+		cats, walletsRaw []byte
 	)
 	if err := row.Scan(&b.ID, &b.UserID, &b.Name, &b.Description, &b.Note, &icon, &b.Amount, &warn, &b.ScopeAll,
 		&b.TagNames, &b.Recurring, &b.Freq, &interval, &b.StartDate, &b.AnchorDate, &b.EndKind, &b.EndDate, &count,
-		&b.ClosedOn, &b.Status, &b.CreatedAt, &b.UpdatedAt); err != nil {
+		&b.ClosedOn, &b.Status, &b.CreatedAt, &b.UpdatedAt, &cats, &walletsRaw); err != nil {
+		return nil, err
+	}
+	var scopeRows []struct {
+		ID              uuid.UUID `json:"id"`
+		IncludeChildren bool      `json:"include_children"`
+	}
+	if err := json.Unmarshal(cats, &scopeRows); err != nil {
+		return nil, err
+	}
+	b.Categories = make([]scopeCat, len(scopeRows))
+	for i, r := range scopeRows {
+		b.Categories[i] = scopeCat{ID: r.ID, IncludeChildren: r.IncludeChildren}
+	}
+	b.Wallets = []uuid.UUID{}
+	if err := json.Unmarshal(walletsRaw, &b.Wallets); err != nil {
 		return nil, err
 	}
 	b.IconCode = shared.IconFromJSON(icon)
@@ -69,52 +95,10 @@ func scanBudget(row pgx.Row) (*Budget, error) {
 	return &b, nil
 }
 
-func (s *Store) loadScopes(ctx context.Context, q shared.Querier, bs []*Budget) error {
-	if len(bs) == 0 {
-		return nil
-	}
-	ids := make([]uuid.UUID, len(bs))
-	byID := map[uuid.UUID]*Budget{}
-	for i, b := range bs {
-		ids[i], byID[b.ID] = b.ID, b
-		b.Categories, b.Wallets = []scopeCat{}, []uuid.UUID{}
-	}
-	rows, err := q.Query(ctx, `SELECT bc.budget_id, bc.category_id, bc.include_children FROM budget_categories bc
-		JOIN categories c ON c.id = bc.category_id WHERE bc.budget_id = ANY($1) ORDER BY c.sort_order, c.name`, ids)
-	if err != nil {
-		return fmt.Errorf("budget categories: %w", err)
-	}
-	for rows.Next() {
-		var (
-			bid uuid.UUID
-			c   scopeCat
-		)
-		if err := rows.Scan(&bid, &c.ID, &c.IncludeChildren); err != nil {
-			rows.Close()
-			return err
-		}
-		byID[bid].Categories = append(byID[bid].Categories, c)
-	}
-	rows.Close()
-	rows, err = q.Query(ctx, `SELECT budget_id, account_id FROM budget_wallets WHERE budget_id = ANY($1)`, ids)
-	if err != nil {
-		return fmt.Errorf("budget wallets: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var bid, aid uuid.UUID
-		if err := rows.Scan(&bid, &aid); err != nil {
-			return err
-		}
-		byID[bid].Wallets = append(byID[bid].Wallets, aid)
-	}
-	return rows.Err()
-}
-
 func (s *Store) get(ctx context.Context, q pgx.Tx, userID, id uuid.UUID, lock bool) (*Budget, error) {
-	sql := `SELECT ` + budgetColumns + ` FROM budgets WHERE id = $1 AND user_id = $2`
+	sql := `SELECT ` + budgetSelect + ` FROM budgets WHERE id = $1 AND user_id = $2`
 	if lock {
-		sql += ` FOR UPDATE`
+		sql += ` FOR UPDATE OF budgets`
 	}
 	var row pgx.Row
 	if q != nil {
@@ -129,18 +113,11 @@ func (s *Store) get(ctx context.Context, q pgx.Tx, userID, id uuid.UUID, lock bo
 	if err != nil {
 		return nil, fmt.Errorf("budget: %w", err)
 	}
-	var qq shared.Querier = s.db
-	if q != nil {
-		qq = q
-	}
-	if err := s.loadScopes(ctx, qq, []*Budget{b}); err != nil {
-		return nil, err
-	}
 	return b, nil
 }
 
 func (s *Store) listAll(ctx context.Context, userID uuid.UUID) ([]*Budget, error) {
-	rows, err := s.db.Query(ctx, `SELECT `+budgetColumns+` FROM budgets WHERE user_id = $1 ORDER BY created_at, id`, userID)
+	rows, err := s.db.Query(ctx, `SELECT `+budgetSelect+` FROM budgets WHERE user_id = $1 ORDER BY created_at, id`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("budgets: %w", err)
 	}
@@ -157,7 +134,7 @@ func (s *Store) listAll(ctx context.Context, userID uuid.UUID) ([]*Budget, error
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return out, s.loadScopes(ctx, s.db, out)
+	return out, nil
 }
 
 func (s *Store) save(ctx context.Context, tx pgx.Tx, b *Budget) error {

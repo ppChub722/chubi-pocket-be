@@ -12,11 +12,15 @@ const DefaultLanguage = "th"
 
 type prefsKey struct{}
 
-// UserPrefsValue is what a request needs of the caller's preferences: the
-// stored timezone ("" = none) and the language (never empty).
+// DefaultCurrency is the currency when the user has none stored.
+const DefaultCurrency = "THB"
+
+// UserPrefsValue is what a request needs of the caller's settings: the stored
+// timezone ("" = none), the language and the currency (never empty).
 type UserPrefsValue struct {
 	Timezone string
 	Language string
+	Currency string
 }
 
 type prefsHolder struct {
@@ -41,21 +45,25 @@ func UserPrefs(ctx context.Context, q Querier, userID uuid.UUID) (UserPrefsValue
 			return v, nil
 		}
 	}
-	v := UserPrefsValue{Language: DefaultLanguage}
-	rows, err := q.Query(ctx, `SELECT COALESCE(preferences->>'timezone', ''), COALESCE(preferences->>'language', '')
-		FROM user_preferences WHERE user_id = $1`, userID)
+	v := UserPrefsValue{Language: DefaultLanguage, Currency: DefaultCurrency}
+	rows, err := q.Query(ctx, `SELECT COALESCE(p.preferences->>'timezone', ''), COALESCE(p.preferences->>'language', ''),
+			COALESCE(u.currency, '')
+		FROM users u LEFT JOIN user_preferences p ON p.user_id = u.id WHERE u.id = $1`, userID)
 	if err != nil {
 		return v, err
 	}
 	if rows.Next() {
-		var tz, lang string
-		if err := rows.Scan(&tz, &lang); err != nil {
+		var tz, lang, cur string
+		if err := rows.Scan(&tz, &lang, &cur); err != nil {
 			rows.Close()
 			return v, err
 		}
 		v.Timezone = tz
 		if lang != "" {
 			v.Language = lang
+		}
+		if cur != "" {
+			v.Currency = cur
 		}
 	}
 	rows.Close()

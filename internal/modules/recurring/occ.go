@@ -356,6 +356,20 @@ func (s *Service) activeRules(ctx context.Context, q shared.Querier, userID uuid
 // ExpectedBetween implements shared.Expecter: the occurrences still to be
 // recorded with a date in [from, to] (budgets' รอจ่าย, the dashboard, the counts).
 func (s *Service) ExpectedBetween(ctx context.Context, userID uuid.UUID, from, to time.Time) ([]shared.ExpectedOccurrence, error) {
+	memo := shared.ExpectedMemoOf(ctx)
+	if memo != nil {
+		if occs, ok := memo.Lookup(from, to); ok {
+			return occs, nil
+		}
+	}
+	out, err := s.expectedBetween(ctx, userID, from, to)
+	if err == nil && memo != nil {
+		memo.Remember(from, to, out)
+	}
+	return out, err
+}
+
+func (s *Service) expectedBetween(ctx context.Context, userID uuid.UUID, from, to time.Time) ([]shared.ExpectedOccurrence, error) {
 	today, err := s.today(ctx, userID, shared.HeaderTZ(ctx))
 	if err != nil {
 		return nil, err

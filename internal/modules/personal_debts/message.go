@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // SummaryMessage — the share sheet's text in its two variants (0.4.0-3): the whole current cycle
@@ -54,10 +55,11 @@ const summaryLines = 200
 
 // summaryMessage words the current cycle's lines (oldest first, at most summaryLines).
 func (s *Service) summaryMessage(ctx context.Context, userID uuid.UUID, bal DebtPerson, items []StatementItem) (*SummaryMessage, error) {
-	var cur string
-	if err := s.store.db.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, userID).Scan(&cur); err != nil {
+	prefs, err := shared.UserPrefs(ctx, s.store.db, userID)
+	if err != nil {
 		return nil, fmt.Errorf("currency: %w", err)
 	}
+	cur := prefs.Currency
 	unit := cur
 	if cur == "THB" {
 		unit = "บาท"

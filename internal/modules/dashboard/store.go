@@ -107,9 +107,9 @@ func decodeIcon(b []byte) (*shared.IconCode, error) {
 }
 
 func (s *Store) UserCurrency(ctx context.Context, userID uuid.UUID) (string, error) {
-	var cur string
-	if err := s.db.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, userID).Scan(&cur); err != nil {
+	p, err := shared.UserPrefs(ctx, s.db, userID)
+	if err != nil {
 		return "", fmt.Errorf("user currency: %w", err)
 	}
-	return cur, nil
+	return p.Currency, nil
 }

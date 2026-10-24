@@ -2,6 +2,7 @@ package projects
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -361,10 +362,36 @@ func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid
 	return s, nil
 }
 
+type tagRefsKey struct{}
+
+// withTagRefs hands loadTagRefs the event's tags a page already read.
+func withTagRefs(ctx context.Context, tags []EventTag) context.Context {
+	m := make(map[uuid.UUID]EventTagRef, len(tags))
+	for _, t := range tags {
+		m[t.ID] = EventTagRef{ID: t.ID, Name: t.Name, IconCode: t.IconCode, Mine: t.Mine}
+	}
+	return context.WithValue(ctx, tagRefsKey{}, m)
+}
+
 func loadTagRefs(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]EventTagRef, error) {
 	out := map[uuid.UUID]EventTagRef{}
 	if len(ids) == 0 {
 		return out, nil
+	}
+	if known, _ := ctx.Value(tagRefsKey{}).(map[uuid.UUID]EventTagRef); known != nil {
+		all := true
+		for _, id := range ids {
+			r, ok := known[id]
+			if !ok {
+				all = false
+				break
+			}
+			out[id] = r
+		}
+		if all {
+			return out, nil
+		}
+		out = map[uuid.UUID]EventTagRef{}
 	}
 	rows, err := q.Query(ctx, `SELECT et.id, et.name, et.icon_code,
 			EXISTS (SELECT 1 FROM tags t WHERE t.user_id = $2 AND LOWER(t.name) = LOWER(et.name))
@@ -420,17 +447,6 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 		}
 	}
 	w := strings.Join(where, " AND ")
-	total := 0
-	if ids == nil {
-		rows, err := q.Query(ctx, `SELECT COUNT(*) FROM project_transactions pt WHERE `+w, args...)
-		if err != nil {
-			return nil, 0, fmt.Errorf("board count: %w", err)
-		}
-		if rows.Next() {
-			_ = rows.Scan(&total)
-		}
-		rows.Close()
-	}
 	order := "pt.date DESC, pt.created_at DESC"
 	switch f.Sort {
 	case "date_asc":
@@ -440,29 +456,92 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 	case "amount_asc":
 		order = "pt.amount ASC, pt.created_at DESC"
 	}
-	sql := `SELECT ` + strings.ReplaceAll(ptColumnsPrefixed, "@", "pt.") + ` FROM project_transactions pt WHERE ` + w + ` ORDER BY ` + order + `, pt.id`
+	// ONE statement: the page of bills (its position and how many match without the limit ride
+	// along) and the splits of those bills.
+	countArgs := args
+	page := `SELECT pt.id, ROW_NUMBER() OVER (ORDER BY ` + order + `, pt.id) AS rn, COUNT(*) OVER () AS total
+		FROM project_transactions pt WHERE ` + w + ` ORDER BY ` + order + `, pt.id`
 	if ids == nil {
 		args = append(args, f.PerPage, (f.Page-1)*f.PerPage)
-		sql += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
+		page += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
 	}
-	rows, err := q.Query(ctx, sql, args...)
+	args = append(args, callerID)
+	caller := fmt.Sprintf("$%d", len(args))
+	// The tags of a bill, the transaction it was made from (with its wallet) and what of my books
+	// holds it ride along on the bill's own row.
+	rows, err := q.Query(ctx, `WITH page AS (`+page+`)
+		SELECT page.total, `+strings.ReplaceAll(ptColumnsPrefixed, "@", "x.")+`,
+		CASE WHEN x.parent_project_transaction_id IS NULL THEN COALESCE((
+			SELECT json_agg(json_build_object('id', et.id, 'name', et.name, 'icon_code', et.icon_code,
+				'mine', EXISTS (SELECT 1 FROM tags t WHERE t.user_id = `+caller+` AND LOWER(t.name) = LOWER(et.name)))
+				ORDER BY LOWER(et.name), et.id)
+			FROM project_transaction_tags ptt JOIN event_tags et ON et.id = ptt.event_tag_id
+			WHERE ptt.project_transaction_id = x.id), '[]'::json) END,
+		CASE WHEN x.parent_project_transaction_id IS NULL AND x.linked_transaction_id IS NOT NULL THEN (
+			SELECT json_build_object('tx_id', lt.id, 'owner', lt.user_id, 'description', lt.description,
+				'account', CASE WHEN lt.user_id = `+caller+` AND a.id IS NOT NULL THEN json_build_object(
+					'id', a.id, 'name', a.name, 'icon_code', a.icon_code, 'logo_url', a.logo_url,
+					'type', a.type, 'currency', a.currency, 'status', a.status) END)
+			FROM transactions lt LEFT JOIN accounts a ON a.id = lt.account_id
+			WHERE lt.id = x.linked_transaction_id) END,
+		CASE WHEN x.parent_project_transaction_id IS NULL THEN (
+			SELECT json_build_object(
+				'tx', COALESCE(bool_or(t.id IS NOT NULL AND t.repay_person_name IS NULL), false),
+				'repay', COALESCE(bool_or(t.repay_person_name IS NOT NULL), false),
+				'debt', EXISTS (SELECT 1 FROM personal_debts d
+					WHERE d.user_id = `+caller+` AND d.source_project_transaction_id = x.id))
+			FROM (SELECT 1) one
+			LEFT JOIN transactions t ON t.user_id = `+caller+` AND (
+				t.id = x.linked_transaction_id OR t.source_project_transaction_id = x.id
+				OR t.source_project_transaction_id IN (SELECT c.id FROM project_transactions c
+					WHERE c.parent_project_transaction_id = x.id))) END
+		FROM page JOIN project_transactions x ON x.id = page.id OR x.parent_project_transaction_id = page.id
+		ORDER BY page.rn, (x.parent_project_transaction_id IS NOT NULL), x.created_at, x.id`, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("board: %w", err)
 	}
-	var parents []ProjectTransaction
+	var (
+		parents  []ProjectTransaction
+		children = map[uuid.UUID][]ProjectTransaction{}
+		extras   = boardExtras{
+			tags: map[uuid.UUID][]EventTagRef{}, sources: map[uuid.UUID]boardSource{}, booked: map[uuid.UUID]MyBooks{},
+		}
+		total int
+	)
 	for rows.Next() {
-		pt, err := scanPT(rows)
+		var tagsJSON, srcJSON, bookedJSON []byte
+		pt, err := scanPTAround(rows, []any{&total}, []any{&tagsJSON, &srcJSON, &bookedJSON})
 		if err != nil {
 			rows.Close()
 			return nil, 0, err
 		}
+		if pt.ParentProjectTransactionID != nil {
+			children[*pt.ParentProjectTransactionID] = append(children[*pt.ParentProjectTransactionID], *pt)
+			continue
+		}
 		parents = append(parents, *pt)
+		if err := extras.add(pt.ID, tagsJSON, srcJSON, bookedJSON); err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
-	out, err := buildRows(ctx, q, callerID, e, parents)
+	if ids != nil {
+		total = 0
+	} else if len(parents) == 0 && f.Page > 1 { // past the end: the window count has no row to ride on
+		cr, err := q.Query(ctx, `SELECT COUNT(*) FROM project_transactions pt WHERE `+w, countArgs...)
+		if err != nil {
+			return nil, 0, fmt.Errorf("board count: %w", err)
+		}
+		if cr.Next() {
+			_ = cr.Scan(&total)
+		}
+		cr.Close()
+	}
+	out, err := buildRows(ctx, q, callerID, e, parents, children, extras)
 	return out, total, err
 }
 
@@ -473,134 +552,91 @@ const ptColumnsPrefixed = `@id, @project_id, @parent_project_transaction_id,
 	@note, @description,
 	@marks, @created_at, @updated_at`
 
-func buildRows(ctx context.Context, q shared.Querier, callerID uuid.UUID, e Event, parents []ProjectTransaction) ([]BoardRow, error) {
+// boardSource is the transaction a bill was made from; account is set only for the caller's own.
+type boardSource struct {
+	txID    uuid.UUID
+	owner   uuid.UUID
+	desc    *string
+	account *shared.AccountRef
+}
+
+// boardExtras are what loadBoard reads with each bill: its tags, its source transaction and
+// what of the caller's books holds it.
+type boardExtras struct {
+	tags    map[uuid.UUID][]EventTagRef
+	sources map[uuid.UUID]boardSource
+	booked  map[uuid.UUID]MyBooks
+}
+
+func (x *boardExtras) add(id uuid.UUID, tagsJSON, srcJSON, bookedJSON []byte) error {
+	var tags []struct {
+		ID       uuid.UUID       `json:"id"`
+		Name     string          `json:"name"`
+		IconCode json.RawMessage `json:"icon_code"`
+		Mine     bool            `json:"mine"`
+	}
+	if len(tagsJSON) > 0 {
+		if err := json.Unmarshal(tagsJSON, &tags); err != nil {
+			return fmt.Errorf("board tags: %w", err)
+		}
+	}
+	for _, t := range tags {
+		x.tags[id] = append(x.tags[id], EventTagRef{ID: t.ID, Name: t.Name, IconCode: shared.IconFromJSON(t.IconCode), Mine: t.Mine})
+	}
+	if len(srcJSON) > 0 {
+		var s struct {
+			TxID        uuid.UUID `json:"tx_id"`
+			Owner       uuid.UUID `json:"owner"`
+			Description *string   `json:"description"`
+			Account     *struct {
+				ID       uuid.UUID       `json:"id"`
+				Name     string          `json:"name"`
+				IconCode json.RawMessage `json:"icon_code"`
+				LogoURL  *string         `json:"logo_url"`
+				Type     string          `json:"type"`
+				Currency string          `json:"currency"`
+				Status   string          `json:"status"`
+			} `json:"account"`
+		}
+		if err := json.Unmarshal(srcJSON, &s); err != nil {
+			return fmt.Errorf("board source: %w", err)
+		}
+		bs := boardSource{txID: s.TxID, owner: s.Owner, desc: s.Description}
+		if a := s.Account; a != nil {
+			bs.account = &shared.AccountRef{ID: a.ID, Name: a.Name, IconCode: shared.IconFromJSON(a.IconCode), LogoURL: a.LogoURL,
+				Type: a.Type, Currency: a.Currency, Group: shared.AccountGroup(a.Type), Archived: a.Status != "active"}
+		}
+		x.sources[id] = bs
+	}
+	if len(bookedJSON) > 0 {
+		var b MyBooks
+		if err := json.Unmarshal(bookedJSON, &b); err != nil {
+			return fmt.Errorf("board booked: %w", err)
+		}
+		x.booked[id] = b
+	}
+	return nil
+}
+
+func buildRows(ctx context.Context, q shared.Querier, callerID uuid.UUID, e Event, parents []ProjectTransaction, children map[uuid.UUID][]ProjectTransaction, extras boardExtras) ([]BoardRow, error) {
 	out := make([]BoardRow, 0, len(parents))
 	if len(parents) == 0 {
 		return out, nil
 	}
-	ids := make([]uuid.UUID, len(parents))
 	memberIDs := []uuid.UUID{}
-	for i, p := range parents {
-		ids[i] = p.ID
+	for _, p := range parents {
 		memberIDs = append(memberIDs, p.TransactionMemberID)
 	}
-	rows, err := q.Query(ctx, `SELECT `+ptColumns+` FROM project_transactions
-		WHERE parent_project_transaction_id = ANY($1) ORDER BY created_at, id`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("board children: %w", err)
-	}
-	children := map[uuid.UUID][]ProjectTransaction{}
-	for rows.Next() {
-		c, err := scanPT(rows)
-		if err != nil {
-			rows.Close()
-			return nil, err
+	for _, cs := range children {
+		for _, c := range cs {
+			memberIDs = append(memberIDs, c.TransactionMemberID)
 		}
-		children[*c.ParentProjectTransactionID] = append(children[*c.ParentProjectTransactionID], *c)
-		memberIDs = append(memberIDs, c.TransactionMemberID)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	members, err := LoadMemberRefs(ctx, q, callerID, memberIDs)
 	if err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(ctx, `SELECT ptt.project_transaction_id, et.id, et.name, et.icon_code,
-			EXISTS (SELECT 1 FROM tags t WHERE t.user_id = $2 AND LOWER(t.name) = LOWER(et.name))
-		FROM project_transaction_tags ptt JOIN event_tags et ON et.id = ptt.event_tag_id
-		WHERE ptt.project_transaction_id = ANY($1)
-		ORDER BY LOWER(et.name), et.id`, ids, callerID)
-	if err != nil {
-		return nil, fmt.Errorf("board tags: %w", err)
-	}
-	tags := map[uuid.UUID][]EventTagRef{}
-	for rows.Next() {
-		var (
-			pid  uuid.UUID
-			r    EventTagRef
-			icon []byte
-		)
-		if err := rows.Scan(&pid, &r.ID, &r.Name, &icon, &r.Mine); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		r.IconCode = shared.IconFromJSON(icon)
-		tags[pid] = append(tags[pid], r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	rows, err = q.Query(ctx, `SELECT pt.id, t.id, t.user_id, t.description, t.account_id
-		FROM project_transactions pt JOIN transactions t ON t.id = pt.linked_transaction_id
-		WHERE pt.id = ANY($1)`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("board sources: %w", err)
-	}
-	type src struct {
-		txID    uuid.UUID
-		owner   uuid.UUID
-		desc    *string
-		account *uuid.UUID
-	}
-	sources := map[uuid.UUID]src{}
-	var accIDs []uuid.UUID
-	for rows.Next() {
-		var (
-			pid uuid.UUID
-			s   src
-		)
-		if err := rows.Scan(&pid, &s.txID, &s.owner, &s.desc, &s.account); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		sources[pid] = s
-		if s.account != nil && s.owner == callerID {
-			accIDs = append(accIDs, *s.account)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// my_books: which parts of my books hold the row (my linked / copied tx, a repayment, a debt).
-	rows, err = q.Query(ctx, `SELECT pt.id,
-			COALESCE(bool_or(t.id IS NOT NULL AND t.repay_person_name IS NULL), false),
-			COALESCE(bool_or(t.repay_person_name IS NOT NULL), false),
-			EXISTS (SELECT 1 FROM personal_debts d
-				WHERE d.user_id = $2 AND d.source_project_transaction_id = pt.id)
-		FROM project_transactions pt
-		LEFT JOIN transactions t ON t.user_id = $2 AND (
-			t.id = pt.linked_transaction_id OR t.source_project_transaction_id = pt.id
-			OR t.source_project_transaction_id IN (SELECT c.id FROM project_transactions c
-				WHERE c.parent_project_transaction_id = pt.id))
-		WHERE pt.id = ANY($1)
-		GROUP BY pt.id`, ids, callerID)
-	if err != nil {
-		return nil, fmt.Errorf("board booked: %w", err)
-	}
-	booked := map[uuid.UUID]MyBooks{}
-	for rows.Next() {
-		var (
-			id uuid.UUID
-			b  MyBooks
-		)
-		if err := rows.Scan(&id, &b.Tx, &b.Repay, &b.Debt); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		booked[id] = b
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	accounts, err := shared.LoadAccountRefs(ctx, q, accIDs)
-	if err != nil {
-		return nil, err
-	}
+	tags, sources, booked := extras.tags, extras.sources, extras.booked
 
 	me := uuid.Nil
 	if e.MyMemberID != nil {
@@ -648,13 +684,7 @@ func buildRows(ctx context.Context, q shared.Querier, callerID uuid.UUID, e Even
 		if s, ok := sources[p.ID]; ok {
 			r.Linked = true
 			if s.owner == callerID {
-				st := &BoardSourceTx{ID: s.txID, Description: s.desc}
-				if s.account != nil {
-					if a, ok := accounts[*s.account]; ok {
-						st.Account = &a
-					}
-				}
-				r.SourceTx = st
+				r.SourceTx = &BoardSourceTx{ID: s.txID, Description: s.desc, Account: s.account}
 			}
 		}
 		out = append(out, r)
@@ -677,23 +707,24 @@ func containsID(ids []uuid.UUID, id uuid.UUID) bool {
 func round2(f float64) float64 { return math.Round(f*100) / 100 }
 
 func (s *Service) detail(ctx context.Context, callerID, projectID uuid.UUID, page, perPage int) (*EventDetail, error) {
-	if _, err := s.store.GetByIDForCaller(ctx, callerID, projectID); err != nil {
-		return nil, err
-	}
 	q := s.store.db
 	e, err := loadEvent(ctx, q, callerID, projectID)
 	if err != nil {
 		return nil, err
+	}
+	if !e.IsOwner && e.myStatus != MemberStatusActive { // the owner or an active member only
+		return nil, ErrProjectNotFound
 	}
 	out := &EventDetail{Event: e}
 	ctx = shared.WithMemberRefCache(ctx) // the members are read first, the summary and the board reuse them
 	if out.Members, err = loadMembers(ctx, q, callerID, projectID); err != nil {
 		return nil, err
 	}
-	if out.Summary, err = loadSummary(ctx, q, callerID, projectID, e); err != nil {
+	if out.Tags, err = loadEventTags(ctx, q, callerID, projectID); err != nil {
 		return nil, err
 	}
-	if out.Tags, err = loadEventTags(ctx, q, callerID, projectID); err != nil {
+	ctx = withTagRefs(ctx, out.Tags) // the summary's by-tag refs are these tags
+	if out.Summary, err = loadSummary(ctx, q, callerID, projectID, e); err != nil {
 		return nil, err
 	}
 	page, perPage = clampPage(page, perPage)

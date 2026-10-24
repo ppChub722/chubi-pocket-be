@@ -94,8 +94,8 @@ func TestBudgetsQueryBudget(t *testing.T) {
 		t.Fatalf("list: %d %s", status, raw)
 	}
 	t.Logf("list of %d budgets: %d queries, %d expected-occurrence calls", len(bodies), n, calls)
-	if n > 9 {
-		t.Errorf("the list ran %d queries, budget 9", n)
+	if n > 7 {
+		t.Errorf("the list ran %d queries, budget 7", n)
 	}
 	if calls != 1 {
 		t.Errorf("the list asked the Expecter %d times, want 1", calls)
@@ -107,8 +107,8 @@ func TestBudgetsQueryBudget(t *testing.T) {
 		t.Fatalf("get: %d %s", status, raw)
 	}
 	t.Logf("one budget: %d queries, %d expected-occurrence calls", n, calls)
-	if n > 9 {
-		t.Errorf("a budget ran %d queries, budget 9", n)
+	if n > 7 {
+		t.Errorf("a budget ran %d queries, budget 7", n)
 	}
 	if calls != 1 {
 		t.Errorf("a budget asked the Expecter %d times, want 1", calls)

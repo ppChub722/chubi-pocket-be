@@ -502,17 +502,18 @@ func (s *Service) entryPage(ctx context.Context, userID uuid.UUID, where string,
 	if perPage < 1 || perPage > 100 {
 		perPage = entriesPerPage
 	}
-	var total int
-	if err := s.store.db.QueryRow(ctx, `SELECT COUNT(*) FROM saving_entries WHERE user_id = $1 `+where,
-		append([]any{userID}, args...)...).Scan(&total); err != nil {
-		return EntryList{}, err
-	}
 	n := len(args)
-	rows, err := s.store.listEntries(ctx, s.store.db, userID, where+fmt.Sprintf(
+	rows, total, err := s.store.listEntriesPage(ctx, s.store.db, userID, where+fmt.Sprintf(
 		` ORDER BY date DESC, created_at DESC, id LIMIT $%d OFFSET $%d`, n+2, n+3),
 		append(args, perPage, (page-1)*perPage)...)
 	if err != nil {
 		return EntryList{}, err
+	}
+	if len(rows) == 0 && page > 1 { // past the end: the window count has no row to ride on
+		if err := s.store.db.QueryRow(ctx, `SELECT COUNT(*) FROM saving_entries WHERE user_id = $1 `+where,
+			append([]any{userID}, args[:n]...)...).Scan(&total); err != nil {
+			return EntryList{}, err
+		}
 	}
 	data, err := s.entryViews(ctx, rows)
 	if err != nil {
@@ -642,6 +643,7 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int, wi
 
 // GetMonth is Get with the month_* numbers of month ("YYYY-MM", "" = this month).
 func (s *Service) GetMonth(ctx context.Context, userID, id uuid.UUID, perPage int, withDeletePreview bool, month string) (*GoalDetail, error) {
+	ctx = shared.WithRefCache(ctx) // the auto-saves, the wallet split and the entries name the same wallets
 	today, err := s.today(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -684,6 +686,7 @@ func (s *Service) GetMonth(ctx context.Context, userID, id uuid.UUID, perPage in
 }
 
 func (s *Service) Spare(ctx context.Context, userID uuid.UUID, perPage int) (*SpareDetail, error) {
+	ctx = shared.WithRefCache(ctx)
 	today, err := s.today(ctx, userID)
 	if err != nil {
 		return nil, err

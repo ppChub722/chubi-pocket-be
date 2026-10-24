@@ -133,13 +133,14 @@ func (s *Store) saveGoal(ctx context.Context, q querier, g *Goal) error {
 const entryColumns = `id, user_id, group_id, kind, account_id, from_bucket, from_goal_id, to_bucket, to_goal_id,
 	amount::float8, date, note, source, created_at`
 
-func scanEntry(row pgx.Row) (*entryRow, error) {
+// scanEntry reads a row of entryColumns; extra are columns selected after them.
+func scanEntry(row pgx.Row, extra ...any) (*entryRow, error) {
 	var (
 		e   entryRow
 		acc *uuid.UUID
 	)
-	if err := row.Scan(&e.ID, &e.UserID, &e.GroupID, &e.Kind, &acc, &e.FromBucket, &e.FromGoalID, &e.ToBucket,
-		&e.ToGoalID, &e.Amount, &e.Date, &e.Note, &e.Source, &e.CreatedAt); err != nil {
+	if err := row.Scan(append([]any{&e.ID, &e.UserID, &e.GroupID, &e.Kind, &acc, &e.FromBucket, &e.FromGoalID, &e.ToBucket,
+		&e.ToGoalID, &e.Amount, &e.Date, &e.Note, &e.Source, &e.CreatedAt}, extra...)...); err != nil {
 		return nil, err
 	}
 	if acc != nil {
@@ -179,6 +180,29 @@ func (s *Store) listEntries(ctx context.Context, q querier, userID uuid.UUID, wh
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// listEntriesPage is listEntries plus how many rows match without the page limit, in the
+// same statement (the count is 0 when the page is past the end: ask again then).
+func (s *Store) listEntriesPage(ctx context.Context, q querier, userID uuid.UUID, where string, args ...any) ([]*entryRow, int, error) {
+	rows, err := q.Query(ctx, `SELECT `+entryColumns+`, COUNT(*) OVER () FROM saving_entries WHERE user_id = $1 `+where,
+		append([]any{userID}, args...)...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("entries: %w", err)
+	}
+	defer rows.Close()
+	var (
+		out   []*entryRow
+		total int
+	)
+	for rows.Next() {
+		e, err := scanEntry(rows, &total)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, e)
+	}
+	return out, total, rows.Err()
 }
 
 func (s *Store) insertEntry(ctx context.Context, q querier, e *entryRow) error {
@@ -264,8 +288,7 @@ func checkWallet(ctx context.Context, q querier, userID, accountID uuid.UUID) er
 }
 
 func (s *Store) userCurrency(ctx context.Context, userID uuid.UUID) (string, error) {
-	var c string
-	err := s.db.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, userID).Scan(&c)
-	return c, err
+	p, err := shared.UserPrefs(ctx, s.db, userID)
+	return p.Currency, err
 }
 

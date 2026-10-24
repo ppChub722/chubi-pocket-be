@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -230,12 +231,39 @@ func LoadWalletSavings(ctx context.Context, q Querier, userID uuid.UUID, account
 	return out, nil
 }
 
+// LoadSavingTotals is the user's saving totals in ONE statement: what is saved, how it splits
+// into goals and the spare pool (a goal that was archived does not count), how many goals are
+// active, and what is left of the tracked wallets' balances.
 func LoadSavingTotals(ctx context.Context, q Querier, userID uuid.UUID) (*SavingTotals, error) {
-	bals, err := LoadSavingBalances(ctx, q, userID, CountedSavings)
+	out := &SavingTotals{}
+	rows, err := q.Query(ctx, savingMovesCTE+`,
+		b AS (SELECT m.account_id, m.bucket, m.goal_id, SUM(m.amount) AS amt FROM m
+		      GROUP BY 1, 2, 3 HAVING ABS(SUM(m.amount)) > 0.004),
+		c AS (SELECT b.account_id, b.bucket, ROUND(b.amt::float8::numeric, 2)::float8 AS amt FROM b
+		      WHERE `+strings.ReplaceAll(CountedSavings, "m.goal_id", "b.goal_id")+`),
+		si AS (SELECT c.account_id, SUM(c.amt) AS s FROM c GROUP BY c.account_id)
+		SELECT COALESCE((SELECT SUM(amt) FROM c), 0)::float8,
+		       COALESCE((SELECT SUM(amt) FROM c WHERE bucket = 'spare'), 0)::float8,
+		       COALESCE((SELECT SUM(amt) FROM c WHERE bucket <> 'spare'), 0)::float8,
+		       (SELECT COUNT(*) FROM saving_goals WHERE user_id = $1 AND status = 'active'),
+		       COALESCE((SELECT SUM(w.eff - COALESCE(si.s, 0)) FROM (
+		           SELECT a.id, `+EffectiveBalanceSQL("a.balance", "a.id", "$1")+`::float8 AS eff FROM accounts a
+		           WHERE a.status = 'active' AND a.track_balance AND `+ActiveMembershipPredicate("a.id", "$1")+`) w
+		         LEFT JOIN si ON si.account_id = w.id), 0)::float8`, userID)
 	if err != nil {
+		return nil, fmt.Errorf("saving totals: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&out.Saved, &out.Spare, &out.InGoals, &out.Count, &out.Available); err != nil {
+			return nil, err
+		}
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return savingTotalsOf(ctx, q, userID, bals)
+	out.Saved, out.Spare, out.InGoals, out.Available = round2(out.Saved), round2(out.Spare), round2(out.InGoals), round2(out.Available)
+	return out, nil
 }
 
 // SavingTotalsOf is LoadSavingTotals over balances already read (LoadAllSavingBalances).

@@ -83,6 +83,8 @@ func NewService(
 }
 
 func (s *Service) Get(ctx context.Context, userID uuid.UUID, month, headerTZ string) (*Response, error) {
+	// a read: the blocks below share the wallet / category refs and one read of the recurring occurrences
+	ctx = shared.WithRefCache(shared.WithExpectedMemo(ctx))
 	loc, _, err := s.budgets.ResolveTimezone(ctx, userID, headerTZ)
 	if err != nil {
 		return nil, err
@@ -153,6 +155,7 @@ func (s *Service) Get(ctx context.Context, userID uuid.UUID, month, headerTZ str
 func (s *Service) summary(ctx context.Context, userID uuid.UUID, from, to time.Time, groupBy string, txType *transactions.TxType) (*transactions.SummaryResponse, error) {
 	return s.transactions.Summary(ctx, userID, transactions.SummaryRequest{
 		From: from.Format(dateLayout), To: to.Format(dateLayout), GroupBy: groupBy, Type: txType,
+		GroupsOnly: groupBy != "", // the blocks that group read only the groups
 	})
 }
 

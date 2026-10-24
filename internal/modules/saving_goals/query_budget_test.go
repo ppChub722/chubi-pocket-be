@@ -21,9 +21,9 @@ func TestSavingGoalsQueryBudget(t *testing.T) {
 		name, path string
 		max        int64
 	}{
-		{"list", "/saving-goals?status=active&sort=created", 9},
-		{"goal", "/saving-goals/" + first.String(), 12},
-		{"spare", "/saving-goals/spare", 9},
+		{"list", "/saving-goals?status=active&sort=created", 8},
+		{"goal", "/saving-goals/" + first.String(), 9},
+		{"spare", "/saving-goals/spare", 7},
 	} {
 		status, raw, n := apitest.DoCounted(t, f.r, "GET", "/api/v1"+c.path, nil)
 		if status != 200 {

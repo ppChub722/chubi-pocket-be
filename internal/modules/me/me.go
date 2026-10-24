@@ -107,6 +107,16 @@ func NewService(db *pgxpool.Pool) *Service { return &Service{db: db} }
 func (s *Service) WithBudgets(b *budgets.Service) *Service      { s.budgets = b; return s }
 func (s *Service) WithDebts(d *personal_debts.Service) *Service { s.debts = d; return s }
 
+// archivedTotalSQL counts what the archived hub lists, group by group (see Archived).
+var archivedTotalSQL = `(
+	(SELECT COUNT(*) FROM accounts a WHERE a.status = 'archived' AND ` + shared.ActiveMembershipPredicate("a.id", "$1") + `)
+	+ (SELECT COUNT(*) FROM budgets WHERE user_id = $1 AND status = 'archived')
+	+ (SELECT COUNT(*) FROM saving_goals WHERE user_id = $1 AND status = 'archived')
+	+ (SELECT COUNT(*) FROM projects p JOIN project_members m ON m.project_id = p.id AND m.user_id = $1 AND m.status = 'active'
+	   WHERE p.status = 'archived')
+	+ (SELECT COUNT(*) FROM contacts WHERE user_id = $1 AND status = 'archived')
+	+ (SELECT COUNT(*) FROM recurring_rules WHERE user_id = $1 AND status = 'archived'))`
+
 var countsSQL = `SELECT
 	(SELECT COUNT(*) FROM categories WHERE user_id = $1 AND is_system = FALSE),
 	(SELECT COUNT(*) FROM tags WHERE user_id = $1),
@@ -116,25 +126,23 @@ var countsSQL = `SELECT
 	(SELECT COUNT(*) FROM (SELECT 1 FROM (` + shared.DebtLedgerSQL("$1") + `) l
 		GROUP BY l.key
 		HAVING ABS(SUM(l.signed)) > 0.005 OR BOOL_OR(NOT l.paid)) open_people),
-	(SELECT COUNT(*) FROM budgets WHERE user_id = $1 AND status = 'active' AND closed_on IS NULL)`
+	(SELECT COUNT(*) FROM budgets WHERE user_id = $1 AND status = 'active' AND closed_on IS NULL),
+	(SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1 AND read_at IS NULL),
+	(SELECT COUNT(*) FROM pending_transactions WHERE user_id = $1),
+	` + archivedTotalSQL + `,
+	(SELECT COUNT(*) FROM recurring_rules WHERE user_id = $1 AND status = 'active')`
 
 func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string) (*MeCounts, error) {
-	badges, err := shared.LoadBadges(ctx, s.db, userID)
-	if err != nil {
-		return nil, err
-	}
-	out := &MeCounts{Badges: badges}
+	ctx = shared.WithExpectedMemo(ctx) // a read: the recurring counts and the budgets share one read of the occurrences
+	out := &MeCounts{}
 	if err := s.db.QueryRow(ctx, countsSQL, userID).Scan(
 		&out.Counts.Categories, &out.Counts.Tags, &out.Counts.Contacts,
 		&out.Counts.ActiveEvents, &out.Counts.OpenDebts, &out.Counts.Budgets,
+		&out.Badges.UnreadNotifications, &out.Badges.PendingDrafts, &out.Counts.Archived,
+		&out.Counts.Recurring.ActiveCount,
 	); err != nil {
 		return nil, fmt.Errorf("me counts: %w", err)
 	}
-	arch, err := s.Archived(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	out.Counts.Archived = arch.Total
 	goals, err := shared.LoadSavingTotals(ctx, s.db, userID)
 	if err != nil {
 		return nil, err
@@ -150,6 +158,28 @@ func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string)
 	}
 	today := time.Now()
 	if s.budgets != nil {
+		if loc, _, err := s.budgets.ResolveTimezone(ctx, userID, headerTZ); err == nil && loc != nil {
+			today = today.In(loc)
+		}
+	}
+	if s.expected != nil {
+		// the wide window first: the budgets below reuse its occurrences (shared.ExpectedMemo)
+		if err := s.expectedCounts(ctx, userID, today, &out.Counts.Recurring); err != nil {
+			return nil, err
+		}
+	} else {
+		todayStr := today.Format("2006-01-02")
+		until := today.AddDate(0, 0, upcomingDays).Format("2006-01-02")
+		if err := s.db.QueryRow(ctx, `SELECT
+		(SELECT COUNT(*) FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.rule_id
+		 WHERE i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
+		   AND NOT i.archived AND i.date > $2::date AND i.date <= $3::date
+		   AND r.status = 'active')`, userID, todayStr, until).Scan(
+			&out.Counts.Recurring.UpcomingCount); err != nil {
+			return nil, fmt.Errorf("me recurring: %w", err)
+		}
+	}
+	if s.budgets != nil {
 		r, err := s.budgets.Totals(ctx, userID, headerTZ)
 		if err != nil {
 			return nil, err
@@ -158,31 +188,6 @@ func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string)
 			TotalBudget: r.TotalBudget, TotalSpent: r.TotalSpent,
 			UtilizationPct: r.UtilizationPct, OverLimitCount: r.OverLimitCount,
 		}
-		if loc, _, err := s.budgets.ResolveTimezone(ctx, userID, headerTZ); err == nil && loc != nil {
-			today = today.In(loc)
-		}
-	}
-	if s.expected != nil {
-		if err := s.db.QueryRow(ctx,
-			`SELECT COUNT(*) FROM recurring_rules WHERE user_id = $1 AND status = 'active'`, userID,
-		).Scan(&out.Counts.Recurring.ActiveCount); err != nil {
-			return nil, fmt.Errorf("me recurring: %w", err)
-		}
-		if err := s.expectedCounts(ctx, userID, today, &out.Counts.Recurring); err != nil {
-			return nil, err
-		}
-		return out, nil
-	}
-	todayStr := today.Format("2006-01-02")
-	until := today.AddDate(0, 0, upcomingDays).Format("2006-01-02")
-	if err := s.db.QueryRow(ctx, `SELECT
-		(SELECT COUNT(*) FROM recurring_rules WHERE user_id = $1 AND status = 'active'),
-		(SELECT COUNT(*) FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.rule_id
-		 WHERE i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
-		   AND NOT i.archived AND i.date > $2::date AND i.date <= $3::date
-		   AND r.status = 'active')`, userID, todayStr, until).Scan(
-		&out.Counts.Recurring.ActiveCount, &out.Counts.Recurring.UpcomingCount); err != nil {
-		return nil, fmt.Errorf("me recurring: %w", err)
 	}
 	return out, nil
 }

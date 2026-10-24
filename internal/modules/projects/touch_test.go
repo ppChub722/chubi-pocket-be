@@ -310,8 +310,8 @@ func TestEventsAPI(t *testing.T) {
 	detail := me.do("GET", "/projects/"+id+"/detail", nil, "getProjectDetail", http.StatusOK)
 	// the event page reads each section once: members first, the summary and the board reuse them
 	// (the budget excludes the auth middleware's one user lookup)
-	if status, _, n := apitest.DoCounted(t, me.r, "GET", "/api/v1/projects/"+id+"/detail", nil); status != http.StatusOK || n > 17 {
-		t.Errorf("the event detail: status %d, %d queries, budget 17", status, n)
+	if status, _, n := apitest.DoCounted(t, me.r, "GET", "/api/v1/projects/"+id+"/detail", nil); status != http.StatusOK || n > 9 {
+		t.Errorf("the event detail: status %d, %d queries, budget 9", status, n)
 	} else {
 		t.Logf("event detail: %d queries", n)
 	}
