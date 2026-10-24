@@ -33,11 +33,11 @@ func NewService(store *Store) *Service { return &Service{store: store} }
 func (s *Service) WithExpected(e shared.Expecter) *Service { s.expected = e; return s }
 
 func (s *Service) ResolveTimezone(ctx context.Context, userID uuid.UUID, headerTZ string) (*time.Location, string, error) {
-	stored, err := s.store.userTimezone(ctx, userID)
+	prefs, err := shared.UserPrefs(ctx, s.store.db, userID)
 	if err != nil {
 		return nil, "", err
 	}
-	for _, name := range []string{headerTZ, stored, defaultTimezone} {
+	for _, name := range []string{headerTZ, prefs.Timezone, defaultTimezone} {
 		if name == "" {
 			continue
 		}
@@ -72,31 +72,39 @@ func dstr(t *time.Time) *string {
 	return &s
 }
 
-func (s *Service) loadPeriods(ctx context.Context, b *Budget, today time.Time) ([]*periodRow, error) {
-	rows, err := s.store.periods(ctx, s.store.db, b.ID, `ORDER BY start_date`)
+// periodsAndBase reads the budget's periods in one statement and brings them up to date
+// first when they are missing or stale. base is how many of them start before its anchor.
+func (s *Service) periodsAndBase(ctx context.Context, b *Budget, today time.Time) ([]*periodRow, int, error) {
+	all, err := s.store.periodsOf(ctx, s.store.db, []uuid.UUID{b.ID})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	return s.settlePeriods(ctx, b, all[b.ID], today)
+}
+
+func (s *Service) settlePeriods(ctx context.Context, b *Budget, rows []*periodRow, today time.Time) ([]*periodRow, int, error) {
+	base := baseSeqIn(b, rows)
 	stale := len(rows) == 0
 	if !stale && b.Recurring && b.Status == StatusActive && b.ClosedOn == nil {
 		last := rows[len(rows)-1]
 		stale = last.End != nil && last.End.Before(today)
 	}
 	if !stale {
-		return rows, nil
+		return rows, base, nil
 	}
 	tx, err := s.store.db.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer tx.Rollback(ctx)
 	if err := s.store.syncPeriods(ctx, tx, b, today); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return s.store.periods(ctx, s.store.db, b.ID, `ORDER BY start_date`)
+	again, err := s.store.periodsOf(ctx, s.store.db, []uuid.UUID{b.ID})
+	return again[b.ID], base, err
 }
 
 func currentIndex(rows []*periodRow, state string, today time.Time) int {
@@ -422,7 +430,7 @@ func sortItems(rows []countRow) {
 	})
 }
 
-func (s *Service) periodFigures(ctx context.Context, b *Budget, prs []*periodRow, lo, hi, cur int, live bool, today time.Time) (map[int]*figures, error) {
+func figureWindow(prs []*periodRow, lo, hi, cur int, live bool, today time.Time) window {
 	w := window{From: prs[lo].Start}
 	if prs[hi].End != nil {
 		w.To = *prs[hi].End
@@ -436,10 +444,10 @@ func (s *Service) periodFigures(ctx context.Context, b *Budget, prs []*periodRow
 			w.ExpTo = today.AddDate(0, 0, openAheadDays)
 		}
 	}
-	rows, err := s.collect(ctx, b, w)
-	if err != nil {
-		return nil, err
-	}
+	return w
+}
+
+func figuresOf(prs []*periodRow, lo, hi, cur int, rows []countRow) map[int]*figures {
 	out := map[int]*figures{}
 	for i := lo; i <= hi; i++ {
 		out[i] = &figures{}
@@ -466,37 +474,58 @@ func (s *Service) periodFigures(ctx context.Context, b *Budget, prs []*periodRow
 		}
 		f.rows = append(f.rows, r)
 	}
-	return out, nil
+	return out
 }
 
-func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, health, tz string) (*List, error) {
-	today, err := s.today(ctx, userID, tz)
+// periodFigures is figuresOf for ONE budget (cats: its scope categories, expanded).
+func (s *Service) periodFigures(ctx context.Context, b *Budget, cats []uuid.UUID, prs []*periodRow, lo, hi, cur int, live bool, today time.Time) (map[int]*figures, error) {
+	rows, err := s.collectMany(ctx, b.UserID, []collectSpec{{b: b, w: figureWindow(prs, lo, hi, cur, live, today), cats: cats}})
 	if err != nil {
 		return nil, err
 	}
+	return figuresOf(prs, lo, hi, cur, rows[0]), nil
+}
+
+type listEntry struct {
+	b     *Budget
+	state string
+	p     Period
+}
+
+// listEntries is the pass behind List and Totals, whatever the number of budgets: one
+// read of the budgets, one of all their periods, one expansion of the scope categories,
+// one expected-occurrences call and one statement for the rows (see collectMany). It
+// returns the budgets of the status group (and health) with their current period, and the
+// summary over the active ones.
+func (s *Service) listEntries(ctx context.Context, userID uuid.UUID, status, health string, today time.Time) ([]listEntry, ListSummary, error) {
+	var sum ListSummary
 	all, err := s.store.listAll(ctx, userID)
 	if err != nil {
-		return nil, err
+		return nil, sum, err
 	}
 	if status == "" {
 		status = "active"
 	}
-	type entry struct {
+	ids := make([]uuid.UUID, len(all))
+	for i, b := range all {
+		ids[i] = b.ID
+	}
+	periods, err := s.store.periodsOf(ctx, s.store.db, ids)
+	if err != nil {
+		return nil, sum, err
+	}
+	type work struct {
 		b     *Budget
 		state string
-		p     Period
+		group string
+		prs   []*periodRow
+		cur   int
+		live  bool
 	}
-	var (
-		picked []entry
-		sum    ListSummary
-		seen   = map[string]bool{} // counted rows already in total_used
-	)
+	var works []*work
 	for _, b := range all {
-		base, err := s.store.baseSeq(ctx, s.store.db, b)
-		if err != nil {
-			return nil, err
-		}
-		state := b.state(today, base)
+		rows := periods[b.ID]
+		state := b.state(today, baseSeqIn(b, rows))
 		group := "active"
 		switch state {
 		case StateEnded:
@@ -509,19 +538,39 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, he
 		if group != status && group != "active" {
 			continue
 		}
-		prs, err := s.loadPeriods(ctx, b, today)
+		prs, _, err := s.settlePeriods(ctx, b, rows, today)
 		if err != nil {
-			return nil, err
+			return nil, sum, err
 		}
-		cur := currentIndex(prs, state, today)
-		live := state == StateActive || state == StateUpcoming
-		figs, err := s.periodFigures(ctx, b, prs, cur, cur, cur, live, today)
-		if err != nil {
-			return nil, err
-		}
-		_, pace := forecastOf(prs[cur], *figs[cur], today, state == StateActive)
+		works = append(works, &work{b: b, state: state, group: group, prs: prs,
+			cur: currentIndex(prs, state, today), live: state == StateActive || state == StateUpcoming})
+	}
+	bs := make([]*Budget, len(works))
+	for i, w := range works {
+		bs[i] = w.b
+	}
+	cats, err := s.store.expandCategoriesOf(ctx, bs)
+	if err != nil {
+		return nil, sum, err
+	}
+	specs := make([]collectSpec, len(works))
+	for i, w := range works {
+		specs[i] = collectSpec{b: w.b, w: figureWindow(w.prs, w.cur, w.cur, w.cur, w.live, today), cats: cats[w.b.ID]}
+	}
+	rowsOf, err := s.collectMany(ctx, userID, specs)
+	if err != nil {
+		return nil, sum, err
+	}
+	var (
+		picked []listEntry
+		seen   = map[string]bool{} // counted rows already in total_used
+	)
+	for i, w := range works {
+		b, prs, cur := w.b, w.prs, w.cur
+		figs := figuresOf(prs, cur, cur, cur, rowsOf[i])
+		_, pace := forecastOf(prs[cur], *figs[cur], today, w.state == StateActive)
 		p := periodView(b, prs[cur], *figs[cur], true, today, pace)
-		if group == "active" {
+		if w.group == "active" {
 			switch p.Status {
 			case PeriodOver:
 				sum.OverCount++
@@ -548,14 +597,26 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, he
 				}
 			}
 		}
-		if group == status && healthMatches(health, p.Status) {
-			picked = append(picked, entry{b, state, p})
+		if w.group == status && healthMatches(health, p.Status) {
+			picked = append(picked, listEntry{b, w.state, p})
 		}
 	}
 	sum.TotalLimit, sum.TotalUsed = round2(sum.TotalLimit), round2(sum.TotalUsed)
 	sum.TotalRemaining = round2(sum.TotalLimit - sum.TotalUsed)
 	if sum.TotalLimit > 0 {
 		sum.UsedPct = int(math.Round(sum.TotalUsed / sum.TotalLimit * 100))
+	}
+	return picked, sum, nil
+}
+
+func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, health, tz string) (*List, error) {
+	today, err := s.today(ctx, userID, tz)
+	if err != nil {
+		return nil, err
+	}
+	picked, sum, err := s.listEntries(ctx, userID, status, health, today)
+	if err != nil {
+		return nil, err
 	}
 	rank := map[string]int{PeriodOver: 0, PeriodWarn: 1, PeriodPace: 2, PeriodOK: 3}
 	sort.SliceStable(picked, func(i, j int) bool {
@@ -589,20 +650,26 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, he
 	return out, nil
 }
 
+// Totals are the figures /me/counts and the dashboard show: the same pass as List, without
+// the views (no refs to resolve).
 func (s *Service) Totals(ctx context.Context, userID uuid.UUID, tz string) (*Totals, error) {
-	l, err := s.List(ctx, userID, "active", "", "", tz)
+	today, err := s.today(ctx, userID, tz)
+	if err != nil {
+		return nil, err
+	}
+	picked, _, err := s.listEntries(ctx, userID, "active", "", today)
 	if err != nil {
 		return nil, err
 	}
 	out := &Totals{}
-	for _, v := range l.Data {
-		if v.State != StateActive {
+	for _, e := range picked {
+		if e.state != StateActive {
 			continue
 		}
 		out.Count++
-		out.TotalBudget += v.Period.Amount
-		out.TotalSpent += v.Period.Used
-		if v.Period.Status == PeriodOver {
+		out.TotalBudget += e.p.Amount
+		out.TotalSpent += e.p.Used
+		if e.p.Status == PeriodOver {
 			out.OverLimitCount++
 		}
 	}
@@ -614,12 +681,12 @@ func (s *Service) Totals(ctx context.Context, userID uuid.UUID, tz string) (*Tot
 }
 
 func (s *Service) detail(ctx context.Context, b *Budget, periodID *uuid.UUID, today time.Time) (*Detail, error) {
-	base, err := s.store.baseSeq(ctx, s.store.db, b)
+	prs, base, err := s.periodsAndBase(ctx, b, today)
 	if err != nil {
 		return nil, err
 	}
 	state := b.state(today, base)
-	prs, err := s.loadPeriods(ctx, b, today)
+	scope, err := s.store.expandCategories(ctx, b.Categories)
 	if err != nil {
 		return nil, err
 	}
@@ -644,7 +711,7 @@ func (s *Service) detail(ctx context.Context, b *Budget, periodID *uuid.UUID, to
 		lo = 0
 	}
 	live := state == StateActive || state == StateUpcoming
-	figs, err := s.periodFigures(ctx, b, prs, lo, len(prs)-1, cur, live, today)
+	figs, err := s.periodFigures(ctx, b, scope, prs, lo, len(prs)-1, cur, live, today)
 	if err != nil {
 		return nil, err
 	}
@@ -736,10 +803,7 @@ func (s *Service) detail(ctx context.Context, b *Budget, periodID *uuid.UUID, to
 		out.Periods.Data = append(out.Periods.Data, periodView(b, prs[i], *g, i == cur, today, pace))
 	}
 	out.Periods.HasMore = len(prs) > recentPeriods
-	reason, err := s.reasoner(ctx, b)
-	if err != nil {
-		return nil, err
-	}
+	reason := reasoner(b, scope)
 	out.Items = pageItems(f.rows, rf, reason, 1, itemsPerPage)
 	return out, nil
 }
@@ -788,12 +852,12 @@ func (s *Service) Periods(ctx context.Context, userID, id uuid.UUID, page, perPa
 	if err != nil {
 		return nil, err
 	}
-	base, err := s.store.baseSeq(ctx, s.store.db, b)
+	prs, base, err := s.periodsAndBase(ctx, b, today)
 	if err != nil {
 		return nil, err
 	}
 	state := b.state(today, base)
-	prs, err := s.loadPeriods(ctx, b, today)
+	cats, err := s.store.expandCategories(ctx, b.Categories)
 	if err != nil {
 		return nil, err
 	}
@@ -818,7 +882,7 @@ func (s *Service) Periods(ctx context.Context, userID, id uuid.UUID, page, perPa
 	if c < lo || c > hi {
 		c = -1
 	}
-	figs, err := s.periodFigures(ctx, b, prs, lo, hi, c, live, today)
+	figs, err := s.periodFigures(ctx, b, cats, prs, lo, hi, c, live, today)
 	if err != nil {
 		return nil, err
 	}
@@ -841,12 +905,12 @@ func (s *Service) Items(ctx context.Context, userID, id uuid.UUID, periodID *uui
 	if err != nil {
 		return nil, err
 	}
-	base, err := s.store.baseSeq(ctx, s.store.db, b)
+	prs, base, err := s.periodsAndBase(ctx, b, today)
 	if err != nil {
 		return nil, err
 	}
 	state := b.state(today, base)
-	prs, err := s.loadPeriods(ctx, b, today)
+	cats, err := s.store.expandCategories(ctx, b.Categories)
 	if err != nil {
 		return nil, err
 	}
@@ -867,7 +931,7 @@ func (s *Service) Items(ctx context.Context, userID, id uuid.UUID, periodID *uui
 	if view == cur {
 		c = cur
 	}
-	figs, err := s.periodFigures(ctx, b, prs, view, view, c, state == StateActive || state == StateUpcoming, today)
+	figs, err := s.periodFigures(ctx, b, cats, prs, view, view, c, state == StateActive || state == StateUpcoming, today)
 	if err != nil {
 		return nil, err
 	}
@@ -886,10 +950,7 @@ func (s *Service) Items(ctx context.Context, userID, id uuid.UUID, periodID *uui
 	if err != nil {
 		return nil, err
 	}
-	reason, err := s.reasoner(ctx, b)
-	if err != nil {
-		return nil, err
-	}
+	reason := reasoner(b, cats)
 	out := pageItems(rows, rf, reason, page, perPage)
 	return &out, nil
 }

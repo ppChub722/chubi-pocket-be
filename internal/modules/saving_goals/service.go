@@ -41,12 +41,12 @@ func dstr(t *time.Time) *string {
 func days(a, b time.Time) int { return int(math.Round(b.Sub(a).Hours() / 24)) }
 
 func (s *Service) today(ctx context.Context, userID uuid.UUID) (time.Time, error) {
-	stored, err := s.store.userTimezone(ctx, userID)
+	prefs, err := shared.UserPrefs(ctx, s.store.db, userID)
 	if err != nil {
 		return time.Time{}, err
 	}
 	loc := time.UTC
-	for _, n := range []string{stored, defaultTimezone} {
+	for _, n := range []string{prefs.Timezone, defaultTimezone} {
 		if n == "" {
 			continue
 		}

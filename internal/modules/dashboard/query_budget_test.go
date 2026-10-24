@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -26,17 +27,29 @@ func TestDashboardQueryBudget(t *testing.T) {
 	txSvc := transactions.NewService(transactions.NewStore(pool), catSvc)
 	accSvc := accounts.NewService(accounts.NewStore(pool), txSvc, catSvc)
 	pdSvc := personal_debts.NewService(personal_debts.NewStore(pool), txSvc)
-	svc := NewService(NewStore(pool), txSvc, accSvc, budgets.NewService(budgets.NewStore(pool)),
-		saving_goals.NewService(saving_goals.NewStore(pool)), pdSvc)
-	h := NewHandler(svc)
-	r := apitest.CountedEngine(uid, func(g *gin.RouterGroup) { g.GET("/dashboard", h.Get) })
+	bsvc := budgets.NewService(budgets.NewStore(pool))
+	svc := NewService(NewStore(pool), txSvc, accSvc, bsvc, saving_goals.NewService(saving_goals.NewStore(pool)), pdSvc)
+	h, bh := NewHandler(svc), budgets.NewHandler(bsvc)
+	r := apitest.CountedEngine(uid, func(g *gin.RouterGroup) {
+		g.GET("/dashboard", h.Get)
+		g.POST("/budgets", bh.Create)
+	})
+	t.Cleanup(func() { _, _ = pool.Exec(t.Context(), `DELETE FROM budgets WHERE user_id = $1`, uid) })
+	for i := 0; i < 4; i++ {
+		body := map[string]any{"name": "B" + string(rune('A'+i)), "amount": 1000, "recurring": true,
+			"rule": map[string]any{"freq": "monthly"}, "start_date": time.Now().AddDate(0, -2, 0).Format("2006-01-02"),
+			"scope": map[string]any{"all": true}}
+		if status, raw := apitest.Do(t, r, "POST", "/api/v1/budgets", body); status != 201 {
+			t.Fatalf("create budget: %d %s", status, raw)
+		}
+	}
 
 	status, raw, n := apitest.DoCounted(t, r, "GET", "/api/v1/dashboard", nil)
 	if status != 200 {
 		t.Fatalf("status %d: %s", status, raw)
 	}
-	t.Logf("dashboard without budgets: %d queries", n)
-	if n > 27 {
-		t.Errorf("dashboard ran %d queries, budget 27", n)
+	t.Logf("dashboard with 4 budgets: %d queries", n)
+	if n > 29 {
+		t.Errorf("dashboard ran %d queries, budget 29", n)
 	}
 }

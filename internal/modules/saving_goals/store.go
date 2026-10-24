@@ -269,11 +269,3 @@ func (s *Store) userCurrency(ctx context.Context, userID uuid.UUID) (string, err
 	return c, err
 }
 
-func (s *Store) userTimezone(ctx context.Context, userID uuid.UUID) (string, error) {
-	var tz *string
-	err := s.db.QueryRow(ctx, `SELECT preferences->>'timezone' FROM user_preferences WHERE user_id = $1`, userID).Scan(&tz)
-	if errors.Is(err, pgx.ErrNoRows) || tz == nil {
-		return "", nil
-	}
-	return *tz, err
-}

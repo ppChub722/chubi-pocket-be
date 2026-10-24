@@ -1,7 +1,6 @@
 package budgets
 
 import (
-	"context"
 	"strings"
 
 	"github.com/google/uuid"
@@ -15,11 +14,9 @@ const (
 	ReasonWallet      = "wallet"
 )
 
-func (s *Service) reasoner(ctx context.Context, b *Budget) (func(countRow) string, error) {
-	expanded, err := s.store.expandCategories(ctx, b.Categories)
-	if err != nil {
-		return nil, err
-	}
+// reasoner says why a row counts for b; expanded is its scope categories with their
+// sub-categories (store.expandCategories).
+func reasoner(b *Budget, expanded []uuid.UUID) func(countRow) string {
 	direct := map[uuid.UUID]bool{}
 	for _, c := range b.Categories {
 		direct[c.ID] = true
@@ -57,5 +54,5 @@ func (s *Service) reasoner(ctx context.Context, b *Budget) (func(countRow) strin
 			return ReasonWallet
 		}
 		return ""
-	}, nil
+	}
 }

@@ -251,6 +251,45 @@ func (s *Store) baseSeq(ctx context.Context, q rowQuerier, b *Budget) (int, erro
 	return n, err
 }
 
+// periodsOf reads the periods of every budget in one statement, oldest first per budget.
+func (s *Store) periodsOf(ctx context.Context, q shared.Querier, budgetIDs []uuid.UUID) (map[uuid.UUID][]*periodRow, error) {
+	out := map[uuid.UUID][]*periodRow{}
+	if len(budgetIDs) == 0 {
+		return out, nil
+	}
+	rows, err := q.Query(ctx, `SELECT budget_id, `+periodColumns+` FROM budget_periods
+		WHERE budget_id = ANY($1) ORDER BY budget_id, start_date`, budgetIDs)
+	if err != nil {
+		return nil, fmt.Errorf("periods: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			bid uuid.UUID
+			p   periodRow
+			seq int32
+		)
+		if err := rows.Scan(&bid, &p.ID, &seq, &p.Start, &p.End, &p.Amount, &p.Overridden, &p.Note); err != nil {
+			return nil, err
+		}
+		p.Seq = int(seq)
+		out[bid] = append(out[bid], &p)
+	}
+	return out, rows.Err()
+}
+
+// baseSeqIn is baseSeq over the budget's periods already read: the periods that
+// start before its anchor.
+func baseSeqIn(b *Budget, rows []*periodRow) int {
+	n := 0
+	for _, p := range rows {
+		if p.Start.Before(b.AnchorDate) {
+			n++
+		}
+	}
+	return n
+}
+
 func (s *Store) syncPeriods(ctx context.Context, tx pgx.Tx, b *Budget, today time.Time) error {
 	base, err := s.baseSeq(ctx, tx, b)
 	if err != nil {
@@ -328,44 +367,59 @@ func (s *Store) checkScope(ctx context.Context, q pgx.Tx, userID uuid.UUID, b *B
 }
 
 func (s *Store) expandCategories(ctx context.Context, cats []scopeCat) ([]uuid.UUID, error) {
-	var direct, deep []uuid.UUID
-	for _, c := range cats {
-		if c.IncludeChildren {
-			deep = append(deep, c.ID)
-		} else {
-			direct = append(direct, c.ID)
-		}
-	}
-	out := append([]uuid.UUID{}, direct...)
-	if len(deep) == 0 {
-		return out, nil
-	}
-	rows, err := s.db.Query(ctx, `WITH RECURSIVE d AS (
-			SELECT id FROM categories WHERE id = ANY($1)
-			UNION SELECT c.id FROM categories c JOIN d ON c.parent_id = d.id)
-		SELECT id FROM d`, deep)
+	b := &Budget{Categories: cats}
+	b.ID = uuid.Nil
+	m, err := s.expandCategoriesOf(ctx, []*Budget{b})
 	if err != nil {
-		return nil, fmt.Errorf("expand categories: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
+	return m[b.ID], nil
 }
 
-func (s *Store) userTimezone(ctx context.Context, userID uuid.UUID) (string, error) {
-	var tz *string
-	err := s.db.QueryRow(ctx, `SELECT preferences->>'timezone' FROM user_preferences WHERE user_id = $1`, userID).Scan(&tz)
-	if errors.Is(err, pgx.ErrNoRows) || tz == nil {
-		return "", nil
+// expandCategoriesOf gives, per budget, its scope categories with the sub-categories of
+// the ones that include children: ONE recursive statement for every budget.
+func (s *Store) expandCategoriesOf(ctx context.Context, bs []*Budget) (map[uuid.UUID][]uuid.UUID, error) {
+	out := make(map[uuid.UUID][]uuid.UUID, len(bs))
+	seenRoot := map[uuid.UUID]bool{}
+	var roots []uuid.UUID
+	for _, b := range bs {
+		out[b.ID] = []uuid.UUID{}
+		for _, c := range b.Categories {
+			if c.IncludeChildren && !seenRoot[c.ID] {
+				seenRoot[c.ID] = true
+				roots = append(roots, c.ID)
+			}
+		}
 	}
-	if err != nil {
-		return "", fmt.Errorf("user prefs: %w", err)
+	family := map[uuid.UUID][]uuid.UUID{}
+	if len(roots) > 0 {
+		rows, err := s.db.Query(ctx, `WITH RECURSIVE d(root, id) AS (
+				SELECT r, r FROM unnest($1::uuid[]) AS r
+				UNION SELECT d.root, c.id FROM categories c JOIN d ON c.parent_id = d.id)
+			SELECT root, id FROM d`, roots)
+		if err != nil {
+			return nil, fmt.Errorf("expand categories: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var root, id uuid.UUID
+			if err := rows.Scan(&root, &id); err != nil {
+				return nil, err
+			}
+			family[root] = append(family[root], id)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
-	return *tz, nil
+	for _, b := range bs {
+		for _, c := range b.Categories {
+			if c.IncludeChildren {
+				out[b.ID] = append(out[b.ID], family[c.ID]...)
+			} else {
+				out[b.ID] = append(out[b.ID], c.ID)
+			}
+		}
+	}
+	return out, nil
 }

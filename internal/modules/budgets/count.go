@@ -47,12 +47,12 @@ const storedItemsSQL = `
 			(SELECT jsonb_array_elements_text(COALESCE(i.draft->'tag_ids', '[]'::jsonb))) ORDER BY g.name)::text[],
 		NULL::uuid, i.id, NULL::uuid, NULL::date
 	FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.rule_id
-	WHERE $8 AND i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
+	WHERE $4 AND i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
 	  AND NOT i.archived AND r.status = 'active'
-	  AND i.draft->>'type' = 'expense' AND i.draft ? 'amount' AND i.date BETWEEN $9 AND $10`
+	  AND i.draft->>'type' = 'expense' AND i.draft ? 'amount' AND i.date BETWEEN $5 AND $6`
 
 // expectedItemsSQL is the same branch read from the occurrences an Expecter
-// computed, passed as the JSON parameter $11, so the scope filter below still
+// computed, passed as the JSON parameter $8, so the scope filter below still
 // applies to them.
 const expectedItemsSQL = `
 	SELECT 'recurring_item', x.id, 'upcoming', 'expected', x.date, x.amount,
@@ -60,9 +60,9 @@ const expectedItemsSQL = `
 		ARRAY(SELECT g.name FROM tags g WHERE g.user_id = $1 AND g.id::text IN
 			(SELECT jsonb_array_elements_text(COALESCE(x.tag_ids, '[]'::jsonb))) ORDER BY g.name)::text[],
 		NULL::uuid, x.item_id, x.rule_id, x.slot
-	FROM jsonb_to_recordset($11::jsonb) AS x(id uuid, rule_id uuid, slot date, item_id uuid, date date,
+	FROM jsonb_to_recordset($8::jsonb) AS x(id uuid, rule_id uuid, slot date, item_id uuid, date date,
 		amount float8, description text, category_id uuid, account_id uuid, tag_ids jsonb)
-	WHERE $8 AND x.date BETWEEN $9 AND $10`
+	WHERE $4 AND x.date BETWEEN $5 AND $6`
 
 func countSQL(expected bool) string {
 	items := storedItemsSQL
@@ -113,8 +113,8 @@ all_rows AS (
 		NULL::uuid, NULL::uuid, NULL::uuid, NULL::date
 	FROM transactions t
 	LEFT JOIN categories c ON c.id = t.category_id
-	WHERE $8 AND t.user_id = $1 AND ` + shared.ReportScopePredicate("t", "$1") + `
-	  AND t.type = 'expense' AND t.date > ` + shared.TodaySQL("$1") + ` AND t.date BETWEEN $9 AND $10
+	WHERE $4 AND t.user_id = $1 AND ` + shared.ReportScopePredicate("t", "$1") + `
+	  AND t.type = 'expense' AND t.date > ` + shared.TodaySQL("$1") + ` AND t.date BETWEEN $5 AND $6
 	  AND t.source_personal_debt_id IS NULL AND t.source_project_transaction_id IS NULL
 	  AND (c.id IS NULL OR (NOT c.is_system AND ` + shared.ReportableCategoryPredicate("c") + `))
 	  AND NOT EXISTS (SELECT 1 FROM project_transactions lp WHERE lp.linked_transaction_id = t.id)
@@ -133,7 +133,7 @@ all_rows AS (
 		ev.project_id, NULL::uuid, NULL::uuid, NULL::date
 	FROM ev LEFT JOIN transactions mt ON mt.id = ev.my_tx
 	WHERE ev.share > 0
-	  AND (ev.date <= ` + shared.TodaySQL("$1") + ` OR ($8 AND ev.date BETWEEN $9 AND $10))
+	  AND (ev.date <= ` + shared.TodaySQL("$1") + ` OR ($4 AND ev.date BETWEEN $5 AND $6))
 
 	UNION ALL`
 
@@ -148,19 +148,25 @@ const countSQLTail = `
 		(p.draft->>'project_id')::uuid, (SELECT ri.id FROM recurring_items ri WHERE ri.pending_id = p.id),
 		NULL::uuid, NULL::date
 	FROM pending_transactions p
-	WHERE $8 AND p.user_id = $1 AND p.kind = 'create' AND p.draft->>'type' = 'expense'
-	  AND p.draft ? 'amount' AND p.draft ? 'date' AND (p.draft->>'date')::date BETWEEN $9 AND $10
+	WHERE $4 AND p.user_id = $1 AND p.kind = 'create' AND p.draft->>'type' = 'expense'
+	  AND p.draft ? 'amount' AND p.draft ? 'date' AND (p.draft->>'date')::date BETWEEN $5 AND $6
 )
-SELECT kind, id, source, counts_as, date, amount, description, category_id, account_id, tags, event_id, item_id,
-	rule_id, slot
+SELECT s.idx, a.kind, a.id, a.source, a.counts_as, a.date, a.amount, a.description, a.category_id, a.account_id,
+	a.tags, a.event_id, a.item_id, a.rule_id, a.slot
 FROM all_rows a
-WHERE $4 OR (
+JOIN jsonb_to_recordset($7::jsonb) AS s(idx int, from_date date, to_date date, expected bool, exp_from date, exp_to date,
+	scope_all bool, cats jsonb, wallets jsonb, tags jsonb)
+  ON ((a.counts_as = 'used' AND a.date BETWEEN s.from_date AND s.to_date)
+   OR (a.counts_as = 'expected' AND s.expected AND a.date BETWEEN s.exp_from AND s.exp_to
+       AND (a.kind <> 'event_bill' OR a.date BETWEEN s.from_date AND s.to_date)))
+WHERE s.scope_all OR (
 	-- A picked scope narrows: a row must match every list that is set
 	-- (categories AND wallets AND tags); within one list any entry will do.
-	cardinality($5::uuid[]) + cardinality($6::text[]) + cardinality($7::uuid[]) > 0
-	AND (cardinality($5::uuid[]) = 0 OR a.category_id = ANY($5))
-	AND (cardinality($7::uuid[]) = 0 OR a.account_id = ANY($7))
-	AND (cardinality($6::text[]) = 0 OR EXISTS (SELECT 1 FROM unnest(a.tags) n WHERE lower(n) = ANY($6))))`
+	jsonb_array_length(s.cats) + jsonb_array_length(s.tags) + jsonb_array_length(s.wallets) > 0
+	AND (jsonb_array_length(s.cats) = 0 OR (a.category_id IS NOT NULL AND s.cats ? a.category_id::text))
+	AND (jsonb_array_length(s.wallets) = 0 OR (a.account_id IS NOT NULL AND s.wallets ? a.account_id::text))
+	AND (jsonb_array_length(s.tags) = 0 OR EXISTS (SELECT 1 FROM unnest(a.tags) n WHERE s.tags ? lower(n))))
+ORDER BY s.idx`
 
 // expectedJSON is one computed occurrence as the CTE reads it.
 type expectedJSON struct {
@@ -185,17 +191,14 @@ func occurrenceID(o shared.ExpectedOccurrence) uuid.UUID {
 	return uuid.NewSHA1(o.RuleID, []byte(o.Slot.Format(dateLayout)))
 }
 
-// expectedOccurrences asks the Expecter for what is still to be recorded in the
-// window and returns it as the JSON the CTE reads, with each row's recurring
-// link by row id. Only expenses with a known amount count, as a stored item
-// without an amount always did.
-func (s *Service) expectedOccurrences(ctx context.Context, userID uuid.UUID, w window) (string, map[uuid.UUID]*ItemRecurring, error) {
-	var occs []shared.ExpectedOccurrence
-	if w.Expected {
-		var err error
-		if occs, err = s.expected.ExpectedBetween(ctx, userID, w.ExpFrom, w.ExpTo); err != nil {
-			return "", nil, fmt.Errorf("budget expected: %w", err)
-		}
+// expectedOccurrences asks the Expecter ONCE for what is still to be recorded between
+// from and to (the widest window of every budget in the pass) and returns it as the
+// JSON the CTE reads, with each row's recurring link by row id. Only expenses with a
+// known amount count, as a stored item without an amount always did.
+func (s *Service) expectedOccurrences(ctx context.Context, userID uuid.UUID, from, to time.Time) (string, map[uuid.UUID]*ItemRecurring, error) {
+	occs, err := s.expected.ExpectedBetween(ctx, userID, from, to)
+	if err != nil {
+		return "", nil, fmt.Errorf("budget expected: %w", err)
 	}
 	rows := make([]expectedJSON, 0, len(occs))
 	links := make(map[uuid.UUID]*ItemRecurring, len(occs))
@@ -225,45 +228,108 @@ func (s *Service) expectedOccurrences(ctx context.Context, userID uuid.UUID, w w
 	return string(js), links, nil
 }
 
-func (s *Service) collect(ctx context.Context, b *Budget, w window) ([]countRow, error) {
-	cats, err := s.store.expandCategories(ctx, b.Categories)
+// collectSpec is one budget and the window whose rows it wants; cats is its scope's
+// categories with the sub-categories already expanded.
+type collectSpec struct {
+	b    *Budget
+	w    window
+	cats []uuid.UUID
+}
+
+// specJSON is one collectSpec as the final join reads it.
+type specJSON struct {
+	Idx      int      `json:"idx"`
+	From     string   `json:"from_date"`
+	To       string   `json:"to_date"`
+	Expected bool     `json:"expected"`
+	ExpFrom  *string  `json:"exp_from"`
+	ExpTo    *string  `json:"exp_to"`
+	ScopeAll bool     `json:"scope_all"`
+	Cats     []string `json:"cats"`
+	Wallets  []string `json:"wallets"`
+	Tags     []string `json:"tags"`
+}
+
+func uuidStrings(ids []uuid.UUID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
+}
+
+// collectMany reads the rows of every spec in ONE statement (the user's counted rows
+// over the widest window, each spec keeping the ones in its window and scope) and ONE
+// expected-occurrences call.
+func (s *Service) collectMany(ctx context.Context, userID uuid.UUID, specs []collectSpec) ([][]countRow, error) {
+	out := make([][]countRow, len(specs))
+	if len(specs) == 0 {
+		return out, nil
+	}
+	forever := time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
+	from, to := specs[0].w.From, time.Time{}
+	var expFrom, expTo time.Time
+	anyExpected := false
+	js := make([]specJSON, len(specs))
+	for i, sp := range specs {
+		w := sp.w
+		end := w.To
+		if end.IsZero() {
+			end = forever
+		}
+		if w.From.Before(from) {
+			from = w.From
+		}
+		if end.After(to) {
+			to = end
+		}
+		tags := make([]string, len(sp.b.TagNames))
+		for j, t := range sp.b.TagNames {
+			tags[j] = strings.ToLower(t)
+		}
+		js[i] = specJSON{
+			Idx: i, From: w.From.Format(dateLayout), To: end.Format(dateLayout), Expected: w.Expected,
+			ScopeAll: sp.b.ScopeAll, Cats: uuidStrings(sp.cats), Wallets: uuidStrings(sp.b.Wallets), Tags: tags,
+		}
+		if w.Expected {
+			ef, et := w.ExpFrom.Format(dateLayout), w.ExpTo.Format(dateLayout)
+			js[i].ExpFrom, js[i].ExpTo = &ef, &et
+			if !anyExpected || w.ExpFrom.Before(expFrom) {
+				expFrom = w.ExpFrom
+			}
+			if !anyExpected || w.ExpTo.After(expTo) {
+				expTo = w.ExpTo
+			}
+			anyExpected = true
+		}
+	}
+	specsJSON, err := json.Marshal(js)
 	if err != nil {
 		return nil, err
 	}
-	tags := make([]string, len(b.TagNames))
-	for i, t := range b.TagNames {
-		tags[i] = strings.ToLower(t)
-	}
-	wallets := b.Wallets
-	if wallets == nil {
-		wallets = []uuid.UUID{}
-	}
-	if cats == nil {
-		cats = []uuid.UUID{}
-	}
-	to := w.To
-	if to.IsZero() {
-		to = time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
-	}
-	args := []any{b.UserID, w.From, to, b.ScopeAll, cats, tags, wallets, w.Expected, w.ExpFrom, w.ExpTo}
+	args := []any{userID, from, to, anyExpected, expFrom, expTo, string(specsJSON)}
 	query := countSQL(false)
 	var links map[uuid.UUID]*ItemRecurring
 	if s.expected != nil {
-		occJSON, l, err := s.expectedOccurrences(ctx, b.UserID, w)
-		if err != nil {
-			return nil, err
+		occJSON := "[]"
+		if anyExpected {
+			if occJSON, links, err = s.expectedOccurrences(ctx, userID, expFrom, expTo); err != nil {
+				return nil, err
+			}
 		}
-		args, query, links = append(args, occJSON), countSQL(true), l
+		args, query = append(args, occJSON), countSQL(true)
 	}
 	rows, err := s.store.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("budget count: %w", err)
 	}
 	defer rows.Close()
-	var out []countRow
 	for rows.Next() {
-		var r countRow
-		if err := rows.Scan(&r.Kind, &r.ID, &r.Source, &r.CountsAs, &r.Date, &r.Amount, &r.Description,
+		var (
+			idx int
+			r   countRow
+		)
+		if err := rows.Scan(&idx, &r.Kind, &r.ID, &r.Source, &r.CountsAs, &r.Date, &r.Amount, &r.Description,
 			&r.CategoryID, &r.AccountID, &r.Tags, &r.EventID, &r.ItemID, &r.RuleID, &r.Slot); err != nil {
 			return nil, err
 		}
@@ -273,7 +339,7 @@ func (s *Service) collect(ctx context.Context, b *Budget, w window) ([]countRow,
 		if r.Tags == nil {
 			r.Tags = []string{}
 		}
-		out = append(out, r)
+		out[idx] = append(out[idx], r)
 	}
 	return out, rows.Err()
 }
