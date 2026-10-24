@@ -180,8 +180,8 @@ func peopleSQL(keyFilter string) string {
 }
 
 const todayInUserTZ = `(NOW() AT TIME ZONE COALESCE(
-	(SELECT z.name FROM pg_timezone_names z JOIN user_preferences up ON up.preferences->>'timezone' = z.name
-	 WHERE up.user_id = $1 LIMIT 1), 'Asia/Bangkok'))::date`
+	(SELECT NULLIF(up.preferences->>'timezone', '') FROM user_preferences up
+	 WHERE up.user_id = $1), 'Asia/Bangkok'))::date`
 
 const TodayInUserTZSQL = todayInUserTZ
 

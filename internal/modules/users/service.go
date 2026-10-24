@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -18,6 +19,17 @@ func (s *Service) WithFeeCategoryCheck(fn func(ctx context.Context, userID, cate
 }
 
 var ErrInvalidFeeCategory = errors.New("fee_category_id must be one of your expense categories")
+
+// ValidTimezone: an IANA name Go's embedded tz database knows. SQL uses the
+// stored name as is (shared.TodaySQL), so only real zones may be saved;
+// "" and "Local" are not zone names.
+func ValidTimezone(name string) bool {
+	if name == "" || name == "Local" {
+		return false
+	}
+	_, err := time.LoadLocation(name)
+	return err == nil
+}
 
 func (s *Service) FeeCategoryID(ctx context.Context, userID uuid.UUID) (*uuid.UUID, error) {
 	prof, err := s.store.GetProfile(ctx, userID)
@@ -66,6 +78,11 @@ func (s *Service) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdatePro
 		if v, ok := req.Preferences[PrefMoneyDecimals]; ok && v != nil {
 			if str, _ := v.(string); !MoneyDecimals[str] {
 				return nil, fmt.Errorf("%w: %q is not a decimals mode", ErrUnknownPreferenceKey, str)
+			}
+		}
+		if v, ok := req.Preferences["timezone"]; ok && v != nil {
+			if str, _ := v.(string); !ValidTimezone(str) {
+				return nil, fmt.Errorf("%w: %q is not a timezone", ErrUnknownPreferenceKey, str)
 			}
 		}
 		if v, ok := req.Preferences[PrefFeeCategoryID]; ok && v != nil {

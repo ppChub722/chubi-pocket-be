@@ -17,6 +17,7 @@ func New(connString string, log *slog.Logger) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse db config: %w", err)
 	}
+	config.ConnConfig.Tracer = queryTracer{}
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

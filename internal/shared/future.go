@@ -6,11 +6,13 @@ package shared
 // wallet's balance as of today.
 
 // TodaySQL is the caller's today as a date; userParam is the SQL parameter
-// that holds the user id (e.g. "$1").
+// that holds the user id (e.g. "$1"). The stored timezone is trusted as is:
+// it is checked when saved (users.ValidTimezone), never against
+// pg_timezone_names, which costs ~80 ms per scan on a small box.
 func TodaySQL(userParam string) string {
 	return `(NOW() AT TIME ZONE COALESCE(
-	(SELECT z.name FROM pg_timezone_names z JOIN user_preferences up ON up.preferences->>'timezone' = z.name
-	 WHERE up.user_id = ` + userParam + ` LIMIT 1), 'Asia/Bangkok'))::date`
+	(SELECT NULLIF(up.preferences->>'timezone', '') FROM user_preferences up
+	 WHERE up.user_id = ` + userParam + `), 'Asia/Bangkok'))::date`
 }
 
 // CashAmountSQL is what a transaction moves on its wallet: the amount minus the

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/database"
 )
 
 const (
@@ -40,6 +42,9 @@ func GinLoggerMiddleware(log *slog.Logger, logBodies bool) gin.HandlerFunc {
 			c.Writer = resWriter
 		}
 
+		ctx, qs := database.WithQueryStats(c.Request.Context())
+		c.Request = c.Request.WithContext(ctx)
+
 		c.Next()
 
 		latency := time.Since(start)
@@ -52,6 +57,8 @@ func GinLoggerMiddleware(log *slog.Logger, logBodies bool) gin.HandlerFunc {
 			"path", path,
 			"query", query,
 			"latency_ms", float64(latency.Nanoseconds()) / 1e6,
+			"db_queries", qs.Count(),
+			"db_ms", float64(qs.Duration().Microseconds()) / 1e3,
 			"ip", c.ClientIP(),
 		}
 		// user_id is set by the auth middleware (runs inside this one, so it's present by the time
