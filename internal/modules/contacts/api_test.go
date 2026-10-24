@@ -131,6 +131,13 @@ func TestContactAPI(t *testing.T) {
 		t.Errorf("empty display_name status = %d, want 400", status)
 	}
 
+	// The delete preview answers (it once queried a dropped column and 500'd).
+	if status, raw := apitest.Do(t, r, "GET", "/api/v1/contacts/"+ann.ID.String()+"?include=delete_preview", nil); status != http.StatusOK {
+		t.Errorf("delete preview status = %d, want 200: %s", status, raw)
+	} else if !strings.Contains(string(raw), `"delete_preview"`) {
+		t.Errorf("delete preview missing: %s", raw)
+	}
+
 	put := func(id uuid.UUID, body map[string]any) cJSON {
 		t.Helper()
 		status, raw := apitest.Do(t, r, "PUT", "/api/v1/contacts/"+id.String(), body)

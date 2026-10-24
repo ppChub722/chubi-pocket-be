@@ -381,10 +381,14 @@ func onlyDigits(s string) string {
 // DeletePreview counts what a hard delete of the contact would touch.
 func (s *Store) DeletePreview(ctx context.Context, userID uuid.UUID, c *Contact) (*DeletePreview, error) {
 	p := &DeletePreview{Linked: c.LinkedUserID != nil}
+	// Event members no longer point at contacts (migration 027): count the
+	// linked account's memberships in the caller's own events.
 	if err := s.db.QueryRow(ctx, `SELECT
 		(SELECT COUNT(*) FROM personal_debts WHERE user_id = $1 AND counterparty_contact_id = $2)
 		+ (SELECT COUNT(*) FROM transactions WHERE user_id = $1 AND repay_contact_id = $2),
-		(SELECT COUNT(*) FROM project_members WHERE contact_id = $2)`, userID, c.ID).
+		(SELECT COUNT(*) FROM project_members pm JOIN projects p ON p.id = pm.project_id
+		 WHERE p.owner_user_id = $1 AND pm.user_id = $3 AND pm.left_at IS NULL)`,
+		userID, c.ID, c.LinkedUserID).
 		Scan(&p.DebtRecords, &p.EventMembers); err != nil {
 		return nil, fmt.Errorf("delete preview: %w", err)
 	}
