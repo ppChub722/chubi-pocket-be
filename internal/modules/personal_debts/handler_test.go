@@ -36,7 +36,7 @@ type debtHFix struct {
 
 func newDebtHFix(t *testing.T) *debtHFix {
 	t.Helper()
-	pool := testdb.Pool(t)
+	pool := testdb.StatsPool(t)
 	ctx := context.Background()
 	f := &debtHFix{t: t, ctx: ctx, pool: pool}
 	f.me = testdb.User(t, pool)
@@ -64,7 +64,7 @@ func newDebtHFix(t *testing.T) *debtHFix {
 	f.txs.WithSplitsEditor(f.svc.EditForTransactionTx)
 	f.txs.WithDebtLinks(f.svc)
 	h := NewHandler(f.svc)
-	f.r = apitest.Engine(f.me, func(g *gin.RouterGroup) {
+	f.r = apitest.CountedEngine(f.me, func(g *gin.RouterGroup) {
 		g.GET("/personal-debts/people", h.People)
 		g.GET("/personal-debts/people/:key", h.Person)
 		g.GET("/personal-debts/people/:key/entries", h.Entries)
@@ -578,6 +578,12 @@ func TestDebtCyclesAndSummary(t *testing.T) {
 	}
 	if cur != 2 || len(page["items"].([]any)) != 2 {
 		t.Errorf("person page items (default = current cycle) = %d, flagged %d, want 2 / 2", len(page["items"].([]any)), cur)
+	}
+	// the person page reads the ledger once (the budget excludes the auth middleware's one user lookup)
+	if status, _, n := apitest.DoCounted(t, f.r, "GET", "/api/v1/personal-debts/people/n:mom", nil); status != http.StatusOK || n > 5 {
+		t.Errorf("the person page: status %d, %d queries, budget 5", status, n)
+	} else {
+		t.Logf("person page: %d queries", n)
 	}
 	all := f.call("GET", "/api/v1/personal-debts/people/n:mom?cycle=all", nil, "getDebtPerson", http.StatusOK)
 	if len(all["items"].([]any)) != 4 {

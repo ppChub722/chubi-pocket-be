@@ -255,9 +255,20 @@ func (s *Service) shares(ctx context.Context, per map[uuid.UUID]float64) ([]Wall
 }
 
 func (s *Service) spare(ctx context.Context, q shared.Querier, userID uuid.UUID) (Spare, error) {
-	per, err := bucketBalances(ctx, q, userID, nil)
+	bals, err := shared.LoadAllSavingBalances(ctx, q, userID)
 	if err != nil {
 		return Spare{}, err
+	}
+	return s.spareOf(ctx, bals)
+}
+
+// spareOf is the unallocated pool, per wallet, from balances already read.
+func (s *Service) spareOf(ctx context.Context, bals []shared.SavingBalanceRow) (Spare, error) {
+	per := map[uuid.UUID]float64{}
+	for _, b := range bals {
+		if b.Bucket == "spare" {
+			per[b.AccountID] += b.Amount
+		}
 	}
 	by, total, err := s.shares(ctx, per)
 	if err != nil {
@@ -266,9 +277,64 @@ func (s *Service) spare(ctx context.Context, q shared.Querier, userID uuid.UUID)
 	return Spare{Amount: total, ByWallet: by}, nil
 }
 
+// goalFacts is what a page's goal rows are built from, read once: the user's currency,
+// every saving balance, and the monthly nets of the goals.
+type goalFacts struct {
+	currency string
+	bals     []shared.SavingBalanceRow
+	nets     map[uuid.UUID]map[string]float64
+}
+
+func (s *Service) loadFacts(ctx context.Context, userID uuid.UUID, goalIDs []uuid.UUID) (*goalFacts, error) {
+	var (
+		f   goalFacts
+		err error
+	)
+	if f.currency, err = s.store.userCurrency(ctx, userID); err != nil {
+		return nil, err
+	}
+	if f.bals, err = shared.LoadAllSavingBalances(ctx, s.store.db, userID); err != nil {
+		return nil, err
+	}
+	f.nets = map[uuid.UUID]map[string]float64{}
+	if len(goalIDs) > 0 {
+		if f.nets, err = s.monthlyNets(ctx, s.store.db, userID, goalIDs, false); err != nil {
+			return nil, err
+		}
+	}
+	return &f, nil
+}
+
+// perWallet is how much of one goal sits in each wallet.
+func (f *goalFacts) perWallet(goalID uuid.UUID) map[uuid.UUID]float64 {
+	out := map[uuid.UUID]float64{}
+	for _, b := range f.bals {
+		if b.Bucket == "goal" && b.GoalID != nil && *b.GoalID == goalID {
+			out[b.AccountID] += b.Amount
+		}
+	}
+	return out
+}
+
 // goalViews builds the goal rows; month ("YYYY-MM", "" = this month) is the
 // month the month_* numbers are for.
 func (s *Service) goalViews(ctx context.Context, userID uuid.UUID, goals []*Goal, today time.Time, month string) ([]GoalView, error) {
+	ids := make([]uuid.UUID, len(goals))
+	for i, g := range goals {
+		ids[i] = g.ID
+	}
+	var facts *goalFacts
+	if len(goals) > 0 {
+		var err error
+		if facts, err = s.loadFacts(ctx, userID, ids); err != nil {
+			return nil, err
+		}
+	}
+	return s.goalViewsWith(ctx, userID, goals, today, month, facts)
+}
+
+// goalViewsWith builds the goal rows from facts already read (nil only when there are no goals).
+func (s *Service) goalViewsWith(ctx context.Context, userID uuid.UUID, goals []*Goal, today time.Time, month string, facts *goalFacts) ([]GoalView, error) {
 	if month == "" {
 		month = monthKey(today)
 	}
@@ -280,25 +346,12 @@ func (s *Service) goalViews(ctx context.Context, userID uuid.UUID, goals []*Goal
 	if len(goals) == 0 {
 		return out, nil
 	}
-	currency, err := s.store.userCurrency(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]uuid.UUID, len(goals))
-	for i, g := range goals {
-		ids[i] = g.ID
-	}
-	bals, err := shared.LoadSavingBalances(ctx, s.store.db, userID, `m.bucket = 'goal' AND m.goal_id = ANY($2)`, ids)
-	if err != nil {
-		return nil, err
-	}
+	currency, nets := facts.currency, facts.nets
 	saved := map[uuid.UUID]float64{}
-	for _, b := range bals {
-		saved[*b.GoalID] += b.Amount
-	}
-	nets, err := s.monthlyNets(ctx, s.store.db, userID, ids, false)
-	if err != nil {
-		return nil, err
+	for _, b := range facts.bals {
+		if b.Bucket == "goal" && b.GoalID != nil {
+			saved[*b.GoalID] += b.Amount
+		}
 	}
 	autos, err := s.autoViews(ctx, userID, today, monthStart)
 	if err != nil {
@@ -506,20 +559,26 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, mo
 	if err != nil {
 		return nil, err
 	}
-	out := &GoalList{Data: []GoalView{}}
-	if out.Data, err = s.goalViews(ctx, userID, goals, today, month); err != nil {
-		return nil, err
+	ids := make([]uuid.UUID, len(goals))
+	for i, g := range goals {
+		ids[i] = g.ID
 	}
-	if out.Spare, err = s.spare(ctx, s.store.db, userID); err != nil {
-		return nil, err
-	}
-	t, err := shared.LoadSavingTotals(ctx, s.store.db, userID)
+	facts, err := s.loadFacts(ctx, userID, ids)
 	if err != nil {
 		return nil, err
 	}
-	if out.Summary.Currency, err = s.store.userCurrency(ctx, userID); err != nil {
+	out := &GoalList{Data: []GoalView{}}
+	if out.Data, err = s.goalViewsWith(ctx, userID, goals, today, month, facts); err != nil {
 		return nil, err
 	}
+	if out.Spare, err = s.spareOf(ctx, facts.bals); err != nil {
+		return nil, err
+	}
+	t, err := shared.SavingTotalsOf(ctx, s.store.db, userID, facts.bals)
+	if err != nil {
+		return nil, err
+	}
+	out.Summary.Currency = facts.currency
 	out.Summary.Saved, out.Summary.InGoals, out.Summary.Spare = t.Saved, t.InGoals, t.Spare
 	out.Summary.SavedTotal, out.Summary.Unallocated = t.Saved, t.Spare
 	for _, v := range out.Data {
@@ -591,22 +650,19 @@ func (s *Service) GetMonth(ctx context.Context, userID, id uuid.UUID, perPage in
 	if err != nil {
 		return nil, err
 	}
-	views, err := s.goalViews(ctx, userID, []*Goal{g}, today, month)
+	facts, err := s.loadFacts(ctx, userID, []uuid.UUID{g.ID})
+	if err != nil {
+		return nil, err
+	}
+	views, err := s.goalViewsWith(ctx, userID, []*Goal{g}, today, month, facts)
 	if err != nil {
 		return nil, err
 	}
 	out := &GoalDetail{Goal: views[0]}
-	per, err := bucketBalances(ctx, s.store.db, userID, &g.ID)
-	if err != nil {
+	if out.ByWallet, _, err = s.shares(ctx, facts.perWallet(g.ID)); err != nil {
 		return nil, err
 	}
-	if out.ByWallet, _, err = s.shares(ctx, per); err != nil {
-		return nil, err
-	}
-	nets, err := s.monthlyNets(ctx, s.store.db, userID, []uuid.UUID{g.ID}, false)
-	if err != nil {
-		return nil, err
-	}
+	nets := facts.nets
 	plan, target := out.Goal.MonthPlan, 0.0
 	if g.TargetAmount != nil {
 		target = *g.TargetAmount

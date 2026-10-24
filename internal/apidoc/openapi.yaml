@@ -2855,6 +2855,56 @@ paths:
         }
       }
 
+  /accounts/{id}/summary:
+    parameters: [{"$ref":"#/components/parameters/IdPath"}]
+    get: {
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "Wallet income / expense over a period",
+        "operationId": "getAccountSummary",
+        "description": "The wallet's income and expense over [from, to] (default: the current month), without loading the wallet. Used when the wallet page shows a month other than this one. Errors: 400 VALIDATION_ERROR (a date that is not YYYY-MM-DD), 404 NOT_FOUND.",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Period start (default: the 1st of this month).",
+            "schema": {
+              "$ref": "#/components/schemas/Date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Period end (default: the last day of this month).",
+            "schema": {
+              "$ref": "#/components/schemas/Date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Final state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+
   /accounts/{id}/archive:
     parameters: [{ $ref: '#/components/parameters/IdPath' }]
     post:

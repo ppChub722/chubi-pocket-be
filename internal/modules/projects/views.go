@@ -163,7 +163,15 @@ func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid
 		m.IsMe = m.UserID != nil && *m.UserID == callerID
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	refs := make([]shared.MemberRef, len(out))
+	for i, m := range out {
+		refs[i] = shared.MemberRef{ID: m.ID, UserID: m.UserID, Name: m.Name, Icon: m.IconCode, IsMe: m.IsMe}
+	}
+	shared.RememberMemberRefs(ctx, callerID, refs)
+	return out, nil
 }
 
 func loadEventTags(ctx context.Context, q shared.Querier, callerID, projectID uuid.UUID) ([]EventTag, error) {
@@ -678,10 +686,11 @@ func (s *Service) detail(ctx context.Context, callerID, projectID uuid.UUID, pag
 		return nil, err
 	}
 	out := &EventDetail{Event: e}
-	if out.Summary, err = loadSummary(ctx, q, callerID, projectID, e); err != nil {
+	ctx = shared.WithMemberRefCache(ctx) // the members are read first, the summary and the board reuse them
+	if out.Members, err = loadMembers(ctx, q, callerID, projectID); err != nil {
 		return nil, err
 	}
-	if out.Members, err = loadMembers(ctx, q, callerID, projectID); err != nil {
+	if out.Summary, err = loadSummary(ctx, q, callerID, projectID, e); err != nil {
 		return nil, err
 	}
 	if out.Tags, err = loadEventTags(ctx, q, callerID, projectID); err != nil {
@@ -703,10 +712,11 @@ func (s *Service) patch(ctx context.Context, callerID, projectID uuid.UUID, rowI
 		return nil, err
 	}
 	out := &EventPatch{Event: e, RemovedRowID: removed}
-	if out.Summary, err = loadSummary(ctx, q, callerID, projectID, e); err != nil {
+	ctx = shared.WithMemberRefCache(ctx)
+	if out.Members, err = loadMembers(ctx, q, callerID, projectID); err != nil {
 		return nil, err
 	}
-	if out.Members, err = loadMembers(ctx, q, callerID, projectID); err != nil {
+	if out.Summary, err = loadSummary(ctx, q, callerID, projectID, e); err != nil {
 		return nil, err
 	}
 	if out.Tags, err = loadEventTags(ctx, q, callerID, projectID); err != nil {

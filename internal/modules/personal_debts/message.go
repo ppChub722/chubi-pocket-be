@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // SummaryMessage — the share sheet's text in its two variants (0.4.0-3): the whole current cycle
@@ -50,11 +49,11 @@ func thaiDate(d string) string {
 	return fmt.Sprintf("%d %s", t.Day(), thaiMonthsShort[t.Month()-1])
 }
 
-func (s *Service) summaryMessage(ctx context.Context, userID uuid.UUID, k shared.DebtPersonKey, bal DebtPerson) (*SummaryMessage, error) {
-	items, _, err := s.store.listStatement(ctx, userID, k.Key(), "current", true, 1, 200)
-	if err != nil {
-		return nil, err
-	}
+// summaryLines is how many lines of the current cycle the summary message lists (the oldest).
+const summaryLines = 200
+
+// summaryMessage words the current cycle's lines (oldest first, at most summaryLines).
+func (s *Service) summaryMessage(ctx context.Context, userID uuid.UUID, bal DebtPerson, items []StatementItem) (*SummaryMessage, error) {
 	var cur string
 	if err := s.store.db.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, userID).Scan(&cur); err != nil {
 		return nil, fmt.Errorf("currency: %w", err)

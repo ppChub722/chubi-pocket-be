@@ -133,12 +133,19 @@ func LoadAccountRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.
 	if len(ids) == 0 {
 		return out, nil
 	}
+	cache := refCacheOf(ctx)
+	if cache != nil {
+		if ids = cache.takeAccounts(ids, out); len(ids) == 0 {
+			return out, nil
+		}
+	}
 	rows, err := q.Query(ctx, `SELECT id, name, icon_code, logo_url, type, currency, status
 		FROM accounts WHERE id = ANY($1)`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("account refs: %w", err)
 	}
 	defer rows.Close()
+	loaded := map[uuid.UUID]AccountRef{}
 	for rows.Next() {
 		var (
 			r      AccountRef
@@ -149,9 +156,15 @@ func LoadAccountRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.
 			return nil, err
 		}
 		r.IconCode, r.Group, r.Archived = IconFromJSON(icon), AccountGroup(r.Type), status != "active"
-		out[r.ID] = r
+		out[r.ID], loaded[r.ID] = r, r
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if cache != nil {
+		cache.putAccounts(loaded)
+	}
+	return out, nil
 }
 
 func LoadCategoryRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]CategoryRef, error) {
@@ -160,12 +173,19 @@ func LoadCategoryRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid
 	if len(ids) == 0 {
 		return out, nil
 	}
+	cache := refCacheOf(ctx)
+	if cache != nil {
+		if ids = cache.takeCategories(ids, out); len(ids) == 0 {
+			return out, nil
+		}
+	}
 	rows, err := q.Query(ctx, `SELECT id, name, type, icon_code, is_system, system_kind, parent_id
 		FROM categories WHERE id = ANY($1)`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("category refs: %w", err)
 	}
 	defer rows.Close()
+	loaded := map[uuid.UUID]CategoryRef{}
 	for rows.Next() {
 		var (
 			r    CategoryRef
@@ -175,9 +195,15 @@ func LoadCategoryRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid
 			return nil, err
 		}
 		r.IconCode = IconFromJSON(icon)
-		out[r.ID] = r
+		out[r.ID], loaded[r.ID] = r, r
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if cache != nil {
+		cache.putCategories(loaded)
+	}
+	return out, nil
 }
 
 func LoadEventRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]EventRef, error) {

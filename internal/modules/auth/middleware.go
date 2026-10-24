@@ -12,10 +12,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
-const (
-	ctxKeyUserID = "user_id"
-	ctxKeyUser   = "user"
-)
+const ctxKeyUserID = "user_id"
 
 func Middleware(cfg *config.Config, store *Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -40,21 +37,20 @@ func Middleware(cfg *config.Config, store *Store) gin.HandlerFunc {
 			return
 		}
 
-		user, err := store.GetByID(c.Request.Context(), userID)
+		status, err := store.StatusByID(c.Request.Context(), userID)
 		if err != nil {
 			response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "User not found", nil)
 			c.Abort()
 			return
 		}
 
-		if user.Status != "active" && !inactiveAllowed(c) {
+		if status != "active" && !inactiveAllowed(c) {
 			response.Fail(c, http.StatusForbidden, "ACCOUNT_INACTIVE", "Account is inactive — reactivate to continue", nil)
 			c.Abort()
 			return
 		}
 
-		c.Set(ctxKeyUserID, user.ID)
-		c.Set(ctxKeyUser, user)
+		c.Set(ctxKeyUserID, userID)
 		c.Next()
 	}
 }
@@ -77,13 +73,4 @@ func UserIDFromContext(c *gin.Context) (uuid.UUID, bool) {
 	}
 	id, ok := v.(uuid.UUID)
 	return id, ok
-}
-
-func UserFromContext(c *gin.Context) (*User, bool) {
-	v, ok := c.Get(ctxKeyUser)
-	if !ok {
-		return nil, false
-	}
-	u, ok := v.(*User)
-	return u, ok
 }

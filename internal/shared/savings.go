@@ -47,17 +47,19 @@ type SavingBalance struct {
 	Amount    float64
 }
 
-func SavingBalancesSQL(where string) string {
-	if where == "" {
-		where = "TRUE"
-	}
-	return `WITH m AS (
+const savingMovesCTE = `WITH m AS (
 		SELECT account_id, to_bucket AS bucket, to_goal_id AS goal_id, amount FROM saving_entries
 		WHERE user_id = $1 AND to_bucket <> 'available'
 		UNION ALL
 		SELECT account_id, from_bucket, from_goal_id, -amount FROM saving_entries
 		WHERE user_id = $1 AND from_bucket <> 'available')
-	SELECT m.account_id, m.bucket, m.goal_id, SUM(m.amount)::float8 FROM m WHERE ` + where + `
+	`
+
+func SavingBalancesSQL(where string) string {
+	if where == "" {
+		where = "TRUE"
+	}
+	return savingMovesCTE + `SELECT m.account_id, m.bucket, m.goal_id, SUM(m.amount)::float8 FROM m WHERE ` + where + `
 	GROUP BY 1, 2, 3 HAVING ABS(SUM(m.amount)) > 0.004`
 }
 
@@ -81,6 +83,38 @@ func LoadSavingBalances(ctx context.Context, q Querier, userID uuid.UUID, where 
 		}
 		b.Amount = math.Round(b.Amount*100) / 100
 		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// SavingBalanceRow is a saving balance with whether it counts (not a goal that was archived).
+type SavingBalanceRow struct {
+	SavingBalance
+	Counted bool
+}
+
+// LoadAllSavingBalances reads every saving balance of the user in ONE statement: a page
+// that needs the balances of goals, the spare pool and the totals derives them all from it.
+func LoadAllSavingBalances(ctx context.Context, q Querier, userID uuid.UUID) ([]SavingBalanceRow, error) {
+	rows, err := q.Query(ctx, savingMovesCTE+`SELECT m.account_id, m.bucket, m.goal_id, SUM(m.amount)::float8,
+		NOT EXISTS (SELECT 1 FROM saving_goals sg WHERE sg.id = m.goal_id AND sg.status = 'archived')
+		FROM m GROUP BY 1, 2, 3 HAVING ABS(SUM(m.amount)) > 0.004`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("saving balances: %w", err)
+	}
+	defer rows.Close()
+	var out []SavingBalanceRow
+	for rows.Next() {
+		var r SavingBalanceRow
+		var acc *uuid.UUID
+		if err := rows.Scan(&acc, &r.Bucket, &r.GoalID, &r.Amount, &r.Counted); err != nil {
+			return nil, err
+		}
+		if acc != nil {
+			r.AccountID = *acc
+		}
+		r.Amount = math.Round(r.Amount*100) / 100
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }
@@ -197,11 +231,26 @@ func LoadWalletSavings(ctx context.Context, q Querier, userID uuid.UUID, account
 }
 
 func LoadSavingTotals(ctx context.Context, q Querier, userID uuid.UUID) (*SavingTotals, error) {
-	out := &SavingTotals{}
 	bals, err := LoadSavingBalances(ctx, q, userID, CountedSavings)
 	if err != nil {
 		return nil, err
 	}
+	return savingTotalsOf(ctx, q, userID, bals)
+}
+
+// SavingTotalsOf is LoadSavingTotals over balances already read (LoadAllSavingBalances).
+func SavingTotalsOf(ctx context.Context, q Querier, userID uuid.UUID, all []SavingBalanceRow) (*SavingTotals, error) {
+	counted := make([]SavingBalance, 0, len(all))
+	for _, r := range all {
+		if r.Counted {
+			counted = append(counted, r.SavingBalance)
+		}
+	}
+	return savingTotalsOf(ctx, q, userID, counted)
+}
+
+func savingTotalsOf(ctx context.Context, q Querier, userID uuid.UUID, bals []SavingBalance) (*SavingTotals, error) {
+	out := &SavingTotals{}
 	savedIn := map[uuid.UUID]float64{}
 	for _, b := range bals {
 		out.Saved += b.Amount

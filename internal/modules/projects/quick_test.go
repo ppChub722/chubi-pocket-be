@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/database"
 )
 
 const qcTestDefaultDSN = "postgres://chubadmin:admin1234@localhost:5433/chubi_pocket_db?sslmode=disable"
@@ -28,7 +31,7 @@ func qcTestPool(t *testing.T) *pgxpool.Pool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := database.New(dsn, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Skipf("cannot build pool: %v", err)
 	}

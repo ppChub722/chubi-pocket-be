@@ -89,6 +89,25 @@ func (h *Handler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, a)
 }
 
+// Summary — GET /accounts/:id/summary?from=&to=: income and expense of the wallet over a period.
+func (h *Handler) Summary(c *gin.Context) {
+	userID, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.Summary(c.Request.Context(), userID, id, c.Query("from"), c.Query("to"))
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {

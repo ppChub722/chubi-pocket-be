@@ -15,7 +15,7 @@ import (
 
 func eventsEngine(f *qcFixture, as uuid.UUID) http.Handler {
 	h := NewHandler(f.svc)
-	return apitest.Engine(as, func(g *gin.RouterGroup) {
+	return apitest.CountedEngine(as, func(g *gin.RouterGroup) {
 		g.POST("/projects", h.Create)
 		g.GET("/projects", h.List)
 		g.POST("/projects/quick", h.QuickCreate)
@@ -308,6 +308,13 @@ func TestEventsAPI(t *testing.T) {
 	me.do("PUT", "/projects/"+id, map[string]any{"end_date": nil, "planned_amount": nil}, "updateProject", http.StatusOK)
 
 	detail := me.do("GET", "/projects/"+id+"/detail", nil, "getProjectDetail", http.StatusOK)
+	// the event page reads each section once: members first, the summary and the board reuse them
+	// (the budget excludes the auth middleware's one user lookup)
+	if status, _, n := apitest.DoCounted(t, me.r, "GET", "/api/v1/projects/"+id+"/detail", nil); status != http.StatusOK || n > 17 {
+		t.Errorf("the event detail: status %d, %d queries, budget 17", status, n)
+	} else {
+		t.Logf("event detail: %d queries", n)
+	}
 	if len(list(m(detail, "board"), "data")) != 2 || len(list(detail, "members")) != 3 {
 		t.Errorf("detail board / members = %v / %v", m(detail, "board")["data"], detail["members"])
 	}

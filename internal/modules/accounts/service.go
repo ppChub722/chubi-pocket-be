@@ -174,7 +174,7 @@ func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, include [
 	}
 	out := &AccountDetail{Account: *a}
 	if wantSummary {
-		if out.Summary, err = s.Summary(ctx, userID, id, from, to); err != nil {
+		if out.Summary, err = s.summaryOf(ctx, id, from, to); err != nil {
 			return nil, err
 		}
 	}
@@ -193,10 +193,28 @@ func (s *Service) GetDetail(ctx context.Context, userID, id uuid.UUID, include [
 	return out, nil
 }
 
+// Summary is the wallet's income / expense over [from, to] (default: this month).
 func (s *Service) Summary(ctx context.Context, userID, accountID uuid.UUID, from, to string) (*AccountSummary, error) {
-	if _, err := s.store.GetByID(ctx, userID, accountID); err != nil {
+	for _, d := range []string{from, to} {
+		if d == "" {
+			continue
+		}
+		if _, err := time.Parse("2006-01-02", d); err != nil {
+			return nil, ErrInvalidDate
+		}
+	}
+	ok, err := s.store.IsActiveMember(ctx, accountID, userID)
+	if err != nil {
 		return nil, err
 	}
+	if !ok {
+		return nil, ErrAccountNotFound
+	}
+	return s.summaryOf(ctx, accountID, from, to)
+}
+
+// summaryOf is Summary for a caller already known to be a member.
+func (s *Service) summaryOf(ctx context.Context, accountID uuid.UUID, from, to string) (*AccountSummary, error) {
 	now := time.Now()
 	if from == "" {
 		from = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).Format("2006-01-02")

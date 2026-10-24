@@ -520,6 +520,7 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 }
 
 func (s *Service) detail(ctx context.Context, userID, id uuid.UUID, today time.Time, page, perPage int, touched []uuid.UUID) (*Detail, error) {
+	ctx = shared.WithRefCache(ctx) // the views and both item pages resolve the same wallets / categories
 	r, err := getRule(ctx, s.db, userID, id, false)
 	if err != nil {
 		return nil, err

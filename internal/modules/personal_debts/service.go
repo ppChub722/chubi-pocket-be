@@ -88,15 +88,24 @@ func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey, cycle st
 	if cycle == "" {
 		cycle = "current" // the page shows the current cycle; earlier ones are "load more"
 	}
-	items, total, err := s.store.listStatement(ctx, userID, k.Key(), cycle, false, page, perPage)
+	lines, err := s.store.ledgerLines(ctx, s.store.db, userID, k.Key())
 	if err != nil {
 		return nil, err
 	}
-	counts, err := s.store.entryCounts(ctx, userID, k.Key())
+	mark := cycleMarkOf(lines)
+	counts := countsOf(lines, mark)
+	picked := cycleLines(lines, mark, cycle)
+	pageLines := pageNewestFirst(picked, page, perPage)
+	current := cycleLines(lines, mark, "current")
+	if len(current) > summaryLines {
+		current = current[:summaryLines]
+	}
+	byID, err := s.store.statementItems(ctx, s.store.db, userID, append(append([]ledgerLine{}, pageLines...), current...), mark)
 	if err != nil {
 		return nil, err
 	}
-	msg, err := s.summaryMessage(ctx, userID, k, bal)
+	items, total := itemsOf(pageLines, byID), len(picked)
+	msg, err := s.summaryMessage(ctx, userID, bal, itemsOf(current, byID))
 	if err != nil {
 		return nil, err
 	}

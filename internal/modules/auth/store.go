@@ -120,6 +120,20 @@ func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
 	return u, nil
 }
 
+// StatusByID is all the auth middleware needs of the caller: whether the account is
+// active (one narrow read on every request, never the whole row).
+func (s *Store) StatusByID(ctx context.Context, id uuid.UUID) (string, error) {
+	var status string
+	err := s.db.QueryRow(ctx, `SELECT status FROM users WHERE id = $1`, id).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrUserNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("db error: %w", err)
+	}
+	return status, nil
+}
+
 func (s *Store) UpdatePassword(ctx context.Context, id uuid.UUID, newHash string) error {
 	tag, err := s.db.Exec(ctx,
 		`UPDATE users SET password_hash = $2, updated_by_user_id = $1 WHERE id = $1`,

@@ -31,7 +31,7 @@ type goalFix struct {
 
 func newGoalFix(t *testing.T) *goalFix {
 	t.Helper()
-	pool := testdb.Pool(t)
+	pool := testdb.StatsPool(t)
 	f := &goalFix{t: t, ctx: context.Background(), pool: pool}
 	f.me = testdb.User(t, pool)
 	f.kbank, f.scb, f.untrack = testdb.Account(t, pool, f.me), testdb.Account(t, pool, f.me), testdb.Account(t, pool, f.me)
@@ -42,7 +42,7 @@ func newGoalFix(t *testing.T) *goalFix {
 	now := time.Now().In(loc)
 	f.today = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	h := NewHandler(NewService(NewStore(pool)))
-	f.r = apitest.Engine(f.me, func(g *gin.RouterGroup) {
+	f.r = apitest.CountedEngine(f.me, func(g *gin.RouterGroup) {
 		g.GET("/saving-goals", h.List)
 		g.POST("/saving-goals", h.Create)
 		g.GET("/saving-goals/spare", h.Spare)
