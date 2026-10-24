@@ -31,13 +31,10 @@ type Service struct {
 	budgets      *budgets.Service
 	goals        *saving_goals.Service
 	debts        *personal_debts.Service
-	due          shared.DueChecker
 	// expected, when set, supplies the upcoming recurring occurrences; nil keeps
 	// reading the stored recurring items.
 	expected shared.Expecter
 }
-
-func (s *Service) WithDueCheck(fn shared.DueChecker) { s.due = fn }
 
 func (s *Service) WithExpected(e shared.Expecter) *Service { s.expected = e; return s }
 
@@ -86,11 +83,6 @@ func NewService(
 }
 
 func (s *Service) Get(ctx context.Context, userID uuid.UUID, month, headerTZ string) (*Response, error) {
-	if s.due != nil {
-		if err := s.due(ctx, userID, headerTZ); err != nil {
-			return nil, err
-		}
-	}
 	loc, _, err := s.budgets.ResolveTimezone(ctx, userID, headerTZ)
 	if err != nil {
 		return nil, err

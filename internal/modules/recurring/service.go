@@ -2,7 +2,6 @@ package recurring
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -35,16 +34,11 @@ func NewService(db *pgxpool.Pool, txs *transactions.Service, p *pending.Service,
 }
 
 func (s *Service) today(ctx context.Context, userID uuid.UUID, headerTZ string) (time.Time, error) {
-	var stored *string
-	err := s.db.QueryRow(ctx, `SELECT preferences->>'timezone' FROM user_preferences WHERE user_id = $1`, userID).Scan(&stored)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	prefs, err := shared.UserPrefs(ctx, s.db, userID)
+	if err != nil {
 		return time.Time{}, err
 	}
-	names := []string{headerTZ}
-	if stored != nil {
-		names = append(names, *stored)
-	}
-	names = append(names, defaultTimezone)
+	names := []string{headerTZ, prefs.Timezone, defaultTimezone}
 	loc := time.UTC
 	for _, n := range names {
 		if n == "" {
@@ -64,13 +58,37 @@ func (s *Service) Today(ctx context.Context, userID uuid.UUID) (string, error) {
 	return t.Format(dateLayout), err
 }
 
-// DueCheck runs on every read of the recurring module (and the dashboard, the
-// counts, the notifications, sync). Nothing is produced into pending any more:
-// an occurrence that came due is just a computed `due` state. What it does:
-// pause settings whose wallet was archived, record the transactions of the
-// settings with auto-create on, count the newly due occurrences for ONE grouped
-// notice, tell about settings that are about to end, and make the goal
-// auto-save drafts.
+// DueCheckDaily runs DueCheck when the user's local day has not been checked
+// yet (or something it reacts to changed since): POST /sync calls it, reads
+// never do. One read when there is nothing to do.
+func (s *Service) DueCheckDaily(ctx context.Context, userID uuid.UUID, headerTZ string) error {
+	today, err := s.today(ctx, userID, headerTZ)
+	if err != nil {
+		return err
+	}
+	var skip bool
+	if err := s.db.QueryRow(ctx, `SELECT
+		EXISTS (SELECT 1 FROM recurring_due_checks c WHERE c.user_id = $1 AND c.checked_on >= $2
+		        AND NOT EXISTS (SELECT 1 FROM saving_auto a WHERE a.user_id = $1 AND a.start_date <= $2 AND a.updated_at > c.checked_at))
+		AND NOT EXISTS (SELECT 1 FROM recurring_rules r WHERE r.user_id = $1 AND r.status = 'active'
+		        AND (r.account_id IN (SELECT id FROM accounts WHERE status = 'archived')
+		          OR r.to_account_id IN (SELECT id FROM accounts WHERE status = 'archived')))`,
+		userID, today).Scan(&skip); err != nil {
+		return fmt.Errorf("due check guard: %w", err)
+	}
+	if skip {
+		return nil
+	}
+	return s.DueCheck(ctx, userID, headerTZ)
+}
+
+// DueCheck makes what came due since the last check real. Nothing is produced
+// into pending any more: an occurrence that came due is just a computed `due`
+// state. What it does: pause settings whose wallet was archived, record the
+// transactions of the settings with auto-create on, count the newly due
+// occurrences for ONE grouped notice, tell about settings that are about to
+// end, and make the goal auto-save drafts. It writes, so it runs from
+// DueCheckDaily and after a recurring write, never on a read.
 func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ string) error {
 	today, err := s.today(ctx, userID, headerTZ)
 	if err != nil {
@@ -154,6 +172,10 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 		if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET ending_notified = TRUE WHERE id = $1`, e.id); err != nil {
 			return err
 		}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO recurring_due_checks (user_id, checked_on, checked_at) VALUES ($1, $2, NOW())
+		ON CONFLICT (user_id) DO UPDATE SET checked_on = EXCLUDED.checked_on, checked_at = NOW()`, userID, today); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -506,16 +528,20 @@ func (s *Service) detail(ctx context.Context, userID, id uuid.UUID, today time.T
 	if err != nil {
 		return nil, err
 	}
-	items, err := s.ruleItems(ctx, userID, r, today, "produced", page, perPage, nil, 0)
+	stored, err := s.storedRows(ctx, s.db, userID, []uuid.UUID{r.ID}, nil, nil)
 	if err != nil {
 		return nil, err
 	}
-	up, err := s.ruleItems(ctx, userID, r, today, "upcoming", 1, perPage, nil, 0)
+	items, err := s.ruleItemsOf(ctx, userID, r, stored, today, "produced", page, perPage, nil, 0)
+	if err != nil {
+		return nil, err
+	}
+	up, err := s.ruleItemsOf(ctx, userID, r, stored, today, "upcoming", 1, perPage, nil, 0)
 	if err != nil {
 		return nil, err
 	}
 	out := &Detail{Recurring: views[0], Items: *items, Upcoming: *up}
-	if out.Stats, err = s.stats(ctx, userID, r, today); err != nil {
+	if out.Stats, err = s.stats(ctx, userID, r, stored, today); err != nil {
 		return nil, err
 	}
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
@@ -525,7 +551,7 @@ func (s *Service) detail(ctx context.Context, userID, id uuid.UUID, today time.T
 }
 
 // stats — the detail page's numbers, from the recorded occurrences.
-func (s *Service) stats(ctx context.Context, userID uuid.UUID, r *Rule, today time.Time) (Stats, error) {
+func (s *Service) stats(ctx context.Context, userID uuid.UUID, r *Rule, stored []*itemRow, today time.Time) (Stats, error) {
 	st := Stats{Series: []Point{}}
 	rows, err := s.db.Query(ctx, `SELECT COALESCE(i.slot, i.date), i.date, t.amount::float8 FROM recurring_items i
 		JOIN transactions t ON t.id = i.transaction_id
@@ -570,10 +596,6 @@ func (s *Service) stats(ctx context.Context, userID uuid.UUID, r *Rule, today ti
 	}
 	st.Series = append(st.Series, pts...)
 	if r.TotalCount != nil && r.GeneratedUntil != nil {
-		stored, err := s.storedRows(ctx, s.db, userID, []uuid.UUID{r.ID}, nil, nil)
-		if err != nil {
-			return st, err
-		}
 		left := 0.0
 		for _, o := range occsOf(r, stored, r.StartDate, *r.GeneratedUntil, today, s.lang(ctx, userID)) {
 			if o.expected() && o.draft.Amount != nil {
@@ -623,12 +645,17 @@ func (s *Service) pageOccs(ctx context.Context, userID uuid.UUID, today time.Tim
 // is still to come (oldest first): a setting WITHOUT an end shows `months`
 // months from `from` (default today, 12), one with an end shows all of it.
 func (s *Service) ruleItems(ctx context.Context, userID uuid.UUID, r *Rule, today time.Time, tab string, page, perPage int, from *time.Time, months int) (*ItemList, error) {
-	page, perPage = clampPage(page, perPage)
-	lang := s.lang(ctx, userID)
 	stored, err := s.storedRows(ctx, s.db, userID, []uuid.UUID{r.ID}, nil, nil)
 	if err != nil {
 		return nil, err
 	}
+	return s.ruleItemsOf(ctx, userID, r, stored, today, tab, page, perPage, from, months)
+}
+
+// ruleItemsOf is ruleItems over the rule's stored rows, already loaded.
+func (s *Service) ruleItemsOf(ctx context.Context, userID uuid.UUID, r *Rule, stored []*itemRow, today time.Time, tab string, page, perPage int, from *time.Time, months int) (*ItemList, error) {
+	page, perPage = clampPage(page, perPage)
+	lang := s.lang(ctx, userID)
 	if tab != "upcoming" {
 		var occs []*occ
 		seqs := seqIndex(r)
@@ -697,9 +724,6 @@ func (s *Service) ListAll(ctx context.Context, userID uuid.UUID, tz string) (*Re
 }
 
 func (s *Service) list(ctx context.Context, userID uuid.UUID, status, q, forType string, hint PickerHint, kind string, page, perPage int, tz string, unlimited bool) (*RecurringList, error) {
-	if err := s.DueCheck(ctx, userID, tz); err != nil {
-		return nil, err
-	}
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
 		return nil, err
@@ -809,9 +833,6 @@ func dueKey(v *Recurring) string {
 }
 
 func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, page, perPage int, tz string, withDeletePreview bool) (*Detail, error) {
-	if err := s.DueCheck(ctx, userID, tz); err != nil {
-		return nil, err
-	}
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
 		return nil, err
@@ -830,9 +851,6 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, page, perPage i
 }
 
 func (s *Service) RuleItems(ctx context.Context, userID, id uuid.UUID, tab string, page, perPage int, from *time.Time, months int, tz string) (*ItemList, error) {
-	if err := s.DueCheck(ctx, userID, tz); err != nil {
-		return nil, err
-	}
 	r, err := getRule(ctx, s.db, userID, id, false)
 	if err != nil {
 		return nil, err
@@ -850,9 +868,6 @@ func (s *Service) RuleItems(ctx context.Context, userID, id uuid.UUID, tab strin
 // (stored rows, newest first) | all (needs a month). month = every occurrence
 // dated in it, oldest first.
 func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, month string, ruleID *uuid.UUID, page, perPage int, tz string) (*ItemList, error) {
-	if err := s.DueCheck(ctx, userID, tz); err != nil {
-		return nil, err
-	}
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
 		return nil, err
@@ -994,9 +1009,6 @@ func (s *Service) GetItem(ctx context.Context, userID, id uuid.UUID) (*Item, err
 // `upcoming` ones, each with its state and linked transaction; suggested_slot is
 // the oldest overdue one, else the free one nearest txDate.
 func (s *Service) Occurrences(ctx context.Context, userID, ruleID uuid.UUID, txDate *time.Time, past, upcoming int, tz string) (*OccurrencesResult, error) {
-	if err := s.DueCheck(ctx, userID, tz); err != nil {
-		return nil, err
-	}
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
 		return nil, err

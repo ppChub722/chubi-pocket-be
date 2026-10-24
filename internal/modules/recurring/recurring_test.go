@@ -41,7 +41,7 @@ type recFix struct {
 
 func newRecFix(t *testing.T) *recFix {
 	t.Helper()
-	pool := testdb.Pool(t)
+	pool := testdb.StatsPool(t)
 	ctx := context.Background()
 	f := &recFix{t: t, ctx: ctx, pool: pool}
 	f.me = testdb.User(t, pool)
@@ -64,7 +64,7 @@ func newRecFix(t *testing.T) *recFix {
 
 	h := NewHandler(f.svc)
 	th := transactions.NewHandler(f.txs)
-	f.r = apitest.Engine(f.me, func(g *gin.RouterGroup) {
+	f.r = apitest.CountedEngine(f.me, func(g *gin.RouterGroup) {
 		g.GET("/recurring", h.List)
 		g.POST("/recurring", h.Create)
 		g.GET("/recurring/:id", h.Get)
@@ -107,6 +107,7 @@ func newRecFix(t *testing.T) *recFix {
 		_, _ = pool.Exec(ctx, `DELETE FROM recurring_rules WHERE user_id = $1`, f.me)
 		_, _ = pool.Exec(ctx, `DELETE FROM pending_transactions WHERE user_id = $1`, f.me)
 		_, _ = pool.Exec(ctx, `DELETE FROM notifications WHERE recipient_user_id = $1`, f.me)
+		_, _ = pool.Exec(ctx, `DELETE FROM recurring_due_checks WHERE user_id = $1`, f.me)
 	})
 	return f
 }
@@ -512,6 +513,19 @@ func TestDueNoticeResumeAndEdit(t *testing.T) {
 	f.exec(`UPDATE recurring_rules SET due_notified_until = $2 WHERE id = $1`, id, f.today.AddDate(0, 0, -30))
 	f.exec(`DELETE FROM notifications WHERE recipient_user_id = $1`, f.me)
 	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, nil)
+	if rows, _ := f.notices("recurring_due"); rows != 0 {
+		t.Errorf("a GET made a recurring_due notice (rows %d)", rows)
+	}
+	if err := f.svc.DueCheckDaily(f.ctx, f.me, ""); err != nil {
+		t.Fatal(err)
+	}
+	if rows, _ := f.notices("recurring_due"); rows != 0 {
+		t.Errorf("the day was already checked, yet a notice was made (rows %d)", rows)
+	}
+	f.exec(`DELETE FROM recurring_due_checks WHERE user_id = $1`, f.me)
+	if err := f.svc.DueCheckDaily(f.ctx, f.me, ""); err != nil {
+		t.Fatal(err)
+	}
 	if rows, count := f.notices("recurring_due"); rows != 1 || count != 3 {
 		t.Errorf("recurring_due rows %d count %d, want 1 / 3", rows, count)
 	}
@@ -520,9 +534,11 @@ func TestDueNoticeResumeAndEdit(t *testing.T) {
 	if dl != "/recurring?focus=due" {
 		t.Errorf("deep link = %q", dl)
 	}
-	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, nil)
+	if err := f.svc.DueCheck(f.ctx, f.me, ""); err != nil {
+		t.Fatal(err)
+	}
 	if rows, count := f.notices("recurring_due"); rows != 1 || count != 3 {
-		t.Errorf("a second look made another notice: rows %d count %d", rows, count)
+		t.Errorf("a second check made another notice: rows %d count %d", rows, count)
 	}
 
 	// Pause + resume: what was due before the pause stays due; the occurrences of the

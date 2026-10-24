@@ -7,8 +7,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-
-	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type RecurringEndingPayload struct {
@@ -17,15 +15,6 @@ type RecurringEndingPayload struct {
 	Left        int          `json:"left"`
 	StartDate   string       `json:"start_date"`
 	End         RecurringEnd `json:"end"`
-}
-
-func (s *Service) WithDueCheck(fn shared.DueChecker) { s.due = fn }
-
-func (s *Service) RunDueCheck(ctx context.Context, userID uuid.UUID, headerTZ string) error {
-	if s.due == nil {
-		return nil
-	}
-	return s.due(ctx, userID, headerTZ)
 }
 
 // recurringDueLink opens the recurring page scrolled to ต้องจัดการ.

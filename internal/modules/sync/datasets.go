@@ -33,11 +33,9 @@ type Services struct {
 	Providers    *providers.Store
 }
 
-// dataset is one A dataset. readsMutate marks a loader whose read changes rows (recurring runs the
-// due check), so its fingerprint is taken after the load.
+// dataset is one A dataset.
 type dataset struct {
-	load        Loader
-	readsMutate bool
+	load Loader
 }
 
 func datasets(s Services) map[string]dataset {
@@ -72,7 +70,7 @@ func datasets(s Services) map[string]dataset {
 		Projects: {load: func(ctx context.Context, uid uuid.UUID, _ string) (any, error) {
 			return s.Projects.ListAll(ctx, uid, projects.ListFilter{Status: "all"})
 		}},
-		Recurring: {readsMutate: true, load: func(ctx context.Context, uid uuid.UUID, tz string) (any, error) {
+		Recurring: {load: func(ctx context.Context, uid uuid.UUID, tz string) (any, error) {
 			return s.Recurring.ListAll(ctx, uid, tz)
 		}},
 		FormDefaults: {load: func(ctx context.Context, uid uuid.UUID, _ string) (any, error) {

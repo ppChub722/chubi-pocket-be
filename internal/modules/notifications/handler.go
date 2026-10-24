@@ -33,10 +33,6 @@ func (h *Handler) List(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	if err := h.service.RunDueCheck(c.Request.Context(), userID, c.GetHeader("X-Timezone")); err != nil {
-		response.InternalError(c, "Recurring due check failed", err.Error())
-		return
-	}
 	f := ListFilter{
 		Read:         c.Query("read"),
 		Actioned:     c.Query("actioned"),
@@ -72,10 +68,6 @@ func (h *Handler) UnreadCount(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
 		unauthorized(c)
-		return
-	}
-	if err := h.service.RunDueCheck(c.Request.Context(), userID, c.GetHeader("X-Timezone")); err != nil {
-		response.InternalError(c, "Recurring due check failed", err.Error())
 		return
 	}
 	b, err := h.service.Badges(c.Request.Context(), userID)

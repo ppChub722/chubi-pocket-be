@@ -1,8 +1,6 @@
 package notifications
 
 import (
-	"github.com/ppChub722/chubi-pocket-be/internal/shared"
-
 	"context"
 	"errors"
 
@@ -12,7 +10,6 @@ import (
 
 type Service struct {
 	store *Store
-	due   shared.DueChecker // the recurring due check (recurring.go)
 }
 
 func NewService(store *Store) *Service {

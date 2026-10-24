@@ -1,7 +1,6 @@
 package shared
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -106,8 +105,6 @@ type DebtLink struct {
 	Direction string    `json:"direction"`
 	Paid      bool      `json:"paid"`
 }
-
-type DueChecker func(ctx context.Context, userID uuid.UUID, headerTZ string) error
 
 type RecurringRef struct {
 	ID       uuid.UUID `json:"id"`

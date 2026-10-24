@@ -62,13 +62,10 @@ type Service struct {
 	db      *pgxpool.Pool
 	budgets *budgets.Service
 	debts   *personal_debts.Service
-	due     shared.DueChecker
 	// expected, when set, supplies the recurring occurrences behind the
 	// recurring counts; nil keeps counting the stored recurring items.
 	expected shared.Expecter
 }
-
-func (s *Service) WithDueCheck(fn shared.DueChecker) *Service { s.due = fn; return s }
 
 func (s *Service) WithExpected(e shared.Expecter) *Service { s.expected = e; return s }
 
@@ -122,11 +119,6 @@ var countsSQL = `SELECT
 	(SELECT COUNT(*) FROM budgets WHERE user_id = $1 AND status = 'active' AND closed_on IS NULL)`
 
 func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string) (*MeCounts, error) {
-	if s.due != nil {
-		if err := s.due(ctx, userID, headerTZ); err != nil {
-			return nil, err
-		}
-	}
 	badges, err := shared.LoadBadges(ctx, s.db, userID)
 	if err != nil {
 		return nil, err

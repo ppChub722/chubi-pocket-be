@@ -36,12 +36,11 @@ func (o *occ) stored() bool { return o.row != nil }
 func (o *occ) expected() bool { return o.status == StatusUpcoming || o.status == StatusDue }
 
 func (s *Service) lang(ctx context.Context, userID uuid.UUID) string {
-	var l *string
-	err := s.db.QueryRow(ctx, `SELECT preferences->>'language' FROM user_preferences WHERE user_id = $1`, userID).Scan(&l)
-	if err != nil || l == nil || *l == "" {
-		return "th"
+	prefs, err := shared.UserPrefs(ctx, s.db, userID)
+	if err != nil {
+		return shared.DefaultLanguage
 	}
-	return *l
+	return prefs.Language
 }
 
 // seqIndex maps a slot ("YYYY-MM-DD") to its number in the rule (1-based), only

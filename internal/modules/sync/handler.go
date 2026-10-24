@@ -26,10 +26,15 @@ type Handler struct {
 	db       *pgxpool.Pool
 	log      *slog.Logger
 	datasets map[string]dataset
+	dueCheck func(ctx context.Context, userID uuid.UUID, headerTZ string) error
 }
 
 func NewHandler(db *pgxpool.Pool, log *slog.Logger, s Services) *Handler {
-	return &Handler{db: db, log: log, datasets: datasets(s)}
+	h := &Handler{db: db, log: log, datasets: datasets(s)}
+	if s.Recurring != nil {
+		h.dueCheck = s.Recurring.DueCheckDaily
+	}
+	return h
 }
 
 type Request struct {
@@ -80,6 +85,13 @@ func (h *Handler) Sync(c *gin.Context) {
 
 	tz := c.GetHeader("X-Timezone")
 	ctx := shared.WithHeaderTZ(c.Request.Context(), tz)
+	// once per local day; before the fingerprints, so the versions already hold what it changed
+	// A failed check must not block the sync: it runs again on the next one.
+	if h.dueCheck != nil {
+		if err := h.dueCheck(ctx, userID, tz); err != nil {
+			h.log.Warn("recurring due check failed", "user_id", userID, "error", err)
+		}
+	}
 	versions, err := Fingerprints(ctx, h.db, userID, tz)
 	if err != nil {
 		response.InternalError(c, "Failed to compute sync versions", err.Error())
@@ -102,7 +114,6 @@ func (h *Handler) Sync(c *gin.Context) {
 	}
 
 	results := h.loadAll(ctx, userID, tz, load)
-	mutated := false
 	for _, name := range load {
 		r := results[name]
 		if r.err != nil {
@@ -115,21 +126,6 @@ func (h *Handler) Sync(c *gin.Context) {
 			continue
 		}
 		out.Data[name] = DatasetData{V: versions[name], Body: r.body}
-		mutated = mutated || h.datasets[name].readsMutate
-	}
-	if mutated {
-		after, err := Fingerprints(ctx, h.db, userID, tz)
-		if err != nil {
-			response.InternalError(c, "Failed to compute sync versions", err.Error())
-			return
-		}
-		for name, d := range out.Data {
-			if h.datasets[name].readsMutate {
-				d.V = after[name]
-				out.Data[name] = d
-			}
-		}
-		versions = after
 	}
 	out.Versions = versions
 	c.JSON(http.StatusOK, out)

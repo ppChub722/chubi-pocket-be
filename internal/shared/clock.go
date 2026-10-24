@@ -22,16 +22,11 @@ func HeaderTZ(ctx context.Context) string {
 }
 
 func UserLocation(ctx context.Context, q Querier, userID uuid.UUID, headerTZ string) (*time.Location, error) {
-	var stored string
-	rows, err := q.Query(ctx, `SELECT COALESCE(preferences->>'timezone', '') FROM user_preferences WHERE user_id = $1`, userID)
+	prefs, err := UserPrefs(ctx, q, userID)
 	if err != nil {
 		return nil, fmt.Errorf("user timezone: %w", err)
 	}
-	if rows.Next() {
-		_ = rows.Scan(&stored)
-	}
-	rows.Close()
-	for _, name := range []string{headerTZ, stored, DefaultTimezone} {
+	for _, name := range []string{headerTZ, prefs.Timezone, DefaultTimezone} {
 		if name == "" {
 			continue
 		}

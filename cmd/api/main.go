@@ -177,10 +177,6 @@ func main() {
 	dashboardService.WithExpected(recurringService)
 	meService.WithExpected(recurringService)
 
-	meService.WithDueCheck(recurringService.DueCheck)
-	dashboardService.WithDueCheck(recurringService.DueCheck)
-	notificationsService.WithDueCheck(recurringService.DueCheck)
-
 	accountsService.WithNotificationService(notificationsService)
 
 	// Auth registration hooks: seed 6 system + starter user categories AND the user's notification
@@ -294,10 +290,13 @@ func main() {
 		protected.Use(auth.Middleware(cfg, authStore))
 		// the caller's X-Timezone rides in the request context: every service that works
 		// out "today" (recurring, me, dashboard, budgets) reads it from there
+		// and the caller's stored timezone / language are read once per request
 		protected.Use(func(c *gin.Context) {
+			ctx := shared.WithUserPrefs(c.Request.Context())
 			if tz := c.GetHeader("X-Timezone"); tz != "" {
-				c.Request = c.Request.WithContext(shared.WithHeaderTZ(c.Request.Context(), tz))
+				ctx = shared.WithHeaderTZ(ctx, tz)
 			}
+			c.Request = c.Request.WithContext(ctx)
 			c.Next()
 		})
 		protected.Use(datasync.Middleware(dbPool, log))
