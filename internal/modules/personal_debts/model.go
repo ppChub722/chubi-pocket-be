@@ -75,21 +75,23 @@ type EntryTx struct {
 }
 
 type DebtEntry struct {
-	ID             uuid.UUID   `json:"id"`
-	Key            string      `json:"key"`
-	Direction      string      `json:"direction"`
-	Amount         float64     `json:"amount"`
-	Date           string      `json:"date"`
-	Description    *string     `json:"description"`
-	Note           *string     `json:"note"`
-	Paid           bool        `json:"paid"`
-	DueDate        *string     `json:"due_date"`
-	Source         *DebtSource `json:"source"`
-	Transaction    *EntryTx    `json:"transaction"`
-	CreatedAt      time.Time   `json:"created_at"`
-	InCurrentCycle *bool       `json:"in_current_cycle"`
-	UpdatedAt      time.Time   `json:"updated_at"`
-	Origin         *DebtOrigin `json:"origin"`
+	ID          uuid.UUID   `json:"id"`
+	Key         string      `json:"key"`
+	Direction   string      `json:"direction"`
+	Amount      float64     `json:"amount"`
+	Date        string      `json:"date"`
+	Description *string     `json:"description"`
+	Note        *string     `json:"note"`
+	Paid        bool        `json:"paid"`
+	DueDate     *string     `json:"due_date"`
+	Source      *DebtSource `json:"source"`
+	Transaction *EntryTx    `json:"transaction"`
+	// LinkedTransaction is one of my own transactions the entry points at (soft link).
+	LinkedTransaction *EntryTx    `json:"linked_transaction"`
+	CreatedAt         time.Time   `json:"created_at"`
+	InCurrentCycle    *bool       `json:"in_current_cycle"`
+	UpdatedAt         time.Time   `json:"updated_at"`
+	Origin            *DebtOrigin `json:"origin"`
 }
 
 type DebtPerson struct {
@@ -269,9 +271,15 @@ type EntryList struct {
 }
 
 type EntryDetail struct {
-	Entry         DebtEntry                       `json:"entry"`
-	PersonBalance DebtPerson                      `json:"person_balance"`
-	Transaction   *transactions.TransactionDetail `json:"transaction"`
+	Entry             DebtEntry                       `json:"entry"`
+	PersonBalance     DebtPerson                      `json:"person_balance"`
+	Transaction       *transactions.TransactionDetail `json:"transaction"`
+	LinkedTransaction *transactions.TransactionDetail `json:"linked_transaction"`
+}
+
+// LinkTxRequest — POST /personal-debts/{id}/link.
+type LinkTxRequest struct {
+	TransactionID uuid.UUID `json:"transaction_id" binding:"required"`
 }
 
 type WriteResult struct {
@@ -279,6 +287,7 @@ type WriteResult struct {
 	PersonBalance         DebtPerson                      `json:"person_balance"`
 	PreviousPersonBalance *DebtPerson                     `json:"previous_person_balance"`
 	Transaction           *transactions.TransactionDetail `json:"transaction"`
+	LinkedTransaction     *transactions.TransactionDetail `json:"linked_transaction"`
 	AccountBalances       []shared.WalletBalance          `json:"account_balances"`
 	BalanceChange         *transactions.PersonDelta       `json:"balance_change"` // create only (0.4.0-3); null on other writes
 }
@@ -311,6 +320,9 @@ type CreateEntryRequest struct {
 	// BillID (0.4.0-3) — the event bill this debt settles a share of (the resolve sheet's "as
 	// debt"): the entry keeps source event + the bill + its event.
 	BillID *uuid.UUID `json:"bill_id"`
+	// EventID (0.4.0-4) — without bill_id: the debt records an event's จัดการ line (what one
+	// member still owes another over the whole event); the entry keeps source event + the event.
+	EventID *uuid.UUID `json:"event_id"`
 }
 
 type UpdateEntryRequest struct {

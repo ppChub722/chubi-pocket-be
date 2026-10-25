@@ -81,6 +81,9 @@ type periodRow struct {
 	Amount     float64
 	Overridden bool
 	Note       *string
+	// Base is the amount without its own: the budget's amount for this period
+	// (kept when the budget's amount changes later, so a past period stays).
+	Base float64
 }
 
 type ScopeCategory struct {

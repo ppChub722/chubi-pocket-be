@@ -131,6 +131,9 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	if saved > 0.004 {
 		return ErrGoalHasSavings
 	}
+	if err := deleteSavingRulesTx(ctx, tx, userID, id); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM saving_goals WHERE id = $1 AND user_id = $2`, id, userID); err != nil {
 		return err
 	}
@@ -163,6 +166,15 @@ func (s *Service) setStatus(ctx context.Context, userID, id uuid.UUID, check fun
 	}
 	if err := s.store.saveGoal(ctx, tx, g); err != nil {
 		return nil, err
+	}
+	if status != StateActive {
+		today, err := s.today(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		if err := pauseSavingRulesTx(ctx, tx, userID, id, today); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
@@ -240,6 +252,9 @@ func (s *Service) Close(ctx context.Context, userID, id uuid.UUID, r CloseReques
 	now := time.Now()
 	g.Status, g.ClosedAt = StateCompleted, &now
 	if err := s.store.saveGoal(ctx, tx, g); err != nil {
+		return nil, err
+	}
+	if err := pauseSavingRulesTx(ctx, tx, userID, g.ID, today); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {

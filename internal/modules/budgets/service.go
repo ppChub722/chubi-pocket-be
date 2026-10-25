@@ -205,9 +205,13 @@ func forecastOf(r *periodRow, f figures, today time.Time, live bool) (Forecast, 
 }
 
 func periodView(b *Budget, r *periodRow, f figures, current bool, today time.Time, pace bool) Period {
+	base := r.Base
+	if base <= 0 { // a period not stored yet
+		base = b.Amount
+	}
 	p := Period{
 		ID: r.ID, Seq: r.Seq, Start: r.Start.Format(dateLayout), End: dstr(r.End), Amount: r.Amount,
-		BaseAmount: b.Amount, Overridden: r.Overridden, Note: r.Note, IsCurrent: current,
+		BaseAmount: base, Overridden: r.Overridden, Note: r.Note, IsCurrent: current,
 		OnPace: pace && current,
 		Used:   round2(f.used), Expected: round2(f.expected), Remaining: round2(r.Amount - f.used),
 	}
@@ -407,12 +411,11 @@ func itemView(c countRow, rf *refs, reason func(countRow) string) Item {
 	return it
 }
 
+// sortItems: newest date first for every row (expected ones among the used
+// ones by date); on one day the expected ones lead.
 func sortItems(rows []countRow) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
-		if a.CountsAs != b.CountsAs {
-			return a.CountsAs == "expected"
-		}
 		ad, bd := time.Time{}, time.Time{}
 		if a.Date != nil {
 			ad = *a.Date
@@ -421,10 +424,10 @@ func sortItems(rows []countRow) {
 			bd = *b.Date
 		}
 		if !ad.Equal(bd) {
-			if a.CountsAs == "expected" {
-				return ad.Before(bd)
-			}
 			return ad.After(bd)
+		}
+		if a.CountsAs != b.CountsAs {
+			return a.CountsAs == "expected"
 		}
 		return a.ID.String() < b.ID.String()
 	})
@@ -1216,8 +1219,10 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, r *Request, 
 			}
 		}
 		if amountChanged {
-			if _, err := tx.Exec(ctx, `UPDATE budget_periods SET amount = $2
-				WHERE budget_id = $1 AND NOT overridden AND start_date >= $3`, b.ID, b.Amount, from); err != nil {
+			// From the current period on, the base follows; a period with its own amount keeps it.
+			if _, err := tx.Exec(ctx, `UPDATE budget_periods
+				SET base_amount = $2, amount = CASE WHEN overridden THEN amount ELSE $2 END
+				WHERE budget_id = $1 AND start_date >= $3`, b.ID, b.Amount, from); err != nil {
 				return nil, err
 			}
 		}
@@ -1232,12 +1237,15 @@ func (s *Service) UpdatePeriod(ctx context.Context, userID, id, periodID uuid.UU
 		if err != nil {
 			return nil, ErrPeriodNotFound
 		}
+		// null, or the base itself, = back to the period's own base (never today's
+		// budget amount: a past period keeps its history).
 		if r.present["amount"] {
-			if r.Amount == nil {
-				p.Amount, p.Overridden = b.Amount, false
-			} else if *r.Amount <= 0 {
+			switch {
+			case r.Amount == nil || math.Abs(*r.Amount-p.Base) < 0.005:
+				p.Amount, p.Overridden = p.Base, false
+			case *r.Amount <= 0:
 				return nil, ErrValidation
-			} else {
+			default:
 				p.Amount, p.Overridden = *r.Amount, true
 			}
 		}

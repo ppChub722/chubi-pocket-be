@@ -110,8 +110,6 @@ type GoalView struct {
 	MonthShort      *float64         `json:"month_short"`
 	Status          string           `json:"status"`
 	BehindMonths    *int             `json:"behind_months"`
-	AutoSave        *AutoSave        `json:"auto_save"` // legacy: the first of auto_saves
-	AutoSaves       []AutoSaveItem   `json:"auto_saves"`
 	Group           *string          `json:"group"`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
@@ -200,11 +198,9 @@ type GoalDetail struct {
 }
 
 type SpareDetail struct {
-	Spare     Spare          `json:"spare"`
-	History   []HistoryPoint `json:"history"`
-	AutoSave  *AutoSave      `json:"auto_save"` // legacy: the first of auto_saves
-	AutoSaves []AutoSaveItem `json:"auto_saves"`
-	Entries   EntryList      `json:"entries"`
+	Spare   Spare          `json:"spare"`
+	History []HistoryPoint `json:"history"`
+	Entries EntryList      `json:"entries"`
 }
 
 type WalletOut struct {

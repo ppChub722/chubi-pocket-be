@@ -122,7 +122,7 @@ func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, ro
 		row.PendingID = nil
 	}
 	d := row.Draft
-	if d.Type == nil || *d.Type == typeSaving {
+	if d.Type == nil {
 		return nil, nil, ErrValidation
 	}
 	if d.Amount == nil || *d.Amount <= 0 {
@@ -139,6 +139,9 @@ func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, ro
 	desc := d.Description
 	if desc == nil || *desc == "" {
 		desc = ptr(occName(r, slot, seqPtr(seqIndex(r), slot), lang))
+	}
+	if *d.Type == typeSaving {
+		return s.recordSavingTx(ctx, tx, row, when, desc, auto)
 	}
 	req := transactions.CreateRequest{
 		Type: transactions.TxType(*d.Type), AccountID: d.AccountID, Amount: *d.Amount, CategoryID: d.CategoryID,
@@ -281,7 +284,11 @@ func (s *Service) Confirm(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 	if err != nil {
 		return nil, err
 	}
+	before := row.Draft
 	applyToDraft(&row.Draft, &req.Fields)
+	if switchesSaving(before, row.Draft) {
+		return nil, ErrValidation
+	}
 	if req.values() {
 		row.Edited = true
 	}

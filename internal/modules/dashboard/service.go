@@ -52,7 +52,7 @@ func (s *Service) upcomingItems(ctx context.Context, userID uuid.UUID, today tim
 	}
 	out := make([]upcomingRow, 0, len(occs))
 	for _, o := range occs {
-		if o.Due {
+		if o.Due || o.Type == "saving" { // a saving is not a bill to pay
 			continue
 		}
 		id, rule, slot := o.RuleID, o.RuleID, o.Slot.Format(dateLayout)

@@ -228,6 +228,47 @@ func (h *Handler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
+// LinkTx — POST /personal-debts/{id}/link: the entry points at one of my existing transactions.
+func (h *Handler) LinkTx(c *gin.Context) {
+	userID, ok := caller(c)
+	if !ok {
+		return
+	}
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	var req LinkTxRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		return
+	}
+	out, err := h.service.LinkTx(c.Request.Context(), userID, id, req.TransactionID)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// UnlinkTx — POST /personal-debts/{id}/unlink: drops the link; the transaction stays.
+func (h *Handler) UnlinkTx(c *gin.Context) {
+	userID, ok := caller(c)
+	if !ok {
+		return
+	}
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.UnlinkTx(c.Request.Context(), userID, id)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := caller(c)
 	if !ok {
@@ -288,6 +329,12 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "BILL_NOT_FOUND", err.Error(), nil)
 	case errors.Is(err, ErrManagedByTx):
 		response.Fail(c, http.StatusConflict, "DEBT_MANAGED_BY_TX", err.Error(), nil)
+	case errors.Is(err, transactions.ErrTxNotFound):
+		response.NotFound(c, "TRANSACTION_NOT_FOUND", "Transaction not found")
+	case errors.Is(err, ErrTxNotLinkable):
+		response.BadRequest(c, "TX_NOT_LINKABLE", err.Error(), nil)
+	case errors.Is(err, ErrTxLinkedElsewhere):
+		response.Fail(c, http.StatusConflict, "DEBT_TX_ALREADY_LINKED", err.Error(), nil)
 	case errors.Is(err, transactions.ErrAccountArchived):
 		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, transactions.ErrAccountForbidden):

@@ -141,6 +141,11 @@ func (s *Service) GetEntry(ctx context.Context, userID, id uuid.UUID) (*EntryDet
 			return nil, err
 		}
 	}
+	if v.LinkedTransaction != nil {
+		if out.LinkedTransaction, err = s.txs.Get(ctx, userID, v.LinkedTransaction.ID); err != nil {
+			return nil, err
+		}
+	}
 	return out, nil
 }
 
@@ -273,6 +278,17 @@ func (s *Service) createEntryTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID
 		}
 		kind := SourceEvent
 		entry.SourceKind, entry.SourceProjectTransactionID, entry.ProjectID = &kind, req.BillID, &projectID
+	} else if req.EventID != nil {
+		var ok bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM project_members
+			WHERE project_id = $1 AND user_id = $2 AND status = 'active')`, *req.EventID, userID).Scan(&ok); err != nil {
+			return nil, nil, fmt.Errorf("debt event: %w", err)
+		}
+		if !ok {
+			return nil, nil, ErrBillNotFound
+		}
+		kind := SourceEvent
+		entry.SourceKind, entry.ProjectID = &kind, req.EventID
 	}
 	e, err := insertEntryTx(ctx, tx, entry)
 	if err != nil {
@@ -384,10 +400,97 @@ func (s *Service) writeResult(ctx context.Context, userID, entryID uuid.UUID, to
 			return nil, err
 		}
 	}
+	if v.LinkedTransaction != nil {
+		if out.LinkedTransaction, err = s.txs.Get(ctx, userID, v.LinkedTransaction.ID); err != nil {
+			return nil, err
+		}
+	}
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.store.db, touched); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// LinkTx points a manual entry at one of my plain transactions of its direction (paid =
+// expense, received = income). The transaction keeps its category and amount. The entry's own
+// transaction, if it has one, is deleted: the linked one replaces it.
+func (s *Service) LinkTx(ctx context.Context, userID, id, txID uuid.UUID) (*WriteResult, error) {
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	e, err := getEntry(ctx, tx, userID, id, true)
+	if err != nil {
+		return nil, err
+	}
+	if e.SourceKind != nil {
+		return nil, ErrManagedBySource
+	}
+	var (
+		typ   string
+		plain bool
+	)
+	err = tx.QueryRow(ctx, `SELECT t.type,
+		t.project_id IS NULL AND t.source_personal_debt_id IS NULL AND t.source_project_transaction_id IS NULL
+		AND t.repay_person_name IS NULL AND t.paid_by_amount IS NULL
+		AND NOT EXISTS (SELECT 1 FROM categories c WHERE c.id = t.category_id AND c.is_system)
+		FROM transactions t WHERE t.id = $1 AND t.user_id = $2`, txID, userID).Scan(&typ, &plain)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, transactions.ErrTxNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("link tx: %w", err)
+	}
+	want := "income"
+	if e.Direction == DirectionPaid {
+		want = "expense"
+	}
+	if !plain || typ != want {
+		return nil, ErrTxNotLinkable
+	}
+	var taken bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM personal_debts
+		WHERE linked_transaction_id = $1 AND id <> $2)`, txID, e.ID).Scan(&taken); err != nil {
+		return nil, fmt.Errorf("link tx taken: %w", err)
+	}
+	if taken {
+		return nil, ErrTxLinkedElsewhere
+	}
+
+	var touched []uuid.UUID
+	own, err := entryTxID(ctx, tx, e.ID)
+	if err != nil {
+		return nil, err
+	}
+	if own != nil {
+		acc, err := s.txs.DeleteDebtTxInTx(ctx, tx, userID, *own)
+		if err != nil {
+			return nil, err
+		}
+		touched = nonNil(acc)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE personal_debts SET linked_transaction_id = $2, updated_by_user_id = $3
+		WHERE id = $1`, e.ID, txID, userID); err != nil {
+		return nil, fmt.Errorf("link tx: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.writeResult(ctx, userID, e.ID, touched, nil)
+}
+
+// UnlinkTx drops the entry's link; the transaction stays as it is.
+func (s *Service) UnlinkTx(ctx context.Context, userID, id uuid.UUID) (*WriteResult, error) {
+	if _, err := entryView(ctx, s.store.db, userID, id); err != nil {
+		return nil, err
+	}
+	if _, err := s.store.db.Exec(ctx, `UPDATE personal_debts SET linked_transaction_id = NULL, updated_by_user_id = $3
+		WHERE id = $1 AND user_id = $2`, id, userID, userID); err != nil {
+		return nil, fmt.Errorf("unlink tx: %w", err)
+	}
+	return s.writeResult(ctx, userID, id, nil, nil)
 }
 
 func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req UpdateEntryRequest) (*WriteResult, error) {
@@ -502,6 +605,10 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 			return nil, err
 		}
 		touched = nonNil(wallet)
+		// The entry's own transaction replaces a linked one.
+		if _, err := tx.Exec(ctx, `UPDATE personal_debts SET linked_transaction_id = NULL WHERE id = $1`, e.ID); err != nil {
+			return nil, fmt.Errorf("drop link: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)

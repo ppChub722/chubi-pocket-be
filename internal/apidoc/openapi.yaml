@@ -3812,7 +3812,7 @@ paths:
         - { name: q, in: query, description: 'Case-insensitive substring of the name.', schema: { type: string } }
         - { name: status, in: query, schema: { type: string, enum: [current, archived, all] } }
         - { name: for_type, in: query, description: 'THE PICKER: only ACTIVE settings of this money type (a transaction of that type can link to them); each row''s current_occurrence says which occurrence it would take (null = none now).', schema: { type: string, enum: [expense, income, transfer] } }
-        - { name: kind, in: query, description: 'Only settings of this kind.', schema: { type: string, enum: [subscription, installment, income, reminder] } }
+        - { name: kind, in: query, description: 'Only settings of this kind.', schema: { type: string, enum: [subscription, installment, income, reminder, saving] } }
         - { name: category_id, in: query, description: 'Picker hint (with for_type): the transaction''s category; settings with it are likely: true and first.', schema: { $ref: '#/components/schemas/Uuid' } }
         - { name: amount, in: query, description: 'Picker hint (with for_type): the transaction''s amount; settings within ±5% are likely: true and first.', schema: { type: number, exclusiveMinimum: 0 } }
       responses:
@@ -3832,6 +3832,7 @@ paths:
       operationId: createRecurring
       description: |
         Writes the setting only: its occurrences are COMPUTED from the rule on every read (0.4.0-2), a row is stored only when an occurrence is edited, recorded, paid or skipped. `tracked_from` = today: earlier occurrences count as paid (never overdue). A set end is at most 2 years after the start (400 END_TOO_FAR). `auto_create` needs a fixed amount and a wallet (400 AUTO_CREATE_NEEDS_AMOUNT / AUTO_CREATE_NEEDS_WALLET). Errors: 400 VALIDATION_ERROR / INVALID_RULE / END_TOO_FAR / ACCOUNT_NOT_FOUND / INVALID_CATEGORY / TAG_NOT_FOUND.
+        kind saving (ออมเงิน, replaces the goal auto-saves): 400 SAVING_NEEDS_WALLET without account_id, 400 WALLET_NOT_TRACKED for a wallet that does not track its balance, 404 NOT_FOUND for an unknown goal_id, 409 GOAL_NOT_ACTIVE for a closed / archived goal. Closing or archiving the goal pauses its saving settings (reopening does not resume them; resuming answers 409 GOAL_NOT_ACTIVE while the goal is not active); deleting the goal deletes them.
       requestBody:
         required: true
         content:
@@ -3845,6 +3846,8 @@ paths:
               schema: { $ref: '#/components/schemas/RecurringDetail' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: '409 GOAL_NOT_ACTIVE (kind saving) / ACCOUNT_ARCHIVED.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
       x-breaking: New.
       x-used-by:
         - { page: recurring-detail, calls: 1 }
@@ -4142,7 +4145,7 @@ paths:
       tags: [Recurring]
       summary: Confirm one occurrence ("ยืนยัน")
       operationId: confirmRecurringOccurrence
-      description: 'Records the transaction now, dated the occurrence date unless `date` is sent; the other keys override the values first (the description defaults to the occurrence name). 400 AMOUNT_REQUIRED when it has no amount, 409 ALREADY_RECORDED, 404 when the slot is not an occurrence.'
+      description: 'Records the transaction now, dated the occurrence date unless `date` is sent; the other keys override the values first (the description defaults to the occurrence name). 400 AMOUNT_REQUIRED when it has no amount, 409 ALREADY_RECORDED, 404 when the slot is not an occurrence. A saving occurrence makes a saving entry instead (from the wallet into the goal / unallocated pot, source recurring, the note defaults to the occurrence name): `transaction` is null, `item.saving_entry_id` is set; 400 SAVING_NEEDS_WALLET / WALLET_NOT_TRACKED, 409 GOAL_NOT_ACTIVE.'
       requestBody:
         required: false
         content:
@@ -4248,7 +4251,7 @@ paths:
       tags: [Recurring]
       summary: Link an existing transaction to one occurrence
       operationId: linkRecurringOccurrence
-      description: 'One occurrence ↔ one transaction; the transaction keeps its own date and amount (the occurrence shows the transaction''s amount). The type must match the setting''s (400 VALIDATION_ERROR). 409 ITEM_ALREADY_LINKED when the occurrence holds another transaction (`details.transaction`) or this transaction is on another occurrence (`details.other {rule_id, slot}`), unless `replace: true` (one DB transaction: the other side lets go, its transaction stays). `amount_differs` → the app asks "อัปเดตยอดรายการประจำด้วยไหม".'
+      description: 'One occurrence ↔ one transaction; the transaction keeps its own date and amount (the occurrence shows the transaction''s amount). The type must match the setting''s (400 VALIDATION_ERROR; a saving occurrence never takes a transaction: 400 VALIDATION_ERROR). 409 ITEM_ALREADY_LINKED when the occurrence holds another transaction (`details.transaction`) or this transaction is on another occurrence (`details.other {rule_id, slot}`), unless `replace: true` (one DB transaction: the other side lets go, its transaction stays). `amount_differs` → the app asks "อัปเดตยอดรายการประจำด้วยไหม".'
       requestBody:
         required: true
         content:
@@ -4714,6 +4717,59 @@ paths:
       x-breaking: "Was the legacy {success, message} envelope; now DebtEntryDeleteResult. Also deletes the linked transaction."
       x-used-by:
         - { page: tx-detail, calls: 1 }
+  /personal-debts/{id}/link:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Debts]
+      summary: Link an existing transaction to an entry ("บันทึกในรายการ")
+      operationId: linkDebtEntryTx
+      description: |
+        0.4.0-4. A soft link (`entry.linked_transaction`): the transaction keeps its category, amount and wallet, and still counts in reports / budgets; the amounts may differ. Only a manual entry (`source` null) and one of my plain transactions of its direction (paid = expense, received = income; not a debt / repayment / event / paid-by / system row). One transaction links one entry. An entry's own transaction (`transaction`) is deleted: the linked one replaces it (its wallet is in `account_balances`). Linking again replaces the link.
+        Errors: 400 TX_NOT_LINKABLE, 404 NOT_FOUND / TRANSACTION_NOT_FOUND, 409 ENTRY_MANAGED_BY_SOURCE / DEBT_TX_ALREADY_LINKED.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction_id]
+              properties:
+                transaction_id: { $ref: '#/components/schemas/Uuid' }
+      responses:
+        '200':
+          description: The entry with its link.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DebtEntryWriteResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'ENTRY_MANAGED_BY_SOURCE / DEBT_TX_ALREADY_LINKED.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-used-by:
+        - { page: tx-detail, calls: 1 }
+  /personal-debts/{id}/unlink:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Debts]
+      summary: Drop an entry's linked transaction (the transaction stays)
+      operationId: unlinkDebtEntryTx
+      description: 0.4.0-4. Clears `entry.linked_transaction`; the transaction is not touched. 404 NOT_FOUND if not the caller's.
+      responses:
+        '200':
+          description: The entry without its link.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DebtEntryWriteResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-used-by:
+        - { page: tx-detail, calls: 1 }
   /personal-debts/split-requests/{notification_id}/accept:
     parameters: [{"name":"notification_id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}]
     post:
@@ -4781,7 +4837,7 @@ paths:
       tags: [Saving goals]
       summary: Goals list (+ totals and the spare bucket)
       operationId: listSavingGoals
-      description: '`status`: active (default) | completed | archived. `month` (YYYY-MM, default this month) is the month the `month_plan` / `month_saved` / `month_short` of every goal and the summary''s month totals are for; `month_plan` of a goal without auto-saves is its `needed_monthly` whatever the month.'
+      description: '`status`: active (default) | completed | archived. `month` (YYYY-MM, default this month) is the month the `month_plan` / `month_saved` / `month_short` of every goal and the summary''s month totals are for; `month_plan` of a goal with active recurring saving settings (type saving, GET /recurring) is Σ amount × their occurrences in that month; without any it is its `needed_monthly` whatever the month.'
       parameters:
         - { name: month, in: query, description: 'YYYY-MM (400 VALIDATION_ERROR otherwise).', schema: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$' } }
         - { name: status, in: query, schema: { type: string, enum: [active, completed, archived] } }
@@ -4817,124 +4873,6 @@ paths:
       x-breaking: v2 body (no linked_account_id / allocation_pct).
       x-used-by:
         - { page: goal-detail, calls: 1 }
-  /saving-goals/{id}/auto-saves:
-    parameters: [{ $ref: '#/components/parameters/IdPath' }]
-    put:
-      tags: [Saving goals]
-      summary: Replace a goal's auto-saves
-      operationId: setGoalAutoSaves
-      description: |
-        A goal can have many auto-saves, each with its own wallet, amount and a full recurrence rule (the /recurring shapes). This REPLACES the set: an item with an existing `id` is updated in place (it keeps its produced-up-to marker), an item without an `id` is added, items not listed are deleted, `items: []` clears (`items` is required). At most 20 items; an `id` that is not in the goal's set is 400 VALIDATION_ERROR. Rules are checked like /recurring (400 INVALID_RULE, 400 END_TOO_FAR for an end more than 2 years after the start); `account_id` must be an active wallet that tracks its balance. The goal must be active (409 GOAL_NOT_ACTIVE).
-        The due check makes one saving draft (🐷, source auto_save) for every occurrence from `start_date` up to today that is inside `end` and after the last one made — the 12 newest per item per run; the user confirms them (a wallet-less draft saves with no wallet). Returns the goal page.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/SavingAutoSavesRequest' }
-      responses:
-        '200':
-          description: 'The goal page.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/SavingGoalDetail' }
-        '400': { $ref: '#/components/responses/ValidationError' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: 'GOAL_NOT_ACTIVE: the goal is closed or archived.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-      x-breaking: 'New (0.4.0-2). Many auto-saves per goal; the old /auto-save calls keep working (they replace the set with ONE monthly item).'
-  /saving-goals/spare/auto-saves:
-    put:
-      tags: [Saving goals]
-      summary: Replace the auto-saves of unallocated money
-      operationId: setSpareAutoSaves
-      description: 'Like the goal auto-saves, into the spare bucket (drafts with no goal; the spare is always on). Returns the spare page.'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/SavingAutoSavesRequest' }
-      responses:
-        '200':
-          description: 'The spare page.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/SavingSpareDetail' }
-        '400': { $ref: '#/components/responses/ValidationError' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-      x-breaking: 'New (0.4.0-2).'
-  /saving-goals/{id}/auto-save:
-    parameters: [{ $ref: '#/components/parameters/IdPath' }]
-    put:
-      tags: [Saving goals]
-      summary: Set a goal's auto-saving
-      operationId: setGoalAutoSave
-      description: 'Legacy (use PUT /auto-saves). Replaces the goal''s auto-saves with ONE monthly item: `amount` on `day` of each month (start today, no end), from `account_id` or no wallet; an item already there is kept (updated in place) so a draft is not made twice. The user confirms the drafts (a wallet-less draft saves with no wallet). Returns the goal page. 404 / 409 GOAL_NOT_ACTIVE for a closed goal.'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/SavingAutoSaveRequest' }
-      responses:
-        '200':
-          description: 'The goal page.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/SavingGoalDetail' }
-        '400': { $ref: '#/components/responses/ValidationError' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/NotFound' }
-      x-breaking: 'New (0.4.0). Replaces the recurring ออม settings.'
-    delete:
-      tags: [Saving goals]
-      summary: Stop a goal's auto-saving
-      operationId: clearGoalAutoSave
-      description: 'Idempotent. Returns the goal page.'
-      responses:
-        '200':
-          description: 'The goal page.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/SavingGoalDetail' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/NotFound' }
-      x-breaking: 'New (0.4.0).'
-  /saving-goals/spare/auto-save:
-    put:
-      tags: [Saving goals]
-      summary: Set the auto-saving of unallocated money
-      operationId: setSpareAutoSave
-      description: 'Like the goal auto-saving, into the spare bucket (a draft with no goal). Returns the spare page.'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/SavingAutoSaveRequest' }
-      responses:
-        '200':
-          description: 'The spare page.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/SavingSpareDetail' }
-        '400': { $ref: '#/components/responses/ValidationError' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-      x-breaking: 'New (0.4.0).'
-    delete:
-      tags: [Saving goals]
-      summary: Stop the auto-saving of unallocated money
-      operationId: clearSpareAutoSave
-      description: 'Idempotent. Returns the spare page.'
-      responses:
-        '200':
-          description: 'The spare page.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/SavingSpareDetail' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-      x-breaking: 'New (0.4.0).'
   /saving-goals/spare:
     get:
       tags: [Saving goals]
@@ -4959,7 +4897,7 @@ paths:
       tags: [Saving goals]
       summary: Goal page (one call)
       operationId: getSavingGoal
-      description: '`month` (YYYY-MM, default this month) is the month `goal.month_plan` / `month_saved` / `month_short` are for: with auto-saves month_plan = Σ amount × occurrences in THAT month (a daily rule counts the whole month), else needed_monthly.'
+      description: '`month` (YYYY-MM, default this month) is the month `goal.month_plan` / `month_saved` / `month_short` are for: with active recurring saving settings month_plan = Σ amount × their occurrences in THAT month (a daily rule counts the whole month), else needed_monthly.'
       parameters:
         - { name: month, in: query, description: 'YYYY-MM (400 VALIDATION_ERROR otherwise).', schema: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$' } }
         - { $ref: '#/components/parameters/PerPage' }
@@ -5298,7 +5236,7 @@ paths:
       tags: [Budgets]
       summary: Edit one period ("เฉพาะรอบนี้")
       operationId: updateBudgetPeriod
-      description: '`amount` (null = back to the base amount) and `note`. Returns the budget page at that period.'
+      description: 'Only the keys sent change. `amount`: null, or equal to the period''s `base_amount`, = back to that base (not overridden; a past period keeps its own base, never today''s budget amount); else the period''s own amount. `note` alone never touches the amount. Returns the budget page at that period.'
       requestBody:
         required: true
         content:
@@ -5323,7 +5261,7 @@ paths:
       tags: [Budgets]
       summary: Everything counted in a period ("ดูอีก n รายการ")
       operationId: listBudgetItems
-      description: 'Expected items (upcoming, pending) first, then the used ones newest first. `period_id` default the current period; `source` filters one source.'
+      description: 'Every item newest date first (expected ones among the used ones by date; on one day the expected ones lead). `period_id` default the current period; `source` filters one source.'
       parameters:
         - { name: period_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
         - { name: source, in: query, schema: { type: string, enum: [normal, recurring, event, upcoming, pending, future_tx] } }
@@ -6762,7 +6700,7 @@ components:
         - pace_monthly = the net saved into the goal over the last 3 months, this month included (fewer when the goal is younger), per month; null when nothing was saved.
         - eta_date = today + ⌈remaining / pace_monthly⌉ months; null when reached or no pace.
         - pace: reached (saved ≥ target) · on_track (eta ≤ deadline) · late (eta after the deadline, or no pace with a deadline; late_months = whole months past it, null without an eta) · none (no deadline, or not active).
-      required: [id, name, description, note, icon_code, target_amount, deadline, state, saved_amount, progress_pct, remaining_amount, days_remaining, needed_monthly, pace_monthly, eta_date, pace, late_months, milestones, currency, closed_at, actions, month_plan, month_saved, month_short, status, behind_months, auto_save, auto_saves, group, created_at, updated_at]
+      required: [id, name, description, note, icon_code, target_amount, deadline, state, saved_amount, progress_pct, remaining_amount, days_remaining, needed_monthly, pace_monthly, eta_date, pace, late_months, milestones, currency, closed_at, actions, month_plan, month_saved, month_short, status, behind_months, group, created_at, updated_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         name: { type: string, maxLength: 100 }
@@ -6803,13 +6741,11 @@ components:
             archive: { type: boolean }
             restore: { type: boolean }
             delete: { type: boolean }
-        month_plan: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'What the goal should get THIS month: its auto-saving amount, else needed_monthly; null for a closed goal or when there is neither.' }
+        month_plan: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'What the goal should get THIS month: Σ amount × occurrences this month of its ACTIVE recurring saving settings (/recurring, kind saving, goal_id = the goal), else needed_monthly; null for a closed goal or when there is neither.' }
         month_saved: { $ref: '#/components/schemas/Money', description: 'Net saved into the goal so far this month (user timezone).' }
         month_short: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'max(0, month_plan − month_saved); null with no plan or no target (an open-ended goal is never short).' }
         status: { type: string, enum: [reached, on_track, behind, none], description: 'reached = saved ≥ target; on_track = the pace gets there by the deadline; behind = it does not (behind_months); none = no deadline / closed.' }
         behind_months: { type: [integer, 'null'], description: 'With status behind: how many months late.' }
-        auto_save: { oneOf: [{ $ref: '#/components/schemas/SavingAutoSave' }, { type: 'null' }], description: 'Legacy: the first of `auto_saves` in the old shape (null = none). `day` = monthly.day for a monthly-by-day rule, else the start date''s day.' }
-        auto_saves: { type: array, items: { $ref: '#/components/schemas/SavingAutoSaveItem' }, description: 'The goal''s auto-saves, oldest first; [] = none. month_plan = the sum of amount × occurrences in the current month (needed_monthly without any).' }
         group: { type: [string, 'null'], enum: [ongoing, null], description: 'The list group the goal always sits in: ongoing (ออมต่อเนื่อง) for a goal with no target; null = grouped by this month (short / done / no plan).' }
         created_at: { $ref: '#/components/schemas/DateTime' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
@@ -6871,7 +6807,7 @@ components:
         amount: { $ref: '#/components/schemas/Money' }
         from: { $ref: '#/components/schemas/SavingBucketRef' }
         to: { $ref: '#/components/schemas/SavingBucketRef' }
-        source: { type: string, enum: [manual, recurring, pending], description: 'recurring = made from a recurring ออม draft ("ออมประจำ"); pending = from another pending draft.' }
+        source: { type: string, enum: [manual, recurring, pending], description: 'recurring = recorded from a recurring saving occurrence ("ออมประจำ"); pending = from a pending draft.' }
         goal_ids: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
         recurring: { oneOf: [{ $ref: '#/components/schemas/RecurringItemLink' }, { type: 'null' }] }
         created_at: { $ref: '#/components/schemas/DateTime' }
@@ -6888,49 +6824,6 @@ components:
         month: { type: string, description: 'YYYY-MM.' }
         cumulative: { $ref: '#/components/schemas/Money', description: 'The balance at the end of that month (this month: today).' }
         plan: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'The cumulative plan line: min(target, k × the goal''s month_plan), k = months since the first point; null without a plan (and on the spare).' }
-    SavingAutoSaveItem:
-      type: object
-      description: 'One auto-save of a goal (or of unallocated money): `amount` from `wallet` (or no wallet) on every occurrence of `rule` from `start_date` to the `end`; each is a pending saving draft (🐷) the user confirms.'
-      required: [id, amount, wallet, rule, start_date, end, next_date]
-      properties:
-        id: { $ref: '#/components/schemas/Uuid' }
-        amount: { $ref: '#/components/schemas/Money' }
-        wallet: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'Source wallet; null = none.' }
-        rule: { $ref: '#/components/schemas/RecurrenceRule' }
-        start_date: { $ref: '#/components/schemas/Date' }
-        end: { $ref: '#/components/schemas/RecurrenceEnd' }
-        next_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The next occurrence a draft is not made for yet; null once it has ended.' }
-    SavingAutoSaveInput:
-      type: object
-      required: [amount, rule, start_date]
-      properties:
-        id: { $ref: '#/components/schemas/Uuid', description: 'An existing item of this set (updated in place); leave out to add one.' }
-        amount: { type: number, exclusiveMinimum: 0 }
-        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Source wallet (active, tracks its balance) or none.' }
-        rule: { $ref: '#/components/schemas/RecurrenceRuleInput' }
-        start_date: { $ref: '#/components/schemas/Date' }
-        end: { $ref: '#/components/schemas/RecurrenceEndInput', description: 'Default none.' }
-    SavingAutoSavesRequest:
-      type: object
-      required: [items]
-      properties:
-        items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/SavingAutoSaveInput' }, description: 'The whole set; [] clears.' }
-    SavingAutoSave:
-      type: object
-      description: 'Legacy single auto-save (the first of `auto_saves`, old shape): on `day` a pending saving draft (🐷) of `amount` is made (from `wallet`, or no wallet); the user confirms it.'
-      required: [amount, day, wallet, next_date]
-      properties:
-        amount: { $ref: '#/components/schemas/Money' }
-        day: { type: integer, minimum: 1, maximum: 31, description: 'Day of the month; 31 = the last day of a short month.' }
-        wallet: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'Source wallet; null = none.' }
-        next_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The next occurrence a draft is not made for yet; null once it has ended.' }
-    SavingAutoSaveRequest:
-      type: object
-      required: [amount, day]
-      properties:
-        amount: { type: number, exclusiveMinimum: 0 }
-        day: { type: integer, minimum: 1, maximum: 31 }
-        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Source wallet (active, tracks its balance) or none.' }
     SavingGoalList:
       type: object
       required: [summary, spare, data]
@@ -6980,12 +6873,10 @@ components:
                 can_delete: { type: boolean }
     SavingSpareDetail:
       type: object
-      required: [spare, history, auto_save, auto_saves, entries]
+      required: [spare, history, entries]
       properties:
         spare: { $ref: '#/components/schemas/SavingSpare' }
         history: { type: array, items: { $ref: '#/components/schemas/SavingHistoryPoint' } }
-        auto_save: { oneOf: [{ $ref: '#/components/schemas/SavingAutoSave' }, { type: 'null' }], description: 'Legacy: the first of `auto_saves` in the old shape (null = none).' }
-        auto_saves: { type: array, items: { $ref: '#/components/schemas/SavingAutoSaveItem' }, description: 'The auto-saves of unallocated money, oldest first; [] = none.' }
         entries: { $ref: '#/components/schemas/SavingEntryList' }
         delete_preview:
           description: 'Only with ?include=delete_preview, else null: a goal can be deleted only while it holds no money (else 409 GOAL_HAS_SAVINGS: close it first).'
@@ -9816,7 +9707,7 @@ components:
         start: { $ref: '#/components/schemas/Date' }
         end: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'null = open-ended.' }
         amount: { $ref: '#/components/schemas/Money' }
-        base_amount: { $ref: '#/components/schemas/Money', description: 'The setup amount; differs from amount when overridden.' }
+        base_amount: { $ref: '#/components/schemas/Money', description: 'The budget''s amount for this period (0.4.0-4: stored per period, so it stays when the budget''s amount changes later); differs from amount when overridden.' }
         overridden: { type: boolean, description: 'The amount was set for this period only ("✏️ เฉพาะรอบนี้").' }
         note: { type: [string, 'null'], maxLength: 500 }
         is_current: { type: boolean }
@@ -10192,6 +10083,7 @@ components:
         due_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: '0.4.0-3 "กำหนดจ่าย": optional, never before `date`.' }
         source: { oneOf: [{ $ref: '#/components/schemas/DebtSource' }, { type: 'null' }], description: 'Null = a manual entry (fully editable).' }
         transaction: { oneOf: [{ $ref: '#/components/schemas/DebtEntryTx' }, { type: 'null' }], description: 'Null = ledger-only.' }
+        linked_transaction: { oneOf: [{ $ref: '#/components/schemas/DebtEntryTx' }, { type: 'null' }], description: '0.4.0-4: one of my existing transactions linked to the entry (soft link, POST /personal-debts/{id}/link). Never set together with `transaction`.' }
         created_at: { $ref: '#/components/schemas/DateTime' }
         in_current_cycle: { type: [boolean, 'null'], description: 'Only in the person''s entry lists (person page, entries): true = after the cycle boundary (cleared_at); null elsewhere.' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
@@ -10252,6 +10144,7 @@ components:
         entry: { $ref: '#/components/schemas/DebtEntry' }
         person_balance: { $ref: '#/components/schemas/DebtPerson' }
         transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }] }
+        linked_transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }], description: '0.4.0-4: entry.linked_transaction as a full row.' }
     DebtEntryWriteResult:
       type: object
       description: 'Every debt write returns the final state: the entry, the person''s new balance, the linked transaction (full row, null = ledger-only) and the post-write balance of every wallet touched.'
@@ -10262,6 +10155,7 @@ components:
         person_balance: { $ref: '#/components/schemas/DebtPerson' }
         previous_person_balance: { oneOf: [{ $ref: '#/components/schemas/DebtPerson' }, { type: 'null' }], description: 'Set only when an edit moved the entry to another person (the old person''s new balance).' }
         transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }] }
+        linked_transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }], description: '0.4.0-4: entry.linked_transaction as a full row.' }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
     DebtEntryDeleteResult:
       type: object
@@ -10287,6 +10181,7 @@ components:
         person_name: { type: string, minLength: 1, maxLength: 100, description: '`n:` keys only: the shown spelling of a typed name.' }
         due_date: { $ref: '#/components/schemas/Date', description: '0.4.0-3 "กำหนดจ่าย" (optional). Before the entry''s date → 400 VALIDATION_ERROR.' }
         bill_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.0-3 B3: the event resolve sheet''s "as debt": the event bill this debt settles a share of (I must be an active member: else 400 BILL_NOT_FOUND). The entry gets source {kind: event, id: the event}; unlike split-sourced entries its money stays editable.' }
+        event_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.0-4, without bill_id: the debt records an event''s จัดการ line (settle `recorded`). I must be an active member (else 400 BILL_NOT_FOUND). Source {kind: event, id: the event}, no bill.' }
     DebtEntryUpdateRequest:
       type: object
       description: 'Partial. A split-sourced entry accepts only description / note / paid.'
@@ -10541,11 +10436,12 @@ components:
         payable: { $ref: '#/components/schemas/Money', description: '−net when < 0 (they owe others), else 0.' }
     SettleLine:
       type: object
-      required: [from, to, amount]
+      required: [from, to, amount, recorded]
       properties:
         from: { $ref: '#/components/schemas/MemberRef', description: 'Owes.' }
         to: { $ref: '#/components/schemas/MemberRef', description: 'Gets.' }
         amount: { $ref: '#/components/schemas/Money' }
+        recorded: { type: boolean, description: '0.4.0-4: a line with me in it that I already recorded as a debt: one of my entries with source event, this event, no bill (POST entries with event_id), my side of the line, the other member (linked contact or same name) and the same amount. False for lines without me.' }
     MyBooks:
       type: object
       description: '0.4.0-3: which parts of my books hold the row.'
@@ -10938,11 +10834,11 @@ components:
         id: { $ref: '#/components/schemas/Uuid' }
         name: { type: string }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
-        kind: { type: string, enum: [subscription, installment, income, reminder], description: 'Sent by the recurring module (its items); absent on refs other modules embed.' }
+        kind: { type: string, enum: [subscription, installment, income, reminder, saving], description: 'Sent by the recurring module (its items); absent on refs other modules embed.' }
     Recurring:
       type: object
       description: 'A recurring setting (the generator), page-ready.'
-      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, monthly_amount, saved_count, pending_count, next_amount, current_occurrence, next_date, days_until, progress, ending_soon, counts, likely, edited_any, actions, created_at, updated_at, due_count, avg_amount, chain, auto_create, recorded_tx_count]
+      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal_id, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, monthly_amount, saved_count, pending_count, next_amount, current_occurrence, next_date, days_until, progress, ending_soon, counts, likely, edited_any, actions, created_at, updated_at, due_count, avg_amount, chain, auto_create, recorded_tx_count]
       properties:
         likely: { type: boolean, description: 'Only meaningful with the picker hints (for_type + category_id / amount): the setting matches the transaction by category or amount (±5%); such settings are listed first. false otherwise.' }
         id: { $ref: '#/components/schemas/Uuid' }
@@ -10950,9 +10846,9 @@ components:
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
-        type: { type: string, enum: [expense, income, transfer], description: 'The money direction; the user-facing choice is kind.' }
+        type: { type: string, enum: [expense, income, transfer, saving], description: 'The money direction; the user-facing choice is kind. saving (kind saving) is never money in or out.' }
         amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'null = a reminder with no amount yet.' }
-        kind: { type: string, enum: [subscription, installment, income, reminder] }
+        kind: { type: string, enum: [subscription, installment, income, reminder, saving], description: 'saving = ออมเงิน: each occurrence, when confirmed, saves `amount` from `account` (required, tracks its balance) into `goal` (null = the unallocated pot) as a saving entry, never a transaction.' }
         trial_until: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'Subscription: the free trial runs until this date.' }
         yearly_cost: { $ref: '#/components/schemas/Money', description: 'Amount x the times it happens in an average month x 12 (custom dates: x the number of dates); an installment counts at most amount x count. 0 with no amount.' }
         monthly_amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'Amount x the times it happens in an average month (the hero''s ต่อเดือน); null with no amount.' }
@@ -10976,7 +10872,8 @@ components:
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
         to_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'Transfers only.' }
         category: { oneOf: [{ $ref: '#/components/schemas/CategoryRef' }, { type: 'null' }] }
-        goal: { oneOf: [{ $ref: '#/components/schemas/SavingGoalRef', description: 'saving only: the target goal (null = spare).' }, { type: 'null' }] }
+        goal_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'saving only: the target goal; null = the unallocated pot ("ยังไม่จัดสรร").' }
+        goal: { oneOf: [{ $ref: '#/components/schemas/SavingGoalRef', description: 'saving only: the target goal (null = the unallocated pot).' }, { type: 'null' }] }
         tags: { type: array, items: { $ref: '#/components/schemas/TagRef' } }
         rule: { $ref: '#/components/schemas/RecurrenceRule' }
         start_date: { $ref: '#/components/schemas/Date' }
@@ -11082,19 +10979,20 @@ components:
                     name: { type: string }
                     date: { $ref: '#/components/schemas/Date' }
                     amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
-                    type: { type: string, enum: [expense, income, transfer] }
+                    type: { type: string, enum: [expense, income, transfer, saving] }
                 - { type: 'null' }
             due_30d_total: { $ref: '#/components/schemas/Money', description: 'What is still to pay in the next 30 days: expense occurrences not done / archived, due today or earlier (still waiting) up to 30 days ahead, KNOWN amounts only.' }
             awaiting_amount_count: { type: integer, description: 'Occurrences in that window (and any overdue pending one) that have no amount yet (reminders waiting for the number).' }
             by_kind:
               type: object
               description: 'Per kind, over the ACTIVE settings: how many, their per-month equivalent and yearly cost (same normalisation as month_pay).'
-              required: [subscription, installment, income, reminder]
+              required: [subscription, installment, income, reminder, saving]
               properties:
                 subscription: { $ref: '#/components/schemas/RecurringKindTotals' }
                 installment: { $ref: '#/components/schemas/RecurringKindTotals' }
                 income: { $ref: '#/components/schemas/RecurringKindTotals' }
                 reminder: { $ref: '#/components/schemas/RecurringKindTotals' }
+                saving: { $ref: '#/components/schemas/RecurringKindTotals', description: 'Saving settings: what they put aside (never in month_pay / month_receive / due totals).' }
         pagination: { $ref: '#/components/schemas/Page' }
     RecurringItemLink:
       type: object
@@ -11116,7 +11014,7 @@ components:
     RecurringItem:
       type: object
       description: 'One occurrence of a setting, COMPUTED from its rule or STORED (a row exists only when it was edited, recorded, paid or skipped; id null = computed). Its address is rule_id + slot either way. status: upcoming (dated after today) | due (today or before, not recorded) | done (a transaction) | paid (settled without one) | skipped | pending (a legacy draft still waiting). A slot before the setting''s tracked_from (its creation day) is paid implicitly.'
-      required: [id, rule_id, slot, stored, auto_created, needs_amount, recurring, seq, total, date, days_until, status, edited, manual, type, amount, account, to_account, category, goal, tags, description, note, splits, project, pending_id, transaction, saving_entry_id, created_at, updated_at]
+      required: [id, rule_id, slot, stored, auto_created, needs_amount, recurring, seq, total, date, days_until, status, edited, manual, type, amount, account, to_account, category, goal_id, goal, tags, description, note, splits, project, pending_id, transaction, saving_entry_id, created_at, updated_at]
       properties:
         id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The stored row; null while only computed.' }
         rule_id: { $ref: '#/components/schemas/Uuid' }
@@ -11132,13 +11030,14 @@ components:
         status: { type: string, enum: [upcoming, due, done, paid, skipped, pending] }
         edited: { type: boolean }
         manual: { type: boolean }
-        type: { type: string, enum: [expense, income, transfer] }
-        amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'The transaction''s amount when recorded; null = not known yet (a reminder: confirm answers 400 AMOUNT_REQUIRED until it has one).' }
+        type: { type: string, enum: [expense, income, transfer, saving] }
+        amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'The transaction''s (or saving entry''s) amount when recorded; null = not known yet (a reminder: confirm answers 400 AMOUNT_REQUIRED until it has one).' }
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
         to_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
         category: { oneOf: [{ $ref: '#/components/schemas/CategoryRef' }, { type: 'null' }] }
+        goal_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'type saving: the goal; null = the unallocated pot.' }
         goal: { oneOf: [{ $ref: '#/components/schemas/SavingGoalRef' }, { type: 'null' }] }
-        saving_entry_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'A saving item that was made: the saving entry (status done).' }
+        saving_entry_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'A recorded saving occurrence: the saving entry it made (status done; transaction stays null).' }
         tags: { type: array, items: { $ref: '#/components/schemas/TagRef' } }
         description: { type: [string, 'null'], description: 'The occurrence name ("Netflix ประจำเดือน ต.ค. 2026", the tx description), unless the user typed one.' }
         note: { type: [string, 'null'] }
@@ -11242,11 +11141,12 @@ components:
       type: object
       description: 'Value fields; partial (absent = unchanged, null clears a nullable one).'
       properties:
-        type: { type: string, enum: [expense, income, transfer], description: 'Optional when kind is sent (the kind implies it).' }
+        type: { type: string, enum: [expense, income, transfer, saving], description: 'Optional when kind is sent (the kind implies it). saving goes with kind saving only; a setting / occurrence never switches between saving and a money type (400 VALIDATION_ERROR).' }
         amount: { type: number, minimum: 0, description: 'Required (> 0) except for a reminder, where 0 / absent = no amount yet.' }
-        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
-        to_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
-        category_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'saving: required (400 SAVING_NEEDS_WALLET), a wallet that tracks its balance (400 WALLET_NOT_TRACKED).' }
+        to_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Transfers only (dropped on a saving).' }
+        category_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Dropped on a saving (so are tag_ids).' }
+        goal_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'saving only: the goal (active, else 409 GOAL_NOT_ACTIVE; unknown = 404); null / absent = the unallocated pot.' }
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
         tag_ids: { $ref: '#/components/schemas/Ids' }
@@ -11256,7 +11156,7 @@ components:
         - type: object
           required: [name, rule, start_date]
           properties:
-            kind: { type: string, enum: [subscription, installment, income, reminder], description: 'subscription = an expense that repeats; installment = an expense with a COUNT of payments (end.kind count required); income = an income that repeats; reminder = เตือนจ่าย (expense or transfer, the amount is optional: omit it or send 0). Omitted = derived from type (+ end). The kind implies the type when type is omitted.' }
+            kind: { type: string, enum: [subscription, installment, income, reminder, saving], description: 'subscription = an expense that repeats; installment = an expense with a COUNT of payments (end.kind count required); income = an income that repeats; reminder = เตือนจ่าย (expense or transfer, the amount is optional: omit it or send 0); saving = ออมเงิน (type saving, amount > 0, account_id required, goal_id or null = unallocated; confirming an occurrence makes a saving entry, never a transaction; auto_create defaults to false like every kind). Omitted = derived from type (+ end). The kind implies the type when type is omitted.' }
             trial_until: { type: string, description: 'Subscription only: the free trial runs until this date (yyyy-mm-dd).' }
             name: { type: string, minLength: 1, maxLength: 100 }
             icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
@@ -11270,7 +11170,7 @@ components:
         - type: object
           properties:
             name: { type: string, minLength: 1, maxLength: 100 }
-            kind: { type: string, enum: [subscription, installment, income, reminder], description: 'Change the kind (re-validated: installment needs an end count, income is an income, subscription / installment are expenses).' }
+            kind: { type: string, enum: [subscription, installment, income, reminder, saving], description: 'Change the kind (re-validated: installment needs an end count, income is an income, subscription / installment are expenses). A saving setting stays a saving one and a money one never becomes one (400 VALIDATION_ERROR).' }
             trial_until: { type: string, description: 'Subscription: a date sets the free-trial end, "" clears it, absent leaves it.' }
             icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
             rule: { $ref: '#/components/schemas/RecurrenceRuleInput' }

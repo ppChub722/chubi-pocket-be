@@ -384,7 +384,7 @@ func (s *Service) expectedBetween(ctx context.Context, userID uuid.UUID, from, t
 	}
 	out := []shared.ExpectedOccurrence{}
 	for _, o := range occs {
-		if !o.expected() || o.rule.Type == typeSaving {
+		if !o.expected() {
 			continue
 		}
 		e := shared.ExpectedOccurrence{
@@ -478,16 +478,38 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 		return out, nil
 	}
 	drafts := make([]pending.Draft, len(occs))
-	var txIDs []uuid.UUID
+	var txIDs, entryIDs []uuid.UUID
 	for i, o := range occs {
 		drafts[i] = o.draft
 		if o.row != nil && o.row.TransactionID != nil {
 			txIDs = append(txIDs, *o.row.TransactionID)
 		}
+		if o.row != nil && o.row.SavingEntryID != nil {
+			entryIDs = append(entryIDs, *o.row.SavingEntryID)
+		}
 	}
 	resolved, err := pending.ResolveDrafts(ctx, q, userID, drafts)
 	if err != nil {
 		return nil, err
+	}
+	entryAmounts := map[uuid.UUID]float64{}
+	if len(entryIDs) > 0 {
+		rows, err := q.Query(ctx, `SELECT id, amount::float8 FROM saving_entries WHERE id = ANY($1)`, entryIDs)
+		if err != nil {
+			return nil, fmt.Errorf("item saving entries: %w", err)
+		}
+		for rows.Next() {
+			var (
+				id  uuid.UUID
+				amt float64
+			)
+			if err := rows.Scan(&id, &amt); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			entryAmounts[id] = amt
+		}
+		rows.Close()
 	}
 	type txInfo struct {
 		desc *string
@@ -530,7 +552,7 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 			Recurring: &shared.RecurringRef{ID: o.rule.ID, Name: o.rule.Name, IconCode: o.rule.IconCode, Kind: o.rule.Kind},
 			Seq:       o.seq, Date: o.date.Format(dateLayout), DaysUntil: int(o.date.Sub(today).Hours() / 24),
 			Account: r.Account, ToAccount: r.TransferToAccount, Category: r.Category, Project: r.Project,
-			Tags: r.Tags, Splits: r.Splits, Goal: r.Goal, Description: o.draft.Description, Note: o.draft.Note,
+			Tags: r.Tags, Splits: r.Splits, GoalID: o.draft.GoalID, Goal: r.Goal, Description: o.draft.Description, Note: o.draft.Note,
 		}
 		if o.rule.TotalCount != nil {
 			t := *o.rule.TotalCount
@@ -558,6 +580,11 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 			it.AutoCreated = o.row.AutoCreatedAt != nil
 			ca, ua := o.row.CreatedAt, o.row.UpdatedAt
 			it.CreatedAt, it.UpdatedAt = &ca, &ua
+			if o.row.SavingEntryID != nil {
+				if amt, ok := entryAmounts[*o.row.SavingEntryID]; ok {
+					it.Amount = &amt // the occurrence shows the saving entry's amount
+				}
+			}
 			if o.row.TransactionID != nil {
 				lt := &LinkedTx{ID: *o.row.TransactionID}
 				if t, ok := txs[*o.row.TransactionID]; ok {

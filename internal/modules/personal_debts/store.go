@@ -34,8 +34,13 @@ var (
 	ErrManagedBySource    = errors.New("this entry comes from a split: only its description, note and paid label can change here")
 	ErrBillNotFound       = errors.New("bill not found in an event you are a member of")
 	// ErrManagedByTx — a paid-by debt is one record with its expense: edit or delete the transaction.
-	ErrManagedByTx = errors.New("this debt is the paid-by part of a transaction: edit or delete the transaction instead")
+	ErrManagedByTx   = errors.New("this debt is the paid-by part of a transaction: edit or delete the transaction instead")
 	ErrDueBeforeDate = errors.New("due_date can't be before the entry's date")
+	// ErrTxNotLinkable — the transaction's type is not the entry's direction (paid = expense,
+	// received = income), or it is not a plain transaction of mine (a debt, repayment, event or system row).
+	ErrTxNotLinkable = errors.New("this transaction can't be linked to this entry")
+	// ErrTxLinkedElsewhere — one transaction is linked to one entry.
+	ErrTxLinkedElsewhere = errors.New("this transaction is already linked to another debt entry")
 )
 
 type querier interface {
@@ -362,9 +367,11 @@ const entryViewSQL = `SELECT pd.id, ` + `pd.direction, pd.counterparty_contact_i
 		to_char(CASE pd.source_kind WHEN 'transaction' THEN st.date WHEN 'paid_by' THEN ft.date WHEN 'partner' THEN ft.date
 		                            WHEN 'event' THEN bp.date ELSE t.date END, 'YYYY-MM-DD'),
 		CASE pd.source_kind WHEN 'transaction' THEN st.account_id WHEN 'paid_by' THEN ft.account_id
-		                    WHEN 'partner' THEN ft.account_id WHEN 'event' THEN NULL ELSE t.account_id END
+		                    WHEN 'partner' THEN ft.account_id WHEN 'event' THEN NULL ELSE t.account_id END,
+		lt.id, lt.account_id
 	FROM personal_debts pd
 	LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id
+	LEFT JOIN transactions lt ON lt.id = pd.linked_transaction_id
 	LEFT JOIN categories tc ON tc.id = t.category_id
 	LEFT JOIN transactions st ON st.id = pd.source_transaction_id
 	LEFT JOIN categories sc ON sc.id = st.category_id
@@ -380,10 +387,14 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 	if err != nil {
 		return nil, fmt.Errorf("entries: %w", err)
 	}
+	const (
+		accTx = iota
+		accOrigin
+		accLinked
+	)
 	type acc struct {
-		i      int
-		id     uuid.UUID
-		origin bool // the origin's wallet (else the linked transaction's)
+		i, of int
+		id    uuid.UUID
 	}
 	var (
 		out  = make([]DebtEntry, 0)
@@ -403,10 +414,13 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 			o        DebtOrigin
 			oKind    *string
 			oAccount *uuid.UUID
+			ltID     *uuid.UUID
+			ltAcc    *uuid.UUID
 		)
 		if err := rows.Scan(&v.ID, &v.Direction, &cid, &name, &v.Amount, &v.Date, &v.Description, &v.Note,
 			&v.Paid, &kind, &sourceID, &title, &txID, &accID, &v.CreatedAt, &v.UpdatedAt, &v.DueDate,
-			&oKind, &o.TransactionID, &o.BillID, &o.EventID, &o.Title, &o.Amount, &o.Date, &oAccount); err != nil {
+			&oKind, &o.TransactionID, &o.BillID, &o.EventID, &o.Title, &o.Amount, &o.Date, &oAccount,
+			&ltID, &ltAcc); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("entries scan: %w", err)
 		}
@@ -417,7 +431,7 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 		if txID != nil {
 			v.Transaction = &EntryTx{ID: *txID}
 			if accID != nil {
-				accs = append(accs, acc{len(out), *accID, false})
+				accs = append(accs, acc{len(out), accTx, *accID})
 				ids = append(ids, *accID)
 			}
 		}
@@ -425,8 +439,15 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 			o.Kind = *oKind
 			v.Origin = &o
 			if oAccount != nil {
-				accs = append(accs, acc{len(out), *oAccount, true})
+				accs = append(accs, acc{len(out), accOrigin, *oAccount})
 				ids = append(ids, *oAccount)
+			}
+		}
+		if ltID != nil {
+			v.LinkedTransaction = &EntryTx{ID: *ltID}
+			if ltAcc != nil {
+				accs = append(accs, acc{len(out), accLinked, *ltAcc})
+				ids = append(ids, *ltAcc)
 			}
 		}
 		out = append(out, v)
@@ -444,9 +465,12 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 		if !ok {
 			continue
 		}
-		if a.origin {
+		switch a.of {
+		case accOrigin:
 			out[a.i].Origin.Account = &r
-		} else {
+		case accLinked:
+			out[a.i].LinkedTransaction.Account = &r
+		default:
 			out[a.i].Transaction.Account = &r
 		}
 	}

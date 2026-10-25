@@ -72,6 +72,9 @@ func (s *Service) linkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 	if o.status == StatusSkipped {
 		return nil, ErrInvalidTransition
 	}
+	if draftType(o.draft) == typeSaving { // a saving is recorded by confirming, never by a transaction
+		return nil, ErrValidation
+	}
 	var (
 		txType   string
 		txAmount float64

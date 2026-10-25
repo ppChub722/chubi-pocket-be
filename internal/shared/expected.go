@@ -19,7 +19,7 @@ type ExpectedOccurrence struct {
 	ItemID     *uuid.UUID // the stored row, nil while the occurrence is only computed
 	Slot       time.Time  // the occurrence's original date
 	Date       time.Time  // its date now (an edit may have moved it)
-	Type       string     // expense | income | transfer
+	Type       string     // expense | income | transfer | saving (a saving is never money spent or received)
 	Amount     float64    // 0 = not known yet
 	AccountID  *uuid.UUID
 	CategoryID *uuid.UUID

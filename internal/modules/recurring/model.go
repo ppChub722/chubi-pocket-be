@@ -51,7 +51,7 @@ type Rule struct {
 	GoalID         *uuid.UUID // type saving: the goal (nil = spare)
 	TagIDs         []uuid.UUID
 	recurrence.Spec
-	Kind       string     // subscription | installment | income | reminder
+	Kind       string     // subscription | installment | income | reminder | saving
 	TrialUntil *time.Time // subscription: the free trial runs until
 	Status     string
 	EndingNotified bool
@@ -156,7 +156,9 @@ type Recurring struct {
 	CurrentOccurrence *Occurrence           `json:"current_occurrence"`
 	ToAccount         *shared.AccountRef    `json:"to_account"`
 	Category          *shared.CategoryRef   `json:"category"`
-	Goal              *shared.SavingGoalRef `json:"goal"`
+	// GoalID / Goal — a saving setting's goal; null = the unallocated pot.
+	GoalID *uuid.UUID             `json:"goal_id"`
+	Goal   *shared.SavingGoalRef  `json:"goal"`
 	Tags              []shared.TagRef       `json:"tags"`
 	Rule              RecurrenceRule        `json:"rule"`
 	StartDate         string                `json:"start_date"`
@@ -227,6 +229,7 @@ type Item struct {
 	Account       *shared.AccountRef      `json:"account"`
 	ToAccount     *shared.AccountRef      `json:"to_account"`
 	Category      *shared.CategoryRef     `json:"category"`
+	GoalID        *uuid.UUID              `json:"goal_id"`
 	Goal          *shared.SavingGoalRef   `json:"goal"`
 	Tags          []shared.TagRef         `json:"tags"`
 	Description   *string                 `json:"description"`

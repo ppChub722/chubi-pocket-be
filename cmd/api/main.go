@@ -386,6 +386,8 @@ func main() {
 			protected.GET("/personal-debts/:id", personalDebtsHandler.Get)
 			protected.PUT("/personal-debts/:id", personalDebtsHandler.Update)
 			protected.DELETE("/personal-debts/:id", personalDebtsHandler.Delete)
+			protected.POST("/personal-debts/:id/link", personalDebtsHandler.LinkTx)
+			protected.POST("/personal-debts/:id/unlink", personalDebtsHandler.UnlinkTx)
 
 			protected.GET("/notifications", notificationsHandler.List)
 			protected.GET("/notifications/unread-count", notificationsHandler.UnreadCount)
@@ -445,12 +447,6 @@ func main() {
 			protected.DELETE("/saving-entries/:id", savingGoalsHandler.DeleteEntry)
 			protected.PUT("/saving-goals/:id", savingGoalsHandler.Update)
 			protected.DELETE("/saving-goals/:id", savingGoalsHandler.Delete)
-			protected.PUT("/saving-goals/:id/auto-saves", savingGoalsHandler.PutAutoSaves)
-			protected.PUT("/saving-goals/spare/auto-saves", savingGoalsHandler.PutAutoSavesSpare)
-			protected.PUT("/saving-goals/:id/auto-save", savingGoalsHandler.PutAutoSave)
-			protected.DELETE("/saving-goals/:id/auto-save", savingGoalsHandler.DeleteAutoSave)
-			protected.PUT("/saving-goals/spare/auto-save", savingGoalsHandler.PutAutoSaveSpare)
-			protected.DELETE("/saving-goals/spare/auto-save", savingGoalsHandler.DeleteAutoSaveSpare)
 			protected.POST("/saving-goals/:id/archive", savingGoalsHandler.Archive)
 			protected.POST("/saving-goals/:id/restore", savingGoalsHandler.Restore)
 

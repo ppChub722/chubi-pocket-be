@@ -353,20 +353,19 @@ func (s *Service) goalViewsWith(ctx context.Context, userID uuid.UUID, goals []*
 			saved[*b.GoalID] += b.Amount
 		}
 	}
-	autos, err := s.autoViews(ctx, userID, today, monthStart)
+	plans, err := s.monthPlans(ctx, userID, monthStart)
 	if err != nil {
 		return nil, err
 	}
 	for _, g := range goals {
 		v := goalView(g, saved[g.ID], nets[g.ID], today, currency)
-		auto := autos[g.ID]
-		v.AutoSave, v.AutoSaves = auto.legacyOrNil(), auto.itemsOrEmpty()
 		v.MonthSaved = round2(nets[g.ID][month])
 		active := v.State == StateActive
+		plan, planned := plans[g.ID]
 		switch {
 		case !active:
-		case auto != nil:
-			v.MonthPlan = fptr(auto.monthPlan)
+		case planned:
+			v.MonthPlan = fptr(plan)
 		case v.NeededMonthly != nil:
 			v.MonthPlan = v.NeededMonthly
 		}
@@ -643,7 +642,7 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, perPage int, wi
 
 // GetMonth is Get with the month_* numbers of month ("YYYY-MM", "" = this month).
 func (s *Service) GetMonth(ctx context.Context, userID, id uuid.UUID, perPage int, withDeletePreview bool, month string) (*GoalDetail, error) {
-	ctx = shared.WithRefCache(ctx) // the auto-saves, the wallet split and the entries name the same wallets
+	ctx = shared.WithRefCache(ctx) // the wallet split and the entries name the same wallets
 	today, err := s.today(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -692,11 +691,6 @@ func (s *Service) Spare(ctx context.Context, userID uuid.UUID, perPage int) (*Sp
 		return nil, err
 	}
 	out := &SpareDetail{}
-	autos, err := s.autoViews(ctx, userID, today, time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC))
-	if err != nil {
-		return nil, err
-	}
-	out.AutoSave, out.AutoSaves = autos[uuid.Nil].legacyOrNil(), autos[uuid.Nil].itemsOrEmpty()
 	if out.Spare, err = s.spare(ctx, s.store.db, userID); err != nil {
 		return nil, err
 	}

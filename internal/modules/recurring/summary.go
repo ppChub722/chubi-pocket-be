@@ -141,7 +141,7 @@ func (s *Service) summary(ctx context.Context, userID uuid.UUID, today time.Time
 	}
 	out.MonthPay = math.Round(out.MonthPay*100) / 100
 	out.MonthReceive = math.Round(out.MonthReceive*100) / 100
-	for _, k := range []*KindTotals{&out.ByKind.Subscription, &out.ByKind.Installment, &out.ByKind.Income, &out.ByKind.Reminder} {
+	for _, k := range []*KindTotals{&out.ByKind.Subscription, &out.ByKind.Installment, &out.ByKind.Income, &out.ByKind.Reminder, &out.ByKind.Saving} {
 		k.Monthly, k.Yearly = math.Round(k.Monthly*100)/100, math.Round(k.Yearly*100)/100
 	}
 	return out, nil
@@ -158,6 +158,7 @@ type KindsSum struct {
 	Installment  KindTotals `json:"installment"`
 	Income       KindTotals `json:"income"`
 	Reminder     KindTotals `json:"reminder"`
+	Saving       KindTotals `json:"saving"`
 }
 
 func (k *KindsSum) of(kind string) *KindTotals {
@@ -168,6 +169,8 @@ func (k *KindsSum) of(kind string) *KindTotals {
 		return &k.Income
 	case KindReminder:
 		return &k.Reminder
+	case KindSaving:
+		return &k.Saving
 	}
 	return &k.Subscription
 }

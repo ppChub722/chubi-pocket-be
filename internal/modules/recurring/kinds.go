@@ -11,11 +11,13 @@ const (
 	KindInstallment  = "installment"
 	KindIncome       = "income"
 	KindReminder     = "reminder"
+	// KindSaving — money from a wallet into a saving goal (goal_id NULL = the unallocated pot).
+	KindSaving = "saving"
 )
 
 func validKind(k string) bool {
 	switch k {
-	case KindSubscription, KindInstallment, KindIncome, KindReminder:
+	case KindSubscription, KindInstallment, KindIncome, KindReminder, KindSaving:
 		return true
 	}
 	return false
@@ -27,6 +29,8 @@ func deriveKind(typ, endKind string) string {
 		return KindIncome
 	case "transfer":
 		return KindReminder
+	case typeSaving:
+		return KindSaving
 	}
 	if endKind == "count" {
 		return KindInstallment
@@ -35,8 +39,11 @@ func deriveKind(typ, endKind string) string {
 }
 
 func typeForKind(k string) string {
-	if k == KindIncome {
+	switch k {
+	case KindIncome:
 		return "income"
+	case KindSaving:
+		return typeSaving
 	}
 	return "expense"
 }
@@ -67,6 +74,13 @@ func (r *Rule) finishKind(kind *string) error {
 		if (r.Type != "expense" && r.Type != "transfer") || r.Amount < 0 {
 			return ErrValidation
 		}
+	case KindSaving:
+		if r.Type != typeSaving || r.Amount <= 0 {
+			return ErrValidation
+		}
+	}
+	if r.Type == typeSaving && r.Kind != KindSaving {
+		return ErrValidation
 	}
 	if r.Kind != KindSubscription {
 		r.TrialUntil = nil

@@ -189,14 +189,14 @@ func (s *Store) save(ctx context.Context, tx pgx.Tx, b *Budget) error {
 	return nil
 }
 
-const periodColumns = `id, seq, start_date, end_date, amount::float8, overridden, note`
+const periodColumns = `id, seq, start_date, end_date, amount::float8, overridden, note, base_amount::float8`
 
 func scanPeriod(row pgx.Row) (*periodRow, error) {
 	var (
 		p   periodRow
 		seq int32
 	)
-	if err := row.Scan(&p.ID, &seq, &p.Start, &p.End, &p.Amount, &p.Overridden, &p.Note); err != nil {
+	if err := row.Scan(&p.ID, &seq, &p.Start, &p.End, &p.Amount, &p.Overridden, &p.Note, &p.Base); err != nil {
 		return nil, err
 	}
 	p.Seq = int(seq)
@@ -246,7 +246,7 @@ func (s *Store) periodsOf(ctx context.Context, q shared.Querier, budgetIDs []uui
 			p   periodRow
 			seq int32
 		)
-		if err := rows.Scan(&bid, &p.ID, &seq, &p.Start, &p.End, &p.Amount, &p.Overridden, &p.Note); err != nil {
+		if err := rows.Scan(&bid, &p.ID, &seq, &p.Start, &p.End, &p.Amount, &p.Overridden, &p.Note, &p.Base); err != nil {
 			return nil, err
 		}
 		p.Seq = int(seq)
@@ -294,8 +294,8 @@ func (s *Store) syncPeriods(ctx context.Context, tx pgx.Tx, b *Budget, today tim
 			continue
 		}
 		id, _ := uuid.NewV7()
-		if _, err := tx.Exec(ctx, `INSERT INTO budget_periods (id, budget_id, seq, start_date, end_date, amount)
-			VALUES ($1, $2, $3, $4, $5, $6)`, id, b.ID, seq, sp.Start, sp.End, b.Amount); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO budget_periods (id, budget_id, seq, start_date, end_date, amount, base_amount)
+			VALUES ($1, $2, $3, $4, $5, $6, $6)`, id, b.ID, seq, sp.Start, sp.End, b.Amount); err != nil {
 			return fmt.Errorf("insert period: %w", err)
 		}
 	}

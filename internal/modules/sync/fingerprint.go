@@ -147,7 +147,8 @@ var sources = map[string][]source{
 	SavingGoals: {
 		ts(`saving_goals x WHERE x.user_id = $1`),
 		ts(`saving_entries x WHERE x.user_id = $1`),
-		ts(`saving_auto x WHERE x.user_id = $1`),
+		// a goal's month plan comes from its recurring saving settings
+		ts(`recurring_rules x WHERE x.user_id = $1 AND x.type = 'saving'`),
 	},
 	Pending: {
 		ts(`pending_transactions x WHERE x.user_id = $1`),

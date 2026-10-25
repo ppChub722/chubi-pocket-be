@@ -21,7 +21,6 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
-	"github.com/ppChub722/chubi-pocket-be/internal/shared/recurrence"
 )
 
 type recFix struct {
@@ -811,139 +810,132 @@ func TestEditedOccurrenceReplacesComputed(t *testing.T) {
 	}
 }
 
-func TestGoalAutoSaveDraft(t *testing.T) {
+// A saving setting records a saving entry (never a transaction), counts as neither
+// expense nor income, follows its goal's life and is the goal's month plan.
+func TestRecurringSaving(t *testing.T) {
 	f := newRecFix(t)
 	goal := uuid.New()
 	f.exec(`INSERT INTO saving_goals (id, user_id, name, target_amount) VALUES ($1, $2, 'Japan', 80000)`, goal, f.me)
-	day := f.today.Day()
-	if day < 28 {
-		if err := f.savings.SetAutoSave(f.ctx, f.me, &goal, saving_goals.AutoSaveRequest{Amount: 500, Day: day + 1}); err != nil {
-			t.Fatal(err)
-		}
-		if err := f.svc.DueCheck(f.ctx, f.me, ""); err != nil {
-			t.Fatal(err)
-		}
-		var n int
-		_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM pending_transactions WHERE user_id = $1 AND source = 'auto_save'`, f.me).Scan(&n)
-		if n != 0 {
-			t.Fatalf("drafts before the day = %d", n)
-		}
+	monthly := map[string]any{"freq": "monthly", "interval": 1}
+	body := func() map[string]any {
+		return map[string]any{"name": "ออม Japan", "kind": "saving", "amount": 500, "account_id": f.wallet,
+			"goal_id": goal, "rule": monthly, "start_date": f.day(-1)}
 	}
-	if err := f.savings.SetAutoSave(f.ctx, f.me, &goal, saving_goals.AutoSaveRequest{Amount: 500, Day: day, AccountID: &f.wallet}); err != nil {
+	noWallet := body()
+	delete(noWallet, "account_id")
+	if raw := f.call("POST", "/recurring", "createRecurring", noWallet, 400, nil); !contains(raw, "SAVING_NEEDS_WALLET") {
+		t.Errorf("no wallet: %s", raw)
+	}
+	untracked := testdb.Account(t, f.pool, f.me)
+	f.exec(`UPDATE accounts SET track_balance = FALSE WHERE id = $1`, untracked)
+	bad := body()
+	bad["account_id"] = untracked
+	if raw := f.call("POST", "/recurring", "createRecurring", bad, 400, nil); !contains(raw, "WALLET_NOT_TRACKED") {
+		t.Errorf("untracked wallet: %s", raw)
+	}
+
+	apitest.ConformRequest(t, "createRecurring", body())
+	var d Detail
+	f.call("POST", "/recurring", "createRecurring", body(), 201, &d)
+	r := d.Recurring
+	if r.Type != "saving" || r.Kind != KindSaving || r.GoalID == nil || *r.GoalID != goal || r.Goal == nil ||
+		r.Goal.Name != "Japan" || r.AutoCreate || r.Category != nil {
+		t.Fatalf("saving setting = %+v", r)
+	}
+	id := r.ID
+	f.track(id)
+	var due ItemList
+	f.call("GET", "/recurring-items?status=due&rule_id="+id.String(), "listRecurringItems", nil, 200, &due)
+	dueNow := onlyDue(due.Data)
+	if len(dueNow) != 1 || dueNow[0].Type != "saving" || dueNow[0].GoalID == nil || dueNow[0].Goal == nil {
+		t.Fatalf("due = %+v", due.Data)
+	}
+	slot := dueNow[0].Slot
+
+	// an existing transaction can't be its record
+	f.call("POST", f.occ(id, slot)+"/link", "", map[string]any{"transaction_id": f.newTx(500, 0)}, 400, nil)
+	before := f.balance()
+	var w ItemWriteResult
+	f.call("POST", f.occ(id, slot)+"/confirm", "confirmRecurringOccurrence", map[string]any{}, 200, &w)
+	if w.Item.Status != StatusDone || w.Item.SavingEntryID == nil || av(w.Item.Amount) != 500 || len(w.AccountBalances) != 1 {
+		t.Fatalf("confirmed = %+v", w)
+	}
+	var (
+		toGoal *uuid.UUID
+		acc    *uuid.UUID
+		amount float64
+		source string
+	)
+	if err := f.pool.QueryRow(f.ctx, `SELECT to_goal_id, account_id, amount::float8, source FROM saving_entries WHERE id = $1`,
+		*w.Item.SavingEntryID).Scan(&toGoal, &acc, &amount, &source); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.savings.SetAutoSave(f.ctx, f.me, nil, saving_goals.AutoSaveRequest{Amount: 100, Day: day}); err != nil {
-		t.Fatal(err)
+	if toGoal == nil || *toGoal != goal || acc == nil || *acc != f.wallet || amount != 500 || source != "recurring" {
+		t.Errorf("entry = goal %v wallet %v amount %v source %s", toGoal, acc, amount, source)
 	}
-	for i := 0; i < 2; i++ { // the second run changes nothing
-		if err := f.svc.DueCheck(f.ctx, f.me, ""); err != nil {
-			t.Fatal(err)
-		}
+	if f.balance() != before {
+		t.Errorf("a saving moved the wallet balance: %v → %v", before, f.balance())
 	}
-	rows, err := f.pool.Query(f.ctx, `SELECT kind, draft->>'goal_id', draft->>'account_id', (draft->>'amount')::float8
-		FROM pending_transactions WHERE user_id = $1 AND source = 'auto_save' ORDER BY (draft->>'amount')::float8`, f.me)
-	if err != nil {
-		t.Fatal(err)
+	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, &d)
+	if d.Stats.PaidCount != 1 || d.Stats.PaidTotal != 500 || d.Recurring.AvgAmount == nil || *d.Recurring.AvgAmount != 500 {
+		t.Errorf("stats = %+v", d.Stats)
 	}
-	defer rows.Close()
-	type d struct {
-		kind         string
-		goal, wallet *string
-		amount       float64
+	var list RecurringList
+	f.call("GET", "/recurring", "listRecurring", nil, 200, &list)
+	if list.Summary.MonthPay != 0 || list.Summary.MonthReceive != 0 || list.Summary.ByKind.Saving.Count != 1 ||
+		list.Summary.ByKind.Subscription.Count != 0 {
+		t.Errorf("summary = %+v", list.Summary)
 	}
-	var got []d
-	for rows.Next() {
-		var x d
-		if err := rows.Scan(&x.kind, &x.goal, &x.wallet, &x.amount); err != nil {
-			t.Fatal(err)
-		}
-		got = append(got, x)
-	}
-	if len(got) != 2 || got[0].amount != 100 || got[0].goal != nil || got[0].wallet != nil ||
-		got[1].amount != 500 || got[1].goal == nil || *got[1].goal != goal.String() || got[1].wallet == nil || got[0].kind != "saving" {
-		t.Fatalf("drafts = %+v", got)
+	exp, err := f.svc.ExpectedBetween(f.ctx, f.me, f.today, f.today.AddDate(0, 2, 0))
+	if err != nil || len(exp) == 0 || exp[0].Type != "saving" {
+		t.Errorf("expected = %+v (%v)", exp, err)
 	}
 	page, err := f.savings.Get(f.ctx, f.me, goal, 20, false)
-	if err != nil || page.Goal.AutoSave == nil || page.Goal.AutoSave.Amount != 500 || page.Goal.AutoSave.Wallet == nil ||
-		page.Goal.AutoSave.NextDate == nil || *page.Goal.AutoSave.NextDate <= f.day(0) {
-		t.Errorf("goal auto_save = %+v (%v)", page.Goal.AutoSave, err)
-	}
-}
-
-func TestManyAutoSavesProduceEveryOccurrence(t *testing.T) {
-	f := newRecFix(t)
-	goal := uuid.New()
-	f.exec(`INSERT INTO saving_goals (id, user_id, name, target_amount) VALUES ($1, $2, 'Japan', 80000)`, goal, f.me)
-	items := []saving_goals.AutoSaveInput{
-		// 21 daily occurrences since 20 days ago: only the newest 12 become drafts.
-		{Amount: 10, AccountID: &f.wallet, StartDate: f.day(-20),
-			Rule: &recurrence.RecurrenceRule{Freq: "daily", Interval: 1}},
-		// two weekly occurrences, then it ends.
-		{Amount: 20, StartDate: f.day(-14),
-			Rule: &recurrence.RecurrenceRule{Freq: "weekly", Interval: 1},
-			End:  &recurrence.RecurrenceEnd{Kind: "count", Count: intp(2)}},
-		// not started yet: nothing.
-		{Amount: 30, StartDate: f.day(3),
-			Rule: &recurrence.RecurrenceRule{Freq: "daily", Interval: 1}},
-	}
-	if err := f.savings.SetAutoSaves(f.ctx, f.me, &goal, items); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 2; i++ { // the second run makes nothing more
-		if err := f.svc.DueCheck(f.ctx, f.me, ""); err != nil {
-			t.Fatal(err)
-		}
-	}
-	count := func(amount float64) (n int, oldest string) {
-		_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*), COALESCE(MIN(draft->>'date'), '') FROM pending_transactions
-			WHERE user_id = $1 AND source = 'auto_save' AND (draft->>'amount')::float8 = $2`, f.me, amount).Scan(&n, &oldest)
-		return
-	}
-	if n, oldest := count(10); n != 12 || oldest != f.day(-11) {
-		t.Errorf("daily drafts = %d from %s, want 12 from %s", n, oldest, f.day(-11))
-	}
-	if n, oldest := count(20); n != 2 || oldest != f.day(-14) {
-		t.Errorf("weekly drafts = %d from %s, want 2 from %s", n, oldest, f.day(-14))
-	}
-	if n, _ := count(30); n != 0 {
-		t.Errorf("future start made %d drafts", n)
+	if err != nil || page.Goal.MonthPlan == nil || *page.Goal.MonthPlan != 500 {
+		t.Errorf("goal month_plan = %v (%v)", page.Goal.MonthPlan, err)
 	}
 
-	page, err := f.savings.Get(f.ctx, f.me, goal, 20, false)
-	if err != nil || len(page.Goal.AutoSaves) != 3 {
-		t.Fatalf("auto_saves = %+v (%v)", page.Goal.AutoSaves, err)
-	}
-	daily, weekly, future := page.Goal.AutoSaves[0], page.Goal.AutoSaves[1], page.Goal.AutoSaves[2]
-	if daily.NextDate == nil || *daily.NextDate != f.day(1) {
-		t.Errorf("daily next = %v, want %s", daily.NextDate, f.day(1))
-	}
-	if weekly.NextDate != nil {
-		t.Errorf("an ended item has next_date %v", *weekly.NextDate)
-	}
-	if future.NextDate == nil || *future.NextDate != f.day(3) {
-		t.Errorf("future next = %v, want %s", future.NextDate, f.day(3))
-	}
-
-	// A closed goal makes no drafts; the spare is always on.
-	f.exec(`UPDATE saving_goals SET status = 'completed' WHERE id = $1`, goal)
-	f.exec(`UPDATE saving_auto SET last_produced = NULL WHERE user_id = $1`, f.me)
-	f.exec(`DELETE FROM pending_transactions WHERE user_id = $1`, f.me)
-	if err := f.savings.SetAutoSaves(f.ctx, f.me, nil, []saving_goals.AutoSaveInput{
-		{Amount: 5, StartDate: f.day(0), Rule: &recurrence.RecurrenceRule{Freq: "daily", Interval: 1}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.svc.DueCheck(f.ctx, f.me, ""); err != nil {
-		t.Fatal(err)
-	}
+	// skipping with delete_tx deletes the saving entry
+	f.call("POST", f.occ(id, slot)+"/skip", "skipRecurringOccurrence", map[string]any{"delete_tx": true}, 200, nil)
 	var n int
-	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM pending_transactions WHERE user_id = $1 AND source = 'auto_save'`, f.me).Scan(&n)
-	if n != 1 {
-		t.Errorf("drafts with the goal closed = %d, want 1 (the spare's)", n)
+	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM saving_entries WHERE user_id = $1`, f.me).Scan(&n)
+	if n != 0 {
+		t.Errorf("entries after skip = %d", n)
 	}
-}
 
-func intp(n int) *int { return &n }
+	// the unallocated pot
+	spare := body()
+	spare["name"], spare["goal_id"] = "ออมเงิน", nil
+	var sd Detail
+	f.call("POST", "/recurring", "createRecurring", spare, 201, &sd)
+	if sd.Recurring.GoalID != nil || sd.Recurring.Goal != nil || sd.Recurring.Kind != KindSaving {
+		t.Fatalf("spare setting = %+v", sd.Recurring)
+	}
+	f.track(sd.Recurring.ID)
+	f.call("POST", f.occ(sd.Recurring.ID, slot)+"/confirm", "confirmRecurringOccurrence", map[string]any{}, 200, &w)
+	var bucket string
+	_ = f.pool.QueryRow(f.ctx, `SELECT to_bucket FROM saving_entries WHERE id = $1`, *w.Item.SavingEntryID).Scan(&bucket)
+	if bucket != "spare" {
+		t.Errorf("spare saving went to %q", bucket)
+	}
+
+	// archiving the goal pauses its setting; deleting the goal deletes it
+	if _, err := f.savings.Archive(f.ctx, f.me, goal); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	_ = f.pool.QueryRow(f.ctx, `SELECT status FROM recurring_rules WHERE id = $1`, id).Scan(&status)
+	if status != "paused" {
+		t.Errorf("setting of an archived goal = %s", status)
+	}
+	if raw := f.call("POST", "/recurring/"+id.String()+"/resume", "", nil, 409, nil); !contains(raw, "GOAL_NOT_ACTIVE") {
+		t.Errorf("resume on an archived goal: %s", raw)
+	}
+	if err := f.savings.Delete(f.ctx, f.me, goal); err != nil {
+		t.Fatal(err)
+	}
+	f.call("GET", "/recurring/"+id.String(), "", nil, 404, nil)
+}
 
 func av(p *float64) float64 {
 	if p == nil {

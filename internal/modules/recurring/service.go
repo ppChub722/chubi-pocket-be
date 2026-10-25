@@ -68,8 +68,7 @@ func (s *Service) DueCheckDaily(ctx context.Context, userID uuid.UUID, headerTZ 
 	}
 	var skip bool
 	if err := s.db.QueryRow(ctx, `SELECT
-		EXISTS (SELECT 1 FROM recurring_due_checks c WHERE c.user_id = $1 AND c.checked_on >= $2
-		        AND NOT EXISTS (SELECT 1 FROM saving_auto a WHERE a.user_id = $1 AND a.start_date <= $2 AND a.updated_at > c.checked_at))
+		EXISTS (SELECT 1 FROM recurring_due_checks c WHERE c.user_id = $1 AND c.checked_on >= $2)
 		AND NOT EXISTS (SELECT 1 FROM recurring_rules r WHERE r.user_id = $1 AND r.status = 'active'
 		        AND (r.account_id IN (SELECT id FROM accounts WHERE status = 'archived')
 		          OR r.to_account_id IN (SELECT id FROM accounts WHERE status = 'archived')))`,
@@ -87,7 +86,7 @@ func (s *Service) DueCheckDaily(ctx context.Context, userID uuid.UUID, headerTZ 
 // state. What it does: pause settings whose wallet was archived, record the
 // transactions of the settings with auto-create on, count the newly due
 // occurrences for ONE grouped notice, tell about settings that are about to
-// end, and make the goal auto-save drafts. It writes, so it runs from
+// end. It writes, so it runs from
 // DueCheckDaily and after a recurring write, never on a read.
 func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ string) error {
 	today, err := s.today(ctx, userID, headerTZ)
@@ -144,9 +143,6 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 		} else if ok {
 			ends = append(ends, e)
 		}
-	}
-	if err := s.produceAutoSaves(ctx, tx, userID, today); err != nil {
-		return err
 	}
 	if s.notifs != nil {
 		if newlyDue > 0 {
@@ -410,8 +406,10 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 		}
 	}
 	avg := map[uuid.UUID]float64{}
-	arows, err := s.db.Query(ctx, `SELECT i.rule_id, AVG(t.amount)::float8 FROM recurring_items i
-		JOIN transactions t ON t.id = i.transaction_id WHERE i.user_id = $1 AND i.rule_id = ANY($2) GROUP BY i.rule_id`, userID, ids)
+	arows, err := s.db.Query(ctx, `SELECT i.rule_id, AVG(COALESCE(t.amount, e.amount))::float8 FROM recurring_items i
+		LEFT JOIN transactions t ON t.id = i.transaction_id
+		LEFT JOIN saving_entries e ON e.id = i.saving_entry_id
+		WHERE i.user_id = $1 AND i.rule_id = ANY($2) AND (t.id IS NOT NULL OR e.id IS NOT NULL) GROUP BY i.rule_id`, userID, ids)
 	if err != nil {
 		return nil, fmt.Errorf("avg amounts: %w", err)
 	}
@@ -499,6 +497,7 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 			}
 		}
 		if r.GoalID != nil {
+			v.GoalID = r.GoalID
 			if x, ok := goals[*r.GoalID]; ok {
 				v.Goal = &x
 			}
@@ -554,9 +553,11 @@ func (s *Service) detail(ctx context.Context, userID, id uuid.UUID, today time.T
 // stats — the detail page's numbers, from the recorded occurrences.
 func (s *Service) stats(ctx context.Context, userID uuid.UUID, r *Rule, stored []*itemRow, today time.Time) (Stats, error) {
 	st := Stats{Series: []Point{}}
-	rows, err := s.db.Query(ctx, `SELECT COALESCE(i.slot, i.date), i.date, t.amount::float8 FROM recurring_items i
-		JOIN transactions t ON t.id = i.transaction_id
-		WHERE i.user_id = $1 AND i.rule_id = $2 ORDER BY COALESCE(i.slot, i.date)`, userID, r.ID)
+	rows, err := s.db.Query(ctx, `SELECT COALESCE(i.slot, i.date), i.date, COALESCE(t.amount, e.amount)::float8 FROM recurring_items i
+		LEFT JOIN transactions t ON t.id = i.transaction_id
+		LEFT JOIN saving_entries e ON e.id = i.saving_entry_id
+		WHERE i.user_id = $1 AND i.rule_id = $2 AND (t.id IS NOT NULL OR e.id IS NOT NULL)
+		ORDER BY COALESCE(i.slot, i.date)`, userID, r.ID)
 	if err != nil {
 		return st, fmt.Errorf("stats: %w", err)
 	}
@@ -843,7 +844,7 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, page, perPage i
 		return d, err
 	}
 	p := &DeletePreview{}
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE transaction_id IS NOT NULL), COUNT(*) FILTER (WHERE pending_id IS NOT NULL)
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE transaction_id IS NOT NULL OR saving_entry_id IS NOT NULL), COUNT(*) FILTER (WHERE pending_id IS NOT NULL)
 		FROM recurring_items WHERE rule_id = $1 AND user_id = $2`, id, userID).Scan(&p.Items, &p.LinkedTransactions, &p.PendingDrafts); err != nil {
 		return nil, err
 	}

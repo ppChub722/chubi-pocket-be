@@ -91,6 +91,10 @@ func scanRule(row pgx.Row) (*Rule, error) {
 	if r.TagIDs == nil {
 		r.TagIDs = []uuid.UUID{}
 	}
+	// a setting migrated in without its end worked out (an old goal auto-save) gets it on read
+	if r.TotalCount == nil && (r.EndKind == "date" || r.EndKind == "count" || r.Freq == "dates") {
+		_ = r.Spec.Limits(r.StartDate)
+	}
 	return &r, nil
 }
 

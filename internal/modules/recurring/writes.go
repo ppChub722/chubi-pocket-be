@@ -28,7 +28,7 @@ func validateFields(f *Fields) error {
 			return ErrValidation
 		}
 		switch *f.Type {
-		case "expense", "income", "transfer":
+		case "expense", "income", "transfer", typeSaving:
 		default:
 			return ErrValidation
 		}
@@ -441,6 +441,9 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 	if err := r.finishKind(req.Kind); err != nil {
 		return nil, err
 	}
+	if (old.Type == typeSaving) != (r.Type == typeSaving) {
+		return nil, ErrValidation // a saving setting stays one (and a money one never becomes one)
+	}
 	if rebuild {
 		r.GeneratedUntil, r.EndingNotified = nil, false
 		if err := r.limits(today); err != nil {
@@ -692,6 +695,11 @@ func (s *Service) Resume(ctx context.Context, userID, id uuid.UUID, tz string) (
 		if err := s.checkWalletsActive(ctx, tx, r); err != nil {
 			return err
 		}
+		if r.Type == typeSaving { // the goal must be active again
+			if err := checkSavingTx(ctx, tx, r.UserID, r.AccountID, r.GoalID); err != nil {
+				return err
+			}
+		}
 		r.Status = "active"
 		if err := r.limits(today); err != nil {
 			return err
@@ -845,6 +853,9 @@ func (s *Service) CreateItem(ctx context.Context, userID uuid.UUID, req ItemCrea
 	}
 	it.RuleID, it.Draft = &r.ID, ruleBaseDraft(r)
 	applyToDraft(&it.Draft, &req.Fields)
+	if switchesSaving(ruleBaseDraft(r), it.Draft) {
+		return nil, ErrValidation
+	}
 	if err := checkDraftRefsTx(ctx, tx, userID, it.Draft); err != nil {
 		return nil, err
 	}
@@ -890,7 +901,11 @@ func (s *Service) UpdateItem(ctx context.Context, userID, id uuid.UUID, req Item
 // applyItemEdit puts the fields on a stored row, marks it edited and pushes the
 // change to what it is linked to.
 func (s *Service) applyItemEdit(ctx context.Context, tx pgx.Tx, it *itemRow, f *Fields, alsoUpdateLink bool) ([]uuid.UUID, error) {
+	before := it.Draft
 	applyToDraft(&it.Draft, f)
+	if switchesSaving(before, it.Draft) {
+		return nil, ErrValidation
+	}
 	if err := checkDraftRefsTx(ctx, tx, it.UserID, it.Draft); err != nil {
 		return nil, err
 	}

@@ -49,12 +49,6 @@ func newGoalFix(t *testing.T) *goalFix {
 		g.GET("/saving-goals/:id", h.Get)
 		g.PUT("/saving-goals/:id", h.Update)
 		g.DELETE("/saving-goals/:id", h.Delete)
-		g.PUT("/saving-goals/:id/auto-saves", h.PutAutoSaves)
-		g.PUT("/saving-goals/spare/auto-saves", h.PutAutoSavesSpare)
-		g.PUT("/saving-goals/:id/auto-save", h.PutAutoSave)
-		g.DELETE("/saving-goals/:id/auto-save", h.DeleteAutoSave)
-		g.PUT("/saving-goals/spare/auto-save", h.PutAutoSaveSpare)
-		g.DELETE("/saving-goals/spare/auto-save", h.DeleteAutoSaveSpare)
 		g.POST("/saving-goals/:id/close", h.Close)
 		g.POST("/saving-goals/:id/archive", h.Archive)
 		g.POST("/saving-goals/:id/restore", h.Restore)
@@ -111,6 +105,23 @@ func (f *goalFix) save(wallet uuid.UUID, goal *uuid.UUID, amount float64) WriteR
 		"kind": "save", "amount": amount, "wallet_id": wallet, "goal_id": goal,
 	}, http.StatusCreated, &w)
 	return w
+}
+
+// savingRule adds a recurring saving setting of the goal straight in SQL (recurring
+// imports this package): monthly on monthDay, or every interval days.
+func (f *goalFix) savingRule(goal *uuid.UUID, amount float64, monthDay int, interval int, start string) uuid.UUID {
+	f.t.Helper()
+	id := uuid.New()
+	freq, mode, day := "daily", (*string)(nil), (*int)(nil)
+	if monthDay > 0 {
+		m := "day"
+		freq, mode, day, interval = "monthly", &m, &monthDay, 1
+	}
+	f.exec(`INSERT INTO recurring_rules (id, user_id, name, type, kind, amount, account_id, goal_id, freq, interval_n,
+		monthly_mode, month_day, start_date, status)
+		VALUES ($1, $2, 'ออม', 'saving', 'saving', $3, $4, $5, $6, $7, $8, $9, $10, 'active')`,
+		id, f.me, amount, f.kbank, goal, freq, interval, mode, day, start)
+	return id
 }
 
 func walletOf(w WriteResult, id uuid.UUID) *shared.WalletSavings {
@@ -370,7 +381,7 @@ func TestSavingsWithoutWallet(t *testing.T) {
 	}
 }
 
-func TestGoalMonthNumbersAndAutoSave(t *testing.T) {
+func TestGoalMonthNumbersAndSavingPlan(t *testing.T) {
 	f := newGoalFix(t)
 	dl := f.today.AddDate(0, 5, 0).Format(dateLayout)
 	goal := f.goal("Japan", 80000, &dl)
@@ -379,135 +390,60 @@ func TestGoalMonthNumbersAndAutoSave(t *testing.T) {
 	var d GoalDetail
 	f.call("GET", "/saving-goals/"+goal.String(), "getSavingGoal", nil, http.StatusOK, &d)
 	g := d.Goal
-	if g.MonthSaved != 10000 || g.MonthPlan == nil || g.MonthShort == nil || *g.MonthShort != round2(*g.MonthPlan-10000) && *g.MonthShort != 0 || g.AutoSave != nil {
+	if g.MonthSaved != 10000 || g.MonthPlan == nil || g.MonthShort == nil || *g.MonthShort != round2(*g.MonthPlan-10000) && *g.MonthShort != 0 {
 		t.Fatalf("goal month numbers = %+v", g)
 	}
-	f.call("PUT", "/saving-goals/"+goal.String()+"/auto-save", "setGoalAutoSave",
-		map[string]any{"amount": 15000, "day": 31, "account_id": f.kbank}, http.StatusOK, &d)
+	// an active recurring saving setting is the month plan
+	f.savingRule(&goal, 15000, 31, 0, f.today.Format(dateLayout))
+	f.call("GET", "/saving-goals/"+goal.String(), "getSavingGoal", nil, http.StatusOK, &d)
 	g = d.Goal
-	if g.AutoSave == nil || g.AutoSave.Day != 31 || g.AutoSave.Wallet == nil || g.AutoSave.Wallet.ID != f.kbank ||
-		g.MonthPlan == nil || *g.MonthPlan != 15000 || g.MonthShort == nil || *g.MonthShort != 5000 {
-		t.Fatalf("with auto-save = plan %v short %v auto %+v", g.MonthPlan, g.MonthShort, g.AutoSave)
+	if g.MonthPlan == nil || *g.MonthPlan != 15000 || g.MonthShort == nil || *g.MonthShort != 5000 {
+		t.Fatalf("with a saving setting = plan %v short %v", g.MonthPlan, g.MonthShort)
 	}
-	f.call("PUT", "/saving-goals/"+goal.String()+"/auto-save", "", map[string]any{"amount": 0, "day": 5}, http.StatusBadRequest, nil)
-	f.call("PUT", "/saving-goals/"+goal.String()+"/auto-save", "", map[string]any{"amount": 10, "day": 32}, http.StatusBadRequest, nil)
-	f.call("PUT", "/saving-goals/"+goal.String()+"/auto-save", "", map[string]any{"amount": 10, "day": 5, "account_id": f.untrack}, http.StatusBadRequest, nil)
-
 	var l GoalList
 	f.call("GET", "/saving-goals", "listSavingGoals", nil, http.StatusOK, &l)
 	if l.Summary.SavedTotal != 10000 || l.Summary.MonthShortTotal != 5000 || l.Summary.Unallocated != 0 {
 		t.Errorf("summary = %+v", l.Summary)
 	}
-	var sp SpareDetail
-	f.call("PUT", "/saving-goals/spare/auto-save", "setSpareAutoSave", map[string]any{"amount": 200, "day": 1}, http.StatusOK, &sp)
-	if sp.AutoSave == nil || sp.AutoSave.Wallet != nil || sp.AutoSave.Amount != 200 {
-		t.Errorf("spare auto-save = %+v", sp.AutoSave)
-	}
-	f.call("DELETE", "/saving-goals/spare/auto-save", "clearSpareAutoSave", nil, http.StatusOK, &sp)
-	f.call("DELETE", "/saving-goals/"+goal.String()+"/auto-save", "clearGoalAutoSave", nil, http.StatusOK, &d)
-	if sp.AutoSave != nil || d.Goal.AutoSave != nil {
-		t.Errorf("cleared: spare %+v goal %+v", sp.AutoSave, d.Goal.AutoSave)
+	// a paused one is not a plan
+	f.exec(`UPDATE recurring_rules SET status = 'paused' WHERE goal_id = $1`, goal)
+	f.call("GET", "/saving-goals/"+goal.String(), "getSavingGoal", nil, http.StatusOK, &d)
+	if d.Goal.MonthPlan == nil || *d.Goal.MonthPlan == 15000 {
+		t.Errorf("paused plan = %v, want needed_monthly", d.Goal.MonthPlan)
 	}
 }
 
-func TestGoalManyAutoSaves(t *testing.T) {
+// Closing / archiving a goal pauses its saving settings (reopening doesn't resume
+// them); deleting it deletes them.
+func TestGoalLifecycleSavingRules(t *testing.T) {
 	f := newGoalFix(t)
-	dl := f.today.AddDate(0, 5, 0).Format(dateLayout)
-	goal := f.goal("Japan", 80000, &dl)
-	path := "/saving-goals/" + goal.String() + "/auto-saves"
-	start := f.today.Format(dateLayout)
-	monthly := func(day int) map[string]any {
-		return map[string]any{"freq": "monthly", "interval": 1, "monthly": map[string]any{"mode": "day", "day": day}}
-	}
-	weekly := map[string]any{"freq": "weekly", "interval": 1}
-
-	var d GoalDetail
-	f.call("GET", "/saving-goals/"+goal.String(), "getSavingGoal", nil, http.StatusOK, &d)
-	if d.Goal.AutoSaves == nil || len(d.Goal.AutoSaves) != 0 || d.Goal.AutoSave != nil {
-		t.Fatalf("none yet = %+v / %+v", d.Goal.AutoSaves, d.Goal.AutoSave)
-	}
-
-	f.call("PUT", path, "setGoalAutoSaves", map[string]any{"items": []map[string]any{
-		{"amount": 1000, "account_id": f.kbank, "rule": monthly(31), "start_date": start, "end": map[string]any{"kind": "none"}},
-		{"amount": 200, "account_id": f.scb, "rule": weekly, "start_date": start, "end": map[string]any{"kind": "count", "count": 3}},
-	}}, http.StatusOK, &d)
-	got := d.Goal.AutoSaves
-	if len(got) != 2 || got[0].Amount != 1000 || got[0].Wallet == nil || got[0].Wallet.ID != f.kbank ||
-		got[0].Rule.Freq != "monthly" || got[0].StartDate != start || got[0].End.Kind != "none" ||
-		got[1].Rule.Freq != "weekly" || got[1].End.Kind != "count" || got[1].NextDate == nil || *got[1].NextDate != start {
-		t.Fatalf("two items = %+v", got)
-	}
-	if d.Goal.AutoSave == nil || d.Goal.AutoSave.Amount != 1000 || d.Goal.AutoSave.Day != 31 {
-		t.Errorf("legacy auto_save = %+v", d.Goal.AutoSave)
-	}
-	// 1000 for the 31st + 200 × the weekly dates (≤ 3) that fall in this month.
-	if d.Goal.MonthPlan == nil || *d.Goal.MonthPlan < 1200 || *d.Goal.MonthPlan > 1600 {
-		t.Errorf("month_plan = %v", d.Goal.MonthPlan)
-	}
-
-	// Replacing: the first is kept in place (same id), the weekly goes, a new one comes.
-	keep := got[0].ID
-	f.call("PUT", path, "setGoalAutoSaves", map[string]any{"items": []map[string]any{
-		{"id": keep, "amount": 1500, "account_id": nil, "rule": monthly(31), "start_date": start},
-		{"amount": 50, "rule": map[string]any{"freq": "daily", "interval": 7}, "start_date": start},
-	}}, http.StatusOK, &d)
-	got = d.Goal.AutoSaves
-	if len(got) != 2 || got[0].ID != keep || got[0].Amount != 1500 || got[0].Wallet != nil || got[1].Rule.Interval != 7 {
-		t.Fatalf("replaced = %+v", got)
-	}
-
-	// Validation.
-	for name, items := range map[string][]map[string]any{
-		"amount":       {{"amount": 0, "rule": monthly(5), "start_date": start}},
-		"no rule":      {{"amount": 10, "start_date": start}},
-		"no start":     {{"amount": 10, "rule": monthly(5)}},
-		"unknown id":   {{"id": uuid.New(), "amount": 10, "rule": monthly(5), "start_date": start}},
-		"untracked":    {{"amount": 10, "account_id": f.untrack, "rule": monthly(5), "start_date": start}},
-		"duplicate id": {{"id": keep, "amount": 10, "rule": monthly(5), "start_date": start}, {"id": keep, "amount": 10, "rule": monthly(6), "start_date": start}},
-	} {
-		raw := f.call("PUT", path, "", map[string]any{"items": items}, http.StatusBadRequest, nil)
-		if name == "untracked" && errCode(raw) != "WALLET_NOT_TRACKED" {
-			t.Errorf("%s: %s", name, raw)
+	goal := f.goal("Japan", 80000, nil)
+	other := f.goal("Car", 50000, nil)
+	rule := f.savingRule(&goal, 1000, 1, 0, f.today.Format(dateLayout))
+	spare := f.savingRule(nil, 100, 0, 1, f.today.Format(dateLayout))
+	keep := f.savingRule(&other, 500, 1, 0, f.today.Format(dateLayout))
+	status := func(id uuid.UUID) string {
+		var s string
+		if err := f.pool.QueryRow(f.ctx, `SELECT status FROM recurring_rules WHERE id = $1`, id).Scan(&s); err != nil {
+			return "gone"
 		}
+		return s
 	}
-	bad := f.call("PUT", path, "", map[string]any{"items": []map[string]any{
-		{"amount": 10, "rule": map[string]any{"freq": "sometimes"}, "start_date": start},
-	}}, http.StatusBadRequest, nil)
-	if errCode(bad) != "INVALID_RULE" {
-		t.Errorf("bad rule: %s", bad)
+	f.call("POST", "/saving-goals/"+goal.String()+"/archive", "archiveSavingGoal", nil, http.StatusOK, nil)
+	if status(rule) != "paused" || status(spare) != "active" || status(keep) != "active" {
+		t.Fatalf("after archive: %s / %s / %s", status(rule), status(spare), status(keep))
 	}
-	far := f.today.AddDate(3, 0, 0).Format(dateLayout)
-	tooFar := f.call("PUT", path, "", map[string]any{"items": []map[string]any{
-		{"amount": 10, "rule": monthly(5), "start_date": start, "end": map[string]any{"kind": "date", "date": far}},
-	}}, http.StatusBadRequest, nil)
-	if errCode(tooFar) != "END_TOO_FAR" {
-		t.Errorf("far end: %s", tooFar)
+	f.call("POST", "/saving-goals/"+goal.String()+"/restore", "restoreSavingGoal", nil, http.StatusOK, nil)
+	if status(rule) != "paused" {
+		t.Errorf("restore resumed the setting: %s", status(rule))
 	}
-	f.call("PUT", path, "", map[string]any{}, http.StatusBadRequest, nil)
-	f.call("GET", "/saving-goals/"+goal.String(), "getSavingGoal", nil, http.StatusOK, &d)
-	if len(d.Goal.AutoSaves) != 2 {
-		t.Fatalf("a failed PUT changed the set: %+v", d.Goal.AutoSaves)
+	f.call("POST", "/saving-goals/"+other.String()+"/close", "closeSavingGoal", map[string]any{"to": "spare"}, http.StatusOK, nil)
+	if status(keep) != "paused" {
+		t.Errorf("after close: %s", status(keep))
 	}
-
-	// The old call replaces the set with one monthly item, keeping the first row.
-	f.call("PUT", "/saving-goals/"+goal.String()+"/auto-save", "setGoalAutoSave",
-		map[string]any{"amount": 700, "day": 31}, http.StatusOK, &d)
-	if len(d.Goal.AutoSaves) != 1 || d.Goal.AutoSaves[0].ID != keep || d.Goal.AutoSaves[0].Amount != 700 {
-		t.Errorf("legacy PUT = %+v", d.Goal.AutoSaves)
-	}
-
-	// The spare, and clearing.
-	var sp SpareDetail
-	f.call("PUT", "/saving-goals/spare/auto-saves", "setSpareAutoSaves", map[string]any{"items": []map[string]any{
-		{"amount": 30, "rule": weekly, "start_date": start},
-	}}, http.StatusOK, &sp)
-	if len(sp.AutoSaves) != 1 || sp.AutoSave == nil || sp.AutoSave.Amount != 30 {
-		t.Errorf("spare = %+v / %+v", sp.AutoSaves, sp.AutoSave)
-	}
-	f.call("PUT", "/saving-goals/spare/auto-saves", "setSpareAutoSaves", map[string]any{"items": []map[string]any{}}, http.StatusOK, &sp)
-	f.call("PUT", path, "setGoalAutoSaves", map[string]any{"items": []map[string]any{}}, http.StatusOK, &d)
-	if sp.AutoSaves == nil || len(sp.AutoSaves) != 0 || sp.AutoSave != nil || d.Goal.AutoSaves == nil || len(d.Goal.AutoSaves) != 0 {
-		t.Errorf("cleared: %+v / %+v", sp.AutoSaves, d.Goal.AutoSaves)
+	f.call("DELETE", "/saving-goals/"+goal.String(), "deleteSavingGoal", nil, http.StatusOK, nil)
+	if status(rule) != "gone" || status(spare) != "active" {
+		t.Errorf("after delete: %s / %s", status(rule), status(spare))
 	}
 }
 
@@ -515,14 +451,11 @@ func TestGoalMonthParam(t *testing.T) {
 	f := newGoalFix(t)
 	dl := f.today.AddDate(0, 5, 0).Format(dateLayout)
 	goal := f.goal("Japan", 80000, &dl)
-	start := f.today.Format(dateLayout)
 	path := "/saving-goals/" + goal.String()
 	next := f.today.AddDate(0, 1, 0)
 	nextMonth := next.Format("2006-01")
-	f.call("PUT", path+"/auto-saves", "setGoalAutoSaves", map[string]any{"items": []map[string]any{
-		{"amount": 1000, "rule": map[string]any{"freq": "monthly", "interval": 1, "monthly": map[string]any{"mode": "day", "day": 31}}, "start_date": start},
-		{"amount": 100, "rule": map[string]any{"freq": "daily", "interval": 1}, "start_date": f.today.AddDate(0, -3, 0).Format(dateLayout)},
-	}}, http.StatusOK, nil)
+	f.savingRule(&goal, 1000, 31, 0, f.today.Format(dateLayout))
+	f.savingRule(&goal, 100, 0, 1, f.today.AddDate(0, -3, 0).Format(dateLayout))
 
 	var now, later GoalDetail
 	f.call("GET", path, "getSavingGoal", nil, http.StatusOK, &now)
@@ -560,12 +493,12 @@ func TestOpenEndedGoal(t *testing.T) {
 		t.Fatalf("open-ended = %+v", g)
 	}
 	f.save(f.kbank, &kid, 2000)
-	f.call("PUT", "/saving-goals/"+kid.String()+"/auto-save", "setGoalAutoSave",
-		map[string]any{"amount": 3000, "day": 31, "account_id": f.kbank}, http.StatusOK, &d)
+	f.savingRule(&kid, 3000, 31, 0, f.today.Format(dateLayout))
+	f.call("GET", "/saving-goals/"+kid.String(), "getSavingGoal", nil, http.StatusOK, &d)
 	g = d.Goal
 	if g.SavedAmount != 2000 || g.MonthSaved != 2000 || g.MonthPlan == nil || *g.MonthPlan != 3000 ||
 		g.MonthShort != nil || g.EtaDate != nil || g.NeededMonthly != nil || g.Status != "none" {
-		t.Fatalf("open-ended with auto-save = %+v", g)
+		t.Fatalf("open-ended with a saving setting = %+v", g)
 	}
 	for _, p := range d.History {
 		if p.Plan != nil {

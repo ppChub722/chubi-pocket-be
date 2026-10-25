@@ -3,20 +3,25 @@ package recurring
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
 )
 
 const typeSaving = "saving"
 
+// ErrSavingNeedsWallet — a saving setting (or occurrence) has no wallet to save from.
+var ErrSavingNeedsWallet = errors.New("a saving needs a wallet")
+
 func (s *Service) WithSavings(sv *saving_goals.Service) { s.savings = sv }
 
 func checkSavingTx(ctx context.Context, q rowQuerier, userID uuid.UUID, account, goal *uuid.UUID) error {
 	if account == nil {
-		return ErrValidation
+		return ErrSavingNeedsWallet
 	}
 	var tracked bool
 	if err := q.QueryRow(ctx, `SELECT track_balance FROM accounts WHERE id = $1`, *account).Scan(&tracked); err != nil {
@@ -43,6 +48,41 @@ func checkSavingTx(ctx context.Context, q rowQuerier, userID uuid.UUID, account,
 		return saving_goals.ErrGoalNotActive
 	}
 	return nil
+}
+
+// switchesSaving — an occurrence can't move between a saving and a money type.
+func switchesSaving(before, after pending.Draft) bool {
+	return (draftType(before) == typeSaving) != (draftType(after) == typeSaving)
+}
+
+// recordSavingTx records a saving occurrence: a deposit of its amount from its wallet into
+// its goal (or the unallocated pot), dated when, linked to the row.
+func (s *Service) recordSavingTx(ctx context.Context, tx pgx.Tx, row *itemRow, when time.Time, desc *string, auto bool) ([]uuid.UUID, any, error) {
+	d := row.Draft
+	if s.savings == nil {
+		return nil, nil, ErrValidation
+	}
+	if err := checkSavingTx(ctx, tx, row.UserID, d.AccountID, d.GoalID); err != nil {
+		return nil, nil, err
+	}
+	note := d.Note
+	if note == nil || *note == "" {
+		note = desc
+	}
+	id, err := s.savings.SaveFromDraftTx(ctx, tx, row.UserID, d.AccountID, d.GoalID, *d.Amount, when.Format(dateLayout),
+		truncRunes(note, 500), saving_goals.SourceRecurring)
+	if err != nil {
+		return nil, nil, err
+	}
+	now := time.Now()
+	row.SavingEntryID, row.ProducedAt = &id, &now
+	if auto {
+		row.AutoCreatedAt = &now
+	}
+	if err := saveItemTx(ctx, tx, row); err != nil {
+		return nil, nil, err
+	}
+	return []uuid.UUID{*d.AccountID}, nil, nil
 }
 
 func checkRuleRefsTx(ctx context.Context, q rowQuerier, userID uuid.UUID, r *Rule) error {

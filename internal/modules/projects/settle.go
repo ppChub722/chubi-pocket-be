@@ -5,17 +5,77 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// SettleLine — From owes To Amount.
+// SettleLine — From owes To Amount. Recorded (a line with me in it): I already have a debt
+// for exactly this line (POST /personal-debts/…/entries with event_id).
 type SettleLine struct {
-	From   shared.MemberRef `json:"from"`
-	To     shared.MemberRef `json:"to"`
-	Amount float64          `json:"amount"`
+	From     shared.MemberRef `json:"from"`
+	To       shared.MemberRef `json:"to"`
+	Amount   float64          `json:"amount"`
+	Recorded bool             `json:"recorded"`
+}
+
+// eventDebt — one of my debts recording an event's จัดการ line (source event, no bill).
+type eventDebt struct {
+	direction    string
+	amount       float64
+	personName   string
+	linkedUserID *uuid.UUID
+	contactName  *string
+}
+
+func loadEventDebts(ctx context.Context, q shared.Querier, userID, eventID uuid.UUID) ([]eventDebt, error) {
+	rows, err := q.Query(ctx, `SELECT d.direction, d.amount::float8, d.counterparty_person_name,
+			c.linked_user_id, c.display_name
+		FROM personal_debts d
+		LEFT JOIN contacts c ON c.id = d.counterparty_contact_id
+		WHERE d.user_id = $1 AND d.project_id = $2 AND d.source_kind = 'event'
+		  AND d.source_project_transaction_id IS NULL`, userID, eventID)
+	if err != nil {
+		return nil, fmt.Errorf("settle debts: %w", err)
+	}
+	defer rows.Close()
+	var out []eventDebt
+	for rows.Next() {
+		var d eventDebt
+		if err := rows.Scan(&d.direction, &d.amount, &d.personName, &d.linkedUserID, &d.contactName); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// recorded: the line has me in it and one of debts records it (my side, the other member,
+// the same amount).
+func (l SettleLine) recorded(debts []eventDebt) bool {
+	var other shared.MemberRef
+	dir := ""
+	switch {
+	case l.From.IsMe:
+		other, dir = l.To, "received" // I owe them
+	case l.To.IsMe:
+		other, dir = l.From, "paid" // they owe me
+	default:
+		return false
+	}
+	for _, d := range debts {
+		if d.direction != dir || math.Abs(d.amount-l.Amount) > 0.005 {
+			continue
+		}
+		if (d.linkedUserID != nil && other.UserID != nil && *d.linkedUserID == *other.UserID) ||
+			strings.EqualFold(strings.TrimSpace(d.personName), strings.TrimSpace(other.Name)) ||
+			(d.contactName != nil && strings.EqualFold(strings.TrimSpace(*d.contactName), strings.TrimSpace(other.Name))) {
+			return true
+		}
+	}
+	return false
 }
 
 // EventSettle — who pays whom to clear the event: Pairs nets each two members' own bills and
@@ -93,12 +153,21 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID) (*EventSettl
 	if err != nil {
 		return nil, err
 	}
+	debts, err := loadEventDebts(ctx, s.store.db, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	line := func(m settleMove) SettleLine {
+		l := SettleLine{From: refs[m.from], To: refs[m.to], Amount: m.amount}
+		l.Recorded = l.recorded(debts)
+		return l
+	}
 	out := &EventSettle{Pairs: []SettleLine{}, Simplified: []SettleLine{}}
 	for _, l := range pairs {
-		out.Pairs = append(out.Pairs, SettleLine{From: refs[l.from], To: refs[l.to], Amount: l.amount})
+		out.Pairs = append(out.Pairs, line(l))
 	}
 	for _, l := range simplified {
-		out.Simplified = append(out.Simplified, SettleLine{From: refs[l.from], To: refs[l.to], Amount: l.amount})
+		out.Simplified = append(out.Simplified, line(l))
 	}
 	sortSettle(out.Pairs)
 	sortSettle(out.Simplified)

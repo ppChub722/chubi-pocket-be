@@ -73,6 +73,8 @@ func newDebtHFix(t *testing.T) *debtHFix {
 		g.GET("/personal-debts/:id", h.Get)
 		g.PUT("/personal-debts/:id", h.Update)
 		g.DELETE("/personal-debts/:id", h.Delete)
+		g.POST("/personal-debts/:id/link", h.LinkTx)
+		g.POST("/personal-debts/:id/unlink", h.UnlinkTx)
 	})
 	f.exec(`UPDATE users SET display_name = 'Bee Live' WHERE id = $1`, f.partner)
 	f.wallet = testdb.Account(t, pool, f.me)

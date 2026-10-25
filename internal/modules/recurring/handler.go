@@ -133,6 +133,14 @@ func mapError(c *gin.Context, err error) {
 		response.BadRequest(c, "TAG_NOT_FOUND", err.Error(), nil)
 	case errors.Is(err, ErrInvalidTransition):
 		response.Fail(c, http.StatusConflict, "INVALID_TRANSITION", err.Error(), nil)
+	case errors.Is(err, ErrSavingNeedsWallet):
+		response.BadRequest(c, "SAVING_NEEDS_WALLET", err.Error(), nil)
+	case errors.Is(err, saving_goals.ErrAccountNotFound):
+		response.BadRequest(c, "ACCOUNT_NOT_FOUND", err.Error(), nil)
+	case errors.Is(err, saving_goals.ErrValidation):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+	case errors.Is(err, saving_goals.ErrInsufficientSaving):
+		response.Fail(c, http.StatusConflict, "INSUFFICIENT_SAVING", err.Error(), nil)
 	case errors.Is(err, saving_goals.ErrWalletNotTracked):
 		response.BadRequest(c, "WALLET_NOT_TRACKED", err.Error(), nil)
 	case errors.Is(err, saving_goals.ErrGoalNotFound):
@@ -179,7 +187,7 @@ func (h *Handler) List(c *gin.Context) {
 		hint.Amount = &a
 	}
 	kind := c.Query("kind")
-	if kind != "" && kind != KindSubscription && kind != KindInstallment && kind != KindIncome && kind != KindReminder {
+	if kind != "" && !validKind(kind) {
 		response.BadRequest(c, "VALIDATION_ERROR", "Invalid kind", nil)
 		return
 	}
