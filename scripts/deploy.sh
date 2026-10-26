@@ -12,17 +12,18 @@
 # (git archive HEAD of the repo, or of --dir) — uncommitted changes are not
 # shipped; the script warns.
 #
-# BE steps (all on the VPS, see chubi-pocket-docs/ops/ops-runbook.md):
-#   1. upload the source, build image chubi-be:prod-new on the server
-#   2. pg_dump backup (/srv/backup/backup.sh)
+# BE steps (see chubi-pocket-docs/ops/ops-runbook.md):
+#   1. build image chubi-be:prod-new HERE (Docker Desktop must run): the 1 GB
+#      box must never build — then docker save | ssh … docker load
+#   2. on the VPS: pg_dump backup (/srv/backup/backup.sh)
 #   3. copy migrations → /srv/chubi/migrations, run `migrate up`
 #   4. keep the running image as chubi-be:prev, swap in the new one, restart
-#   5. health check https://chubipocket-api.ppforge.dev/health — on failure the
-#      previous image is put back automatically (migrations are NOT rolled
-#      back; restore from the backup taken in step 2 if ever needed).
+#   5. health check /health and /api/v1/health — on failure the previous image
+#      is put back automatically (migrations are NOT rolled back; restore from
+#      the backup taken in step 2 if ever needed).
 set -euo pipefail
 
-VPS="${VPS_HOST:-Admin@160.238.13.137}"   # new box: export VPS_HOST=Admin@<ip>
+VPS="${VPS_HOST:-Admin@143.14.147.249}"   # ppForge (ssh alias ppforge); the old Happy-Host box is gone
 KEY="$HOME/.ssh/ppforge_vps"
 HEALTH_URL="https://chubipocket-api.ppforge.dev/health"
 
@@ -63,30 +64,29 @@ deploy_be() {
     echo "⚠ commit $commit is not pushed yet (deploying it anyway)."
   fi
 
-  say "BE: packing commit $commit"
-  local tgz
-  tgz="$(mktemp -d)/chubi-be-src.tgz"
-  git archive --format=tar.gz -o "$tgz" HEAD
+  say "BE: building image of commit $commit (here, not on the VPS)"
+  docker info >/dev/null 2>&1 || { echo "✗ Docker is not running on this machine" >&2; exit 1; }
+  local src
+  src="$(mktemp -d)"
+  git archive HEAD | tar -x -C "$src"
+  docker build -q -t chubi-be:prod-new --label "commit=$commit" "$src" >/dev/null
 
-  say "BE: uploading"
-  ssh_vps 'mkdir -p ~/deploy'
-  scp "${SSH_OPTS[@]}" -q "$tgz" "$VPS:~/deploy/chubi-be-src.tgz"
+  say "BE: shipping the image + migrations"
+  docker save chubi-be:prod-new | gzip -1 | ssh_vps 'gunzip | sudo docker load' >/dev/null
+  tar -czf - -C "$src" migrations | ssh_vps 'rm -rf ~/deploy/migrations && mkdir -p ~/deploy && tar -xzf - -C ~/deploy'
+  rm -rf "$src"
 
-  say "BE: build → backup → migrate → swap → health check (on the VPS)"
+  say "BE: backup → migrate → swap → health check (on the VPS)"
   ssh_vps "COMMIT=$commit HEALTH_URL=$HEALTH_URL bash -s" <<'REMOTE'
 set -euo pipefail
 cd ~/deploy
-rm -rf src && mkdir src && tar -xzf chubi-be-src.tgz -C src
-
-echo "· building image (commit $COMMIT)"
-sudo docker build -q -t chubi-be:prod-new --label "commit=$COMMIT" src </dev/null >/dev/null
 
 echo "· backup"
 sudo bash /srv/backup/backup.sh >/dev/null
 echo "  latest dump: $(ls -t /srv/backup/dumps | grep '\.dump\.gz$' | head -1)"
 
 echo "· migrations"
-sudo cp -r src/migrations/. /srv/chubi/migrations/
+sudo cp -r migrations/. /srv/chubi/migrations/
 cd /srv/chubi
 # -T + </dev/null: compose must not read stdin — this script itself arrives
 # on stdin (ssh ... bash -s), and `run` would swallow the rest of it.
@@ -101,7 +101,8 @@ sudo docker compose up -d app </dev/null >/dev/null 2>&1
 
 echo "· health check"
 for i in $(seq 1 30); do
-  if curl -fsS --max-time 3 "$HEALTH_URL" >/dev/null 2>&1; then
+  if curl -fsS --max-time 3 "$HEALTH_URL" >/dev/null 2>&1 &&
+     curl -fsS --max-time 3 "${HEALTH_URL%/health}/api/v1/health" >/dev/null 2>&1; then
     echo "  healthy after ${i}s"
     sudo docker image prune -f >/dev/null
     exit 0

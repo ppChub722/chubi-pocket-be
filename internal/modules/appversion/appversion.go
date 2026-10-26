@@ -36,6 +36,16 @@ func (h *Handler) Version(c *gin.Context) {
 	c.JSON(http.StatusOK, h.info.view())
 }
 
+// PubspecBuild — the app's build as pubspec has it. The APKs are split per ABI, so Android's
+// versionCode (what a phone sends) is ABI × 1000 + build: 2170 on arm64 is build 170. Holds while
+// the build stays under 1000.
+func PubspecBuild(build int) int {
+	if build >= 1000 {
+		return build % 1000
+	}
+	return build
+}
+
 func (h *Handler) Middleware(exempt ...string) gin.HandlerFunc {
 	skip := make(map[string]bool, len(exempt))
 	for _, p := range exempt {
@@ -47,6 +57,7 @@ func (h *Handler) Middleware(exempt ...string) gin.HandlerFunc {
 			return
 		}
 		build, err := strconv.Atoi(strings.TrimSpace(c.GetHeader(Header)))
+		build = PubspecBuild(build)
 		if err != nil || build >= h.info.MinBuild {
 			c.Next()
 			return

@@ -85,6 +85,21 @@ func TestOutdatedBuildGets426(t *testing.T) {
 	}
 }
 
+// A phone sends the split-per-ABI versionCode (ABI × 1000 + build): it counts as the build.
+func TestSplitAbiBuild(t *testing.T) {
+	i := info
+	i.MinBuild = 170
+	r := newRouter(i)
+	for build, want := range map[string]int{
+		"165": http.StatusUpgradeRequired, "2167": http.StatusUpgradeRequired, "1169": http.StatusUpgradeRequired,
+		"170": http.StatusOK, "2170": http.StatusOK, "1170": http.StatusOK, "4171": http.StatusOK,
+	} {
+		if w := get(r, "/api/v1/transactions", build); w.Code != want {
+			t.Errorf("build %s: status = %d, want %d", build, w.Code, want)
+		}
+	}
+}
+
 func TestPasses(t *testing.T) {
 	cases := []struct {
 		name, path, build string
