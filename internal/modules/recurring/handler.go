@@ -147,6 +147,8 @@ func mapError(c *gin.Context, err error) {
 		response.NotFound(c, "NOT_FOUND", "Saving goal not found")
 	case errors.Is(err, saving_goals.ErrGoalNotActive):
 		response.Fail(c, http.StatusConflict, "GOAL_NOT_ACTIVE", err.Error(), nil)
+	case errors.Is(err, saving_goals.ErrGoalReached):
+		response.Fail(c, http.StatusConflict, "GOAL_REACHED", err.Error(), nil)
 	case errors.Is(err, ErrAlreadyLinked):
 		response.Fail(c, http.StatusConflict, "ITEM_ALREADY_LINKED", err.Error(), nil)
 	default:

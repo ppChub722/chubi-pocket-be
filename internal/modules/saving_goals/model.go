@@ -48,6 +48,40 @@ type Goal struct {
 	ClosedAt     *time.Time
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	// เป้าต่อรอบ: PeriodAmount nil = none; the periods run every PeriodInterval
+	// PeriodFreq from PeriodAnchor.
+	PeriodAmount   *float64
+	PeriodFreq     *string
+	PeriodInterval int
+	PeriodAnchor   *time.Time
+}
+
+// GoalPeriod — the goal's เป้าต่อรอบ as set, and the period today is in.
+type GoalPeriod struct {
+	Amount   float64 `json:"amount"`
+	Freq     string  `json:"freq"`
+	Interval int     `json:"interval"`
+	Anchor   string  `json:"anchor"`
+	// Current is null when the goal isn't active, has no target or is reached.
+	Current *PeriodNow `json:"current"`
+}
+
+// PeriodNow — the period today is in.
+type PeriodNow struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+	// Target is the amount, but never more than the goal still needed when the period began.
+	Target   float64 `json:"target"`
+	Saved    float64 `json:"saved"` // net into the goal within the period
+	Short    float64 `json:"short"` // max(0, target − saved)
+	DaysLeft int     `json:"days_left"`
+	// EtaDate — the end of the period the goal is done in, if every period from now on
+	// reaches its target (a short period isn't carried over). Late = after the deadline.
+	EtaDate string `json:"eta_date"`
+	Late    bool   `json:"late"`
+	// Plan — what the goal's saving recurring settings put in within this period
+	// (null = none).
+	Plan *float64 `json:"plan"`
 }
 
 type entryRow struct {
@@ -110,6 +144,7 @@ type GoalView struct {
 	MonthShort      *float64         `json:"month_short"`
 	Status          string           `json:"status"`
 	BehindMonths    *int             `json:"behind_months"`
+	Period          *GoalPeriod      `json:"period"` // null = no เป้าต่อรอบ
 	Group           *string          `json:"group"`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
@@ -230,8 +265,18 @@ type GoalRequest struct {
 	TargetAmount *float64         `json:"target_amount"`
 	Deadline     *string          `json:"deadline"`
 	Milestones   []int            `json:"milestones"`
+	// เป้าต่อรอบ: period_amount null clears it; period sets the periods (default:
+	// every month from the 1st of this month).
+	PeriodAmount *float64     `json:"period_amount"`
+	Period       *PeriodInput `json:"period"`
 
 	present map[string]bool
+}
+
+type PeriodInput struct {
+	Freq     string `json:"freq"`
+	Interval int    `json:"interval"`
+	Anchor   string `json:"anchor"`
 }
 
 type Split struct {

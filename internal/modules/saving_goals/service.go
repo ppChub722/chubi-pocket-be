@@ -60,10 +60,17 @@ func (s *Service) today(ctx context.Context, userID uuid.UUID) (time.Time, error
 }
 
 func (s *Service) monthlyNets(ctx context.Context, q shared.Querier, userID uuid.UUID, goalIDs []uuid.UUID, spare bool) (map[uuid.UUID]map[string]float64, error) {
+	months, _, err := s.nets(ctx, q, userID, goalIDs, spare)
+	return months, err
+}
+
+// nets is the net per month ("YYYY-MM") and per day ("YYYY-MM-DD") into each goal (the
+// spare pot = uuid.Nil), in one query.
+func (s *Service) nets(ctx context.Context, q shared.Querier, userID uuid.UUID, goalIDs []uuid.UUID, spare bool) (map[uuid.UUID]map[string]float64, map[uuid.UUID]map[string]float64, error) {
 	if goalIDs == nil {
 		goalIDs = []uuid.UUID{}
 	}
-	rows, err := q.Query(ctx, `SELECT COALESCE(x.k, '00000000-0000-0000-0000-000000000000'::uuid), to_char(x.date, 'YYYY-MM'),
+	rows, err := q.Query(ctx, `SELECT COALESCE(x.k, '00000000-0000-0000-0000-000000000000'::uuid), to_char(x.date, 'YYYY-MM-DD'),
 			SUM(x.v)::float8
 		FROM (
 			SELECT CASE WHEN to_bucket = 'spare' THEN NULL ELSE to_goal_id END AS k, to_bucket AS b, date, amount AS v
@@ -75,25 +82,27 @@ func (s *Service) monthlyNets(ctx context.Context, q shared.Querier, userID uuid
 		WHERE (x.b = 'spare' AND $3) OR (x.b = 'goal' AND x.k = ANY($2))
 		GROUP BY 1, 2`, userID, goalIDs, spare)
 	if err != nil {
-		return nil, fmt.Errorf("monthly nets: %w", err)
+		return nil, nil, fmt.Errorf("nets: %w", err)
 	}
 	defer rows.Close()
-	out := map[uuid.UUID]map[string]float64{}
+	months := map[uuid.UUID]map[string]float64{}
+	byDay := map[uuid.UUID]map[string]float64{}
 	for rows.Next() {
 		var (
 			k uuid.UUID
-			m string
+			d string
 			v float64
 		)
-		if err := rows.Scan(&k, &m, &v); err != nil {
-			return nil, err
+		if err := rows.Scan(&k, &d, &v); err != nil {
+			return nil, nil, err
 		}
-		if out[k] == nil {
-			out[k] = map[string]float64{}
+		if months[k] == nil {
+			months[k], byDay[k] = map[string]float64{}, map[string]float64{}
 		}
-		out[k][m] = v
+		months[k][d[:7]] += v
+		byDay[k][d] = v
 	}
-	return out, rows.Err()
+	return months, byDay, rows.Err()
 }
 
 func monthKey(t time.Time) string { return t.Format("2006-01") }
@@ -283,6 +292,7 @@ type goalFacts struct {
 	currency string
 	bals     []shared.SavingBalanceRow
 	nets     map[uuid.UUID]map[string]float64
+	days     map[uuid.UUID]map[string]float64 // the same nets per day (เป้าต่อรอบ)
 }
 
 func (s *Service) loadFacts(ctx context.Context, userID uuid.UUID, goalIDs []uuid.UUID) (*goalFacts, error) {
@@ -296,9 +306,9 @@ func (s *Service) loadFacts(ctx context.Context, userID uuid.UUID, goalIDs []uui
 	if f.bals, err = shared.LoadAllSavingBalances(ctx, s.store.db, userID); err != nil {
 		return nil, err
 	}
-	f.nets = map[uuid.UUID]map[string]float64{}
+	f.nets, f.days = map[uuid.UUID]map[string]float64{}, map[uuid.UUID]map[string]float64{}
 	if len(goalIDs) > 0 {
-		if f.nets, err = s.monthlyNets(ctx, s.store.db, userID, goalIDs, false); err != nil {
+		if f.nets, f.days, err = s.nets(ctx, s.store.db, userID, goalIDs, false); err != nil {
 			return nil, err
 		}
 	}
@@ -353,12 +363,19 @@ func (s *Service) goalViewsWith(ctx context.Context, userID uuid.UUID, goals []*
 			saved[*b.GoalID] += b.Amount
 		}
 	}
-	plans, err := s.monthPlans(ctx, userID, monthStart)
+	rules, err := s.planRules(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
+	plans := plansBetween(rules, monthStart, monthStart.AddDate(0, 1, -1))
 	for _, g := range goals {
 		v := goalView(g, saved[g.ID], nets[g.ID], today, currency)
+		v.Period = periodView(g, saved[g.ID], facts.days[g.ID], func(from, to time.Time) *float64 {
+			if p, ok := plansBetween(rules, from, to)[g.ID]; ok {
+				return &p
+			}
+			return nil
+		}, today)
 		v.MonthSaved = round2(nets[g.ID][month])
 		active := v.State == StateActive
 		plan, planned := plans[g.ID]

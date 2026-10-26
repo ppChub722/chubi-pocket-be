@@ -25,6 +25,8 @@ var (
 	ErrGoalHasSavings     = errors.New("this goal still holds money; close it first")
 	ErrInvalidTransition  = errors.New("this action doesn't apply in the goal's current state")
 	ErrInsufficientSaving = errors.New("not enough saved there")
+	// ErrGoalReached — a recurring saving into a goal that already holds its target.
+	ErrGoalReached = errors.New("this goal already holds its target")
 )
 
 type InsufficientError struct{ Available float64 }
@@ -46,18 +48,20 @@ func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 func (s *Store) Pool() *pgxpool.Pool { return s.db }
 
 const goalColumns = `id, user_id, name, description, note, icon_code, target_amount::float8, deadline, milestones,
-	status, closed_at, created_at, updated_at`
+	status, closed_at, created_at, updated_at, period_amount::float8, period_freq, period_interval, period_anchor`
 
 func scanGoal(row pgx.Row) (*Goal, error) {
 	var (
-		g    Goal
-		icon []byte
-		ms   []int32
+		g        Goal
+		icon     []byte
+		ms       []int32
+		interval int32
 	)
 	if err := row.Scan(&g.ID, &g.UserID, &g.Name, &g.Description, &g.Note, &icon, &g.TargetAmount, &g.Deadline, &ms,
-		&g.Status, &g.ClosedAt, &g.CreatedAt, &g.UpdatedAt); err != nil {
+		&g.Status, &g.ClosedAt, &g.CreatedAt, &g.UpdatedAt, &g.PeriodAmount, &g.PeriodFreq, &interval, &g.PeriodAnchor); err != nil {
 		return nil, err
 	}
+	g.PeriodInterval = int(interval)
 	g.IconCode = shared.IconFromJSON(icon)
 	for _, m := range ms {
 		g.Milestones = append(g.Milestones, int(m))
@@ -110,18 +114,22 @@ func (s *Store) saveGoal(ctx context.Context, q querier, g *Goal) error {
 	for i, m := range g.Milestones {
 		ms[i] = int32(m)
 	}
+	if g.PeriodInterval < 1 {
+		g.PeriodInterval = 1
+	}
 	args := []any{g.ID, g.UserID, g.Name, shared.CleanText(g.Description), shared.CleanText(g.Note), icon,
-		g.TargetAmount, g.Deadline, ms, g.Status, g.ClosedAt}
+		g.TargetAmount, g.Deadline, ms, g.Status, g.ClosedAt, g.PeriodAmount, g.PeriodFreq, g.PeriodInterval, g.PeriodAnchor}
 	var err error
 	if g.ID == uuid.Nil {
 		g.ID, _ = uuid.NewV7()
 		args[0] = g.ID
 		_, err = q.Exec(ctx, `INSERT INTO saving_goals (id, user_id, name, description, note, icon_code, target_amount,
-			deadline, milestones, status, closed_at, created_by_user_id)
-			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $2)`, args...)
+			deadline, milestones, status, closed_at, period_amount, period_freq, period_interval, period_anchor, created_by_user_id)
+			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $2)`, args...)
 	} else {
 		_, err = q.Exec(ctx, `UPDATE saving_goals SET name = $3, description = $4, note = $5, icon_code = $6::jsonb,
-			target_amount = $7, deadline = $8, milestones = $9, status = $10, closed_at = $11, updated_by_user_id = $2
+			target_amount = $7, deadline = $8, milestones = $9, status = $10, closed_at = $11, period_amount = $12,
+			period_freq = $13, period_interval = $14, period_anchor = $15, updated_by_user_id = $2
 			WHERE id = $1 AND user_id = $2`, args...)
 	}
 	if err != nil {

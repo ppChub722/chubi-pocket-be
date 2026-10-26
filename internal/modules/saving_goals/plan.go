@@ -14,9 +14,26 @@ import (
 // The recurring "saving" settings (recurring_rules.type = 'saving') are a goal's plan:
 // read here in SQL, since recurring imports this package.
 
-// monthPlans — per goal with at least one active saving setting: Σ amount × its
-// occurrences in the month that starts on monthStart.
-func (s *Service) monthPlans(ctx context.Context, userID uuid.UUID, monthStart time.Time) (map[uuid.UUID]float64, error) {
+// planRule is one active saving setting into a goal.
+type planRule struct {
+	goal   uuid.UUID
+	amount float64
+	spec   recurrence.Spec
+}
+
+// plansBetween — per goal with at least one active saving setting: Σ amount × its
+// occurrences from from to to (both days included).
+func plansBetween(rules []planRule, from, to time.Time) map[uuid.UUID]float64 {
+	out := map[uuid.UUID]float64{}
+	for _, r := range rules {
+		n := len(r.spec.Between(from, to))
+		out[r.goal] = round2(out[r.goal] + r.amount*float64(n))
+	}
+	return out
+}
+
+// planRules reads the user's active saving settings into a goal, once per page.
+func (s *Service) planRules(ctx context.Context, userID uuid.UUID) ([]planRule, error) {
 	rows, err := s.store.db.Query(ctx, `SELECT goal_id, amount::float8, freq, interval_n, weekdays, monthly_mode,
 		month_day, month_nth, month_weekday, dates, start_date, end_kind, end_date, end_count, total_count, generated_until
 		FROM recurring_rules WHERE user_id = $1 AND type = 'saving' AND status = 'active' AND goal_id IS NOT NULL`, userID)
@@ -24,8 +41,7 @@ func (s *Service) monthPlans(ctx context.Context, userID uuid.UUID, monthStart t
 		return nil, fmt.Errorf("saving plans: %w", err)
 	}
 	defer rows.Close()
-	monthEnd := monthStart.AddDate(0, 1, -1)
-	out := map[uuid.UUID]float64{}
+	var out []planRule
 	for rows.Next() {
 		var (
 			goal                               uuid.UUID
@@ -45,8 +61,7 @@ func (s *Service) monthPlans(ctx context.Context, userID uuid.UUID, monthStart t
 			sp.Weekdays = append(sp.Weekdays, int(w))
 		}
 		sp.MonthDay, sp.MonthNth, sp.MonthWeekday, sp.EndCount, sp.TotalCount = intOf(monthDay), intOf(monthNth), intOf(monthWD), intOf(count), intOf(total)
-		n := len(sp.Between(monthStart, monthEnd))
-		out[goal] = round2(out[goal] + amount*float64(n))
+		out = append(out, planRule{goal: goal, amount: amount, spec: sp})
 	}
 	return out, rows.Err()
 }

@@ -4918,7 +4918,7 @@ paths:
       tags: [Saving goals]
       summary: Edit a goal
       operationId: updateSavingGoal
-      description: 'Partial: name, description, note, icon, target, deadline (null clears), milestones.'
+      description: 'Partial: name, description, note, icon, target, deadline (null clears), milestones, period_amount (null clears) + period.'
       requestBody:
         required: true
         content:
@@ -6746,6 +6746,7 @@ components:
         month_short: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'max(0, month_plan − month_saved); null with no plan or no target (an open-ended goal is never short).' }
         status: { type: string, enum: [reached, on_track, behind, none], description: 'reached = saved ≥ target; on_track = the pace gets there by the deadline; behind = it does not (behind_months); none = no deadline / closed.' }
         behind_months: { type: [integer, 'null'], description: 'With status behind: how many months late.' }
+        period: { oneOf: [{ $ref: '#/components/schemas/SavingGoalPeriod' }, { type: 'null' }], description: '0.4.0-5 เป้าต่อรอบ; null = none.' }
         group: { type: [string, 'null'], enum: [ongoing, null], description: 'The list group the goal always sits in: ongoing (ออมต่อเนื่อง) for a goal with no target; null = grouped by this month (short / done / no plan).' }
         created_at: { $ref: '#/components/schemas/DateTime' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
@@ -6966,6 +6967,40 @@ components:
         target_amount: { oneOf: [{ type: number, exclusiveMinimum: 0 }, { type: 'null' }], description: 'Missing / null = no target (an open-ended goal, 0.4.0-1).' }
         deadline: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }] }
         milestones: { type: array, items: { type: integer, minimum: 1, maximum: 100 }, description: 'Default [25, 50, 75, 100].' }
+        period_amount: { oneOf: [{ type: number, exclusiveMinimum: 0 }, { type: 'null' }], description: '0.4.0-5 เป้าต่อรอบ: the target per period; null / missing = none.' }
+        period: { oneOf: [{ $ref: '#/components/schemas/SavingGoalPeriodInput' }, { type: 'null' }], description: 'The periods of period_amount; missing = every month from the 1st of this month.' }
+    SavingGoalPeriodInput:
+      type: object
+      required: [freq, interval, anchor]
+      properties:
+        freq: { type: string, enum: [daily, weekly, monthly, yearly] }
+        interval: { type: integer, minimum: 1, maximum: 99 }
+        anchor: { $ref: '#/components/schemas/Date', description: 'The first period starts here; the rest follow every interval freq (a month day past a short month''s end = its last day).' }
+    SavingGoalPeriod:
+      type: object
+      description: '0.4.0-5 เป้าต่อรอบ as set, and the period today is in.'
+      required: [amount, freq, interval, anchor, current]
+      properties:
+        amount: { $ref: '#/components/schemas/Money' }
+        freq: { type: string, enum: [daily, weekly, monthly, yearly] }
+        interval: { type: integer }
+        anchor: { $ref: '#/components/schemas/Date' }
+        current:
+          description: 'Null when the goal is not active, has no target or holds it already.'
+          oneOf:
+            - { type: 'null' }
+            - type: object
+              required: [start, end, target, saved, short, days_left, eta_date, late, plan]
+              properties:
+                start: { $ref: '#/components/schemas/Date' }
+                end: { $ref: '#/components/schemas/Date' }
+                target: { $ref: '#/components/schemas/Money', description: 'amount, but never more than the goal still needed when the period began (the last period = what is left).' }
+                saved: { $ref: '#/components/schemas/Money', description: 'Net into the goal within the period (save − withdraw ± move).' }
+                short: { $ref: '#/components/schemas/Money', description: 'max(0, target − saved).' }
+                days_left: { type: integer, description: 'Days from today to end (0 on the last day).' }
+                eta_date: { $ref: '#/components/schemas/Date', description: 'End of the period the goal is done in if every period from now on reaches its target (a short period is not carried over).' }
+                late: { type: boolean, description: 'eta_date is after the deadline.' }
+                plan: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'What the goal''s active saving recurring settings put in within this period; null = none.' }
     SavingGoalUpdateRequest:
       type: object
       properties:
@@ -6976,6 +7011,8 @@ components:
         target_amount: { oneOf: [{ type: number, exclusiveMinimum: 0 }, { type: 'null' }], description: 'null clears the target (the goal becomes open-ended).' }
         deadline: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }] }
         milestones: { type: array, items: { type: integer, minimum: 1, maximum: 100 } }
+        period_amount: { oneOf: [{ type: number, exclusiveMinimum: 0 }, { type: 'null' }], description: '0.4.0-5 เป้าต่อรอบ; null clears it.' }
+        period: { oneOf: [{ $ref: '#/components/schemas/SavingGoalPeriodInput' }, { type: 'null' }], description: 'The periods; a goal given period_amount without periods gets every month from the 1st of this month.' }
     SavingGoalCloseRequest:
       type: object
       required: [to]

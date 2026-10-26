@@ -56,6 +56,35 @@ func applyGoal(g *Goal, r *GoalRequest, creating bool) error {
 			g.Deadline = &d
 		}
 	}
+	if has("period_amount") {
+		if r.PeriodAmount != nil && *r.PeriodAmount <= 0 {
+			return ErrValidation
+		}
+		g.PeriodAmount = r.PeriodAmount
+	}
+	if has("period") && r.Period != nil {
+		p := r.Period
+		switch p.Freq {
+		case "daily", "weekly", "monthly", "yearly":
+		default:
+			return ErrValidation
+		}
+		if p.Interval < 1 || p.Interval > 99 {
+			return ErrValidation
+		}
+		anchor, err := time.Parse(dateLayout, p.Anchor)
+		if err != nil {
+			return ErrValidation
+		}
+		freq := p.Freq
+		g.PeriodFreq, g.PeriodInterval, g.PeriodAnchor = &freq, p.Interval, &anchor
+	}
+	// A เป้าต่อรอบ with no periods set: every month from the 1st of this month.
+	if g.PeriodAmount != nil && (g.PeriodFreq == nil || g.PeriodAnchor == nil) {
+		now := time.Now()
+		freq, anchor := "monthly", time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		g.PeriodFreq, g.PeriodInterval, g.PeriodAnchor = &freq, 1, &anchor
+	}
 	if creating && !has("milestones") {
 		g.Milestones = append([]int{}, defaultMilestones...)
 	} else if has("milestones") {
@@ -626,6 +655,24 @@ func (s *Service) writeResult(ctx context.Context, userID uuid.UUID, entryIDs, g
 
 func (s *Service) SaveFromDraftTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, accountID *uuid.UUID, goalID *uuid.UUID,
 	amount float64, date string, note *string, source string) (uuid.UUID, error) {
+	// A recurring saving never takes a goal past its target: the last one is what's left.
+	if goalID != nil && source == SourceRecurring {
+		g, err := s.store.getGoal(ctx, tx, userID, *goalID, false)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if g.TargetAmount != nil {
+			saved, _, err := s.goalSaved(ctx, tx, userID, *goalID)
+			if err != nil {
+				return uuid.Nil, err
+			}
+			left := round2(*g.TargetAmount - saved)
+			if left <= 0.004 {
+				return uuid.Nil, ErrGoalReached
+			}
+			amount = math.Min(amount, left)
+		}
+	}
 	d := date
 	ids, _, _, err := s.createEntriesTx(ctx, tx, userID, EntryRequest{
 		Kind: KindSave, Amount: amount, Date: &d, Note: note, GoalID: goalID, WalletID: accountID,
