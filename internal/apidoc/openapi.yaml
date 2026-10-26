@@ -3823,7 +3823,7 @@ paths:
       tags: [Recurring]
       summary: Recurring settings list
       operationId: listRecurring
-      description: 'Runs the due check first. `status`: current (active + paused, default) | archived | all. Sorted overdue first (oldest due first), then by the next occurrence coming, none last, then name (the picker keeps `likely` first).'
+      description: 'Reads only (the due check runs once a day from POST /sync and after a recurring write, 0.4.0-4). `status`: current (active + paused, default) | archived | all. Sorted overdue first (oldest due first), then by the next occurrence coming, none last, then name (the picker keeps `likely` first).'
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
@@ -3876,7 +3876,7 @@ paths:
       tags: [Recurring]
       summary: Recurring setting page (one call)
       operationId: getRecurring
-      description: 'Runs the due check first. The setting + the first page of its history (`items`: recorded / paid / skipped / due, newest first) + the first page of what is coming (`upcoming`: a no-end setting = a 12-month window, see listRecurringRuleItems) + `stats`. `tx_update` is null here (it answers an edit with also_update_tx).'
+      description: 'Reads only (the due check runs once a day from POST /sync and after a recurring write, 0.4.0-4). The setting + the first page of its history (`items`: recorded / paid / skipped / due, newest first) + the first page of what is coming (`upcoming`: a no-end setting = a 12-month window, see listRecurringRuleItems) + `stats`. `tx_update` is null here (it answers an edit with also_update_tx).'
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
@@ -4068,7 +4068,7 @@ paths:
       tags: [Recurring]
       summary: One setting's occurrences to link a transaction to (picker step 2)
       operationId: listRecurringOccurrences
-      description: 'Runs the due check first. The overdue ones (newest 24) + the `past` latest earlier ones + the next `upcoming` ones, computed and stored merged, oldest first. `suggested_slot` ("งวดใกล้เคียง") = the oldest overdue one of ALL (also when it is past the 24 listed), else the open (upcoming / due) one nearest `tx_date` (ties: the earlier); null when none is open.'
+      description: 'Reads only (the due check runs once a day from POST /sync and after a recurring write, 0.4.0-4). The overdue ones (newest 24) + the `past` latest earlier ones + the next `upcoming` ones, computed and stored merged, oldest first. `suggested_slot` ("งวดใกล้เคียง") = the oldest overdue one of ALL (also when it is past the 24 listed), else the open (upcoming / due) one nearest `tx_date` (ties: the earlier); null when none is open.'
       parameters:
         - { name: tx_date, in: query, description: 'The transaction''s date (YYYY-MM-DD).', schema: { $ref: '#/components/schemas/Date' } }
         - { name: past, in: query, schema: { type: integer, minimum: 0, default: 3 } }
@@ -4330,7 +4330,7 @@ paths:
       tags: [Recurring]
       summary: Occurrences across settings (month list, ต้องจัดการ, by status)
       operationId: listRecurringItems
-      description: 'Runs the due check first. Occurrences of the ACTIVE settings, computed and stored merged. `status`: upcoming (default without month: the next 120 days, oldest first) | due (ต้องจัดการ: overdue + due today + this month''s upcoming ones with no amount, flagged `needs_amount`) | done | paid | skipped | pending (a legacy draft) | all (needs `month`, else 400). The old names not_created (= due) and archived (= skipped) are still accepted. `kind`: all (default) | recurring (the same: every item belongs to a setting). `window` is always null here.'
+      description: 'Reads only (the due check runs once a day from POST /sync and after a recurring write, 0.4.0-4). Occurrences of the ACTIVE settings, computed and stored merged. `status`: upcoming (default without month: the next 120 days, oldest first) | due (ต้องจัดการ: overdue + due today + this month''s upcoming ones with no amount, flagged `needs_amount`) | done | paid | skipped | pending (a legacy draft) | all (needs `month`, else 400). The old names not_created (= due) and archived (= skipped) are still accepted. `kind`: all (default) | recurring (the same: every item belongs to a setting). `window` is always null here.'
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
@@ -9999,7 +9999,7 @@ components:
       description: 'A person''s balance (people list row, header of the person page, and `person_balance` in every debt write so the FE patches without re-fetching).'
       required: [key, person, net, open_count, entry_count, last_activity_at, cleared_at, days_outstanding, side, first_activity_at, last_activity]
       properties:
-        side: { type: string, enum: [receivable, payable, clear], description: '0.4.0-3: net > 0 รอรับ / net < 0 รอจ่าย / 0.' }
+        side: { type: string, enum: [receivable, payable, clear], description: '0.4.0-3: net > 0 receivable (ลูกหนี้) / net < 0 payable (เจ้าหนี้) / 0 clear (เคลียร์แล้ว).' }
         first_activity_at: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: '0.4.0-3: the first line''s date ever ("ติดต่อกันตั้งแต่ …").' }
         last_activity:
           description: '0.4.0-3: the latest line, for the people row''s second line ("ค่าตั๋ว | 1 ก.ย." / a repayment "คุณจ่ายคืน ฿400 | 10 ต.ค."). Null with no lines.'
