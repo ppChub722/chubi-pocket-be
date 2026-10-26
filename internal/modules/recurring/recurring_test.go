@@ -66,6 +66,7 @@ func newRecFix(t *testing.T) *recFix {
 	f.r = apitest.CountedEngine(f.me, func(g *gin.RouterGroup) {
 		g.GET("/recurring", h.List)
 		g.POST("/recurring", h.Create)
+		g.POST("/recurring/occurrences/bulk", h.SettleOccurrences)
 		g.GET("/recurring/:id", h.Get)
 		g.PUT("/recurring/:id", h.Update)
 		g.DELETE("/recurring/:id", h.Delete)
@@ -444,6 +445,81 @@ func TestBulkOccurrences(t *testing.T) {
 	if len(b.Items) != 3 || b.Items[0].Status != StatusSkipped {
 		t.Fatalf("skip-ready = %+v", b.Items)
 	}
+}
+
+func TestSettleOccurrences(t *testing.T) {
+	f := newRecFix(t)
+	d := f.createWeekly(6)
+	a := d.Recurring.ID
+	f.track(a)
+	var rem Detail
+	f.call("POST", "/recurring", "createRecurring", map[string]any{"name": "Water", "kind": "reminder", "account_id": f.wallet,
+		"rule": map[string]any{"freq": "monthly", "interval": 1}, "start_date": f.day(-40)}, 201, &rem)
+	b := rem.Recurring.ID
+	f.track(b)
+	var due ItemList
+	f.call("GET", "/recurring-items?status=due&rule_id="+b.String(), "listRecurringItems", nil, 200, &due)
+	remDue := onlyDue(due.Data)
+	if len(remDue) < 2 {
+		t.Fatalf("reminder due = %d, want 2+", len(remDue))
+	}
+	bulk := func(body map[string]any, want int) OccBulkResult {
+		t.Helper()
+		var out OccBulkResult
+		if want == 200 {
+			apitest.ConformRequest(t, "settleRecurringOccurrences", body)
+			f.call("POST", "/recurring/occurrences/bulk", "settleRecurringOccurrences", body, 200, &out)
+		} else {
+			f.call("POST", "/recurring/occurrences/bulk", "", body, want, nil)
+		}
+		return out
+	}
+	item := func(rule uuid.UUID, slot string, amount ...float64) map[string]any {
+		m := map[string]any{"rule_id": rule, "slot": slot}
+		if len(amount) > 0 {
+			m["amount"] = amount[0]
+		}
+		return m
+	}
+
+	// confirm across two settings: the ones with an amount go, the rest are left out with the reason
+	out := bulk(map[string]any{"action": "confirm", "items": []any{
+		item(a, f.day(-14)), item(a, f.day(-7)), item(b, remDue[0].Slot), item(uuid.New(), f.day(-7)), item(a, f.day(-14)),
+	}}, 200)
+	reasons := map[string]int{}
+	for _, lo := range out.LeftOut {
+		reasons[lo.Reason]++
+	}
+	if len(out.Items) != 2 || reasons["needs_amount"] != 1 || reasons["not_found"] != 1 || reasons["already_recorded"] != 1 || f.balance() != 800 {
+		t.Fatalf("confirm = %d items, left out %+v, balance %v", len(out.Items), out.LeftOut, f.balance())
+	}
+	if out.Items[0].Status != StatusDone || out.Items[0].Transaction == nil || len(out.Settings) != 1 || out.Settings[0].ID != a || len(out.AccountBalances) != 1 {
+		t.Fatalf("confirm result = %+v / settings %d / balances %+v", out.Items[0], len(out.Settings), out.AccountBalances)
+	}
+	// an amount typed for one that has none records it
+	out = bulk(map[string]any{"action": "confirm", "items": []any{item(b, remDue[0].Slot, 50)}}, 200)
+	if len(out.Items) != 1 || out.Items[0].Status != StatusDone || f.balance() != 750 {
+		t.Fatalf("confirm with amount = %+v, balance %v", out, f.balance())
+	}
+	// mark_paid and skip take a row with no amount; a recorded one is left out
+	out = bulk(map[string]any{"action": "mark_paid", "items": []any{item(b, remDue[1].Slot), item(a, f.day(-7))}}, 200)
+	if len(out.Items) != 1 || out.Items[0].Status != StatusPaid || len(out.LeftOut) != 1 || out.LeftOut[0].Reason != "already_recorded" {
+		t.Fatalf("mark_paid = %+v", out)
+	}
+	out = bulk(map[string]any{"action": "skip", "items": []any{item(a, f.day(0))}}, 200)
+	if len(out.Items) != 1 || out.Items[0].Status != StatusSkipped || f.balance() != 750 {
+		t.Fatalf("skip = %+v", out)
+	}
+	// a skipped one can't be confirmed
+	out = bulk(map[string]any{"action": "confirm", "items": []any{item(a, f.day(0))}}, 200)
+	if len(out.Items) != 0 || len(out.LeftOut) != 1 || out.LeftOut[0].Reason != "refused" {
+		t.Fatalf("confirm skipped = %+v", out)
+	}
+
+	bulk(map[string]any{"action": "delete", "items": []any{item(a, f.day(0))}}, 400)
+	bulk(map[string]any{"action": "skip", "items": []any{item(a, f.day(0), 10)}}, 400)
+	bulk(map[string]any{"action": "confirm", "items": []any{item(a, f.day(0), 0)}}, 400)
+	bulk(map[string]any{"action": "confirm", "items": []any{}}, 400)
 }
 
 func TestAutoCreate(t *testing.T) {

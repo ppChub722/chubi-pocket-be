@@ -19,7 +19,7 @@ const (
 	SourceTransaction = "transaction" // a split on my bill (source_transaction_id)
 	SourceEvent       = "event"       // a split on an event board
 	SourcePartner     = "partner"     // another user's split on me (the mirror)
-	SourcePaidBy      = "paid_by"     // someone paid (part of) my expense (paid_for_transaction_id)
+	SourcePaidBy      = "paid_by"     // someone paid (part of) my expense, or received (part of) my income (paid_for_transaction_id)
 )
 
 type Entry struct {

@@ -20,7 +20,7 @@ const (
 )
 
 const (
-	KindRecurring = "recurring" // an upcoming recurring item (one-off or from a setting)
+	KindRecurring = "recurring" // an upcoming occurrence of a recurring setting
 	KindCardDue   = "card_due"  // credit card / pay-later payment due date
 )
 

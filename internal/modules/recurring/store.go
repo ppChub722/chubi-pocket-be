@@ -171,9 +171,9 @@ func iconJSON(ic *shared.IconCode) ([]byte, error) {
 type itemRow struct {
 	ID            uuid.UUID
 	UserID        uuid.UUID
-	RuleID        *uuid.UUID
+	RuleID        uuid.UUID // NOT NULL since 000068: every item belongs to a setting
 	Seq           *int
-	Slot          *time.Time // the rule date it was generated for (nil: manual / one-off)
+	Slot          *time.Time // the rule date it was generated for (nil: a manual item)
 	Date          time.Time
 	Draft         pending.Draft
 	Edited        bool

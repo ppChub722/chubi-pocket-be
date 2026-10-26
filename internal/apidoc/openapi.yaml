@@ -79,7 +79,7 @@ paths:
         - { name: tag_id, in: query, description: 'Repeatable; rows having ANY of these tags.', schema: { type: array, items: { $ref: '#/components/schemas/Uuid' } }, style: form, explode: true }
         - { name: sort, in: query, schema: { type: string, enum: [date_desc, date_asc, amount_desc, amount_asc], default: date_desc } }
         - { name: can_join_event, in: query, description: 'true = only rows I may pull into an event (the event "add existing bills" picker): mine, expense / income, not in an event, not a debt entry or system row, no split labelled paid.', schema: { type: boolean } }
-        - { name: counterparty_key, in: query, description: 'Only the money of this debt person: the wallet transactions of their debts AND their repayment transactions (repayment_person).', schema: { $ref: '#/components/schemas/PersonKey' } }
+        - { name: counterparty_key, in: query, description: 'Only the money of this debt person: the wallet transactions of their debts, the bills split with them, the bills they paid or received for me (paid_by, incl. a partner''s split mirrored into my book), the transactions linked to their debts (0.4.1-0), AND their repayment transactions (repayment_person).', schema: { $ref: '#/components/schemas/PersonKey' } }
       responses:
         '200':
           description: 'One page of rows plus totals over the whole filtered set.'
@@ -99,7 +99,7 @@ paths:
       description: |
         Returns a `TransactionWriteResult`: `rows` (one row, or both rows of a transfer) in their final state + `account_balances`. `tag_ids` attach the tags in the same call; with `splits`, the response already contains them (`splits[]` with resolved persons).
         `project_id` is not accepted (events are joined through the bills endpoints).
-        **paid_by (0.4.0-3, quick create tab "จ่ายแทน")**: bill 123, Lee paid 13 → `{type: expense, amount: 123, account_id: <wallet>, paid_by: {person_name: "Lee", amount: 13}}`: ONE expense of 123 (reports / budgets / my_share count 123), the wallet moves 110 (`wallet_amount`), and the debt "I owe Lee 13" is made in the same call (`rows[0].paid_by`, `person_balance` = Lee's new balance). paid_by.amount = amount → no wallet. Errors: 400 PAID_BY_EXPENSE_ONLY, PAID_BY_EXCEEDS_AMOUNT, LINK_MODE_CONFLICT (with splits / source_project_transaction_id), CONTACT_NOT_FOUND, VALIDATION_ERROR (no person).
+        **paid_by (0.4.0-3, quick create tab "จ่ายแทน")**: bill 123, Lee paid 13 → `{type: expense, amount: 123, account_id: <wallet>, paid_by: {person_name: "Lee", amount: 13}}`: ONE expense of 123 (reports / budgets / my_share count 123), the wallet moves 110 (`wallet_amount`), and the debt "I owe Lee 13" is made in the same call (`rows[0].paid_by`, `person_balance` = Lee's new balance). paid_by.amount = amount → no wallet. **On an income (0.4.1-0, tab "รับแทน")** Lee RECEIVED 13 of my 123 for me: `{type: income, …, paid_by: {person_name: "Lee", amount: 13}}` = ONE income of 123, the wallet takes 110 and the debt is "Lee owes me 13" (a paid entry). Errors: 400 PAID_BY_EXPENSE_ONLY (a transfer), PAID_BY_EXCEEDS_AMOUNT, LINK_MODE_CONFLICT (with splits / source_project_transaction_id), CONTACT_NOT_FOUND, VALIDATION_ERROR (no person).
         **A date after today (the user's timezone)** is allowed and makes a normal transaction (0.4.0-2: there is no upcoming one-off item any more). It stays in the transactions list but counts nowhere until its day: wallet `balance` (and `account_balances`), month flows, reports, the dashboard and a budget's `used` all stop at today; a budget counts it as รอจ่าย (source `future_tx`) while its period is current.
       operationId: createTransaction
       requestBody:
@@ -2671,6 +2671,24 @@ paths:
         },
         "security": []
       }
+  /health:
+    get:
+      tags: [Me]
+      summary: Is the server up (the app's online check)
+      operationId: getHealth
+      description: 'Public, outside the build check (an outdated build may call it). The app pings it to tell online from offline. Also served at `/health` (no /api/v1) for the uptime check.'
+      responses:
+        '200':
+          description: Up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+      security: []
+      x-breaking: 'New (0.4.1-0): it was only at /health, and /api/v1/health answered 404.'
 
   # ───────────────────────────── v2: reached pages (target shapes) ─────────────────────────────
   /pending-transactions/scan-slip:
@@ -4113,6 +4131,26 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
       x-breaking: 'New (0.4.0-2).'
+  /recurring/occurrences/bulk:
+    post:
+      tags: [Recurring]
+      summary: Confirm / skip / mark paid the picked occurrences ("ยืนยัน / ข้าม / จ่ายแล้วที่เลือก")
+      operationId: settleRecurringOccurrences
+      description: 'One action on 1–100 picked occurrences of any settings, in one DB transaction with a savepoint per occurrence: one that can''t take the action is listed in `left_out` and stays as it was; the others go through. confirm records a transaction dated the occurrence date, with the occurrence''s amount or the `amount` sent (an occurrence with neither is left out as needs_amount: it can only be skipped or marked paid). skip and mark_paid take any open occurrence, amount or not. A recorded one is left out as already_recorded.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecurringOccurrenceBulkRequest' }
+      responses:
+        '200':
+          description: The settled occurrences, the ones left out, the balances, the settings touched.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecurringOccurrenceBulkResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+      x-breaking: 'New (0.4.1-0).'
   /recurring/{id}/occurrences/{slot}:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
@@ -5701,7 +5739,7 @@ components:
         split_count: { type: integer, minimum: 0 }
         splits: { type: [array, 'null'], items: { $ref: '#/components/schemas/Split' }, description: 'Detail and write responses only; null on list rows. '}
         link_mode: { type: string, enum: [personal, split, paid, event], description: 'How the bill is shared (0.4.0-3; the quick-create tab it was saved with): event = an event bill or a copy of one (project / event_bill / source_project_transaction_id); split = it has splits; paid = someone paid (part of) it for me (paid_by); personal = all mine. One mode at a time.' }
-        paid_by: { oneOf: [{ $ref: '#/components/schemas/PaidBy' }, { type: 'null' }], description: 'link_mode paid: who paid (part of) this expense for me and the debt it made. Null otherwise (and on another member''s row).' }
+        paid_by: { oneOf: [{ $ref: '#/components/schemas/PaidBy' }, { type: 'null' }], description: 'link_mode paid: who paid (part of) this expense for me, or received (part of) this income for me, and the debt it made. Null otherwise (and on another member''s row).' }
         wallet_amount: { $ref: '#/components/schemas/Money', description: 'What the row moved on its wallet: amount − paid_by.amount (= amount without paid_by; 0 when they paid it all, then there is no wallet). amount stays the bill (my consumption: reports, budgets, my_share).' }
         can_split: { type: boolean }
         can_edit_splits: { type: boolean }
@@ -5748,7 +5786,7 @@ components:
     PaidBy:
       type: object
       description: |
-        Someone paid (part of) my expense (0.4.0-3). Bill 123, Lee paid 13: amount = 123 (my consumption), paid_by.amount = 13, my_paid = 110 (what left my wallet; 0 = no wallet), and the debt "I owe Lee 13" (a received entry, source paid_by, GET /personal-debts/{debt_id}) is one record with the expense: PUT / DELETE the transaction to change it.
+        Someone paid (part of) my expense (0.4.0-3), or received (part of) my income for me (0.4.1-0, "รับแทน": the debt is "they owe me", a paid entry; my_paid = what reached my wallet). Bill 123, Lee paid 13: amount = 123 (my consumption), paid_by.amount = 13, my_paid = 110 (what left my wallet; 0 = no wallet), and the debt "I owe Lee 13" (a received entry, source paid_by, GET /personal-debts/{debt_id}) is one record with the expense: PUT / DELETE the transaction to change it.
         source partner = another user's split on me mirrored into my book (my expense of my share, paid in full by them): its amount, date and wallet follow their bill ("อัปเดตตาม"; PUT money → 409 PAID_BY_LOCKED); category, text and tags are mine. Deleting it keeps their debt.
       required: [debt_id, key, person, amount, my_paid, source, paid]
       properties:
@@ -5761,7 +5799,7 @@ components:
         paid: { type: boolean, description: 'The debt''s "จ่ายแล้ว" label.' }
     PaidByInput:
       type: object
-      description: 'Who paid (part of) the bill for me: contact_id (my contact) or a typed person_name, and how much (≤ the bill). Expense only. Exclusive with splits and an event (400 LINK_MODE_CONFLICT). amount = the bill → the wallet is dropped (they paid it all). A linked contact gets the usual split_created notice (recipient_direction paid).'
+      description: 'Who paid (part of) the bill for me: contact_id (my contact) or a typed person_name, and how much (≤ the bill). Expense or income (on an income: who received it for me, 0.4.1-0); a transfer → 400 PAID_BY_EXPENSE_ONLY. Exclusive with splits and an event (400 LINK_MODE_CONFLICT). amount = the bill → the wallet is dropped (they paid it all). A linked contact gets the usual split_created notice (recipient_direction paid; received on an income).'
       required: [amount]
       properties:
         contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
@@ -5845,7 +5883,7 @@ components:
         note: { type: [string, 'null'], maxLength: 500 }
         tag_ids: { $ref: '#/components/schemas/Ids' }
         splits: { type: array, items: { $ref: '#/components/schemas/SplitInput' }, description: 'Σ owed_amount ≤ amount; expense / income only.' }
-        paid_by: { oneOf: [{ $ref: '#/components/schemas/PaidByInput' }, { type: 'null' }], description: 'Someone paid (part of) it for me (0.4.0-3): amount = the bill; the wallet moves amount − paid_by.amount and the debt "I owe them" is made in the same call (the answer''s person_balance).' }
+        paid_by: { oneOf: [{ $ref: '#/components/schemas/PaidByInput' }, { type: 'null' }], description: 'Someone paid (part of) it for me (0.4.0-3): amount = the bill; the wallet moves amount − paid_by.amount and the debt "I owe them" (on an income: "they owe me") is made in the same call (the answer''s person_balance).' }
         my_share: { type: [number, 'null'], exclusiveMinimum: 0 }
         source_project_transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Event resolve flow only. '}
     UpdateTransactionRequest:
@@ -10021,8 +10059,8 @@ components:
       description: 'The text to send a person (Thai, both directions).'
       required: [text, text_balance_only, since, entries, net]
       properties:
-        text: { type: string, description: 'Share variant "รอบนี้". Multi-line: "สรุปยอดกับ <name> (ตั้งแต่ <first date>)", one "• <date> <what> <±amount> <unit> (<description>)" line per CURRENT-cycle statement line (debts and repayments), oldest first (+ = I paid for them / ฉันจ่ายคืน, − = they paid me / ได้รับคืนจาก), then "รวม ฉันรอรับจาก <name> …" / "รวม ฉันรอจ่ายให้ <name> …" / cleared (0.4.0-3 wording: never ติด).' }
-        text_balance_only: { type: string, description: '0.4.0-3, share variant "ยอดคงเหลืออย่างเดียว": "ยอดกับ <name> ตอนนี้: ฉันรอรับจาก / รอจ่ายให้ <name> <amount> <unit>".' }
+        text: { type: string, description: 'Share variant "รอบนี้". Multi-line: "สรุปยอดกับ <name> (ตั้งแต่ <first date>)", one "• <date> <what> <±amount> <unit> (<description>)" line per CURRENT-cycle statement line (debts and repayments), oldest first (+ = I paid for them / ฉันจ่ายคืน, − = they paid me / ได้รับคืนจาก), then "รวม <name> เป็นลูกหนี้ …" / "รวม <name> เป็นเจ้าหนี้ …" / cleared (0.4.1-0 wording, like the app: never ติด).' }
+        text_balance_only: { type: string, description: '0.4.0-3, share variant "ยอดคงเหลืออย่างเดียว": "ยอดกับ <name> ตอนนี้: <name> เป็นลูกหนี้ / เป็นเจ้าหนี้ <amount> <unit>".' }
         since: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The current cycle''s first line date.' }
         entries: { type: integer, description: 'Lines listed (the current cycle).' }
         net: { $ref: '#/components/schemas/Money' }
@@ -10075,7 +10113,7 @@ components:
         `transaction` = a split on my bill (id = that transaction, title = its description or category name);
         `event` = a split on an event board (id = the event, title = the event name);
         `partner` = another user's split on me (id = my expense of it, the transaction with paid_by.source partner, or null when I deleted it / it is from before 0.4.0-3; title = their display name);
-        `paid_by` = someone paid (part of) my expense (0.4.0-3; id = that transaction, title = its description or category name). Edit or delete the transaction; DELETE /personal-debts/{id} → 409 DEBT_MANAGED_BY_TX. Deleting a `partner` entry that has my expense deletes the expense too (it has no wallet).
+        `paid_by` = someone paid (part of) my expense or received (part of) my income (0.4.0-3 / 0.4.1-0; id = that transaction, title = its description or category name). Edit or delete the transaction; DELETE /personal-debts/{id} → 409 DEBT_MANAGED_BY_TX. Deleting a `partner` entry that has my expense deletes the expense too (it has no wallet).
       required: [kind, id, title]
       properties:
         kind: { type: string, enum: [transaction, event, partner, paid_by] }
@@ -10085,7 +10123,7 @@ components:
       type: object
       description: |
         0.4.0-3: where a debt came from, for the debt detail's "มาจาก" card (page-ready; null for a ledger-only debt). kind:
-        `split` = a split on my bill (transaction = the bill), `paid_by` = someone paid (part of) my expense (transaction = it), `partner` = another user's split on me (transaction = my expense of it, or null), `event` = an event bill (bill_id / event_id; resolve "as debt"), `cash` = a loan / borrow with its own wallet transaction (transaction = it).
+        `split` = a split on my bill (transaction = the bill), `paid_by` = someone paid (part of) my expense or received (part of) my income (transaction = it), `partner` = another user's split on me (transaction = my expense of it, or null), `event` = an event bill (bill_id / event_id; resolve "as debt"), `cash` = a loan / borrow with its own wallet transaction (transaction = it).
         title / amount / date / account are that transaction's (an event: the bill's description or the event name, the bill amount and date, no wallet). The debt itself has no wallet.
       required: [kind, transaction_id, bill_id, event_id, title, amount, date, account]
       properties:
@@ -11285,6 +11323,39 @@ components:
               slot: { $ref: '#/components/schemas/Date' }
               reason: { type: string, enum: [needs_amount, refused] }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
+    RecurringOccurrenceBulkRequest:
+      type: object
+      required: [action, items]
+      properties:
+        action: { type: string, enum: [confirm, skip, mark_paid] }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [rule_id, slot]
+            properties:
+              rule_id: { $ref: '#/components/schemas/Uuid' }
+              slot: { $ref: '#/components/schemas/Date' }
+              amount: { type: number, exclusiveMinimum: 0, description: 'confirm only: the amount typed for an occurrence that has none (or overrides its amount).' }
+    RecurringOccurrenceBulkResult:
+      type: object
+      required: [items, left_out, account_balances, settings]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/RecurringItem' }, description: 'The occurrences the action settled, in request order.' }
+        left_out:
+          type: array
+          description: 'Picked occurrences the action could not take, and why: needs_amount (confirm, no amount) | refused (the record was refused, e.g. an archived wallet, a deleted category, a skipped occurrence to confirm) | not_found (no such setting or occurrence) | already_recorded.'
+          items:
+            type: object
+            required: [rule_id, slot, reason]
+            properties:
+              rule_id: { $ref: '#/components/schemas/Uuid' }
+              slot: { $ref: '#/components/schemas/Date' }
+              reason: { type: string, enum: [needs_amount, refused, not_found, already_recorded] }
+        account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
+        settings: { type: array, items: { $ref: '#/components/schemas/Recurring' }, description: 'Every setting with a settled occurrence, after the write (no re-fetch).' }
     RecurringUnlinkResult:
       type: object
       required: [item, setting]

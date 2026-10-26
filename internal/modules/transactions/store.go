@@ -238,9 +238,12 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	}
 	if f.CounterpartyKey != "" {
 		args = append(args, f.CounterpartyKey)
-		// The person's money: debts' linked transactions and the repayments to / from them.
+		// The person's money: their debts' own transactions, the bills split with them, the bills
+		// they paid / received for me, the transactions linked to their debts, and the repayments.
 		whereClauses = append(whereClauses, fmt.Sprintf(`t.user_id = $1 AND (EXISTS (SELECT 1 FROM personal_debts kd
-			WHERE kd.id = t.source_personal_debt_id AND kd.user_id = t.user_id AND %[1]s = $%[3]d)
+			WHERE kd.user_id = t.user_id AND %[1]s = $%[3]d
+			  AND (kd.id = t.source_personal_debt_id
+			       OR t.id IN (kd.source_transaction_id, kd.paid_for_transaction_id, kd.linked_transaction_id)))
 			OR (t.repay_person_name IS NOT NULL AND %[2]s = $%[3]d))`, shared.DebtKeySQL("kd"), shared.RepayKeySQL("t"), len(args)))
 	}
 

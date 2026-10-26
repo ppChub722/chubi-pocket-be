@@ -310,9 +310,7 @@ func (s *Service) occsInRange(ctx context.Context, q shared.Querier, userID uuid
 	}
 	byRule := map[uuid.UUID][]*itemRow{}
 	for _, it := range rows {
-		if it.RuleID != nil {
-			byRule[*it.RuleID] = append(byRule[*it.RuleID], it)
-		}
+		byRule[it.RuleID] = append(byRule[it.RuleID], it)
 	}
 	lang := s.lang(ctx, userID)
 	var out []*occ
@@ -451,8 +449,7 @@ func (s *Service) store(ctx context.Context, tx pgx.Tx, o *occ) (*itemRow, error
 	d := o.draft
 	d.Description = nil
 	slot := o.slot
-	rid := o.rule.ID
-	it := &itemRow{UserID: o.rule.UserID, RuleID: &rid, Slot: &slot, Date: o.slot, Draft: d}
+	it := &itemRow{UserID: o.rule.UserID, RuleID: o.rule.ID, Slot: &slot, Date: o.slot, Draft: d}
 	if o.seq != nil {
 		it.Seq = o.seq
 	}
@@ -462,7 +459,7 @@ func (s *Service) store(ctx context.Context, tx pgx.Tx, o *occ) (*itemRow, error
 	}
 	if id == uuid.Nil { // someone stored it in the meantime
 		var existing uuid.UUID
-		if err := tx.QueryRow(ctx, `SELECT id FROM recurring_items WHERE rule_id = $1 AND slot = $2`, rid, slot).Scan(&existing); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT id FROM recurring_items WHERE rule_id = $1 AND slot = $2`, o.rule.ID, slot).Scan(&existing); err != nil {
 			return nil, err
 		}
 		return getItem(ctx, tx, o.rule.UserID, existing, true)

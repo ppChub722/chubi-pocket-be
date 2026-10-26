@@ -500,7 +500,7 @@ func (s *Service) pushToRecorded(ctx context.Context, userID uuid.UUID, old, cur
 	var touched []uuid.UUID
 	oldSeqs, newSeqs := seqIndex(old), seqIndex(cur)
 	for _, it := range rows {
-		if it.TransactionID == nil || it.RuleID == nil {
+		if it.TransactionID == nil {
 			continue
 		}
 		slot := it.Date
@@ -713,8 +713,8 @@ func (s *Service) Resume(ctx context.Context, userID, id uuid.UUID, tz string) (
 		}
 		if gapFrom.Before(today) {
 			for _, d := range r.Spec.Between(gapFrom, today.AddDate(0, 0, -1)) {
-				slot, rid := d, r.ID
-				if _, err := insertItemTx(ctx, tx, &itemRow{UserID: r.UserID, RuleID: &rid, Slot: &slot, Date: d,
+				slot := d
+				if _, err := insertItemTx(ctx, tx, &itemRow{UserID: r.UserID, RuleID: r.ID, Slot: &slot, Date: d,
 					Draft: ruleBaseDraft(r), Archived: true}); err != nil {
 					return err
 				}
@@ -851,7 +851,7 @@ func (s *Service) CreateItem(ctx context.Context, userID uuid.UUID, req ItemCrea
 	if err != nil {
 		return nil, err
 	}
-	it.RuleID, it.Draft = &r.ID, ruleBaseDraft(r)
+	it.RuleID, it.Draft = r.ID, ruleBaseDraft(r)
 	applyToDraft(&it.Draft, &req.Fields)
 	if switchesSaving(ruleBaseDraft(r), it.Draft) {
 		return nil, ErrValidation
@@ -959,7 +959,7 @@ func (s *Service) DeleteItem(ctx context.Context, userID, id uuid.UUID, deleteLi
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
 		return nil, err
 	}
-	out.Setting = s.settingOf(ctx, userID, it.RuleID)
+	out.Setting = s.settingOf(ctx, userID, &it.RuleID)
 	return out, nil
 }
 

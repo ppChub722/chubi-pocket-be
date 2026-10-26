@@ -21,11 +21,11 @@ func CashAmountSQL(txAlias string) string {
 	return `(` + txAlias + `.amount - COALESCE(` + txAlias + `.paid_by_amount, 0))`
 }
 
-// SignedTxSQL is a transaction's effect on its wallet: + income, - expense (its
-// cash part), and for a transfer the sign of its side (TRANSFER_OUT is minus).
+// SignedTxSQL is a transaction's effect on its wallet: + income, - expense (each
+// its cash part), and for a transfer the sign of its side (TRANSFER_OUT is minus).
 // txAlias is the transactions alias.
 func SignedTxSQL(txAlias string) string {
-	return `(CASE ` + txAlias + `.type WHEN 'income' THEN ` + txAlias + `.amount WHEN 'expense' THEN -` + CashAmountSQL(txAlias) + `
+	return `(CASE ` + txAlias + `.type WHEN 'income' THEN ` + CashAmountSQL(txAlias) + ` WHEN 'expense' THEN -` + CashAmountSQL(txAlias) + `
 		WHEN 'transfer' THEN CASE WHEN (SELECT fc.system_kind FROM categories fc WHERE fc.id = ` + txAlias + `.category_id) = 'TRANSFER_OUT'
 			THEN -` + txAlias + `.amount ELSE ` + txAlias + `.amount END
 		ELSE 0 END)`

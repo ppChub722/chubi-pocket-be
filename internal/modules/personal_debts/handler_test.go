@@ -495,7 +495,25 @@ func TestTransactionFilters(t *testing.T) {
 	}
 	plainID := plain.(*transactions.TransactionDetail).ID
 	splitBill := split.(*transactions.TransactionDetail)
-	got := ids(transactions.ListFilter{CanJoinEvent: true})
+	// the person's bills too: the one split with Aom, the one Aom paid for me, the one linked to her debt
+	paidFor, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
+		Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: 50, Date: "2026-10-06",
+		PaidBy: &transactions.PaidByInput{PersonName: "Aom", Amount: 20},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	aomDebt, err := f.svc.CreateEntry(f.ctx, f.me, "n:aom", CreateEntryRequest{Direction: DirectionPaid, Amount: 15})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.exec(`UPDATE personal_debts SET linked_transaction_id = $2 WHERE id = $1`, aomDebt.Entry.ID, plainID)
+	got := ids(transactions.ListFilter{CounterpartyKey: "n:aom"})
+	if len(got) != 3 || !got[splitBill.ID] || !got[paidFor.(*transactions.TransactionDetail).ID] || !got[plainID] {
+		t.Errorf("counterparty_key=n:aom = %v, want the split bill, the paid-by bill and the linked tx", got)
+	}
+	f.exec(`UPDATE personal_debts SET linked_transaction_id = NULL WHERE id = $1`, aomDebt.Entry.ID)
+	got = ids(transactions.ListFilter{CanJoinEvent: true})
 	if !got[plainID] || !got[splitBill.ID] || got[entry.Transaction.ID] {
 		t.Errorf("can_join_event = %v, want the plain + split bills, not the debt tx", got)
 	}
@@ -604,11 +622,11 @@ func TestDebtCyclesAndSummary(t *testing.T) {
 
 	msg, _ := page["summary_message"].(map[string]any)
 	text, _ := msg["text"].(string)
-	if num(msg, "entries") != 2 || num(msg, "net") != 70 || !strings.Contains(text, "รวม ฉันรอรับจาก Mom 70 บาท") ||
+	if num(msg, "entries") != 2 || num(msg, "net") != 70 || !strings.Contains(text, "รวม Mom เป็นลูกหนี้ 70 บาท") ||
 		!strings.Contains(text, "+50") || strings.Contains(text, "100") || strings.Contains(text, "ติด") {
 		t.Errorf("message = %q", text)
 	}
-	if only, _ := msg["text_balance_only"].(string); only != "ยอดกับ Mom ตอนนี้: ฉันรอรับจาก Mom 70 บาท" {
+	if only, _ := msg["text_balance_only"].(string); only != "ยอดกับ Mom ตอนนี้: Mom เป็นลูกหนี้ 70 บาท" {
 		t.Errorf("balance-only message = %q", only)
 	}
 }

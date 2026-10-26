@@ -38,14 +38,11 @@ func (s *Service) Link(ctx context.Context, userID, itemID uuid.UUID, req LinkRe
 	if err != nil {
 		return nil, err
 	}
-	if it.RuleID == nil {
-		return nil, ErrItemNotFound
-	}
 	slot := it.Date
 	if it.Slot != nil {
 		slot = *it.Slot
 	}
-	return s.linkOcc(ctx, userID, *it.RuleID, slot, LinkSlotRequest{TransactionID: req.TransactionID, Replace: req.Replace}, "", it)
+	return s.linkOcc(ctx, userID, it.RuleID, slot, LinkSlotRequest{TransactionID: req.TransactionID, Replace: req.Replace}, "", it)
 }
 
 // LinkOcc makes an existing transaction the record of the occurrence: one
@@ -107,7 +104,7 @@ func (s *Service) linkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 			if other.Slot != nil {
 				os = *other.Slot
 			}
-			return nil, &LinkConflict{Other: &OccRef{RuleID: *other.RuleID, Slot: os.Format(dateLayout)}}
+			return nil, &LinkConflict{Other: &OccRef{RuleID: other.RuleID, Slot: os.Format(dateLayout)}}
 		}
 		if _, err := s.release(ctx, tx, other); err != nil {
 			return nil, err
@@ -196,14 +193,11 @@ func (s *Service) Unlink(ctx context.Context, userID, itemID uuid.UUID) (*Unlink
 	if err != nil {
 		return nil, err
 	}
-	if it.RuleID == nil {
-		return nil, ErrItemNotFound
-	}
 	slot := it.Date
 	if it.Slot != nil {
 		slot = *it.Slot
 	}
-	return s.unlinkOcc(ctx, userID, *it.RuleID, slot, "", it)
+	return s.unlinkOcc(ctx, userID, it.RuleID, slot, "", it)
 }
 
 // UnlinkOcc lets go of the occurrence's transaction (the transaction stays):

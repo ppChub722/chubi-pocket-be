@@ -89,13 +89,13 @@ func (s *Service) summaryMessage(ctx context.Context, userID uuid.UUID, bal Debt
 		}
 		b.WriteString("• " + line + "\n")
 	}
-	// Wording (owner 2026-10-21): รอรับ / รอจ่าย, never "ติด".
+	// Wording (owner 2026-10-23): "{name} เป็นลูกหนี้ / เจ้าหนี้" like the app, never "ติด".
 	var total string
 	switch {
 	case bal.Net > 0.005:
-		total = fmt.Sprintf("ฉันรอรับจาก %s %s %s", name, money(bal.Net), unit)
+		total = fmt.Sprintf("%s เป็นลูกหนี้ %s %s", name, money(bal.Net), unit)
 	case bal.Net < -0.005:
-		total = fmt.Sprintf("ฉันรอจ่ายให้ %s %s %s", name, money(bal.Net), unit)
+		total = fmt.Sprintf("%s เป็นเจ้าหนี้ %s %s", name, money(bal.Net), unit)
 	default:
 		total = "ยอดตอนนี้เคลียร์กันหมดแล้ว"
 	}

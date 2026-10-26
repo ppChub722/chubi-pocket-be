@@ -79,7 +79,7 @@ func TestDebtPagesAPI(t *testing.T) {
 		t.Errorf("days = %v", days)
 	}
 	msg := obj(page, "summary_message")
-	if msg["text_balance_only"] != "ยอดกับ Lee ตอนนี้: ฉันรอจ่ายให้ Lee 160 บาท" || msg["since"] != day(-40) {
+	if msg["text_balance_only"] != "ยอดกับ Lee ตอนนี้: Lee เป็นเจ้าหนี้ 160 บาท" || msg["since"] != day(-40) {
 		t.Errorf("share texts = %v", msg)
 	}
 

@@ -17,9 +17,11 @@ import (
 // consumption) with paid_by_amount 13; the wallet moves 110 and the same save writes the debt
 // "I owe Lee 13" (personal_debts.paid_for_transaction_id → this row). The debt side lives in
 // personal_debts (DebtLinks.SetPaidByTx / PaidByDeletingTx).
+// On an income (0.4.1-0, "รับแทน") Lee RECEIVED 13 of my 123 for me: the income counts 123,
+// the wallet moves 110 and the debt is "Lee owes me 13".
 
 var (
-	ErrPaidByExpenseOnly    = errors.New("paid_by is for expenses only")
+	ErrPaidByExpenseOnly    = errors.New("paid_by is for an expense or an income")
 	ErrPaidByExceedsAmount  = errors.New("paid_by.amount is more than the bill")
 	ErrPaidByPersonRequired = errors.New("paid_by needs a contact_id or a person_name")
 	ErrLinkModeConflict     = errors.New("a bill is shared one way at a time: splits, paid_by or an event")
@@ -61,7 +63,7 @@ func loadPaidByDebtTx(ctx context.Context, q pgx.Tx, txID uuid.UUID) (*paidByDeb
 }
 
 func checkPaidByInput(t TxType, in *PaidByInput) error {
-	if t != TypeExpense {
+	if t != TypeExpense && t != TypeIncome {
 		return ErrPaidByExpenseOnly
 	}
 	if in.ContactID == nil && strings.TrimSpace(in.PersonName) == "" {

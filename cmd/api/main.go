@@ -260,9 +260,10 @@ func main() {
 		MaxAge:           12 * time.Hour,
 	}))
 
-	r.GET("/health", func(c *gin.Context) {
+	health := func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
+	}
+	r.GET("/health", health)
 
 	versionHandler := appversion.NewHandler(appversion.Info{
 		MinBuild:    cfg.Version.MinBuild,
@@ -280,6 +281,7 @@ func main() {
 
 	api := r.Group("/api/v1")
 	{
+		api.GET("/health", health) // before the build check: an outdated build still learns it is online
 		api.Use(versionHandler.Middleware("/api/v1/app/version"))
 		api.GET("/app/version", versionHandler.Version)
 
@@ -464,6 +466,7 @@ func main() {
 
 			protected.GET("/recurring", recurringHandler.List)
 			protected.POST("/recurring", recurringHandler.Create)
+			protected.POST("/recurring/occurrences/bulk", recurringHandler.SettleOccurrences)
 			protected.GET("/recurring/:id", recurringHandler.Get)
 			protected.PUT("/recurring/:id", recurringHandler.Update)
 			protected.DELETE("/recurring/:id", recurringHandler.Delete)

@@ -593,6 +593,19 @@ func (h *Handler) MarkPaidReady(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
+func (h *Handler) SettleOccurrences(c *gin.Context) {
+	uid, ok := user(c)
+	if !ok {
+		return
+	}
+	var req OccBulkRequest
+	if _, ok := bind(c, &req); !ok {
+		return
+	}
+	out, err := h.service.SettleOccurrences(c.Request.Context(), uid, req, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
 func (h *Handler) SkipReady(c *gin.Context) {
 	uid, id, ok := userAndID(c)
 	if !ok {

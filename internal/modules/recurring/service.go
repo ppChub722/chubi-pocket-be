@@ -250,9 +250,6 @@ func (s *Service) itemView(ctx context.Context, userID, itemID uuid.UUID) (*Item
 	if err != nil {
 		return nil, err
 	}
-	if it.RuleID == nil {
-		return nil, ErrItemNotFound
-	}
 	return s.viewRow(ctx, userID, it)
 }
 
@@ -262,7 +259,7 @@ func (s *Service) viewRow(ctx context.Context, userID uuid.UUID, it *itemRow) (*
 	if err != nil {
 		return nil, err
 	}
-	r, err := getRule(ctx, s.db, userID, *it.RuleID, false)
+	r, err := getRule(ctx, s.db, userID, it.RuleID, false)
 	if err != nil {
 		return nil, err
 	}
@@ -401,9 +398,7 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 	}
 	byRule := map[uuid.UUID][]*itemRow{}
 	for _, it := range stored {
-		if it.RuleID != nil {
-			byRule[*it.RuleID] = append(byRule[*it.RuleID], it)
-		}
+		byRule[it.RuleID] = append(byRule[it.RuleID], it)
 	}
 	avg := map[uuid.UUID]float64{}
 	arows, err := s.db.Query(ctx, `SELECT i.rule_id, AVG(COALESCE(t.amount, e.amount))::float8 FROM recurring_items i
@@ -930,8 +925,8 @@ func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, mon
 		}
 		lang := s.lang(ctx, userID)
 		for _, it := range stored {
-			if statusOfRow(it, today) == status && it.RuleID != nil {
-				r := byID[*it.RuleID]
+			if statusOfRow(it, today) == status {
+				r := byID[it.RuleID]
 				occs = append(occs, rowOcc(r, it, seqIndex(r), today, lang))
 			}
 		}

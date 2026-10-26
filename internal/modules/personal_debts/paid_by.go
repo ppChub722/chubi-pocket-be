@@ -75,8 +75,13 @@ func (s *Service) SetPaidByTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, 
 	}
 	if cur == nil {
 		kind := SourcePaidBy
+		// they paid my expense: I owe them; they received my income ("รับแทน"): they owe me
+		dir := DirectionReceived
+		if row.Type == transactions.TypeIncome {
+			dir = DirectionPaid
+		}
 		e, err := insertEntryTx(ctx, tx, &Entry{
-			UserID: userID, Direction: DirectionReceived, ContactID: contactID, PersonName: name,
+			UserID: userID, Direction: dir, ContactID: contactID, PersonName: name,
 			Amount: in.Amount, Date: row.Date, SourceKind: &kind, Description: row.Description,
 			PaidForTransactionID: &row.ID,
 		})

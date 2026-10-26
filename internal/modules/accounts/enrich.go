@@ -29,7 +29,7 @@ func (s *Service) decorate(ctx context.Context, userID uuid.UUID, accs []Account
 	}
 	rows, err := s.store.Pool().Query(ctx, `
 		SELECT t.account_id,
-		       COALESCE(SUM(t.amount) FILTER (WHERE t.type IN ('income', 'transfer')), 0)::float8,
+		       COALESCE(SUM(`+shared.CashAmountSQL("t")+`) FILTER (WHERE t.type IN ('income', 'transfer')), 0)::float8,
 		       COALESCE(SUM(`+shared.CashAmountSQL("t")+`) FILTER (WHERE t.type = 'expense'), 0)::float8
 		FROM transactions t
 		JOIN accounts a ON a.id = t.account_id

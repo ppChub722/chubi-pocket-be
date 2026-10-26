@@ -146,8 +146,10 @@ func TestPaidByRules(t *testing.T) {
 		edit func(r *transactions.CreateRequest)
 		want error
 	}{
-		{"income", func(r *transactions.CreateRequest) {
-			r.Type = transactions.TypeIncome
+		{"transfer", func(r *transactions.CreateRequest) {
+			r.Type = transactions.TypeTransfer
+			to := testdb.Account(t, f.pool, f.me)
+			r.TransferToAccountID = &to
 			r.PaidBy = &transactions.PaidByInput{PersonName: "Lee", Amount: 10}
 		}, transactions.ErrPaidByExpenseOnly},
 		{"over the bill", func(r *transactions.CreateRequest) {
@@ -204,6 +206,49 @@ func TestPaidByRules(t *testing.T) {
 	if _, err := f.txs.UpdateWrite(f.ctx, f.me, sw.Rows[0].ID, transactions.UpdateRequest{
 		PaidBy: &transactions.PaidByInput{PersonName: "Lee", Amount: 5}}); !errors.Is(err, transactions.ErrLinkModeConflict) {
 		t.Errorf("paid_by on a split row: err = %v", err)
+	}
+}
+
+// TestPaidByIncome — "รับแทน": a salary of 123 where Lee received 13 for me is ONE income of 123,
+// the wallet takes 110 and the debt is "Lee owes me 13".
+func TestPaidByIncome(t *testing.T) {
+	f := newDebtHFix(t)
+	w, err := f.txs.CreateWrite(f.ctx, f.me, transactions.CreateRequest{
+		Type: transactions.TypeIncome, AccountID: &f.wallet, Amount: 123, Date: "2026-10-12",
+		Description: testdb.Str("Gig"),
+		PaidBy:      &transactions.PaidByInput{PersonName: "Lee", Amount: 13},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	row := w.Rows[0]
+	if row.Amount != 123 || row.WalletAmount != 110 || row.LinkMode != transactions.LinkPaid || f.balance() != 1110 {
+		t.Fatalf("row = amount %v wallet_amount %v mode %s, wallet %v", row.Amount, row.WalletAmount, row.LinkMode, f.balance())
+	}
+	if p, ok := w.PersonBalance.(DebtPerson); !ok || p.Net != 13 {
+		t.Errorf("person_balance = %+v, want +13", w.PersonBalance)
+	}
+	entry := f.call("GET", "/api/v1/personal-debts/"+row.PaidBy.DebtID.String(), nil, "getDebtEntry", http.StatusOK)
+	if e := obj(entry, "entry"); e["direction"] != "paid" || num(e, "amount") != 13 || obj(e, "source")["kind"] != "paid_by" {
+		t.Errorf("debt = %v", e)
+	}
+	// Lee received it all: no wallet, the debt is the whole income.
+	u, err := f.txs.UpdateWrite(f.ctx, f.me, row.ID, transactions.UpdateRequest{PaidBy: &transactions.PaidByInput{PersonName: "Lee", Amount: 123}})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if u.Rows[0].Account != nil || f.balance() != 1000 {
+		t.Errorf("received all: account %v wallet %v", u.Rows[0].Account, f.balance())
+	}
+	if p, ok := u.PersonBalance.(DebtPerson); !ok || p.Net != 123 {
+		t.Errorf("person_balance = %+v, want +123", u.PersonBalance)
+	}
+	if _, err := f.txs.DeleteWrite(f.ctx, f.me, row.ID, false, false); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	var n int
+	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM personal_debts WHERE paid_for_transaction_id = $1`, row.ID).Scan(&n); err != nil || n != 0 {
+		t.Errorf("the รับแทน debt outlived its income: %d (%v)", n, err)
 	}
 }
 
