@@ -12,7 +12,7 @@
 # (git archive HEAD of the repo, or of --dir) — uncommitted changes are not
 # shipped; the script warns.
 #
-# BE steps (all on the VPS, see chubi-pocket-docs/engineering/ops-runbook.md):
+# BE steps (all on the VPS, see chubi-pocket-docs/ops/ops-runbook.md):
 #   1. upload the source, build image chubi-be:prod-new on the server
 #   2. pg_dump backup (/srv/backup/backup.sh)
 #   3. copy migrations → /srv/chubi/migrations, run `migrate up`

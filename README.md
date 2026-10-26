@@ -63,7 +63,7 @@ All routes are under `/api/v1` and require a JWT except `register`, `login` and
 
 Every module follows the same shape (see [Project layout](#project-layout)), so
 the list grows without the codebase changing shape. Endpoint-level detail lives
-in the [specs](../chubi-pocket-docs/design/spec/).
+in the [specs](../chubi-pocket-docs/modules/).
 
 ## Project layout
 
@@ -113,7 +113,7 @@ docker compose -f docker-compose.deploy.yml up -d
 
 ## Logging
 
-Structured `slog` everywhere: pretty console output in dev, JSON on stdout in production. Every request gets an `X-Request-ID` (client-supplied or generated) that appears on every log line — testers paste it from error screens, we grep for the full trace. Bodies are redacted (passwords, tokens, card numbers, etc. → `[REDACTED]`) and capped at 4KB. Full plan: [logging-plan.md](../chubi-pocket-docs/engineering/logging-plan.md).
+Structured `slog` everywhere: pretty console output in dev, JSON on stdout in production. Every request gets an `X-Request-ID` (client-supplied or generated) that appears on every log line — testers paste it from error screens, we grep for the full trace. Bodies are redacted (passwords, tokens, card numbers, etc. → `[REDACTED]`) and capped at 4KB. Full plan: [logging-plan.md](../chubi-pocket-docs/build/logging-plan.md).
 
 Two env dials — switching phase is an `.env` edit + restart, no code changes:
 

@@ -23,4 +23,4 @@ The spec `internal/apidoc/openapi.yaml` is the source of truth. The code conform
 Do not silently deviate. Make the smallest reasonable choice that keeps the spec true, and list it under "Spec questions" in your final report. If a spec change is really needed, say exactly which operationId / schema and what to change; the lead edits the yaml (do not edit `openapi.yaml` yourself).
 
 ## Final report (keep it short)
-Files changed; operations done (operationIds) with their route registration lines for main.go; tests added; `go vet` / `go test` result for your packages; anything not done; spec questions; doc notes (behaviour the docs in `chubi-pocket-docs/design/` must mention).
+Files changed; operations done (operationIds) with their route registration lines for main.go; tests added; `go vet` / `go test` result for your packages; anything not done; spec questions; doc notes (behaviour the docs in `chubi-pocket-docs/modules/` and `chubi-pocket-docs/ref/` must mention).

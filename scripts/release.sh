@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deploy one release from its git tags (Lead commits, tags and pushes;
 # DevOps never does). Given a brief folder (template + format:
-# chubi-pocket-docs/ai/templates/release-brief/):
+# chubi-pocket-docs/team/templates/release-brief/):
 #
 #   ./scripts/release.sh --dry-run <brief-dir>   # read-only: preflight + the plan
 #   ./scripts/release.sh <brief-dir>             # do it
@@ -388,7 +388,7 @@ fi
 
 # ── release entry (main docs tree, NOT committed: Lead commits it) ──────
 say "release entry"
-REL_ENTRY="$DOCS_DIR/ai/releases/$VERSION.md"   # one file per release
+REL_ENTRY="$DOCS_DIR/team/releases/$VERSION.md"   # one file per release
 make_entry() {
   echo "# $VERSION — released $(date +%F) (DevOps, release.sh from tag $TAG)"
   echo
@@ -410,14 +410,14 @@ make_entry() {
   tr -d '\r' < "$BRIEF/entry.md"
 }
 if [[ -f "$REL_ENTRY" ]]; then
-  skip "ai/releases/$VERSION.md already exists (delete it to regenerate)"
+  skip "team/releases/$VERSION.md already exists (delete it to regenerate)"
 elif $DRY; then
-  plan "write ai/releases/$VERSION.md in the main docs tree (uncommitted):"
+  plan "write team/releases/$VERSION.md in the main docs tree (uncommitted):"
   make_entry | sed 's/^/      │ /'
 else
   mkdir -p "$(dirname "$REL_ENTRY")"
   make_entry > "$REL_ENTRY"
-  ok "entry written to ai/releases/$VERSION.md (uncommitted: Lead commits it)"
+  ok "entry written to team/releases/$VERSION.md (uncommitted: Lead commits it)"
 fi
 
 # ── cleanup + summary ───────────────────────────────────────────────────
@@ -436,7 +436,7 @@ fi
   echo "$VERSION DONE (from tag $TAG)"
   $HAS_BE  && echo "be   $BE_SHORT  $BE_SUBJ"
   $HAS_APP && echo "app  $APP_SHORT  build $BUILD · Firebase $(state_get firebase)"
-  echo "docs $(short "$DOCS_DIR" "$DOCS_COMMIT")  entry ai/releases/$VERSION.md (uncommitted)"
+  echo "docs $(short "$DOCS_DIR" "$DOCS_COMMIT")  entry team/releases/$VERSION.md (uncommitted)"
   echo "checks: BE $(state_get checks_be) · app $(state_get checks_app)"
   echo "backup: $(state_get backup) · migrations new: $new_migs"
   echo "env: LATEST_APP_BUILD=$WANT_LATEST · MIN_APP_BUILD=$WANT_MIN (.env.bak-$VERSION)"
