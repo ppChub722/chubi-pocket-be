@@ -33,15 +33,12 @@ func reloadTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*Transaction, error
 }
 
 // personKeysTx — the debt people a row touches: its splits, its paid-by debt, a debt entry it is the
-// wallet side of, a repayment's person.
+// transaction of (a debt or a repayment).
 func personKeysTx(ctx context.Context, q shared.Querier, userID, txID uuid.UUID) ([]string, error) {
 	rows, err := q.Query(ctx, `
 		SELECT `+shared.DebtKeySQL("d")+` FROM personal_debts d
 		WHERE d.user_id = $1 AND (d.source_transaction_id = $2 OR d.paid_for_transaction_id = $2
-		   OR d.id = (SELECT source_personal_debt_id FROM transactions WHERE id = $2))
-		UNION
-		SELECT `+shared.RepayKeySQL("t")+` FROM transactions t
-		WHERE t.id = $2 AND t.user_id = $1 AND t.repay_person_name IS NOT NULL`, userID, txID)
+		   OR d.id = (SELECT source_personal_debt_id FROM transactions WHERE id = $2))`, userID, txID)
 	if err != nil {
 		return nil, fmt.Errorf("row people: %w", err)
 	}
@@ -108,7 +105,7 @@ func (s *Service) switchModeTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID,
 	if current.UserID != userID {
 		return nil, ErrSplitsAuthorOnly
 	}
-	if current.SourcePersonalDebtID != nil || current.RepayPersonName != nil {
+	if current.SourcePersonalDebtID != nil {
 		return nil, ErrSystemTransactionImmutable
 	}
 	from, hasSplits, err := currentMode(ctx, tx, current)

@@ -568,6 +568,15 @@ func (s *Service) deleteEntryTx(ctx context.Context, tx pgx.Tx, userID, id uuid.
 	if err != nil {
 		return nil, err
 	}
+	// The recurring occurrence it fills turns skipped with the entry's last values
+	// (0.4.1-1 R2 / R3, as a deleted transaction does); SQL, since recurring imports this package.
+	if _, err := tx.Exec(ctx, `UPDATE recurring_items i SET saving_entry_id = NULL, archived = TRUE, edited = TRUE,
+			auto_created_at = NULL, cleared_at = NULL, date = e.date,
+			draft = i.draft || jsonb_build_object('amount', e.amount, 'account_id', e.account_id, 'note', e.note,
+				'date', to_char(e.date, 'YYYY-MM-DD'))
+		FROM saving_entries e WHERE e.id = $1 AND i.saving_entry_id = e.id`, id); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM saving_entries WHERE id = $1`, id); err != nil {
 		return nil, err
 	}

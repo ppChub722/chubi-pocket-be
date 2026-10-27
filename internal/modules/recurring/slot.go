@@ -20,8 +20,10 @@ type ConfirmRequest struct {
 	Fields
 }
 
-type SkipRequest struct {
-	DeleteTx bool `json:"delete_tx"`
+// MarkPaidRequest — paid without a transaction keeps an amount (0.4.1-1 R5): the
+// one sent, else the occurrence's planned amount.
+type MarkPaidRequest struct {
+	Amount *float64 `json:"amount"`
 }
 
 type LinkSlotRequest struct {
@@ -41,6 +43,7 @@ type BulkResult struct {
 	LeftOut         []LeftOut              `json:"left_out"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
 	Setting         *Recurring             `json:"setting"`
+	Effects         shared.Effects         `json:"effects"`
 }
 
 // occCtx loads the rule and the occurrence at slot for a write.
@@ -107,11 +110,9 @@ func truncRunes(s *string, n int) *string {
 
 // recordOccurrenceTx makes the transaction of an occurrence (row = its stored
 // row) dated its own date (or `date`), and links it. Confirm, the bulk confirm
-// and auto-create all come through here.
+// and auto-create all come through here. A skipped or paid occurrence is filled
+// straight away (0.4.1-1 R4): the mark goes.
 func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, row *itemRow, date *time.Time, auto bool, lang string) ([]uuid.UUID, any, error) {
-	if row.Archived {
-		return nil, nil, ErrInvalidTransition
-	}
 	if row.TransactionID != nil || row.SavingEntryID != nil {
 		return nil, nil, ErrAlreadyRecorded
 	}
@@ -125,7 +126,14 @@ func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, ro
 	if d.Type == nil {
 		return nil, nil, ErrValidation
 	}
-	if d.Amount == nil || *d.Amount <= 0 {
+	if auto { // never waits, never fails (0.4.1-1 R12): 0 is recorded as 0, a gone wallet / category is left out
+		if d.Amount == nil {
+			d.Amount = ptr(0.0)
+		}
+		if err := autoDraftTx(ctx, tx, r.UserID, &d); err != nil {
+			return nil, nil, err
+		}
+	} else if d.Amount == nil || *d.Amount <= 0 {
 		return nil, nil, ErrAmountRequired
 	}
 	slot := row.Date
@@ -146,7 +154,7 @@ func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, ro
 	req := transactions.CreateRequest{
 		Type: transactions.TxType(*d.Type), AccountID: d.AccountID, Amount: *d.Amount, CategoryID: d.CategoryID,
 		Date: when.Format(dateLayout), Description: truncRunes(desc, 200), Note: d.Note,
-		TransferToAccountID: d.TransferToAccountID, TagIDs: d.TagIDs,
+		TransferToAccountID: d.TransferToAccountID, TagIDs: d.TagIDs, AllowZero: auto,
 	}
 	res, err := s.txs.CreateInTx(ctx, tx, r.UserID, req)
 	if err != nil {
@@ -177,6 +185,7 @@ func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, ro
 	}
 	now := time.Now()
 	row.TransactionID, row.ProducedAt = &id, &now
+	row.Archived, row.ClearedAt = false, nil
 	if auto {
 		row.AutoCreatedAt = &now
 	}
@@ -205,8 +214,11 @@ func (s *Service) autoCreate(ctx context.Context, tx pgx.Tx, r *Rule, today time
 			return 0, err
 		}
 		for _, o := range occsOf(r, rows, from, today, today, lang) {
-			if o.status != StatusDue || o.draft.Amount == nil || *o.draft.Amount <= 0 {
+			if o.status != StatusDue {
 				continue
+			}
+			if draftType(o.draft) == typeSaving && (o.draft.Amount == nil || *o.draft.Amount <= 0) {
+				continue // a saving entry needs an amount: nothing to put away
 			}
 			sp, err := tx.Begin(ctx)
 			if err != nil {
@@ -252,14 +264,13 @@ func (s *Service) EditOcc(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 	if err != nil {
 		return nil, err
 	}
-	touched, err := s.applyItemEdit(ctx, tx, row, &req.Fields, req.AlsoUpdateLink)
-	if err != nil {
+	if err := s.applyItemEdit(ctx, tx, row, &req.Fields); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.slotResult(ctx, userID, ruleID, slot, nil, touched)
+	return s.slotResult(ctx, userID, ruleID, slot, nil, nil)
 }
 
 // Confirm records the occurrence as a transaction now (dated the occurrence
@@ -310,8 +321,9 @@ func (s *Service) Confirm(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 	return s.slotResult(ctx, userID, ruleID, slot, txRow, touched)
 }
 
-// SkipOcc skips the occurrence. A transaction recorded from it stays, unless deleteTx.
-func (s *Service) SkipOcc(ctx context.Context, userID, ruleID uuid.UUID, slot time.Time, deleteTx bool, tz string) (*ItemWriteResult, error) {
+// SkipOcc skips an open (or paid) occurrence. A filled one is refused: its
+// transaction is unlinked or deleted first (0.4.1-1, owner answer 6).
+func (s *Service) SkipOcc(ctx context.Context, userID, ruleID uuid.UUID, slot time.Time, tz string) (*ItemWriteResult, error) {
 	_, _, o, err := s.occCtx(ctx, s.db, userID, ruleID, slot, tz)
 	if err != nil {
 		return nil, err
@@ -325,20 +337,14 @@ func (s *Service) SkipOcc(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 	if err != nil {
 		return nil, err
 	}
-	var touched []uuid.UUID
-	if row.linked() {
-		if deleteTx {
-			if _, touched, err = s.unlinkTx(ctx, tx, row); err != nil {
-				return nil, err
-			}
-		} else {
-			if row.PendingID != nil { // a legacy draft must not outlive the skip
-				if err := s.pending.Store().DeleteTx(ctx, tx, userID, *row.PendingID); err != nil {
-					return nil, err
-				}
-			}
-			row.TransactionID, row.PendingID, row.SavingEntryID = nil, nil, nil
+	if row.TransactionID != nil || row.SavingEntryID != nil {
+		return nil, ErrAlreadyRecorded
+	}
+	if row.PendingID != nil { // a legacy draft must not outlive the skip
+		if err := s.pending.Store().DeleteTx(ctx, tx, userID, *row.PendingID); err != nil {
+			return nil, err
 		}
+		row.PendingID = nil
 	}
 	row.AutoCreatedAt, row.Archived, row.ClearedAt = nil, true, nil
 	if err := saveItemTx(ctx, tx, row); err != nil {
@@ -347,7 +353,7 @@ func (s *Service) SkipOcc(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.slotResult(ctx, userID, ruleID, slot, nil, touched)
+	return s.slotResult(ctx, userID, ruleID, slot, nil, nil)
 }
 
 func blank(it *itemRow) bool {
@@ -366,15 +372,31 @@ func (s *Service) RestoreOcc(ctx context.Context, userID, ruleID uuid.UUID, slot
 }
 
 // MarkPaid clears the occurrence as paid WITHOUT a transaction ("แม่จ่ายให้").
-func (s *Service) MarkPaid(ctx context.Context, userID, ruleID uuid.UUID, slot time.Time, tz string) (*ItemWriteResult, error) {
+// It keeps an amount (0.4.1-1 R5): the one sent, else its planned one. A
+// skipped occurrence may be marked paid straight away (R4).
+func (s *Service) MarkPaid(ctx context.Context, userID, ruleID uuid.UUID, slot time.Time, amount *float64, tz string) (*ItemWriteResult, error) {
+	if amount != nil && *amount <= 0 {
+		return nil, ErrValidation
+	}
 	return s.flip(ctx, userID, ruleID, slot, tz, func(row *itemRow) error {
-		if row.TransactionID != nil || row.SavingEntryID != nil {
-			return ErrAlreadyRecorded
-		}
-		now := time.Now()
-		row.Archived, row.ClearedAt = false, &now
-		return nil
+		return markPaid(row, amount)
 	})
+}
+
+// markPaid puts the paid mark and its amount on a row.
+func markPaid(row *itemRow, amount *float64) error {
+	if row.TransactionID != nil || row.SavingEntryID != nil {
+		return ErrAlreadyRecorded
+	}
+	if amount != nil {
+		row.Draft.Amount, row.Edited = amount, true
+	}
+	if row.Draft.Amount == nil || *row.Draft.Amount <= 0 {
+		return ErrAmountRequired
+	}
+	now := time.Now()
+	row.Archived, row.ClearedAt, row.AutoCreatedAt = false, &now, nil
+	return nil
 }
 
 // UnmarkPaid takes the paid mark off.
@@ -512,16 +534,22 @@ func (s *Service) ConfirmReady(ctx context.Context, userID, ruleID uuid.UUID, tz
 	return s.bulkItems(ctx, userID, ruleID, slots, out)
 }
 
-// MarkPaidReady clears every due occurrence as paid.
+// MarkPaidReady clears every due occurrence that has an amount as paid at it
+// (0.4.1-1 R5); the ones without are left out.
 func (s *Service) MarkPaidReady(ctx context.Context, userID, ruleID uuid.UUID, tz string) (*BulkResult, error) {
 	var slots []time.Time
 	out, err := s.bulk(ctx, userID, ruleID, tz, func(tx pgx.Tx, r *Rule, o *occ, out *BulkResult, touched *[]uuid.UUID) error {
+		if o.draft.Amount == nil || *o.draft.Amount <= 0 {
+			out.LeftOut = append(out.LeftOut, LeftOut{Slot: o.slot.Format(dateLayout), Reason: "needs_amount"})
+			return nil
+		}
 		row, err := s.store(ctx, tx, o)
 		if err != nil {
 			return err
 		}
-		now := time.Now()
-		row.ClearedAt = &now
+		if err := markPaid(row, nil); err != nil {
+			return err
+		}
 		slots = append(slots, o.slot)
 		return saveItemTx(ctx, tx, row)
 	})
@@ -559,5 +587,6 @@ func (s *Service) bulkItems(ctx context.Context, userID, ruleID uuid.UUID, slots
 			out.Items = append(out.Items, *it)
 		}
 	}
+	out.Effects = s.effectsOf(ctx, userID, out.Items, nil, nil, out.AccountBalances)
 	return out, nil
 }

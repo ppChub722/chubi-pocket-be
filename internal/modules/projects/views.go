@@ -261,7 +261,7 @@ func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid
 		return s, fmt.Errorf("positions: %w", err)
 	}
 	type pos struct {
-		id                         uuid.UUID
+		id                          uuid.UUID
 		paid, share, sent, received float64
 	}
 	var ps []pos
@@ -486,15 +486,19 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 			WHERE lt.id = x.linked_transaction_id) END,
 		CASE WHEN x.parent_project_transaction_id IS NULL THEN (
 			SELECT json_build_object(
-				'tx', COALESCE(bool_or(t.id IS NOT NULL AND t.repay_person_name IS NULL), false),
-				'repay', COALESCE(bool_or(t.repay_person_name IS NOT NULL), false),
+				'tx', COALESCE(bool_or(t.id IS NOT NULL), false),
+				'repay', EXISTS (SELECT 1 FROM personal_debts d
+					WHERE d.user_id = `+caller+` AND d.source_project_transaction_id = x.id AND d.kind = 'repayment'),
 				'debt', EXISTS (SELECT 1 FROM personal_debts d
-					WHERE d.user_id = `+caller+` AND d.source_project_transaction_id = x.id))
+					WHERE d.user_id = `+caller+` AND d.source_project_transaction_id = x.id AND d.kind = 'debt'))
 			FROM (SELECT 1) one
 			LEFT JOIN transactions t ON t.user_id = `+caller+` AND (
 				t.id = x.linked_transaction_id OR t.source_project_transaction_id = x.id
 				OR t.source_project_transaction_id IN (SELECT c.id FROM project_transactions c
-					WHERE c.parent_project_transaction_id = x.id))) END
+					WHERE c.parent_project_transaction_id = x.id))) END,
+		CASE WHEN x.parent_project_transaction_id IS NOT NULL THEN EXISTS (SELECT 1 FROM project_transactions pb
+			WHERE pb.paid_back_for_id = x.parent_project_transaction_id AND pb.transaction_member_id = x.transaction_member_id
+			  AND pb.parent_project_transaction_id IS NULL) END
 		FROM page JOIN project_transactions x ON x.id = page.id OR x.parent_project_transaction_id = page.id
 		ORDER BY page.rn, (x.parent_project_transaction_id IS NOT NULL), x.created_at, x.id`, args...)
 	if err != nil {
@@ -505,17 +509,25 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 		children = map[uuid.UUID][]ProjectTransaction{}
 		extras   = boardExtras{
 			tags: map[uuid.UUID][]EventTagRef{}, sources: map[uuid.UUID]boardSource{}, booked: map[uuid.UUID]MyBooks{},
+			paidBack: map[uuid.UUID]map[uuid.UUID]bool{},
 		}
 		total int
 	)
 	for rows.Next() {
 		var tagsJSON, srcJSON, bookedJSON []byte
-		pt, err := scanPTAround(rows, []any{&total}, []any{&tagsJSON, &srcJSON, &bookedJSON})
+		var paidBack *bool
+		pt, err := scanPTAround(rows, []any{&total}, []any{&tagsJSON, &srcJSON, &bookedJSON, &paidBack})
 		if err != nil {
 			rows.Close()
 			return nil, 0, err
 		}
 		if pt.ParentProjectTransactionID != nil {
+			if paidBack != nil && *paidBack {
+				if extras.paidBack[*pt.ParentProjectTransactionID] == nil {
+					extras.paidBack[*pt.ParentProjectTransactionID] = map[uuid.UUID]bool{}
+				}
+				extras.paidBack[*pt.ParentProjectTransactionID][pt.TransactionMemberID] = true
+			}
 			children[*pt.ParentProjectTransactionID] = append(children[*pt.ParentProjectTransactionID], *pt)
 			continue
 		}
@@ -566,6 +578,8 @@ type boardExtras struct {
 	tags    map[uuid.UUID][]EventTagRef
 	sources map[uuid.UUID]boardSource
 	booked  map[uuid.UUID]MyBooks
+	// paidBack — bill → the members a "คืนแล้ว" payback row was made for (0.4.1-1)
+	paidBack map[uuid.UUID]map[uuid.UUID]bool
 }
 
 func (x *boardExtras) add(id uuid.UUID, tagsJSON, srcJSON, bookedJSON []byte) error {
@@ -637,6 +651,7 @@ func buildRows(ctx context.Context, q shared.Querier, callerID uuid.UUID, e Even
 		return nil, err
 	}
 	tags, sources, booked := extras.tags, extras.sources, extras.booked
+	paidBack := extras.paidBack
 
 	me := uuid.Nil
 	if e.MyMemberID != nil {
@@ -667,7 +682,7 @@ func buildRows(ctx context.Context, q shared.Querier, callerID uuid.UUID, e Even
 			}
 			r.Children = append(r.Children, BoardSplit{
 				ID: c.ID, TransactionMember: members[c.TransactionMemberID], Amount: c.Amount,
-				Marks: marks, MyMark: containsID(marks, me),
+				Marks: marks, MyMark: containsID(marks, me), PaidBack: paidBack[p.ID][c.TransactionMemberID],
 			})
 			if c.TransactionMemberID == me {
 				mine += c.Amount

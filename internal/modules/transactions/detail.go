@@ -28,6 +28,7 @@ type rowFacts struct {
 	debtName      *string
 	debtDirection *string
 	debtPaid      *bool
+	debtKind      *string
 	billID        *uuid.UUID
 	recItemID     *uuid.UUID
 	recItemUser   *uuid.UUID
@@ -78,9 +79,6 @@ func buildDetails(
 		r := &rows[i]
 		if f, ok := facts[r.ID]; ok && f.debtContactID != nil && r.UserID == callerID {
 			debtContacts = append(debtContacts, *f.debtContactID)
-		}
-		if r.RepayContactID != nil && r.UserID == callerID {
-			debtContacts = append(debtContacts, *r.RepayContactID)
 		}
 		if f, ok := facts[r.ID]; ok && f.pbContactID != nil && r.UserID == callerID {
 			debtContacts = append(debtContacts, *f.pbContactID)
@@ -173,17 +171,12 @@ func buildDetails(
 			}
 			d.Counterparty = &shared.DebtLink{
 				EntryID:   *r.SourcePersonalDebtID,
+				Kind:      kindOr(f.debtKind, "debt"),
+				Connected: r.DebtConnected,
 				Key:       shared.DebtKey(f.debtContactID, name),
 				Person:    shared.ResolvePerson(debtPersons, shared.PersonKey{ContactID: f.debtContactID, Snapshot: name}),
 				Direction: *f.debtDirection,
 				Paid:      f.debtPaid != nil && *f.debtPaid,
-			}
-		}
-		if r.RepayPersonName != nil && r.UserID == callerID {
-			p := shared.ResolvePerson(debtPersons, shared.PersonKey{ContactID: r.RepayContactID, Snapshot: *r.RepayPersonName})
-			d.RepaymentPerson = &RepaymentPerson{
-				Key: shared.DebtKey(r.RepayContactID, *r.RepayPersonName), Name: p.Name,
-				ContactID: r.RepayContactID, Person: p,
 			}
 		}
 		if f.recItemID != nil && f.recItemUser != nil && *f.recItemUser == callerID {
@@ -288,7 +281,7 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		       `+shared.ActiveMembershipPredicate("t.account_id", "$2")+`,
 		       u.display_name, u.icon_code,
 		       peer.id, peer.account_id, c.system_kind, pc.system_kind,
-		       de.counterparty_contact_id, de.counterparty_person_name, de.direction, de.paid,
+		       de.counterparty_contact_id, de.counterparty_person_name, de.direction, de.paid, de.kind,
 		       COALESCE(bp.parent_project_transaction_id, bp.id),
 		       ri.id, ri.user_id, ri.seq, rr.id, rr.name, rr.icon_code, rr.total_count,
 		       pb.id, pb.source_kind, pb.counterparty_contact_id, pb.counterparty_person_name, pb.paid
@@ -321,7 +314,7 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		if err := rows.Scan(&id, &f.currency, &f.myShare, &f.splitCount, &f.billable, &f.eventBill,
 			&f.closed, &f.activeMembers, &f.callerActive, &f.authorName, &f.authorIcon,
 			&f.peerID, &f.peerAccountID, &f.kind, &f.peerKind,
-			&f.debtContactID, &f.debtName, &f.debtDirection, &f.debtPaid, &f.billID,
+			&f.debtContactID, &f.debtName, &f.debtDirection, &f.debtPaid, &f.debtKind, &f.billID,
 			&f.recItemID, &f.recItemUser, &f.recItemSeq, &f.recID, &f.recName, &f.recIcon, &f.recTotal,
 			&f.pbID, &f.pbKind, &f.pbContactID, &f.pbName, &f.pbPaid); err != nil {
 			return nil, fmt.Errorf("row facts scan: %w", err)
@@ -412,4 +405,12 @@ func detailOf(ctx context.Context, q shared.Querier, callerID uuid.UUID, t *Tran
 		return nil, err
 	}
 	return &ds[0], nil
+}
+
+// kindOr — *s, or dflt when nil.
+func kindOr(s *string, dflt string) string {
+	if s == nil {
+		return dflt
+	}
+	return *s
 }

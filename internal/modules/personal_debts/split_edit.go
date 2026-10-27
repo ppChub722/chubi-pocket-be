@@ -225,8 +225,8 @@ func linkedPartnerTx(ctx context.Context, tx pgx.Tx, d *Entry) *uuid.UUID {
 func (s *Service) notifySplitChangeTx(
 	ctx context.Context, tx pgx.Tx, d *Entry, newAmount float64, change string,
 ) error {
-	if s.notifs == nil {
-		return nil
+	if s.notifs == nil || d.DisconnectedAt != nil {
+		return nil // a disconnected pair (D9): the other book no longer hears about it
 	}
 	partner := linkedPartnerTx(ctx, tx, d)
 	if partner == nil {

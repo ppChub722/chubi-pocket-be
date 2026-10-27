@@ -91,15 +91,15 @@ func TestDueCheckDailyRunsOncePerLocalDay(t *testing.T) {
 		t.Errorf("a checked day cost %d queries, want at most 2 (preferences + guard)", n)
 	}
 
-	// a wallet archived since: the next sync's check pauses its settings
+	// a wallet archived since: its settings keep running (0.4.1-1 R12)
 	f.exec(`UPDATE accounts SET status = 'archived' WHERE id = $1`, f.wallet)
 	if err := f.svc.DueCheckDaily(f.ctx, f.me, ""); err != nil {
 		t.Fatal(err)
 	}
 	var status string
 	_ = f.pool.QueryRow(f.ctx, `SELECT status FROM recurring_rules WHERE id = $1`, id).Scan(&status)
-	if status != "paused" {
-		t.Errorf("a setting on an archived wallet is %q after the check, want paused", status)
+	if status != "active" {
+		t.Errorf("a setting on an archived wallet is %q after the check, want active", status)
 	}
 
 	// a new day: the guard lets it through again

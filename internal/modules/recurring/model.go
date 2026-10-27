@@ -37,23 +37,23 @@ var statusSQL = `(CASE WHEN i.transaction_id IS NOT NULL OR i.saving_entry_id IS
 	ELSE 'upcoming' END)`
 
 type Rule struct {
-	ID             uuid.UUID
-	UserID         uuid.UUID
-	Name           string
-	Description    *string
-	Note           *string
-	IconCode       *shared.IconCode
-	Type           string
-	Amount         float64
-	AccountID      *uuid.UUID
-	ToAccountID    *uuid.UUID
-	CategoryID     *uuid.UUID
-	GoalID         *uuid.UUID // type saving: the goal (nil = spare)
-	TagIDs         []uuid.UUID
+	ID          uuid.UUID
+	UserID      uuid.UUID
+	Name        string
+	Description *string
+	Note        *string
+	IconCode    *shared.IconCode
+	Type        string
+	Amount      float64
+	AccountID   *uuid.UUID
+	ToAccountID *uuid.UUID
+	CategoryID  *uuid.UUID
+	GoalID      *uuid.UUID // type saving: the goal (nil = spare)
+	TagIDs      []uuid.UUID
 	recurrence.Spec
-	Kind       string     // subscription | installment | income | reminder | saving
-	TrialUntil *time.Time // subscription: the free trial runs until
-	Status     string
+	Kind           string     // subscription | installment | income | reminder | saving
+	TrialUntil     *time.Time // subscription: the free trial runs until
+	Status         string
 	EndingNotified bool
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
@@ -68,6 +68,8 @@ type Rule struct {
 	// PausedFrom — the day it was paused (or archived while active); resuming skips the
 	// occurrences of the gap.
 	PausedFrom *time.Time
+	// PauseReason — why it is paused (0.4.1-1 R7): manual | overdue_limit | goal_inactive; nil unless paused.
+	PauseReason *string
 }
 
 type (
@@ -144,36 +146,36 @@ type Recurring struct {
 	Type        string             `json:"type"`
 	Amount      *float64           `json:"amount"` // null = a reminder with no amount yet
 	Account     *shared.AccountRef `json:"account"`
-	Kind       string  `json:"kind"`
-	TrialUntil *string `json:"trial_until"`
-	YearlyCost float64 `json:"yearly_cost"`
+	Kind        string             `json:"kind"`
+	TrialUntil  *string            `json:"trial_until"`
+	YearlyCost  float64            `json:"yearly_cost"`
 	// MonthlyAmount — what it costs (or brings) in an average month: amount × times per month; null
 	// without an amount.
-	MonthlyAmount *float64 `json:"monthly_amount"`
-	SavedCount    int      `json:"saved_count"`
-	PendingCount  int      `json:"pending_count"`
-	NextAmount    *float64 `json:"next_amount"`
-	CurrentOccurrence *Occurrence           `json:"current_occurrence"`
-	ToAccount         *shared.AccountRef    `json:"to_account"`
-	Category          *shared.CategoryRef   `json:"category"`
+	MonthlyAmount     *float64            `json:"monthly_amount"`
+	SavedCount        int                 `json:"saved_count"`
+	PendingCount      int                 `json:"pending_count"`
+	NextAmount        *float64            `json:"next_amount"`
+	CurrentOccurrence *Occurrence         `json:"current_occurrence"`
+	ToAccount         *shared.AccountRef  `json:"to_account"`
+	Category          *shared.CategoryRef `json:"category"`
 	// GoalID / Goal — a saving setting's goal; null = the unallocated pot.
-	GoalID *uuid.UUID             `json:"goal_id"`
-	Goal   *shared.SavingGoalRef  `json:"goal"`
-	Tags              []shared.TagRef       `json:"tags"`
-	Rule              RecurrenceRule        `json:"rule"`
-	StartDate         string                `json:"start_date"`
-	End               RecurrenceEnd         `json:"end"`
-	Status            string                `json:"status"`
-	NextDate          *string               `json:"next_date"`
-	DaysUntil         *int                  `json:"days_until"`
-	Progress          Progress              `json:"progress"`
-	EndingSoon        bool                  `json:"ending_soon"`
-	Counts            StatusCounts          `json:"counts"`
-	Likely    bool      `json:"likely"`
-	EditedAny bool      `json:"edited_any"`
-	Actions   Actions   `json:"actions"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	GoalID     *uuid.UUID            `json:"goal_id"`
+	Goal       *shared.SavingGoalRef `json:"goal"`
+	Tags       []shared.TagRef       `json:"tags"`
+	Rule       RecurrenceRule        `json:"rule"`
+	StartDate  string                `json:"start_date"`
+	End        RecurrenceEnd         `json:"end"`
+	Status     string                `json:"status"`
+	NextDate   *string               `json:"next_date"`
+	DaysUntil  *int                  `json:"days_until"`
+	Progress   Progress              `json:"progress"`
+	EndingSoon bool                  `json:"ending_soon"`
+	Counts     StatusCounts          `json:"counts"`
+	Likely     bool                  `json:"likely"`
+	EditedAny  bool                  `json:"edited_any"`
+	Actions    Actions               `json:"actions"`
+	CreatedAt  time.Time             `json:"created_at"`
+	UpdatedAt  time.Time             `json:"updated_at"`
 	// DueCount — occurrences due and not recorded (overdue + today).
 	DueCount int `json:"due_count"`
 	// AvgAmount — the average of the recorded amounts, else the rule's amount (null without one).
@@ -182,8 +184,10 @@ type Recurring struct {
 	Chain []ChainStep `json:"chain"`
 	// AutoCreate — the transaction is recorded by itself when an occurrence comes due.
 	AutoCreate bool `json:"auto_create"`
-	// RecordedTxCount — recorded occurrences that have a transaction (for "apply to the N recorded tx?").
+	// RecordedTxCount — recorded occurrences that have a transaction.
 	RecordedTxCount int `json:"recorded_tx_count"`
+	// PauseReason — manual | overdue_limit | goal_inactive; null unless paused (0.4.1-1 R7).
+	PauseReason *string `json:"pause_reason"`
 }
 
 type ListCounts struct {
@@ -251,12 +255,10 @@ type ItemList struct {
 }
 
 type Detail struct {
-	Recurring Recurring `json:"recurring"`
-	Items     ItemList  `json:"items"`
-	Upcoming ItemList `json:"upcoming"`
-	Stats    Stats    `json:"stats"`
-	// TxUpdate — set by an edit that sent also_update_tx.
-	TxUpdate        *TxUpdateResult        `json:"tx_update"`
+	Recurring       Recurring              `json:"recurring"`
+	Items           ItemList               `json:"items"`
+	Upcoming        ItemList               `json:"upcoming"`
+	Stats           Stats                  `json:"stats"`
 	DeletePreview   *DeletePreview         `json:"delete_preview"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
 }
@@ -265,33 +267,38 @@ type DeleteResult struct {
 	ID                      uuid.UUID              `json:"id"`
 	DeletedTransactionCount int                    `json:"deleted_transaction_count"`
 	AccountBalances         []shared.WalletBalance `json:"account_balances"`
+	Effects                 shared.Effects         `json:"effects"`
 }
 
 type ItemWriteResult struct {
 	Item            Item                   `json:"item"`
 	Transaction     any                    `json:"transaction"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
-	Setting *Recurring `json:"setting"`
+	Setting         *Recurring             `json:"setting"`
+	Effects         shared.Effects         `json:"effects"`
 }
 
 type ItemsWriteResult struct {
 	Items           []Item                 `json:"items"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
-	Setting *Recurring `json:"setting"`
+	Setting         *Recurring             `json:"setting"`
+	Effects         shared.Effects         `json:"effects"`
 }
 
 type ItemDeleteResult struct {
 	ID              uuid.UUID              `json:"id"`
 	TransactionID   *uuid.UUID             `json:"transaction_id"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
-	Setting *Recurring `json:"setting"`
+	Setting         *Recurring             `json:"setting"`
+	Effects         shared.Effects         `json:"effects"`
 }
 
 type BatchResult struct {
 	Items           []Item                 `json:"items"`
 	DeletedIDs      []uuid.UUID            `json:"deleted_ids"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
-	Setting *Recurring `json:"setting"`
+	Setting         *Recurring             `json:"setting"`
+	Effects         shared.Effects         `json:"effects"`
 }
 
 type Fields struct {
@@ -322,7 +329,7 @@ func (f *Fields) values() bool {
 
 type CreateRequest struct {
 	Fields
-	Name string `json:"name"`
+	Name       string           `json:"name"`
 	Kind       *string          `json:"kind"`
 	TrialUntil *string          `json:"trial_until"`
 	IconCode   *shared.IconCode `json:"icon_code"`
@@ -333,33 +340,17 @@ type CreateRequest struct {
 	AutoCreate *bool `json:"auto_create"`
 }
 
-// TxUpdateResult — what also_update_tx did to the transactions already recorded.
-type TxUpdateResult struct {
-	UpdatedCount int               `json:"updated_tx_count"`
-	Failed       []TxUpdateFailure `json:"failed"`
-}
-
-type TxUpdateFailure struct {
-	TransactionID uuid.UUID `json:"transaction_id"`
-	Reason        string    `json:"reason"` // not_found | account_archived | transfer | refused
-}
-
 type UpdateRequest struct {
 	Fields
-	Name *string `json:"name"`
-	Kind *string `json:"kind"`
-	TrialUntil     *string          `json:"trial_until"`
-	IconCode       *shared.IconCode `json:"icon_code"`
-	Rule           *RecurrenceRule  `json:"rule"`
-	StartDate      *string          `json:"start_date"`
-	End            *RecurrenceEnd   `json:"end"`
-	Scope          string           `json:"scope"`
-	AlsoUpdateLink bool             `json:"also_update_link"`
+	Name       *string          `json:"name"`
+	Kind       *string          `json:"kind"`
+	TrialUntil *string          `json:"trial_until"`
+	IconCode   *shared.IconCode `json:"icon_code"`
+	Rule       *RecurrenceRule  `json:"rule"`
+	StartDate  *string          `json:"start_date"`
+	End        *RecurrenceEnd   `json:"end"`
 	// AutoCreate — switch auto-create on / off (never back-creates).
 	AutoCreate *bool `json:"auto_create"`
-	// AlsoUpdateTx — push a change of name / category / wallet / tags / note to the
-	// transactions already recorded from this setting (never date or amount).
-	AlsoUpdateTx bool `json:"also_update_tx"`
 }
 
 type ExtendRequest struct {
@@ -373,22 +364,7 @@ type ItemCreateRequest struct {
 
 type ItemUpdateRequest struct {
 	Fields
-	Scope          string `json:"scope"`
-	AlsoUpdateLink bool   `json:"also_update_link"`
-}
-
-type CreateNowRequest struct {
-	Target string  `json:"target"`
-	Fields *Fields `json:"fields"`
-}
-
-type BatchRequest struct {
-	IDs            []uuid.UUID `json:"ids"`
-	Action         string      `json:"action"`
-	Target         string      `json:"target"`
-	Fields         *Fields     `json:"fields"`
-	AlsoUpdateLink bool        `json:"also_update_link"`
-	DeleteLinkedTx bool        `json:"delete_linked_tx"`
+	Scope string `json:"scope"`
 }
 
 type sourceRef struct {

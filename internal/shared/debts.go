@@ -53,38 +53,23 @@ func DebtKeySQL(a string) string {
 	return personKeySQL(a+".counterparty_contact_id", a+".counterparty_person_name")
 }
 
-// RepayKeySQL — the person key of a repayment transaction (alias a; repay_person_name set).
-func RepayKeySQL(a string) string {
-	return personKeySQL(a+".repay_contact_id", a+".repay_person_name")
-}
-
 func DebtSignedSQL(a string) string {
 	return fmt.Sprintf(`(CASE %[1]s.direction WHEN 'paid' THEN %[1]s.amount ELSE -%[1]s.amount END)`, a)
 }
 
-// RepaySignedSQL — a repayment I PAY (expense) = + (it lowers what I owe / raises what they owe);
-// one I RECEIVE (income) = −.
-func RepaySignedSQL(a string) string {
-	return fmt.Sprintf(`(CASE %[1]s.type WHEN 'expense' THEN %[1]s.amount ELSE -%[1]s.amount END)`, a)
-}
-
-// DebtLedgerSQL — every signed line of the user's person ledger (userParam = the user id): the
-// debts (personal_debts) and the repayments (transactions with a repay person). A debt's own
-// linked transaction is not a line. Columns: kind (debt | repayment), key, id, cid, snap (the
-// typed-name snapshot), signed, paid (always TRUE on a repayment: never "open"), date, created_at,
-// descr (the line's description).
+// DebtLedgerSQL — every signed line of the user's person ledger (userParam = the user id), ONE
+// table since 0.4.1-1 D3: every personal_debts row, kind debt | repayment, paid + / received −.
+// Transactions never count. Columns: kind, key, id, cid, snap (the typed-name snapshot), signed,
+// paid (always TRUE on a repayment: never "open"), date, created_at, descr (the line's
+// description), due_date (debts only).
 // Wrap it: SELECT … FROM (` + DebtLedgerSQL("$1") + `) l.
 func DebtLedgerSQL(userParam string) string {
-	return `SELECT 'debt' AS kind, ` + DebtKeySQL("lpd") + ` AS key, lpd.id,
+	return `SELECT lpd.kind, ` + DebtKeySQL("lpd") + ` AS key, lpd.id,
 		       lpd.counterparty_contact_id AS cid, lpd.counterparty_person_name AS snap,
-		       ` + DebtSignedSQL("lpd") + ` AS signed, lpd.paid, lpd.date, lpd.created_at, lpd.description AS descr,
-		       lpd.due_date
-		FROM personal_debts lpd WHERE lpd.user_id = ` + userParam + `
-		UNION ALL
-		SELECT 'repayment', ` + RepayKeySQL("lrt") + `, lrt.id,
-		       lrt.repay_contact_id, lrt.repay_person_name,
-		       ` + RepaySignedSQL("lrt") + `, TRUE, lrt.date, lrt.created_at, lrt.description, NULL::date
-		FROM transactions lrt WHERE lrt.user_id = ` + userParam + ` AND lrt.repay_person_name IS NOT NULL`
+		       ` + DebtSignedSQL("lpd") + ` AS signed, (lpd.paid OR lpd.kind = 'repayment') AS paid,
+		       lpd.date, lpd.created_at, lpd.description AS descr,
+		       CASE WHEN lpd.kind = 'debt' THEN lpd.due_date END AS due_date
+		FROM personal_debts lpd WHERE lpd.user_id = ` + userParam
 }
 
 // DebtSide — receivable (they owe me) | payable (I owe them) | clear, from a person's net.
@@ -100,10 +85,14 @@ func DebtSide(net float64) string {
 
 type DebtLink struct {
 	EntryID   uuid.UUID `json:"entry_id"`
+	Kind      string    `json:"kind"` // debt | repayment (0.4.1-1 D3)
 	Key       string    `json:"key"`
 	Person    PersonRef `json:"person"`
 	Direction string    `json:"direction"`
 	Paid      bool      `json:"paid"`
+	// Connected (0.4.1-1 D2) — an existing transaction connected later (can be disconnected);
+	// false = made from the entry.
+	Connected bool `json:"connected"`
 }
 
 type RecurringRef struct {
@@ -112,6 +101,9 @@ type RecurringRef struct {
 	IconCode *IconCode `json:"icon_code"`
 	// Kind — subscription | installment | income | reminder (set by the recurring module only).
 	Kind string `json:"kind,omitempty"`
+	// PauseReason — manual | overdue_limit | goal_inactive while paused (0.4.1-1 R7; recurring
+	// module only, absent elsewhere).
+	PauseReason *string `json:"pause_reason,omitempty"`
 }
 
 type RecurringItemLink struct {

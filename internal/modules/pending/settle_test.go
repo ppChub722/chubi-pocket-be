@@ -10,8 +10,8 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
-// TestSubmitSettleDebtMakesRepaymentTx — a settle_debt draft submits as a repayment TRANSACTION to
-// the debt's person (0.4.0-3), not as a personal_debts row.
+// TestSubmitSettleDebtMakesRepaymentTx — a settle_debt draft submits as a repayment to the debt's
+// person: a person-book row (0.4.1-1 D3) with its transaction (a wallet was given).
 func TestSubmitSettleDebtMakesRepaymentTx(t *testing.T) {
 	e := newAPIEnv(t)
 	for _, c := range [][2]string{{"DEBT_PAID", "expense"}, {"DEBT_RECEIVED", "income"}} {
@@ -34,8 +34,8 @@ func TestSubmitSettleDebtMakesRepaymentTx(t *testing.T) {
 		t.Fatalf("submit: %+v", sub)
 	}
 	row := sub.Submitted[0].Rows[0]
-	if row.Type != "income" || row.Amount != 60 || row.RepaymentPerson == nil || row.RepaymentPerson.Key != "n:lee" {
-		t.Fatalf("settle row = %+v (repayment_person %+v)", row, row.RepaymentPerson)
+	if row.Type != "income" || row.Amount != 60 || row.Counterparty == nil || row.Counterparty.Kind != "repayment" || row.Counterparty.Key != "n:lee" {
+		t.Fatalf("settle row = %+v (counterparty %+v)", row, row.Counterparty)
 	}
 	if e.balance(t, e.acct) != 1060 {
 		t.Errorf("wallet = %v, want 1060", e.balance(t, e.acct))
@@ -72,7 +72,7 @@ func TestSubmitSettleDebtMakesRepaymentTx(t *testing.T) {
 	var debts int
 	var paid bool
 	if err := e.pool.QueryRow(context.Background(), `SELECT COUNT(*), BOOL_OR(paid) FROM personal_debts WHERE user_id = $1`, e.uid).
-		Scan(&debts, &paid); err != nil || debts != 1 || paid {
-		t.Errorf("personal_debts = %d rows, paid %v (%v); want the one debt, label untouched", debts, paid, err)
+		Scan(&debts, &paid); err != nil || debts != 2 || paid {
+		t.Errorf("personal_debts = %d rows, paid %v (%v); want the debt + the repayment row (0.4.1-1 D3), label untouched", debts, paid, err)
 	}
 }

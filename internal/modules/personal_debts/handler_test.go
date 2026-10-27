@@ -75,6 +75,7 @@ func newDebtHFix(t *testing.T) *debtHFix {
 		g.DELETE("/personal-debts/:id", h.Delete)
 		g.POST("/personal-debts/:id/link", h.LinkTx)
 		g.POST("/personal-debts/:id/unlink", h.UnlinkTx)
+		g.POST("/personal-debts/:id/disconnect", h.Disconnect)
 	})
 	f.exec(`UPDATE users SET display_name = 'Bee Live' WHERE id = $1`, f.partner)
 	f.wallet = testdb.Account(t, pool, f.me)
@@ -153,7 +154,7 @@ func TestDebtCreateTransactionWithoutWallet(t *testing.T) {
 	}, "", http.StatusCreated)
 	entryID := obj(made, "entry")["id"].(string)
 	tx := obj(made, "transaction")
-	if tx == nil || tx["type"] != "expense" || obj(tx, "category")["system_kind"] != "DEBT_PAID" {
+	if tx == nil || tx["type"] != "expense" || obj(tx, "category")["system_kind"] != "LOAN_GIVEN" {
 		t.Fatalf("transaction = %v", tx)
 	}
 	if tx["account"] != nil {
@@ -222,7 +223,7 @@ func TestDebtLedgerFlow(t *testing.T) {
 	}
 	tx := obj(lend, "transaction")
 	if tx == nil || tx["type"] != "expense" || obj(tx, "counterparty")["key"] != "n:mom" ||
-		obj(tx, "counterparty")["entry_id"] != lendID || obj(tx, "category")["system_kind"] != "DEBT_PAID" {
+		obj(tx, "counterparty")["entry_id"] != lendID || obj(tx, "category")["system_kind"] != "LOAN_GIVEN" {
 		t.Fatalf("linked tx = %v", tx)
 	}
 	if tags, _ := tx["tags"].([]any); len(tags) != 1 {
@@ -361,11 +362,15 @@ func TestDebtLedgerFlow(t *testing.T) {
 		"direction": "paid", "amount": 40, "account_id": f.wallet,
 	}, "createDebtEntry", http.StatusCreated)
 	againTx := uuid.MustParse(obj(again, "transaction")["id"].(string))
-	dr, err := f.txs.DeleteWrite(f.ctx, f.me, againTx, false, false)
+	dr, err := f.txs.DeleteWrite(f.ctx, f.me, againTx, false)
 	if err != nil || dr.DebtEntryID == nil || dr.DebtEntryID.String() != obj(again, "entry")["id"] {
 		t.Fatalf("delete the wallet side: %+v, %v", dr, err)
 	}
-	f.code("GET", "/api/v1/personal-debts/"+dr.DebtEntryID.String(), nil, http.StatusNotFound, "NOT_FOUND")
+	// 0.4.1-1 D1: deleting the tx keeps the entry, ledger-only (the balance doesn't move).
+	kept := f.call("GET", "/api/v1/personal-debts/"+dr.DebtEntryID.String(), nil, "getDebtEntry", http.StatusOK)
+	if kept["transaction"] != nil || num(kept, "person_balance", "net") != 40 {
+		t.Errorf("the entry after its tx went = %v", kept)
+	}
 }
 
 func TestSplitSourcedEntries(t *testing.T) {
@@ -507,12 +512,16 @@ func TestTransactionFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.exec(`UPDATE personal_debts SET linked_transaction_id = $2 WHERE id = $1`, aomDebt.Entry.ID, plainID)
+	if _, err := f.svc.LinkTx(f.ctx, f.me, aomDebt.Entry.ID, plainID); err != nil {
+		t.Fatal(err)
+	}
 	got := ids(transactions.ListFilter{CounterpartyKey: "n:aom"})
 	if len(got) != 3 || !got[splitBill.ID] || !got[paidFor.(*transactions.TransactionDetail).ID] || !got[plainID] {
 		t.Errorf("counterparty_key=n:aom = %v, want the split bill, the paid-by bill and the linked tx", got)
 	}
-	f.exec(`UPDATE personal_debts SET linked_transaction_id = NULL WHERE id = $1`, aomDebt.Entry.ID)
+	if _, err := f.svc.UnlinkTx(f.ctx, f.me, aomDebt.Entry.ID); err != nil {
+		t.Fatal(err)
+	}
 	got = ids(transactions.ListFilter{CanJoinEvent: true})
 	if !got[plainID] || !got[splitBill.ID] || got[entry.Transaction.ID] {
 		t.Errorf("can_join_event = %v, want the plain + split bills, not the debt tx", got)

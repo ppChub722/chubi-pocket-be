@@ -224,7 +224,11 @@ func occsOf(r *Rule, stored []*itemRow, from, to, today time.Time, lang string) 
 	}
 	var out []*occ
 	for _, it := range shown {
-		out = append(out, rowOcc(r, it, seqs, today, lang))
+		o := rowOcc(r, it, seqs, today, lang)
+		if !listable(r, o) {
+			continue
+		}
+		out = append(out, o)
 	}
 	for _, d := range slots {
 		k := d.Format(dateLayout)
@@ -333,9 +337,10 @@ func (s *Service) occsInRange(ctx context.Context, q shared.Querier, userID uuid
 	return out, nil
 }
 
-// activeRules loads the user's active rules.
+// activeRules loads the user's rules that can have something to pay: the active ones and the
+// paused ones (their stored due occurrences stay due, 0.4.1-1 R7).
 func (s *Service) activeRules(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]*Rule, error) {
-	rows, err := q.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1 AND status = 'active' ORDER BY created_at, id`, userID)
+	rows, err := q.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1 AND status IN ('active', 'paused') ORDER BY created_at, id`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("active rules: %w", err)
 	}
@@ -467,17 +472,94 @@ func (s *Service) store(ctx context.Context, tx pgx.Tx, o *occ) (*itemRow, error
 	return getItem(ctx, tx, o.rule.UserID, id, true)
 }
 
-// viewOccs builds the Item JSON of occurrences (drafts resolved to refs, the
-// linked transaction's own amount / date shown).
+// filled — what a filled occurrence shows: its transaction's (or saving
+// entry's) values, never its own draft (0.4.1-1 R1).
+type filled struct {
+	draft pending.Draft
+	date  time.Time
+	tx    *LinkedTx
+	acc   *uuid.UUID
+}
+
+// filledValues loads the values of the transactions / saving entries that fill
+// occurrences (a transfer: both wallets, no category; tags: the tx owner's).
+func filledValues(ctx context.Context, q shared.Querier, txIDs, entryIDs []uuid.UUID) (map[uuid.UUID]*filled, error) {
+	out := map[uuid.UUID]*filled{}
+	if len(txIDs) > 0 {
+		rows, err := q.Query(ctx, `SELECT t.id, t.type, t.amount::float8, t.account_id, t.category_id, t.description, t.note, t.date,
+				(SELECT o.account_id FROM transactions o JOIN categories c ON c.id = o.category_id
+				 WHERE o.transfer_group_id = t.transfer_group_id AND c.system_kind = 'TRANSFER_OUT' LIMIT 1),
+				(SELECT i.account_id FROM transactions i LEFT JOIN categories c ON c.id = i.category_id
+				 WHERE i.transfer_group_id = t.transfer_group_id AND c.system_kind IS DISTINCT FROM 'TRANSFER_OUT' LIMIT 1),
+				COALESCE((SELECT array_agg(tt.tag_id ORDER BY tt.tag_id) FROM transaction_tags tt JOIN tags g ON g.id = tt.tag_id
+				 WHERE tt.transaction_id = t.id AND g.user_id = t.user_id), '{}')
+			FROM transactions t WHERE t.id = ANY($1)`, txIDs)
+		if err != nil {
+			return nil, fmt.Errorf("item transactions: %w", err)
+		}
+		for rows.Next() {
+			var (
+				id, typ  = uuid.UUID{}, ""
+				f        filled
+				amt      float64
+				from, to *uuid.UUID
+			)
+			d := &f.draft
+			if err := rows.Scan(&id, &typ, &amt, &d.AccountID, &d.CategoryID, &d.Description, &d.Note, &f.date, &from, &to, &d.TagIDs); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			d.Type, d.Amount = &typ, &amt
+			f.acc = d.AccountID
+			if typ == "transfer" {
+				d.AccountID, d.TransferToAccountID, d.CategoryID = from, to, nil
+				f.acc = from
+			}
+			ds := f.date.Format(dateLayout)
+			f.tx = &LinkedTx{ID: id, Description: d.Description, Amount: &amt, Date: &ds}
+			out[id] = &f
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	if len(entryIDs) > 0 {
+		rows, err := q.Query(ctx, `SELECT id, amount::float8, account_id, note, date FROM saving_entries WHERE id = ANY($1)`, entryIDs)
+		if err != nil {
+			return nil, fmt.Errorf("item saving entries: %w", err)
+		}
+		for rows.Next() {
+			var (
+				id  uuid.UUID
+				f   filled
+				amt float64
+				acc uuid.UUID
+			)
+			if err := rows.Scan(&id, &amt, &acc, &f.draft.Note, &f.date); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			f.draft.Type, f.draft.Amount, f.draft.AccountID = ptr(typeSaving), &amt, &acc
+			out[id] = &f
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// viewOccs builds the Item JSON of occurrences (drafts resolved to refs). A
+// filled occurrence shows its transaction's / saving entry's values.
 func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UUID, today time.Time, occs []*occ) ([]Item, error) {
 	out := make([]Item, 0, len(occs))
 	if len(occs) == 0 {
 		return out, nil
 	}
-	drafts := make([]pending.Draft, len(occs))
 	var txIDs, entryIDs []uuid.UUID
-	for i, o := range occs {
-		drafts[i] = o.draft
+	for _, o := range occs {
 		if o.row != nil && o.row.TransactionID != nil {
 			txIDs = append(txIDs, *o.row.TransactionID)
 		}
@@ -485,71 +567,58 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 			entryIDs = append(entryIDs, *o.row.SavingEntryID)
 		}
 	}
-	resolved, err := pending.ResolveDrafts(ctx, q, userID, drafts)
+	fills, err := filledValues(ctx, q, txIDs, entryIDs)
 	if err != nil {
 		return nil, err
 	}
-	entryAmounts := map[uuid.UUID]float64{}
-	if len(entryIDs) > 0 {
-		rows, err := q.Query(ctx, `SELECT id, amount::float8 FROM saving_entries WHERE id = ANY($1)`, entryIDs)
-		if err != nil {
-			return nil, fmt.Errorf("item saving entries: %w", err)
+	fillOf := func(o *occ) *filled {
+		switch {
+		case o.row == nil:
+			return nil
+		case o.row.TransactionID != nil:
+			return fills[*o.row.TransactionID]
+		case o.row.SavingEntryID != nil:
+			return fills[*o.row.SavingEntryID]
 		}
-		for rows.Next() {
-			var (
-				id  uuid.UUID
-				amt float64
-			)
-			if err := rows.Scan(&id, &amt); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			entryAmounts[id] = amt
-		}
-		rows.Close()
+		return nil
 	}
-	type txInfo struct {
-		desc *string
-		acc  *uuid.UUID
-		amt  float64
-		date string
-	}
-	txs := map[uuid.UUID]txInfo{}
+	drafts := make([]pending.Draft, len(occs))
 	var accIDs []uuid.UUID
-	if len(txIDs) > 0 {
-		rows, err := q.Query(ctx, `SELECT id, description, account_id, amount::float8, to_char(date, 'YYYY-MM-DD')
-			FROM transactions WHERE id = ANY($1)`, txIDs)
-		if err != nil {
-			return nil, fmt.Errorf("item transactions: %w", err)
-		}
-		for rows.Next() {
-			var (
-				id uuid.UUID
-				t  txInfo
-			)
-			if err := rows.Scan(&id, &t.desc, &t.acc, &t.amt, &t.date); err != nil {
-				rows.Close()
-				return nil, err
+	for i, o := range occs {
+		drafts[i] = o.draft
+		if f := fillOf(o); f != nil {
+			d := f.draft
+			d.GoalID = o.draft.GoalID // a saving entry's goal stays the occurrence's
+			if d.Description == nil || *d.Description == "" {
+				d.Description = o.draft.Description
 			}
-			txs[id] = t
-			if t.acc != nil {
-				accIDs = append(accIDs, *t.acc)
+			drafts[i] = d
+			if f.acc != nil {
+				accIDs = append(accIDs, *f.acc)
 			}
 		}
-		rows.Close()
+	}
+	resolved, err := pending.ResolveDrafts(ctx, q, userID, drafts)
+	if err != nil {
+		return nil, err
 	}
 	accs, err := shared.LoadAccountRefs(ctx, q, accIDs)
 	if err != nil {
 		return nil, err
 	}
 	for i, o := range occs {
-		r := resolved[i]
+		r, d, date := resolved[i], drafts[i], o.date
+		f := fillOf(o)
+		if f != nil {
+			date = f.date
+		}
 		it := Item{
 			RuleID: o.rule.ID, Slot: o.slot.Format(dateLayout), Stored: o.row != nil, Status: o.status,
-			Recurring: &shared.RecurringRef{ID: o.rule.ID, Name: o.rule.Name, IconCode: o.rule.IconCode, Kind: o.rule.Kind},
-			Seq:       o.seq, Date: o.date.Format(dateLayout), DaysUntil: int(o.date.Sub(today).Hours() / 24),
+			Recurring: &shared.RecurringRef{ID: o.rule.ID, Name: o.rule.Name, IconCode: o.rule.IconCode, Kind: o.rule.Kind,
+				PauseReason: o.rule.pauseReason()},
+			Seq: o.seq, Date: date.Format(dateLayout), DaysUntil: int(date.Sub(today).Hours() / 24),
 			Account: r.Account, ToAccount: r.TransferToAccount, Category: r.Category, Project: r.Project,
-			Tags: r.Tags, Splits: r.Splits, GoalID: o.draft.GoalID, Goal: r.Goal, Description: o.draft.Description, Note: o.draft.Note,
+			Tags: r.Tags, Splits: r.Splits, GoalID: d.GoalID, Goal: r.Goal, Description: d.Description, Note: d.Note,
 		}
 		if o.rule.TotalCount != nil {
 			t := *o.rule.TotalCount
@@ -561,11 +630,11 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 		if it.Splits == nil {
 			it.Splits = []pending.ResolvedSplit{}
 		}
-		if o.draft.Type != nil {
-			it.Type = *o.draft.Type
+		if d.Type != nil {
+			it.Type = *d.Type
 		}
-		if o.draft.Amount != nil && *o.draft.Amount > 0 {
-			a := *o.draft.Amount
+		if d.Amount != nil && *d.Amount > 0 && o.status != StatusSkipped { // a skipped one shows no amount
+			a := *d.Amount
 			it.Amount = &a
 		}
 		it.NeedsAmount = it.Amount == nil && o.expected()
@@ -577,22 +646,16 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 			it.AutoCreated = o.row.AutoCreatedAt != nil
 			ca, ua := o.row.CreatedAt, o.row.UpdatedAt
 			it.CreatedAt, it.UpdatedAt = &ca, &ua
-			if o.row.SavingEntryID != nil {
-				if amt, ok := entryAmounts[*o.row.SavingEntryID]; ok {
-					it.Amount = &amt // the occurrence shows the saving entry's amount
-				}
-			}
 			if o.row.TransactionID != nil {
 				lt := &LinkedTx{ID: *o.row.TransactionID}
-				if t, ok := txs[*o.row.TransactionID]; ok {
-					amt, d := t.amt, t.date
-					lt.Description, lt.Amount, lt.Date = t.desc, &amt, &d
-					it.Amount = &amt // the occurrence shows the transaction's amount
-					if t.acc != nil {
-						if a, ok := accs[*t.acc]; ok {
+				if f != nil && f.tx != nil {
+					lt = f.tx
+					if f.acc != nil {
+						if a, ok := accs[*f.acc]; ok {
 							lt.Account = &a
 						}
 					}
+					it.Amount = lt.Amount // a filled one shows its amount, 0 too
 				}
 				it.Transaction = lt
 			}
@@ -600,4 +663,15 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 		out = append(out, it)
 	}
 	return out, nil
+}
+
+// listable — a stored occurrence of a setting that is not active shows only as
+// history, or still due while the setting is paused (0.4.1-1 R7: the 3 overdue
+// ones of an inactive setting, the due ones of a manual pause); nothing of an
+// archived setting is still to pay.
+func listable(r *Rule, o *occ) bool {
+	if r.Status == "active" || !o.expected() {
+		return true
+	}
+	return r.Status == "paused" && o.status == StatusDue
 }

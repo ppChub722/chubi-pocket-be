@@ -124,7 +124,7 @@ func TestPaidByLeeScenario(t *testing.T) {
 	if f.balance() != 890 {
 		t.Fatalf("re-add paid_by 40: wallet %v, want 890", f.balance())
 	}
-	dr, err := f.txs.DeleteWrite(f.ctx, f.me, row.ID, false, false)
+	dr, err := f.txs.DeleteWrite(f.ctx, f.me, row.ID, false)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestPaidByIncome(t *testing.T) {
 	if p, ok := u.PersonBalance.(DebtPerson); !ok || p.Net != 123 {
 		t.Errorf("person_balance = %+v, want +123", u.PersonBalance)
 	}
-	if _, err := f.txs.DeleteWrite(f.ctx, f.me, row.ID, false, false); err != nil {
+	if _, err := f.txs.DeleteWrite(f.ctx, f.me, row.ID, false); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	var n int
@@ -335,7 +335,7 @@ func TestPartnerSplitMakesMyExpense(t *testing.T) {
 	}
 
 	// Deleting my record of it keeps their debt on me.
-	if _, err := f.txs.DeleteWrite(f.ctx, f.partner, mine.ID, false, false); err != nil {
+	if _, err := f.txs.DeleteWrite(f.ctx, f.partner, mine.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	if m := f.mirror(t); m == nil || m.Amount != 45 || m.PaidForTransactionID != nil {

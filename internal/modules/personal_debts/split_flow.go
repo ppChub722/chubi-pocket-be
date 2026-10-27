@@ -144,5 +144,5 @@ func (s *Service) AcceptSplitRequest(ctx context.Context, userID, notificationID
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return s.writeResult(ctx, userID, out.ID, nil, nil)
+	return s.writeResult(ctx, userID, out.ID, touch{}, nil)
 }

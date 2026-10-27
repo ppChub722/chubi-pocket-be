@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -18,6 +19,7 @@ type Service struct {
 	store  *Store
 	notifs *notifications.Service
 	txs    *transactions.Service
+	debts  *personal_debts.Service // E8: the bill sheet writes my debts and repayments
 }
 
 func NewService(store *Store) *Service {

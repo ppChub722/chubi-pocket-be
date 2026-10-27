@@ -19,12 +19,12 @@ type ledgerLine struct {
 	Date    string
 	Created time.Time
 	Run     float64
-	Money   bool // a repayment, or a debt with a wallet transaction
+	Money   bool // a row with a transaction
 }
 
 func (s *Store) ledgerLines(ctx context.Context, q shared.Querier, userID uuid.UUID, key string) ([]ledgerLine, error) {
 	rows, err := q.Query(ctx, `SELECT l.kind, l.id, to_char(l.date, 'YYYY-MM-DD'), l.created_at, l.run,
-		       (l.kind = 'repayment' OR EXISTS (SELECT 1 FROM transactions t WHERE t.source_personal_debt_id = l.id))
+		       EXISTS (SELECT 1 FROM transactions t WHERE t.source_personal_debt_id = l.id)
 		FROM (SELECT l.*, SUM(l.signed) OVER (ORDER BY l.date, l.created_at, l.id) AS run
 		      FROM `+ledgerSQL+` l WHERE l.key = $2) l
 		ORDER BY l.date, l.created_at, l.id`, userID, key)
@@ -53,8 +53,8 @@ func cycleMarkOf(lines []ledgerLine) *cycleMark {
 	return nil
 }
 
-// countsOf — over the statement (debts + repayments): money = debts with a wallet
-// transaction + every repayment; current = the lines after the cycle boundary.
+// countsOf — over the statement (debts + repayments): money = lines with a transaction;
+// current = the lines after the cycle boundary.
 func countsOf(lines []ledgerLine, mark *cycleMark) EntryCounts {
 	c := EntryCounts{Entries: len(lines)}
 	for _, l := range lines {
@@ -99,33 +99,21 @@ func pageNewestFirst(lines []ledgerLine, page, perPage int) []ledgerLine {
 	return out
 }
 
-// statementItems builds the items of the lines: the debts and the repayment transactions
-// in one read each.
+// statementItems builds the items of the lines (debts and repayments) in one read.
 func (s *Store) statementItems(ctx context.Context, q shared.Querier, userID uuid.UUID, lines []ledgerLine, mark *cycleMark) (map[uuid.UUID]StatementItem, error) {
-	var debtIDs, repayIDs []uuid.UUID
+	ids := make([]uuid.UUID, 0, len(lines))
 	for _, l := range lines {
-		if l.Kind == "debt" {
-			debtIDs = append(debtIDs, l.ID)
-		} else {
-			repayIDs = append(repayIDs, l.ID)
-		}
+		ids = append(ids, l.ID)
 	}
 	byID := map[uuid.UUID]StatementItem{}
-	if len(debtIDs) > 0 {
-		debts, err := loadViews(ctx, q, `WHERE pd.user_id = $1 AND pd.id = ANY($2)`, userID, debtIDs)
+	if len(ids) > 0 {
+		rows, err := loadViews(ctx, q, `WHERE pd.user_id = $1 AND pd.id = ANY($2)`, userID, ids)
 		if err != nil {
 			return nil, err
 		}
-		for _, d := range debts {
+		for _, d := range rows {
 			byID[d.ID] = debtItem(d)
 		}
-	}
-	repays, err := loadRepayments(ctx, q, userID, repayIDs)
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range repays {
-		byID[r.ID] = r
 	}
 	for _, l := range lines {
 		it, ok := byID[l.ID]

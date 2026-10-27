@@ -99,21 +99,18 @@ const myTxOfRow = `t.user_id = $2 AND (
 
 func unlinkMineTx(ctx context.Context, tx pgx.Tx, userID, ptID uuid.UUID, kind string) error {
 	switch kind {
-	case BookDebt:
+	case BookDebt, BookRepay:
+		// 0.4.1-1 D3: debts and repayments are person-book rows; the bill link sits on the row.
 		_, err := tx.Exec(ctx, `UPDATE personal_debts
 			SET unlinked_project_transaction_id = $1, source_kind = NULL, source_project_transaction_id = NULL,
 			    project_id = NULL, updated_by_user_id = $2
-			WHERE user_id = $2 AND source_project_transaction_id = $1`, ptID, userID)
+			WHERE user_id = $2 AND source_project_transaction_id = $1 AND kind = $3`, ptID, userID, bookRowKind(kind))
 		if err != nil {
 			return fmt.Errorf("unlink debts: %w", err)
 		}
 		return nil
-	case BookTx, BookRepay:
-		repay := `t.repay_person_name IS NULL`
-		if kind == BookRepay {
-			repay = `t.repay_person_name IS NOT NULL`
-		}
-		ids, err := collectIDs(ctx, tx, `SELECT t.id FROM transactions t WHERE `+myTxOfRow+` AND `+repay, ptID, userID)
+	case BookTx:
+		ids, err := collectIDs(ctx, tx, `SELECT t.id FROM transactions t WHERE `+myTxOfRow, ptID, userID)
 		if err != nil {
 			return fmt.Errorf("my %s of row: %w", kind, err)
 		}
@@ -138,23 +135,20 @@ func unlinkMineTx(ctx context.Context, tx pgx.Tx, userID, ptID uuid.UUID, kind s
 
 func relinkMineTx(ctx context.Context, tx pgx.Tx, userID, projectID, ptID uuid.UUID, kind string) (bool, error) {
 	switch kind {
-	case BookDebt:
+	case BookDebt, BookRepay:
 		tag, err := tx.Exec(ctx, `UPDATE personal_debts
 			SET source_kind = 'event', source_project_transaction_id = $1, project_id = $3,
 			    unlinked_project_transaction_id = NULL, updated_by_user_id = $2
 			WHERE user_id = $2 AND unlinked_project_transaction_id = $1
-			  AND source_kind IS NULL AND source_project_transaction_id IS NULL`, ptID, userID, projectID)
+			  AND source_kind IS NULL AND source_project_transaction_id IS NULL AND kind = $4`,
+			ptID, userID, projectID, bookRowKind(kind))
 		if err != nil {
 			return false, fmt.Errorf("relink debts: %w", err)
 		}
 		return tag.RowsAffected() > 0, nil
-	case BookTx, BookRepay:
-		repay := `repay_person_name IS NULL`
-		if kind == BookRepay {
-			repay = `repay_person_name IS NOT NULL`
-		}
+	case BookTx:
 		ids, err := collectIDs(ctx, tx, `SELECT id FROM transactions
-			WHERE user_id = $2 AND unlinked_project_transaction_id = $1 AND `+repay+`
+			WHERE user_id = $2 AND unlinked_project_transaction_id = $1
 			  AND source_project_transaction_id IS NULL AND source_personal_debt_id IS NULL AND project_id IS NULL`,
 			ptID, userID)
 		if err != nil {
@@ -172,13 +166,11 @@ func relinkMineTx(ctx context.Context, tx pgx.Tx, userID, projectID, ptID uuid.U
 			return false, fmt.Errorf("relink bill origin: %w", err)
 		}
 		var mySplit *uuid.UUID
-		if kind == BookTx {
-			err := tx.QueryRow(ctx, `SELECT c.id FROM project_transactions c
-				JOIN project_members pm ON pm.id = c.transaction_member_id AND pm.user_id = $2
-				WHERE c.parent_project_transaction_id = $1 LIMIT 1`, ptID, userID).Scan(&mySplit)
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				return false, fmt.Errorf("my split: %w", err)
-			}
+		err = tx.QueryRow(ctx, `SELECT c.id FROM project_transactions c
+			JOIN project_members pm ON pm.id = c.transaction_member_id AND pm.user_id = $2
+			WHERE c.parent_project_transaction_id = $1 LIMIT 1`, ptID, userID).Scan(&mySplit)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return false, fmt.Errorf("my split: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `UPDATE transactions
 			SET source_project_transaction_id = CASE
@@ -190,6 +182,14 @@ func relinkMineTx(ctx context.Context, tx pgx.Tx, userID, projectID, ptID uuid.U
 		return true, nil
 	}
 	return false, nil
+}
+
+// bookRowKind — the person-book row kind of a "ลงบัญชีของฉัน" kind (debt / repay).
+func bookRowKind(kind string) string {
+	if kind == BookRepay {
+		return "repayment"
+	}
+	return "debt"
 }
 
 func collectIDs(ctx context.Context, tx pgx.Tx, q string, args ...any) ([]uuid.UUID, error) {

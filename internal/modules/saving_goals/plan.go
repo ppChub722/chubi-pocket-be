@@ -35,7 +35,7 @@ func plansBetween(rules []planRule, from, to time.Time) map[uuid.UUID]float64 {
 // planRules reads the user's active saving settings into a goal, once per page.
 func (s *Service) planRules(ctx context.Context, userID uuid.UUID) ([]planRule, error) {
 	rows, err := s.store.db.Query(ctx, `SELECT goal_id, amount::float8, freq, interval_n, weekdays, monthly_mode,
-		month_day, month_nth, month_weekday, dates, start_date, end_kind, end_date, end_count, total_count, generated_until
+		month_day, month_nth, month_weekday, dates, start_date, end_kind, end_date, end_count, total_count, generated_until, gaps
 		FROM recurring_rules WHERE user_id = $1 AND type = 'saving' AND status = 'active' AND goal_id IS NOT NULL`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("saving plans: %w", err)
@@ -53,7 +53,7 @@ func (s *Service) planRules(ctx context.Context, userID uuid.UUID) ([]planRule, 
 			total                              *int32
 		)
 		if err := rows.Scan(&goal, &amount, &sp.Freq, &interval, &weekdays, &sp.MonthlyMode, &monthDay, &monthNth, &monthWD,
-			&sp.Dates, &sp.StartDate, &sp.EndKind, &sp.EndDate, &count, &total, &sp.GeneratedUntil); err != nil {
+			&sp.Dates, &sp.StartDate, &sp.EndKind, &sp.EndDate, &count, &total, &sp.GeneratedUntil, &sp.Gaps); err != nil {
 			return nil, err
 		}
 		sp.Interval = int(interval)
@@ -77,7 +77,7 @@ func intOf(p *int32) *int {
 // pauseSavingRulesTx pauses the active saving settings of a goal that stops taking
 // money (closed / archived), like a pause from /recurring; reopening never resumes them.
 func pauseSavingRulesTx(ctx context.Context, tx pgx.Tx, userID, goalID uuid.UUID, today time.Time) error {
-	_, err := tx.Exec(ctx, `UPDATE recurring_rules SET status = 'paused', paused_from = $3
+	_, err := tx.Exec(ctx, `UPDATE recurring_rules SET status = 'paused', paused_from = $3, pause_reason = 'goal_inactive'
 		WHERE user_id = $1 AND goal_id = $2 AND type = 'saving' AND status = 'active'`, userID, goalID, today)
 	return err
 }

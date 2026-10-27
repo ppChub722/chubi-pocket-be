@@ -12,22 +12,25 @@ import (
 type SystemKind string
 
 const (
-	SystemOpeningIn   SystemKind = "OPENING_IN"
-	SystemOpeningOut  SystemKind = "OPENING_OUT"
-	SystemAdjustIn    SystemKind = "ADJUST_IN"
-	SystemAdjustOut   SystemKind = "ADJUST_OUT"
-	SystemTransferIn  SystemKind = "TRANSFER_IN"
-	SystemTransferOut SystemKind = "TRANSFER_OUT"
+	SystemOpeningIn    SystemKind = "OPENING_IN"
+	SystemOpeningOut   SystemKind = "OPENING_OUT"
+	SystemAdjustIn     SystemKind = "ADJUST_IN"
+	SystemAdjustOut    SystemKind = "ADJUST_OUT"
+	SystemTransferIn   SystemKind = "TRANSFER_IN"
+	SystemTransferOut  SystemKind = "TRANSFER_OUT"
 	SystemDebtReceived SystemKind = "DEBT_RECEIVED" // income — settled owed_to_me
 	SystemDebtPaid     SystemKind = "DEBT_PAID"     // expense — settled i_owe
+	// 0.4.1-1 D5: the kinds of a DEBT row's transaction (lend / borrow); repayments keep DEBT_*.
+	SystemLoanGiven SystemKind = "LOAN_GIVEN" // expense — a debt I paid
+	SystemLoanTaken SystemKind = "LOAN_TAKEN" // income — a debt they paid
 )
 
 type Category struct {
-	ID       uuid.UUID  `json:"id"`
-	UserID   uuid.UUID  `json:"-"`
-	Name     string     `json:"name"`
-	Type     string     `json:"type"`
-	ParentID *uuid.UUID `json:"parent_id"`
+	ID              uuid.UUID        `json:"id"`
+	UserID          uuid.UUID        `json:"-"`
+	Name            string           `json:"name"`
+	Type            string           `json:"type"`
+	ParentID        *uuid.UUID       `json:"parent_id"`
 	Depth           int              `json:"depth"`
 	Path            []PathItem       `json:"path"`
 	IsSystem        bool             `json:"is_system"`
@@ -39,8 +42,8 @@ type Category struct {
 	Note            *string          `json:"note"`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
-	MonthSpent float64 `json:"month_spent"`
-	MonthCount int     `json:"month_count"`
+	MonthSpent      float64          `json:"month_spent"`
+	MonthCount      int              `json:"month_count"`
 }
 
 type CategoryDetail struct {
@@ -48,8 +51,8 @@ type CategoryDetail struct {
 	ParentName       *string `json:"parent_name"`
 	ChildCount       int     `json:"child_count"`
 	TransactionCount int     `json:"transaction_count"`
-	BudgetCount int `json:"budget_count"`
-	IsFeeCategory bool `json:"is_fee_category"`
+	BudgetCount      int     `json:"budget_count"`
+	IsFeeCategory    bool    `json:"is_fee_category"`
 }
 
 type CreateCategoryRequest struct {

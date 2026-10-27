@@ -64,20 +64,22 @@ func assertContactOwned(ctx context.Context, q querier, userID uuid.UUID, contac
 	return nil
 }
 
-const entryColumns = `id, user_id, direction,
+const entryColumns = `id, user_id, kind, direction,
 	counterparty_contact_id, counterparty_person_name,
 	source_transaction_id, source_project_transaction_id, project_id,
 	amount, currency, to_char(date, 'YYYY-MM-DD'), paid, source_kind, description, note,
-	created_at, updated_at, counterpart_debt_id, paid_for_transaction_id, to_char(due_date, 'YYYY-MM-DD')`
+	created_at, updated_at, counterpart_debt_id, paid_for_transaction_id, to_char(due_date, 'YYYY-MM-DD'),
+	disconnected_at`
 
 func scanEntry(row pgx.Row) (*Entry, error) {
 	var e Entry
 	err := row.Scan(
-		&e.ID, &e.UserID, &e.Direction,
+		&e.ID, &e.UserID, &e.Kind, &e.Direction,
 		&e.ContactID, &e.PersonName,
 		&e.SourceTransactionID, &e.SourceProjectTransactionID, &e.ProjectID,
 		&e.Amount, &e.Currency, &e.Date, &e.Paid, &e.SourceKind, &e.Description, &e.Note,
 		&e.CreatedAt, &e.UpdatedAt, &e.CounterpartDebtID, &e.PaidForTransactionID, &e.DueDate,
+		&e.DisconnectedAt,
 	)
 	return &e, err
 }
@@ -116,17 +118,20 @@ func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 			return nil, fmt.Errorf("user currency: %w", err)
 		}
 	}
+	if e.Kind == "" {
+		e.Kind = KindDebt
+	}
 	row, err := scanEntry(tx.QueryRow(ctx, `INSERT INTO personal_debts
 		(id, user_id, direction, counterparty_contact_id, counterparty_person_name,
 		 source_transaction_id, source_project_transaction_id, project_id,
 		 amount, currency, date, paid, source_kind, description, note,
-		 created_by_user_id, updated_by_user_id, paid_for_transaction_id, due_date)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::date, $12, $13, $14, $15, $2, $2, $16, $17::date)
+		 created_by_user_id, updated_by_user_id, paid_for_transaction_id, due_date, kind)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::date, $12, $13, $14, $15, $2, $2, $16, $17::date, $18)
 		RETURNING `+entryColumns,
 		id, e.UserID, e.Direction, e.ContactID, strings.TrimSpace(e.PersonName),
 		e.SourceTransactionID, e.SourceProjectTransactionID, e.ProjectID,
 		e.Amount, strings.ToUpper(e.Currency), e.Date, e.Paid, e.SourceKind,
-		shared.CleanText(e.Description), shared.CleanText(e.Note), e.PaidForTransactionID, e.DueDate))
+		shared.CleanText(e.Description), shared.CleanText(e.Note), e.PaidForTransactionID, e.DueDate, e.Kind))
 	if err != nil {
 		return nil, fmt.Errorf("insert entry: %w", err)
 	}
@@ -137,7 +142,7 @@ func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 	return row, nil
 }
 
-// ledgerSQL — the caller's ($1) person ledger: debts + repayment transactions (shared.DebtLedgerSQL).
+// ledgerSQL — the caller's ($1) person ledger: every person-book row (shared.DebtLedgerSQL).
 var ledgerSQL = `(` + shared.DebtLedgerSQL("$1") + `)`
 
 // peopleSQL — one row per person over the ledger (debts AND repayments, signed); keyFilter is
@@ -338,7 +343,7 @@ func (s *Store) personBalance(ctx context.Context, q shared.Querier, userID uuid
 	return p, false, nil
 }
 
-const entryViewSQL = `SELECT pd.id, ` + `pd.direction, pd.counterparty_contact_id, pd.counterparty_person_name,
+const entryViewSQL = `SELECT pd.id, pd.kind, pd.direction, pd.counterparty_contact_id, pd.counterparty_person_name,
 		pd.amount, to_char(pd.date, 'YYYY-MM-DD'), pd.description, pd.note, pd.paid, pd.source_kind,
 		CASE pd.source_kind WHEN 'transaction' THEN pd.source_transaction_id
 		                    WHEN 'event' THEN pd.project_id
@@ -348,11 +353,13 @@ const entryViewSQL = `SELECT pd.id, ` + `pd.direction, pd.counterparty_contact_i
 		                    WHEN 'event' THEN sp.name
 		                    WHEN 'paid_by' THEN COALESCE(ft.description, fc.name)
 		                    WHEN 'partner' THEN ou.display_name END,
-		t.id, t.account_id, pd.created_at, pd.updated_at, to_char(pd.due_date, 'YYYY-MM-DD'),
-		-- origin (the มาจาก card): kind, transaction, bill, event, title, amount, date, wallet
-		CASE pd.source_kind WHEN 'transaction' THEN 'split' WHEN 'paid_by' THEN 'paid_by'
-		                    WHEN 'partner' THEN 'partner' WHEN 'event' THEN 'event'
-		                    ELSE CASE WHEN t.id IS NOT NULL THEN 'cash' END END,
+		t.id, t.account_id, COALESCE(t.debt_connected, FALSE), pd.created_at, pd.updated_at,
+		to_char(pd.due_date, 'YYYY-MM-DD'), pd.counterpart_debt_id IS NOT NULL, pd.disconnected_at,
+		-- origin (the มาจาก card, debts only): kind, transaction, bill, event, title, amount, date, wallet
+		CASE WHEN pd.kind = 'debt' THEN
+		  CASE pd.source_kind WHEN 'transaction' THEN 'split' WHEN 'paid_by' THEN 'paid_by'
+		                      WHEN 'partner' THEN 'partner' WHEN 'event' THEN 'event'
+		                      ELSE CASE WHEN t.id IS NOT NULL THEN 'cash' END END END,
 		CASE pd.source_kind WHEN 'transaction' THEN st.id WHEN 'paid_by' THEN ft.id WHEN 'partner' THEN ft.id
 		                    WHEN 'event' THEN NULL ELSE t.id END,
 		CASE WHEN pd.source_kind = 'event' THEN pd.source_project_transaction_id END,
@@ -367,11 +374,9 @@ const entryViewSQL = `SELECT pd.id, ` + `pd.direction, pd.counterparty_contact_i
 		to_char(CASE pd.source_kind WHEN 'transaction' THEN st.date WHEN 'paid_by' THEN ft.date WHEN 'partner' THEN ft.date
 		                            WHEN 'event' THEN bp.date ELSE t.date END, 'YYYY-MM-DD'),
 		CASE pd.source_kind WHEN 'transaction' THEN st.account_id WHEN 'paid_by' THEN ft.account_id
-		                    WHEN 'partner' THEN ft.account_id WHEN 'event' THEN NULL ELSE t.account_id END,
-		lt.id, lt.account_id
+		                    WHEN 'partner' THEN ft.account_id WHEN 'event' THEN NULL ELSE t.account_id END
 	FROM personal_debts pd
 	LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id
-	LEFT JOIN transactions lt ON lt.id = pd.linked_transaction_id
 	LEFT JOIN categories tc ON tc.id = t.category_id
 	LEFT JOIN transactions st ON st.id = pd.source_transaction_id
 	LEFT JOIN categories sc ON sc.id = st.category_id
@@ -390,7 +395,6 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 	const (
 		accTx = iota
 		accOrigin
-		accLinked
 	)
 	type acc struct {
 		i, of int
@@ -403,24 +407,22 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 	)
 	for rows.Next() {
 		var (
-			v        DebtEntry
-			cid      *uuid.UUID
-			name     string
-			kind     *string
-			sourceID *uuid.UUID
-			title    *string
-			txID     *uuid.UUID
-			accID    *uuid.UUID
-			o        DebtOrigin
-			oKind    *string
-			oAccount *uuid.UUID
-			ltID     *uuid.UUID
-			ltAcc    *uuid.UUID
+			v         DebtEntry
+			cid       *uuid.UUID
+			name      string
+			kind      *string
+			sourceID  *uuid.UUID
+			title     *string
+			txID      *uuid.UUID
+			accID     *uuid.UUID
+			o         DebtOrigin
+			oKind     *string
+			oAccount  *uuid.UUID
+			connected bool
 		)
-		if err := rows.Scan(&v.ID, &v.Direction, &cid, &name, &v.Amount, &v.Date, &v.Description, &v.Note,
-			&v.Paid, &kind, &sourceID, &title, &txID, &accID, &v.CreatedAt, &v.UpdatedAt, &v.DueDate,
-			&oKind, &o.TransactionID, &o.BillID, &o.EventID, &o.Title, &o.Amount, &o.Date, &oAccount,
-			&ltID, &ltAcc); err != nil {
+		if err := rows.Scan(&v.ID, &v.Kind, &v.Direction, &cid, &name, &v.Amount, &v.Date, &v.Description, &v.Note,
+			&v.Paid, &kind, &sourceID, &title, &txID, &accID, &connected, &v.CreatedAt, &v.UpdatedAt, &v.DueDate, &v.PartnerLinked, &v.DisconnectedAt,
+			&oKind, &o.TransactionID, &o.BillID, &o.EventID, &o.Title, &o.Amount, &o.Date, &oAccount); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("entries scan: %w", err)
 		}
@@ -429,7 +431,7 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 			v.Source = &DebtSource{Kind: *kind, ID: sourceID, Title: title}
 		}
 		if txID != nil {
-			v.Transaction = &EntryTx{ID: *txID}
+			v.Transaction = &EntryTx{ID: *txID, Connected: connected}
 			if accID != nil {
 				accs = append(accs, acc{len(out), accTx, *accID})
 				ids = append(ids, *accID)
@@ -441,13 +443,6 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 			if oAccount != nil {
 				accs = append(accs, acc{len(out), accOrigin, *oAccount})
 				ids = append(ids, *oAccount)
-			}
-		}
-		if ltID != nil {
-			v.LinkedTransaction = &EntryTx{ID: *ltID}
-			if ltAcc != nil {
-				accs = append(accs, acc{len(out), accLinked, *ltAcc})
-				ids = append(ids, *ltAcc)
 			}
 		}
 		out = append(out, v)
@@ -468,8 +463,6 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 		switch a.of {
 		case accOrigin:
 			out[a.i].Origin.Account = &r
-		case accLinked:
-			out[a.i].LinkedTransaction.Account = &r
 		default:
 			out[a.i].Transaction.Account = &r
 		}
@@ -494,6 +487,13 @@ func (s *Store) listEntries(ctx context.Context, userID uuid.UUID, key string, f
 	add := func(cond string, v any) {
 		args = append(args, v)
 		where = append(where, fmt.Sprintf(cond, len(args)))
+	}
+	switch f.Kind {
+	case "all":
+	case KindRepayment:
+		where = append(where, "pd.kind = 'repayment'")
+	default:
+		where = append(where, "pd.kind = 'debt'")
 	}
 	if q := strings.TrimSpace(f.Q); q != "" {
 		add("(pd.description ILIKE $%[1]d OR pd.note ILIKE $%[1]d)", "%"+shared.EscapeLike(q)+"%")
@@ -582,74 +582,23 @@ func statementDays(items []StatementItem) []StatementDay {
 	return out
 }
 
+// debtItem — a person-book row as a statement line (debt or repayment; a repayment has no paid
+// label).
 func debtItem(d DebtEntry) StatementItem {
-	paid := d.Paid
 	signed := d.Amount
 	if d.Direction != DirectionPaid {
 		signed = -d.Amount
 	}
-	return StatementItem{
-		Kind: ItemDebt, ID: d.ID, Key: d.Key, Direction: d.Direction, Amount: d.Amount, SignedAmount: signed,
-		Date: d.Date, Description: d.Description, Note: d.Note, Paid: &paid, Source: d.Source,
+	it := StatementItem{
+		Kind: d.Kind, ID: d.ID, Key: d.Key, Direction: d.Direction, Amount: d.Amount, SignedAmount: signed,
+		Date: d.Date, Description: d.Description, Note: d.Note, Source: d.Source,
 		Transaction: d.Transaction, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Origin: d.Origin,
 	}
-}
-
-// loadRepayments — repayment transactions as statement items (pay = expense = direction paid, net +;
-// receive = income = direction received, net −).
-func loadRepayments(ctx context.Context, q shared.Querier, userID uuid.UUID, ids []uuid.UUID) ([]StatementItem, error) {
-	out := make([]StatementItem, 0, len(ids))
-	if len(ids) == 0 {
-		return out, nil
+	if d.Kind != KindRepayment {
+		paid := d.Paid
+		it.Paid = &paid
 	}
-	rows, err := q.Query(ctx, `SELECT t.id, t.repay_contact_id, t.repay_person_name, t.type, t.amount,
-		       to_char(t.date, 'YYYY-MM-DD'), t.description, t.note, t.account_id, t.created_at, t.updated_at
-		FROM transactions t
-		WHERE t.user_id = $1 AND t.id = ANY($2) AND t.repay_person_name IS NOT NULL`, userID, ids)
-	if err != nil {
-		return nil, fmt.Errorf("repayments: %w", err)
-	}
-	var accIDs []uuid.UUID
-	accOf := map[int]uuid.UUID{}
-	for rows.Next() {
-		var (
-			it    StatementItem
-			cid   *uuid.UUID
-			name  string
-			typ   string
-			accID *uuid.UUID
-		)
-		if err := rows.Scan(&it.ID, &cid, &name, &typ, &it.Amount, &it.Date, &it.Description, &it.Note,
-			&accID, &it.CreatedAt, &it.UpdatedAt); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("repayments scan: %w", err)
-		}
-		it.Kind, it.Key = ItemRepayment, shared.DebtKey(cid, name)
-		it.Direction, it.SignedAmount = DirectionPaid, it.Amount
-		if typ == "income" {
-			it.Direction, it.SignedAmount = DirectionReceived, -it.Amount
-		}
-		it.Transaction = &EntryTx{ID: it.ID}
-		if accID != nil {
-			accOf[len(out)] = *accID
-			accIDs = append(accIDs, *accID)
-		}
-		out = append(out, it)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	refs, err := shared.LoadAccountRefs(ctx, q, accIDs)
-	if err != nil {
-		return nil, err
-	}
-	for i, id := range accOf {
-		if r, ok := refs[id]; ok {
-			out[i].Transaction.Account = &r
-		}
-	}
-	return out, nil
+	return it
 }
 
 func entryTxID(ctx context.Context, q querier, entryID uuid.UUID) (*uuid.UUID, error) {
@@ -668,15 +617,10 @@ func (s *Store) UnlinkedNames(ctx context.Context, userID uuid.UUID) ([]struct {
 	Name  string
 	Count int
 }, error) {
-	rows, err := s.db.Query(ctx, `SELECT name, COUNT(*) FROM (
-			SELECT counterparty_person_name AS name FROM personal_debts
-			WHERE user_id = $1 AND counterparty_contact_id IS NULL AND counterparty_person_name <> ''
-			UNION ALL
-			SELECT repay_person_name FROM transactions
-			WHERE user_id = $1 AND repay_contact_id IS NULL AND repay_person_name <> ''
-		) x
-		GROUP BY name
-		ORDER BY COUNT(*) DESC, LOWER(name)`, userID)
+	rows, err := s.db.Query(ctx, `SELECT counterparty_person_name, COUNT(*) FROM personal_debts
+		WHERE user_id = $1 AND counterparty_contact_id IS NULL AND counterparty_person_name <> ''
+		GROUP BY counterparty_person_name
+		ORDER BY COUNT(*) DESC, LOWER(counterparty_person_name)`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("unlinked names: %w", err)
 	}
@@ -730,22 +674,14 @@ func (s *Store) AbsorbForContact(ctx context.Context, userID, contactID uuid.UUI
 	if err != nil {
 		return 0, fmt.Errorf("absorb: %w", err)
 	}
-	repays, err := tx.Exec(ctx, `UPDATE transactions
-		SET repay_contact_id = $1, repay_person_name = $2, updated_by_user_id = $3
-		WHERE user_id = $3 AND repay_person_name IS NOT NULL AND repay_contact_id IS NULL
-		  AND LOWER(TRIM(repay_person_name)) = ANY($4::text[])`,
-		contactID, displayName, userID, lowered)
-	if err != nil {
-		return 0, fmt.Errorf("absorb repayments: %w", err)
-	}
-	if tag.RowsAffected()+repays.RowsAffected() > 0 {
+	if tag.RowsAffected() > 0 {
 		_, _ = tx.Exec(ctx, `UPDATE contacts SET last_used_at = NOW() WHERE id = $1 AND user_id = $2`,
 			contactID, userID)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit: %w", err)
 	}
-	return int(tag.RowsAffected() + repays.RowsAffected()), nil
+	return int(tag.RowsAffected()), nil
 }
 
 func (s *Store) RestoreOnContactDeleteTx(ctx context.Context, tx pgx.Tx, userID, contactID uuid.UUID) (int, error) {
@@ -767,15 +703,7 @@ func (s *Store) RestoreOnContactDeleteTx(ctx context.Context, tx pgx.Tx, userID,
 	if err != nil {
 		return 0, fmt.Errorf("restore on delete: %w", err)
 	}
-	// Repayments too: the FK nulls the contact, the typed name keeps the person (level 1).
-	repays, err := tx.Exec(ctx, `UPDATE transactions
-		SET repay_person_name = $1, updated_by_user_id = $2
-		WHERE user_id = $2 AND repay_contact_id = $3`,
-		displayName, userID, contactID)
-	if err != nil {
-		return 0, fmt.Errorf("restore repayments on delete: %w", err)
-	}
-	return int(tag.RowsAffected() + repays.RowsAffected()), nil
+	return int(tag.RowsAffected()), nil
 }
 
 func round2(f float64) float64 {

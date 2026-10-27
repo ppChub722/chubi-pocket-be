@@ -137,3 +137,27 @@ func (s *Service) SupersedeSplitNoticesTx(ctx context.Context, tx pgx.Tx, recipi
 func (s *Service) RefreshSplitCreatedTx(ctx context.Context, tx pgx.Tx, recipientUserID, splitID uuid.UUID, amount float64) (bool, error) {
 	return s.store.RefreshSplitCreatedTx(ctx, tx, recipientUserID, splitID, amount)
 }
+
+// DebtDisconnectedPayload (0.4.1-1 D9 / B3) — "X ตัดการเชื่อมหนี้ ฿300 แล้ว": the other user
+// disconnected their copy; DebtID is the recipient's own entry, now a plain debt.
+type DebtDisconnectedPayload struct {
+	DebtID      uuid.UUID `json:"debt_id"`
+	Key         string    `json:"key"`
+	PersonName  string    `json:"person_name"`
+	Amount      float64   `json:"amount"`
+	Direction   string    `json:"direction"`
+	Description *string   `json:"description"`
+}
+
+// DispatchDebtDisconnected — info only (no action); pending split notices about the pair are
+// superseded first.
+func (s *Service) DispatchDebtDisconnected(ctx context.Context, tx pgx.Tx, recipientUserID, actorUserID uuid.UUID,
+	splitID uuid.UUID, p DebtDisconnectedPayload) error {
+	for _, t := range []string{TypeSplitCreated, TypeSplitChanged} {
+		if err := s.store.SupersedeSplitNoticesTx(ctx, tx, recipientUserID, t, splitID); err != nil {
+			return err
+		}
+	}
+	deepLink := splitDeepLink(&p.DebtID)
+	return s.dispatchTx(ctx, tx, TypeDebtDisconnected, recipientUserID, &actorUserID, p, &deepLink, false)
+}

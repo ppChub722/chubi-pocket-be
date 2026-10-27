@@ -68,10 +68,7 @@ func (s *Service) DueCheckDaily(ctx context.Context, userID uuid.UUID, headerTZ 
 	}
 	var skip bool
 	if err := s.db.QueryRow(ctx, `SELECT
-		EXISTS (SELECT 1 FROM recurring_due_checks c WHERE c.user_id = $1 AND c.checked_on >= $2)
-		AND NOT EXISTS (SELECT 1 FROM recurring_rules r WHERE r.user_id = $1 AND r.status = 'active'
-		        AND (r.account_id IN (SELECT id FROM accounts WHERE status = 'archived')
-		          OR r.to_account_id IN (SELECT id FROM accounts WHERE status = 'archived')))`,
+		EXISTS (SELECT 1 FROM recurring_due_checks c WHERE c.user_id = $1 AND c.checked_on >= $2)`,
 		userID, today).Scan(&skip); err != nil {
 		return fmt.Errorf("due check guard: %w", err)
 	}
@@ -83,8 +80,8 @@ func (s *Service) DueCheckDaily(ctx context.Context, userID uuid.UUID, headerTZ 
 
 // DueCheck makes what came due since the last check real. Nothing is produced
 // into pending any more: an occurrence that came due is just a computed `due`
-// state. What it does: pause settings whose wallet was archived, record the
-// transactions of the settings with auto-create on, count the newly due
+// state. What it does: pause a setting that would hold a 4th due occurrence
+// (0.4.1-1 R7), record the transactions of the settings with auto-create on, count the newly due
 // occurrences for ONE grouped notice, tell about settings that are about to
 // end. It writes, so it runs from
 // DueCheckDaily and after a recurring write, never on a read.
@@ -98,13 +95,6 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 		return err
 	}
 	defer tx.Rollback(ctx)
-
-	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET status = 'paused', paused_from = $2
-		WHERE user_id = $1 AND status = 'active'
-		  AND (account_id IN (SELECT id FROM accounts WHERE status = 'archived')
-		    OR to_account_id IN (SELECT id FROM accounts WHERE status = 'archived'))`, userID, today); err != nil {
-		return fmt.Errorf("auto-pause: %w", err)
-	}
 
 	rows, err := tx.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1 AND status = 'active'
 		ORDER BY created_at, id FOR UPDATE SKIP LOCKED`, userID)
@@ -128,6 +118,9 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 	newlyDue, autoMade := 0, 0
 	var ends []ending
 	for _, r := range rules {
+		if err := s.overdueLimit(ctx, tx, r, today); err != nil {
+			return err
+		}
 		made, err := s.autoCreate(ctx, tx, r, today, lang)
 		if err != nil {
 			return err
@@ -339,8 +332,8 @@ func (s *Service) aggregate(r *Rule, stored []*itemRow, today time.Time, lang st
 	}
 	implicitPaid := 0
 	for _, o := range all {
-		if r.Status != "active" && o.expected() {
-			continue // a paused or archived setting has nothing due or coming
+		if !listable(r, o) {
+			continue // a paused setting keeps only its due ones; an archived one has nothing to pay
 		}
 		switch o.status {
 		case StatusDue:
@@ -447,7 +440,7 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 			StartDate: r.StartDate.Format(dateLayout), End: r.apiEnd(), Status: r.Status,
 			Progress: Progress{Done: a.done, Total: r.TotalCount}, Counts: a.counts, EditedAny: a.edited,
 			CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
-			DueCount: a.counts.Due, Chain: a.chain, AutoCreate: r.AutoCreate, RecordedTxCount: a.txCount,
+			DueCount: a.counts.Due, Chain: a.chain, AutoCreate: r.AutoCreate, RecordedTxCount: a.txCount, PauseReason: r.pauseReason(),
 		}
 		if a.chain == nil {
 			v.Chain = []ChainStep{}
@@ -974,10 +967,12 @@ func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, mon
 	return s.pageOccs(ctx, userID, today, occs, page, perPage)
 }
 
+// activeOnly — the settings that can have something to pay: active, and paused (their stored due
+// occurrences stay due, 0.4.1-1 R7; occsOf shows nothing else of them).
 func activeOnly(rules []*Rule) []*Rule {
 	out := make([]*Rule, 0, len(rules))
 	for _, r := range rules {
-		if r.Status == "active" {
+		if r.Status == "active" || r.Status == "paused" {
 			out = append(out, r)
 		}
 	}

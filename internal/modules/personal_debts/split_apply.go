@@ -115,6 +115,18 @@ func (s *Service) ApplySplitChange(ctx context.Context, userID, notificationID u
 	if out.PersonBalance, err = s.balanceOfKey(ctx, s.store.db, userID, mirror.Key()); err != nil {
 		return nil, err
 	}
+	t := touch{keys: []string{mirror.Key()}}
+	if result == "updated" {
+		t.debts = []uuid.UUID{mirror.ID}
+		if mirror.PaidForTransactionID != nil {
+			t.txs = []uuid.UUID{*mirror.PaidForTransactionID} // my expense of it followed
+		}
+	} else {
+		t.removedDebts = []uuid.UUID{mirror.ID}
+	}
+	if out.Effects, err = s.effects(ctx, s.store.db, userID, t); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

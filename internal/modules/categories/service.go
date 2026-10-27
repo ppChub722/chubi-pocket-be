@@ -146,7 +146,15 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCa
 	if err != nil {
 		return nil, err
 	}
+	// 0.4.1-1 D6: a system category keeps its name (the app words it from system_kind) and stays out
+	// of reports; the icon, description and note stay editable. Sending the current value is fine.
 	if current.IsSystem {
+		if req.Name != nil && strings.TrimSpace(*req.Name) != current.Name {
+			return nil, fmt.Errorf("%w: a system category can't be renamed", ErrSystemImmutable)
+		}
+		if req.IncludeInReport != nil && *req.IncludeInReport != current.IncludeInReport {
+			return nil, fmt.Errorf("%w: a system category's include_in_report is fixed", ErrSystemImmutable)
+		}
 	}
 
 	newParent, parentChanged := req.ParentIDChange()

@@ -103,10 +103,6 @@ func mapError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusConflict, "ITEM_ALREADY_LINKED", "Some items can't take this action", gin.H{"ids": conflict.IDs})
 	case errors.As(err, &link):
 		response.Fail(c, http.StatusConflict, "ITEM_ALREADY_LINKED", err.Error(), gin.H{"transaction": link.Linked, "other": link.Other})
-	case errors.Is(err, ErrAutoCreateNeedsAmount):
-		response.BadRequest(c, "AUTO_CREATE_NEEDS_AMOUNT", err.Error(), nil)
-	case errors.Is(err, ErrAutoCreateNeedsWallet):
-		response.BadRequest(c, "AUTO_CREATE_NEEDS_WALLET", err.Error(), nil)
 	case errors.Is(err, ErrAmountRequired):
 		response.BadRequest(c, "AMOUNT_REQUIRED", err.Error(), nil)
 	case errors.Is(err, ErrAlreadyRecorded):
@@ -518,11 +514,7 @@ func (h *Handler) SkipOcc(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req SkipRequest
-	if _, ok := bind(c, &req); !ok {
-		return
-	}
-	out, err := h.service.SkipOcc(c.Request.Context(), uid, id, slot, req.DeleteTx, tz(c))
+	out, err := h.service.SkipOcc(c.Request.Context(), uid, id, slot, tz(c))
 	reply(c, http.StatusOK, out, err)
 }
 
@@ -540,7 +532,11 @@ func (h *Handler) MarkPaidOcc(c *gin.Context) {
 	if !ok {
 		return
 	}
-	out, err := h.service.MarkPaid(c.Request.Context(), uid, id, slot, tz(c))
+	var req MarkPaidRequest
+	if _, ok := bind(c, &req); !ok {
+		return
+	}
+	out, err := h.service.MarkPaid(c.Request.Context(), uid, id, slot, req.Amount, tz(c))
 	reply(c, http.StatusOK, out, err)
 }
 

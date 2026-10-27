@@ -15,6 +15,12 @@ const (
 	DirectionReceived = "received" // they paid me / for me: net −
 )
 
+// Kinds of a person-book row (0.4.1-1 D3).
+const (
+	KindDebt      = "debt"
+	KindRepayment = "repayment"
+)
+
 const (
 	SourceTransaction = "transaction" // a split on my bill (source_transaction_id)
 	SourceEvent       = "event"       // a split on an event board
@@ -25,6 +31,7 @@ const (
 type Entry struct {
 	ID                         uuid.UUID
 	UserID                     uuid.UUID
+	Kind                       string // debt | repayment
 	Direction                  string
 	ContactID                  *uuid.UUID // counterparty_contact_id
 	PersonName                 string     // counterparty_person_name (typed snapshot)
@@ -45,6 +52,8 @@ type Entry struct {
 	// my own paid_by (source paid_by) or a partner's split mirrored into my book (source partner).
 	PaidForTransactionID *uuid.UUID
 	DueDate              *string // YYYY-MM-DD; "กำหนดจ่าย" (0.4.0-3)
+	// DisconnectedAt (0.4.1-1 D9) — the cross-user pair was disconnected (either side).
+	DisconnectedAt *time.Time
 }
 
 func (e *Entry) Key() string { return shared.DebtKey(e.ContactID, e.PersonName) }
@@ -72,10 +81,13 @@ type DebtSource struct {
 type EntryTx struct {
 	ID      uuid.UUID          `json:"id"`
 	Account *shared.AccountRef `json:"account"`
+	// Connected (0.4.1-1 D2) — an existing transaction connected later (can be disconnected).
+	Connected bool `json:"connected"`
 }
 
 type DebtEntry struct {
 	ID          uuid.UUID   `json:"id"`
+	Kind        string      `json:"kind"` // debt | repayment (0.4.1-1 D3)
 	Key         string      `json:"key"`
 	Direction   string      `json:"direction"`
 	Amount      float64     `json:"amount"`
@@ -86,12 +98,14 @@ type DebtEntry struct {
 	DueDate     *string     `json:"due_date"`
 	Source      *DebtSource `json:"source"`
 	Transaction *EntryTx    `json:"transaction"`
-	// LinkedTransaction is one of my own transactions the entry points at (soft link).
-	LinkedTransaction *EntryTx    `json:"linked_transaction"`
-	CreatedAt         time.Time   `json:"created_at"`
-	InCurrentCycle    *bool       `json:"in_current_cycle"`
-	UpdatedAt         time.Time   `json:"updated_at"`
-	Origin            *DebtOrigin `json:"origin"`
+	// PartnerLinked / DisconnectedAt (0.4.1-1 D9) — a copy in another user's book right now; when the
+	// pair was disconnected.
+	PartnerLinked  bool        `json:"partner_linked"`
+	DisconnectedAt *time.Time  `json:"disconnected_at"`
+	CreatedAt      time.Time   `json:"created_at"`
+	InCurrentCycle *bool       `json:"in_current_cycle"`
+	UpdatedAt      time.Time   `json:"updated_at"`
+	Origin         *DebtOrigin `json:"origin"`
 }
 
 type DebtPerson struct {
@@ -222,29 +236,21 @@ const (
 )
 
 type RepaymentRequest struct {
-	Kind        string      `json:"kind"         binding:"required,oneof=pay receive"`
-	Amount      float64     `json:"amount"       binding:"required,gt=0"`
-	Date        *string     `json:"date"         binding:"omitempty,datetime=2006-01-02"`
-	AccountID   *uuid.UUID  `json:"account_id"`
-	Description *string     `json:"description"  binding:"omitempty,max=200"`
-	Note        *string     `json:"note"         binding:"omitempty,max=500"`
-	TagIDs      []uuid.UUID `json:"tag_ids"`
-	MarkPaidIDs []uuid.UUID `json:"mark_paid_ids"`
-	PersonName  *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
-	// BillID (0.4.0-3) — an event payback row this repayment records in my books.
+	Kind              string      `json:"kind"         binding:"required,oneof=pay receive"`
+	Amount            float64     `json:"amount"       binding:"omitempty,gt=0"` // required unless link_transaction_id
+	Date              *string     `json:"date"         binding:"omitempty,datetime=2006-01-02"`
+	AccountID         *uuid.UUID  `json:"account_id"`
+	CreateTransaction *bool       `json:"create_transaction"`
+	LinkTransactionID *uuid.UUID  `json:"link_transaction_id"`
+	Description       *string     `json:"description"  binding:"omitempty,max=200"`
+	Note              *string     `json:"note"         binding:"omitempty,max=500"`
+	TagIDs            []uuid.UUID `json:"tag_ids"`
+	MarkPaidIDs       []uuid.UUID `json:"mark_paid_ids"`
+	// MarkAllPaid (0.4.1-1 D10 "ปิดหนี้") — label every open debt this repayment pays down paid.
+	MarkAllPaid bool    `json:"mark_all_paid"`
+	PersonName  *string `json:"person_name"  binding:"omitempty,min=1,max=100"`
+	// BillID (0.4.0-3) — an event payback row this repayment records in my books (the row keeps it).
 	BillID *uuid.UUID `json:"bill_id"`
-}
-
-// RepaymentResult — the repayment transaction (same view as GET /transactions/{id}), its statement
-// line, the person's new balance and the touched wallet balances.
-type RepaymentResult struct {
-	Transaction     *transactions.TransactionDetail `json:"transaction"`
-	Item            StatementItem                   `json:"item"`
-	PersonBalance   DebtPerson                      `json:"person_balance"`
-	AccountBalances []shared.WalletBalance          `json:"account_balances"`
-	// BalanceChange (0.4.0-3) — the person's balance before → after this write; flipped = an overpaid
-	// settle crossed to the other side.
-	BalanceChange *transactions.PersonDelta `json:"balance_change"`
 }
 
 // DebtPreview — POST …/entries or …/repayments with ?preview=true (the debt quick create's result
@@ -271,10 +277,9 @@ type EntryList struct {
 }
 
 type EntryDetail struct {
-	Entry             DebtEntry                       `json:"entry"`
-	PersonBalance     DebtPerson                      `json:"person_balance"`
-	Transaction       *transactions.TransactionDetail `json:"transaction"`
-	LinkedTransaction *transactions.TransactionDetail `json:"linked_transaction"`
+	Entry         DebtEntry                       `json:"entry"`
+	PersonBalance DebtPerson                      `json:"person_balance"`
+	Transaction   *transactions.TransactionDetail `json:"transaction"`
 }
 
 // LinkTxRequest — POST /personal-debts/{id}/link.
@@ -287,9 +292,10 @@ type WriteResult struct {
 	PersonBalance         DebtPerson                      `json:"person_balance"`
 	PreviousPersonBalance *DebtPerson                     `json:"previous_person_balance"`
 	Transaction           *transactions.TransactionDetail `json:"transaction"`
-	LinkedTransaction     *transactions.TransactionDetail `json:"linked_transaction"`
 	AccountBalances       []shared.WalletBalance          `json:"account_balances"`
 	BalanceChange         *transactions.PersonDelta       `json:"balance_change"` // create only (0.4.0-3); null on other writes
+	Item                  *StatementItem                  `json:"item"`           // create only (0.4.1-1)
+	Effects               shared.Effects                  `json:"effects"`
 }
 
 type DeleteResult struct {
@@ -297,20 +303,23 @@ type DeleteResult struct {
 	TransactionID   *uuid.UUID             `json:"transaction_id"`
 	PersonBalance   DebtPerson             `json:"person_balance"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
+	Effects         shared.Effects         `json:"effects"`
 }
 
 type SplitChangeResult struct {
-	Result        string     `json:"result"` // updated | deleted
-	Entry         *DebtEntry `json:"entry"`
-	PersonBalance DebtPerson `json:"person_balance"`
+	Result        string         `json:"result"` // updated | deleted
+	Entry         *DebtEntry     `json:"entry"`
+	PersonBalance DebtPerson     `json:"person_balance"`
+	Effects       shared.Effects `json:"effects"`
 }
 
 type CreateEntryRequest struct {
 	Direction         string      `json:"direction"    binding:"required,oneof=paid received"`
-	Amount            float64     `json:"amount"       binding:"required,gt=0"`
+	Amount            float64     `json:"amount"       binding:"omitempty,gt=0"` // required unless link_transaction_id
 	Date              *string     `json:"date"         binding:"omitempty,datetime=2006-01-02"`
 	AccountID         *uuid.UUID  `json:"account_id"`
 	CreateTransaction *bool       `json:"create_transaction"`
+	LinkTransactionID *uuid.UUID  `json:"link_transaction_id"` // 0.4.1-1 D10
 	Description       *string     `json:"description"  binding:"omitempty,max=200"`
 	Note              *string     `json:"note"         binding:"omitempty,max=500"`
 	TagIDs            []uuid.UUID `json:"tag_ids"`
@@ -373,6 +382,7 @@ type PeopleFilter struct {
 }
 
 type EntryFilter struct {
+	Kind      string // debt (default) | repayment | all
 	Q         string
 	Sort      string
 	Direction string

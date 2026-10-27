@@ -19,15 +19,15 @@ type NextUp struct {
 }
 
 type ListSummary struct {
-	MonthPay     float64 `json:"month_pay"`
-	MonthReceive float64 `json:"month_receive"`
-	Next         *NextUp `json:"next"`
-	Due30dTotal         float64  `json:"due_30d_total"`
-	AwaitingAmountCount int      `json:"awaiting_amount_count"`
+	MonthPay            float64 `json:"month_pay"`
+	MonthReceive        float64 `json:"month_receive"`
+	Next                *NextUp `json:"next"`
+	Due30dTotal         float64 `json:"due_30d_total"`
+	AwaitingAmountCount int     `json:"awaiting_amount_count"`
 	// DueCount / DueTotal — the occurrences due and not recorded (overdue + today).
-	DueCount int     `json:"due_count"`
-	DueTotal float64 `json:"due_total"`
-	ByKind              KindsSum `json:"by_kind"`
+	DueCount int      `json:"due_count"`
+	DueTotal float64  `json:"due_total"`
+	ByKind   KindsSum `json:"by_kind"`
 }
 
 const (
@@ -72,9 +72,7 @@ func (s *Service) summary(ctx context.Context, userID uuid.UUID, today time.Time
 		return out, err
 	}
 	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules r
-		WHERE user_id = $1 AND status = 'active'
-		  AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.status = 'archived'
-		                  AND a.id IN (r.account_id, r.to_account_id))`, userID)
+		WHERE user_id = $1 AND status = 'active'`, userID)
 	if err != nil {
 		return out, fmt.Errorf("summary rules: %w", err)
 	}

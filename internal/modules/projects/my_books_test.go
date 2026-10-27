@@ -86,20 +86,31 @@ func TestSetMyBooks(t *testing.T) {
 		t.Errorf("debt not relinked")
 	}
 
-	// repay: a repayment pointing at the row; unlinking it leaves my bill alone
+	// repay: a repayment row pointing at the row (0.4.1-1 D3: the link sits on the person-book row);
+	// unlinking it leaves my bill and my debts alone
 	repay := qcMustV7(t)
-	if _, err := f.pool.Exec(ctx, `INSERT INTO transactions
-		(id, user_id, account_id, type, amount, date, repay_person_name, project_id, source_project_transaction_id)
-		VALUES ($1, $2, $3, 'income', 30, '2026-09-02', 'Grandma', $4, $5)`, repay, f.owner, f.acctPersonal, proj, pt); err != nil {
+	if _, err := f.pool.Exec(ctx, `INSERT INTO personal_debts
+		(id, user_id, kind, direction, counterparty_person_name, amount, currency, date, source_kind, source_project_transaction_id, project_id)
+		VALUES ($1, $2, 'repayment', 'received', 'Grandma', 30, 'THB', '2026-09-02', 'event', $3, $4)`, repay, f.owner, pt, proj); err != nil {
 		t.Fatal(err)
 	}
 	books(f.owner, MyBooksRequest{Unlink: []string{BookRepay}})
-	f.assertLoose(t, repay)
+	if n := f.countRows(t, `SELECT COUNT(*) FROM personal_debts WHERE id = $1 AND source_project_transaction_id IS NULL
+		AND unlinked_project_transaction_id = $2`, repay, pt); n != 1 {
+		t.Errorf("repayment not unlinked")
+	}
+	if n := f.countRows(t, `SELECT COUNT(*) FROM personal_debts WHERE id = $1 AND source_project_transaction_id = $2`, debt, pt); n != 1 {
+		t.Errorf("unlinking the repayment unlinked the debt")
+	}
 	if f.boardParentOf(t, f.bill1) != pt {
 		t.Errorf("unlinking the repayment moved my bill")
 	}
-	if out := books(f.owner, MyBooksRequest{Link: []string{BookRepay}}); !slices.Equal(out.Relinked, []string{BookRepay}) || f.boardParentOf(t, repay) != pt {
+	if out := books(f.owner, MyBooksRequest{Link: []string{BookRepay}}); !slices.Equal(out.Relinked, []string{BookRepay}) {
 		t.Errorf("relink repay = %v", out.Relinked)
+	}
+	if n := f.countRows(t, `SELECT COUNT(*) FROM personal_debts WHERE id = $1 AND source_project_transaction_id = $2
+		AND kind = 'repayment'`, repay, pt); n != 1 {
+		t.Errorf("repayment not relinked")
 	}
 
 	// a viewer books / unbooks their OWN copy; my bill stays where it is. Bee has a split on the row

@@ -76,6 +76,7 @@ func (s *Service) recordSavingTx(ctx context.Context, tx pgx.Tx, row *itemRow, w
 	}
 	now := time.Now()
 	row.SavingEntryID, row.ProducedAt = &id, &now
+	row.Archived, row.ClearedAt = false, nil
 	if auto {
 		row.AutoCreatedAt = &now
 	}
@@ -94,4 +95,3 @@ func checkRuleRefsTx(ctx context.Context, q rowQuerier, userID uuid.UUID, r *Rul
 	}
 	return nil
 }
-

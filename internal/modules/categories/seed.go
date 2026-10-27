@@ -26,6 +26,10 @@ var systemCatalog = []systemSeed{
 		Icon: "system_debt_received", Color: "#AED581", IncludeInReport: false},
 	{Name: "Debt Paid", Type: "expense", Kind: SystemDebtPaid,
 		Icon: "system_debt_paid", Color: "#E57373", IncludeInReport: false},
+	{Name: "Loan Given", Type: "expense", Kind: SystemLoanGiven,
+		Icon: "volunteer_activism", Color: "#E57373", IncludeInReport: false},
+	{Name: "Loan Taken", Type: "income", Kind: SystemLoanTaken,
+		Icon: "handshake", Color: "#AED581", IncludeInReport: false},
 }
 
 type starterChild struct {

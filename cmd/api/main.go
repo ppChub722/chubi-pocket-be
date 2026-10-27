@@ -164,6 +164,7 @@ func main() {
 	projectsService.WithNotificationService(notificationsService)
 
 	projectsService.WithTransactionsService(transactionsService)
+	projectsService.WithDebts(personalDebtsService) // 0.4.1-1 E8: the bill sheet books debts and repayments
 	transactionsService.WithEventBillSyncer(projectsService.SyncBillFromTxTx)
 	transactionsService.WithEventBillDeleter(projectsService.DeleteBillOfTxTx)
 	transactionsService.WithEventLinks(projectsService)
@@ -390,6 +391,7 @@ func main() {
 			protected.DELETE("/personal-debts/:id", personalDebtsHandler.Delete)
 			protected.POST("/personal-debts/:id/link", personalDebtsHandler.LinkTx)
 			protected.POST("/personal-debts/:id/unlink", personalDebtsHandler.UnlinkTx)
+			protected.POST("/personal-debts/:id/disconnect", personalDebtsHandler.Disconnect)
 
 			protected.GET("/notifications", notificationsHandler.List)
 			protected.GET("/notifications/unread-count", notificationsHandler.UnreadCount)
@@ -423,6 +425,8 @@ func main() {
 			protected.GET("/projects/:id/transactions", projectsHandler.ListPT)
 			protected.POST("/projects/:id/project-transactions", projectsHandler.CreatePT)
 			protected.POST("/projects/:id/bills", projectsHandler.AddBills)
+			protected.POST("/event-bills", projectsHandler.BookBill)
+			protected.PUT("/event-bills/:pt_id", projectsHandler.RebookBill)
 			protected.DELETE("/projects/:id/bills/:transaction_id", projectsHandler.RemoveBill)
 			protected.PUT("/projects/:id/project-transactions/:pt_id", projectsHandler.UpdatePT)
 			protected.DELETE("/projects/:id/project-transactions/:pt_id", projectsHandler.DeletePT)

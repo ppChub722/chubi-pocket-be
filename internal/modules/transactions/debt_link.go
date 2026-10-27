@@ -21,6 +21,7 @@ var (
 
 type DebtLinks interface {
 	TxEditedTx(ctx context.Context, tx pgx.Tx, userID, entryID uuid.UUID, row *Transaction) error
+	// TxDeletedTx — the entry's transaction was deleted (0.4.1-1 D1): the entry stays, ledger-only.
 	TxDeletedTx(ctx context.Context, tx pgx.Tx, userID, entryID uuid.UUID) (key string, err error)
 	PersonBalanceByEntry(ctx context.Context, userID, entryID uuid.UUID) (any, error)
 	PersonBalanceByKey(ctx context.Context, userID uuid.UUID, key string) (any, error)
@@ -29,6 +30,15 @@ type DebtLinks interface {
 	// PaidByDeletingTx — row txID (with a paid-by debt) is about to be deleted: my own paid-by debt
 	// goes with it (the partner is told); a partner's mirrored debt stays, unlinked.
 	PaidByDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (key string, err error)
+	// SplitsFollowTxTx — 0.4.1-1 D8: row (a bill) was edited: its split debts take its date;
+	// checkAmount (an amount-only edit) refuses an amount below their sum (ErrSplitsExceedAmount).
+	SplitsFollowTxTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, row *Transaction, checkAmount bool) error
+	// SplitsDeletingTx — 0.4.1-1 D8: bill txID is about to be deleted: its split debts go with it
+	// and linked partners are told (split_changed removed).
+	SplitsDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) error
+	// DebtEffects — the person-book rows (DebtEntry views) and people's balances for a write's
+	// effects (0.4.1-1 B2).
+	DebtEffects(ctx context.Context, userID uuid.UUID, ids []uuid.UUID, keys []string) (debts, persons []any, err error)
 	// PersonNetTx — a person's balance as q sees it (0 when they have no lines), for the preview.
 	PersonNetTx(ctx context.Context, q shared.Querier, userID uuid.UUID, key string) (shared.PersonRef, float64, error)
 }
@@ -36,6 +46,7 @@ type DebtLinks interface {
 func (s *Service) WithDebtLinks(l DebtLinks) { s.debtLinks = l }
 
 type DebtTxInput struct {
+	Kind        string // debt | repayment: the category (LOAN_* | DEBT_*); "" = debt
 	Direction   string // paid | received
 	AccountID   *uuid.UUID
 	Amount      float64
@@ -53,11 +64,22 @@ func (in DebtTxInput) txType() TxType {
 	return TypeIncome
 }
 
-func (s *Service) debtCategory(ctx context.Context, userID uuid.UUID, t TxType) (uuid.UUID, error) {
-	kind := categories.SystemDebtReceived
-	if t == TypeExpense {
-		kind = categories.SystemDebtPaid
+// DebtCategoryKind — the person-book kind's system category (0.4.1-1 D5): a debt's transaction is
+// LOAN_GIVEN (expense) / LOAN_TAKEN (income), a repayment's DEBT_PAID / DEBT_RECEIVED.
+func DebtCategoryKind(entryKind string, t TxType) categories.SystemKind {
+	switch {
+	case entryKind == "repayment" && t == TypeExpense:
+		return categories.SystemDebtPaid
+	case entryKind == "repayment":
+		return categories.SystemDebtReceived
+	case t == TypeExpense:
+		return categories.SystemLoanGiven
 	}
+	return categories.SystemLoanTaken
+}
+
+func (s *Service) debtCategory(ctx context.Context, userID uuid.UUID, entryKind string, t TxType) (uuid.UUID, error) {
+	kind := DebtCategoryKind(entryKind, t)
 	c, err := s.cats.SystemFor(ctx, userID, kind)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("debt category %s: %w", kind, err)
@@ -75,7 +97,7 @@ func (s *Service) CreateDebtTxInTx(ctx context.Context, tx pgx.Tx, userID, entry
 		}
 	}
 	t := in.txType()
-	catID, err := s.debtCategory(ctx, userID, t)
+	catID, err := s.debtCategory(ctx, userID, in.Kind, t)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +149,7 @@ func (s *Service) SyncDebtTxInTx(ctx context.Context, tx pgx.Tx, userID, txID uu
 			return nil, err
 		}
 	}
-	catID, err := s.debtCategory(ctx, userID, t)
+	catID, err := s.debtCategory(ctx, userID, in.Kind, t)
 	if err != nil {
 		return nil, err
 	}
@@ -159,84 +181,50 @@ func (s *Service) DeleteDebtTxInTx(ctx context.Context, tx pgx.Tx, userID, txID 
 	return current.AccountID, nil
 }
 
-// RepayInput — a repayment to (pay) / from (receive) a debt person (0.4.0-3).
-type RepayInput struct {
-	Kind        string // pay | receive
-	ContactID   *uuid.UUID
-	PersonName  string
-	AccountID   *uuid.UUID // optional, as on POST /transactions
-	Amount      float64
-	Date        string
-	Description *string
-	Note        *string
-	TagIDs      []uuid.UUID
-}
-
-// CreateRepaymentInTx writes ONE transaction: pay = expense in Debt Paid, receive = income in Debt
-// Received, tied to the person. The wallet moves like any transaction.
-func (s *Service) CreateRepaymentInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, in RepayInput) (*Transaction, error) {
-	if in.Amount <= 0 {
-		return nil, ErrAmountInvalid
+// ConnectDebtTxInTx — 0.4.1-1 D2 "ผูกกับรายการที่มีอยู่": an existing transaction (checked plain by
+// the caller) becomes the entry's transaction, connected + synced. It takes the kind category; its
+// own is kept in debt_prev_category_id for a disconnect. Amount, date, wallet and tags stay;
+// description / note are set to the values the caller passes (the entry's when set, else its own).
+func (s *Service) ConnectDebtTxInTx(ctx context.Context, tx pgx.Tx, userID, entryID, txID uuid.UUID,
+	entryKind string, description, note *string) (*Transaction, error) {
+	current, err := scanTx(tx.QueryRow(ctx, `SELECT `+txColumns+` FROM transactions WHERE id = $1 AND user_id = $2 FOR UPDATE`, txID, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTxNotFound
 	}
-	if in.AccountID != nil {
-		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*in.AccountID}); err != nil {
-			return nil, err
-		}
-		if _, _, err := s.store.GetAccountBalanceTx(ctx, tx, userID, *in.AccountID); err != nil {
-			return nil, err
-		}
-	}
-	t := TypeIncome
-	if in.Kind == "pay" {
-		t = TypeExpense
-	}
-	catID, err := s.debtCategory(ctx, userID, t)
 	if err != nil {
 		return nil, err
 	}
-	name := in.PersonName
-	created, err := s.store.InsertRowTx(ctx, tx, &Transaction{
-		UserID: userID, AccountID: in.AccountID, Type: t, Amount: in.Amount, CategoryID: &catID,
-		Date: in.Date, Description: in.Description, Note: in.Note,
-		RepayContactID: in.ContactID, RepayPersonName: &name,
-	})
+	catID, err := s.debtCategory(ctx, userID, entryKind, current.Type)
 	if err != nil {
 		return nil, err
 	}
-	if in.AccountID != nil {
-		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *in.AccountID, signedDelta(t, in.Amount, false)); err != nil {
-			return nil, err
-		}
+	if _, err := tx.Exec(ctx, `UPDATE transactions
+		SET source_personal_debt_id = $2, debt_connected = TRUE, debt_prev_category_id = category_id,
+		    category_id = $3, description = $4, note = $5, updated_by_user_id = $6
+		WHERE id = $1`, txID, entryID, catID, shared.CleanText(description), shared.CleanText(note), userID); err != nil {
+		return nil, fmt.Errorf("connect debt tx: %w", err)
 	}
-	if err := s.store.AttachTagsTx(ctx, tx, userID, created.ID, in.TagIDs); err != nil {
-		return nil, err
-	}
-	return created, nil
+	return reloadTx(ctx, tx, txID)
 }
 
-// repayKey — the debt person key of a repayment row ("" when the row is not one).
-func repayKey(t *Transaction) string {
-	if t.RepayPersonName == nil {
-		return ""
+// DisconnectDebtTxInTx — 0.4.1-1 D2: a connected transaction goes back to a plain row with its old
+// category (none when it is gone); everything else stays.
+func (s *Service) DisconnectDebtTxInTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `UPDATE transactions
+		SET source_personal_debt_id = NULL, debt_connected = FALSE, category_id = debt_prev_category_id,
+		    debt_prev_category_id = NULL, updated_by_user_id = $2
+		WHERE id = $1 AND user_id = $2 AND debt_connected`, txID, userID); err != nil {
+		return fmt.Errorf("disconnect debt tx: %w", err)
 	}
-	return shared.DebtKey(t.RepayContactID, *t.RepayPersonName)
+	return nil
 }
 
-// checkLinkedEdit — the edit / delete gate for a non-transfer row: a debt entry's wallet side and a
-// repayment are system-category rows the author may still edit (amount, date, wallet, text, tags;
-// never the category); any other system row is read-only.
+// checkLinkedEdit — the edit / delete gate for a non-transfer row: a person-book entry's
+// transaction (debt or repayment) is a system-category row the author may still edit (amount, date,
+// wallet, text, tags; never the category); any other system row is read-only.
 func (s *Service) checkLinkedEdit(ctx context.Context, userID uuid.UUID, current *Transaction, req UpdateRequest, deleting bool) error {
-	switch {
-	case current.SourcePersonalDebtID != nil:
+	if current.SourcePersonalDebtID != nil {
 		return checkDebtTxEdit(userID, current, req, deleting)
-	case current.RepayPersonName != nil:
-		if current.UserID != userID {
-			return ErrDebtTxAuthorOnly
-		}
-		if _, ok := req.CategoryIDChange(); ok && !deleting {
-			return ErrSystemTransactionImmutable
-		}
-		return nil
 	}
 	return s.checkNotSystemRow(ctx, current)
 }
@@ -280,7 +268,7 @@ func (s *Service) DeleteInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUI
 	if current.Type == TypeTransfer {
 		return s.deleteTransferInTx(ctx, tx, userID, current)
 	}
-	if current.SourcePersonalDebtID == nil && current.RepayPersonName == nil {
+	if current.SourcePersonalDebtID == nil {
 		if err := s.checkNotSystemRow(ctx, current); err != nil {
 			return nil, err
 		}

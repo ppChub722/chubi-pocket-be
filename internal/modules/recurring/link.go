@@ -30,6 +30,7 @@ type LinkResult struct {
 	TransactionAmount float64                `json:"transaction_amount"`
 	AccountBalances   []shared.WalletBalance `json:"account_balances"`
 	Setting           *Recurring             `json:"setting"`
+	Effects           shared.Effects         `json:"effects"`
 }
 
 // Link — the old call by item id (a stored row): it becomes LinkOcc at the row's slot.
@@ -65,9 +66,6 @@ func (s *Service) linkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 	r, o, err := s.occOf(ctx, tx, userID, ruleID, slot, tz, byRow)
 	if err != nil {
 		return nil, err
-	}
-	if o.status == StatusSkipped {
-		return nil, ErrInvalidTransition
 	}
 	if draftType(o.draft) == typeSaving { // a saving is recorded by confirming, never by a transaction
 		return nil, ErrValidation
@@ -132,7 +130,8 @@ func (s *Service) linkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 		row.PendingID = nil
 	}
 	now := time.Now()
-	row.TransactionID, row.AutoCreatedAt, row.Archived = &req.TransactionID, nil, false
+	// the transaction fills it: a skip / paid mark goes (0.4.1-1 R4)
+	row.TransactionID, row.AutoCreatedAt, row.Archived, row.ClearedAt = &req.TransactionID, nil, false, nil
 	if row.ProducedAt == nil {
 		row.ProducedAt = &now
 	}
@@ -166,6 +165,7 @@ func (s *Service) linkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
 		return nil, err
 	}
+	out.Effects = s.effectsOf(ctx, userID, []Item{out.Item}, nil, nil, out.AccountBalances)
 	return out, nil
 }
 
@@ -183,8 +183,9 @@ func (h *Handler) Link(c *gin.Context) {
 }
 
 type UnlinkResult struct {
-	Item    Item       `json:"item"`
-	Setting *Recurring `json:"setting"`
+	Item    Item           `json:"item"`
+	Setting *Recurring     `json:"setting"`
+	Effects shared.Effects `json:"effects"`
 }
 
 // Unlink — the old call by item id.
@@ -224,6 +225,7 @@ func (s *Service) unlinkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot 
 	if err != nil {
 		return nil, err
 	}
+	let := *row.TransactionID // the transaction it lets go (it stays, a plain one)
 	if _, err := s.release(ctx, tx, row); err != nil {
 		return nil, err
 	}
@@ -234,7 +236,8 @@ func (s *Service) unlinkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot 
 	if err != nil {
 		return nil, err
 	}
-	return &UnlinkResult{Item: *it, Setting: s.settingOf(ctx, userID, ruleOf(it))}, nil
+	return &UnlinkResult{Item: *it, Setting: s.settingOf(ctx, userID, ruleOf(it)),
+		Effects: s.effectsOf(ctx, userID, []Item{*it}, []uuid.UUID{let}, nil, nil)}, nil
 }
 
 func (h *Handler) Unlink(c *gin.Context) {

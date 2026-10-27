@@ -79,7 +79,7 @@ paths:
         - { name: tag_id, in: query, description: 'Repeatable; rows having ANY of these tags.', schema: { type: array, items: { $ref: '#/components/schemas/Uuid' } }, style: form, explode: true }
         - { name: sort, in: query, schema: { type: string, enum: [date_desc, date_asc, amount_desc, amount_asc], default: date_desc } }
         - { name: can_join_event, in: query, description: 'true = only rows I may pull into an event (the event "add existing bills" picker): mine, expense / income, not in an event, not a debt entry or system row, no split labelled paid.', schema: { type: boolean } }
-        - { name: counterparty_key, in: query, description: 'Only the money of this debt person: the wallet transactions of their debts, the bills split with them, the bills they paid or received for me (paid_by, incl. a partner''s split mirrored into my book), the transactions linked to their debts (0.4.1-0), AND their repayment transactions (repayment_person).', schema: { $ref: '#/components/schemas/PersonKey' } }
+        - { name: counterparty_key, in: query, description: 'Only the money of this debt person: the wallet transactions of their debts, the bills split with them, the bills they paid or received for me (paid_by, incl. a partner''s split mirrored into my book), and the transactions of their repayments (0.4.1-1: every person-book row''s transaction, `counterparty.key` = this key).', schema: { $ref: '#/components/schemas/PersonKey' } }
       responses:
         '200':
           description: 'One page of rows plus totals over the whole filtered set.'
@@ -153,7 +153,7 @@ paths:
       summary: Edit a transaction
       description: |
         Partial body; a key present with `null` clears the field. `tag_ids` (when present) REPLACES the tag set. Returns a `TransactionWriteResult` (the edited row, both rows for a transfer, and the touched wallets' balances; moving a row to another wallet touches two).
-        `also_update_link` (the app asks at save): when the row is linked — an event bill made from it (`event_bill.linked`) or a recurring item (`recurring_item`) — the same change goes to the other side too; without it only this row changes (no notification either way).
+        `also_update_link` (the app asks at save): when the row is an event bill's origin (`event_bill.linked`), the same change goes to the bill too; without it only this row changes (no notification either way). A recurring occurrence (`recurring_item`) is never asked about (0.4.1-1 R1): the occurrence it fills reads every value from this row, so an edit shows there at once.
         `paid_by` (0.4.0-3): see UpdateTransactionRequest.paid_by; the response's `person_balance` is the paid-by person's new balance (or the old person's when it was removed). Errors: 400 PAID_BY_EXPENSE_ONLY / PAID_BY_EXCEEDS_AMOUNT / LINK_MODE_CONFLICT, 409 PAID_BY_LOCKED (a partner-mirrored row's money).
         **Link-mode switch (0.4.0-3 B3)**: `link_mode` (personal | split | paid | event) with that mode's data (`splits` / `paid_by` / `event {project_id, payer?, members?}`) switches how the bill is shared in ONE call: the old mode's data goes first (an origin's event bill is removed / a copy unlinked; split debts deleted, linked partners get split_changed removed; the paid-by debt deleted), then the new one is written. Into an event: I paid → the row becomes the bill; someone else paid → the row becomes my share with no wallet. Repayments are never touched. `person_balances` lists every person whose balance moved. Author only (403 SPLITS_AUTHOR_ONLY); not on a debt's wallet side or a repayment (400 SYSTEM_TRANSACTION_IMMUTABLE). Errors: 400 LINK_MODE_INPUT (the new mode without its data), LINK_MODE_CONFLICT (another mode's data sent), SPLITS_EXCEED_AMOUNT. Without link_mode, `splits` edits a split row (LINK_MODE_CONFLICT on a paid / event row) and `event` is refused.
         **`?preview=true`**: a dry run. The whole edit runs and is rolled back; the answer is `TransactionPreview` (the row as it would be, every touched person's balance before / after, every touched wallet's balance before / after). Use it for the confirm dialog of a mode switch. Nothing is saved, no notification goes out.
@@ -186,11 +186,10 @@ paths:
       summary: Delete a transaction
       description: |
         Returns the wallet balances after the delete so the FE patches instead of refetching accounts.
-        A row recorded for a recurring occurrence (`recurring_item`) always releases it: the occurrence goes back to due / upcoming (or paid when it was marked paid first), and an auto-created one is never re-created. The app asks "ลบรายการอย่างเดียว | ลบและข้ามงวดนี้": `skip_occurrence=true` stores the occurrence as skipped in the same DB transaction. An event bill row (`event_bill.linked`) asks "ลบรายการที่ผูกไว้ด้วยไหม": `also_delete_link=true` deletes the event bill made from it too (only when I may edit the event: an active non-viewer member of an event that is not cancelled / archived); without it the bill stays, unlinked. A debt entry's transaction always takes its entry along (one record).
+        A row that fills a recurring occurrence (`recurring_item`) always SKIPS it, in the same DB transaction, with nothing to ask (0.4.1-1 R2): the occurrence keeps the row's last values (amount, wallet, category, tags, description, note, date) and turns skipped; un-skipping it brings it back due with those values. Every path that deletes a transaction does this (a debt's, an event bill's, a split's). The answer's `recurring_item_id` is that occurrence and `effects.slots` holds it. `skip_occurrence` is gone (ignored when sent). An event bill row (`event_bill.linked`) asks "ลบรายการที่ผูกไว้ด้วยไหม": `also_delete_link=true` deletes the event bill made from it too (only when I may edit the event: an active non-viewer member of an event that is not cancelled / archived); without it the bill stays, unlinked. A person-book entry's transaction (debt or repayment, `counterparty`) leaves its entry behind, ledger-only (0.4.1-1 D1: deleting my tx = disconnecting it; the person's balance doesn't move); a split bill's split debts go with it (D8). The answer's `effects` lists all of it.
       operationId: deleteTransaction
       parameters:
         - { name: also_delete_link, in: query, description: 'Event bills: delete the bill made from it too.', schema: { type: boolean } }
-        - { name: skip_occurrence, in: query, description: 'A recorded recurring occurrence: skip it (else it goes back to due / upcoming).', schema: { type: boolean } }
       responses:
         '200':
           description: 'Deleted.'
@@ -609,7 +608,7 @@ paths:
         ],
         "summary": "Edit a category",
         "operationId": "updateCategory",
-        "description": "Returns the detail (counts, fee flag).",
+        "description": "Returns the detail (counts, fee flag). 0.4.1-1 D6: a system category (is_system) keeps its name and include_in_report: a different name / include_in_report → 400 SYSTEM_CATEGORY_IMMUTABLE (sending the current values is fine); icon_code, description and note stay editable. It stays a root and can't be deleted (as before).",
         "requestBody": {
           "required": true,
           "content": {
@@ -3521,6 +3520,87 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /event-bills:
+    post:
+      tags: [Events]
+      summary: Save a new event bill + my books in ONE call ("ลงบัญชีของฉัน")
+      operationId: bookEventBill
+      description: |
+        0.4.1-1 E8. The event bill sheet's save, and the quick-create อีเวนต์ tab: the bill (or payback), the payback rows of the people marked "คืนแล้ว", and every part of MY book, all in ONE DB transaction (nothing is half-saved; it replaces addBills / createProjectTransaction + resolveProjectPeople + my-books + debt entries + repayments + transactions chained by the app). `project_id` = an existing event, or `new_event` = make the event first (quick create).
+        **What goes into my book** (`my_books.on`; the bill's people are resolved / added like AddBillsRequest's payer / members):
+        - **I paid** (payer = me): `tx` = my transaction for the WHOLE bill from `my_books.account_id` (the bill's origin: event_bill.linked); `debt` = each other member with a share who is not `paid_back` owes me their share (a debt linked to the bill). A member `paid_back` ("คืนแล้ว"): a payback row on the board (them → me) and, with `debt`, a debt + an immediate repayment received into `my_books.account_id` (no wallet = a person-book repayment without a transaction): their balance stays 0, my wallet is right.
+        - **Someone else paid** (payer = X) and I have a share S: not paid back → `tx` = my share S with NO wallet ("จ่ายโดย X": `account_id` is ignored) and `debt` = I owe X S. I am `paid_back` → `tx` = my share S from `my_books.account_id`, NO debt, and a payback row (me → X) on the board.
+        - **Payback** (from → to, me one of them): `debt` = the debt it clears (I owe / they owe, linked to the row); `tx` = the repayment (paid / received) from / into `my_books.account_id`. `debt` null / absent = the server decides: true unless my book already holds THIS event's debt with that person (my debts linked to its bills with them, minus repayments linked to it, cover the amount).
+        - Tags: `bill.tag_ids` = event tags; absent and I paid → my tx's personal tags become event tags by name (as addBills). `my_books.tag_ids` = my personal tags on my transaction.
+        - `my_books.on` with no part of the bill being mine (not payer, no share, not in the payback): 422 NO_SHARE_TO_COPY.
+        **`?preview=true`**: a dry run (rolled back): `EventBillBookPreview`, every person whose balance would move (before / after / flipped) and every wallet (before / after), plus what `debt` would default to. The sheet's before → after lines come from it; nothing is saved, no notification goes out.
+        Notifications as the old calls: a linked payer gets project_tx_recorded_for_you; linked people added get project_added.
+        Errors: 400 VALIDATION_ERROR / MEMBER_NOT_IN_PROJECT / SPLITS_EXCEED_AMOUNT / TAG_NOT_FOUND / CONTACT_NOT_FOUND / BAD_PAYBACK / ACCOUNT_NOT_FOUND / INVALID_CATEGORY, 403 FORBIDDEN_ROLE, 404 NOT_FOUND, 409 PROJECT_LOCKED / ACCOUNT_ARCHIVED, 422 NO_SHARE_TO_COPY.
+      parameters:
+        - { name: preview, in: query, description: 'true = dry run (EventBillBookPreview), nothing saved.', schema: { type: boolean } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EventBillBookRequest' }
+      responses:
+        '201':
+          description: 'The patch (row = the bill), what my book holds of it now, the payback rows made, the effects.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventBillBookResult' }
+        '200':
+          description: 'preview=true: the dry run.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventBillBookPreview' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: '409 PROJECT_LOCKED / ACCOUNT_ARCHIVED.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '422': { description: '422 NO_SHARE_TO_COPY.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+      x-breaking: 'New (0.4.1-1 E8).'
+      x-used-by:
+        - { page: event-detail, calls: 1 }
+        - { page: quick-create-sheet, calls: 1 }
+  /event-bills/{pt_id}:
+    parameters:
+      - { name: pt_id, in: path, required: true, schema: { $ref: '#/components/schemas/Uuid' } }
+    put:
+      tags: [Events]
+      summary: Edit an event bill + my books in ONE call
+      operationId: rebookEventBill
+      description: |
+        0.4.1-1 E8, the bill sheet on an existing bill (a parent row; 409 PT_IS_CHILD). `bill` present = the bill is edited (as updateProjectTransaction: `members` = the whole new share list, the payer stays: 400 PAYER_FIXED; the split rows are updated IN PLACE, so my copy pointing at my split row keeps its link, B4). `bill` absent = only my book changes (the sheet's "ลงบัญชี" on a bill someone else recorded).
+        `my_books` = what my book should hold of it now: a part that is linked and no longer wanted is UNLINKED (its rows stay in my book, remembered); a part wanted and not linked takes its remembered rows back, else is made as on bookEventBill. I paid a bill someone else recorded → my new transaction becomes the bill's origin (the whole bill, E6), not a copy. `members[].paid_back` is the tick as it should be now (BoardSplit.paid_back shows it): newly ticked → a payback row made for this bill (+ my repayment, as on create); un-ticked → the payback row made for it is removed with my repayment of it (and its wallet transaction), in the same DB transaction (effects: removed_bill_ids, removed_debt_ids, removed_transaction_ids); a ticked member whose share changed gets the row made again at the new share.
+        `apply_to_my_tx` (as updateProjectTransaction): my linked transaction takes the bill after the edit; without it `my_transaction` shows in_sync / differences. Others with a linked transaction get project_tx_changed.
+        `?preview=true` as on create. Errors as create + 400 PAYER_FIXED, 409 PT_IS_CHILD.
+      parameters:
+        - { name: preview, in: query, description: 'true = dry run (EventBillBookPreview), nothing saved.', schema: { type: boolean } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EventBillRebookRequest' }
+      responses:
+        '200':
+          description: 'As bookEventBill (+ my_transaction when the bill was edited).'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: '#/components/schemas/EventBillBookResult' }
+                  - { $ref: '#/components/schemas/EventBillBookPreview' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: '409 PROJECT_LOCKED / PT_IS_CHILD / ACCOUNT_ARCHIVED.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '422': { description: '422 NO_SHARE_TO_COPY.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+      x-breaking: 'New (0.4.1-1 E8).'
+      x-used-by:
+        - { page: event-detail, calls: 1 }
   /projects/{id}/settle:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
@@ -3849,7 +3929,7 @@ paths:
       summary: Create a recurring setting
       operationId: createRecurring
       description: |
-        Writes the setting only: its occurrences are COMPUTED from the rule on every read (0.4.0-2), a row is stored only when an occurrence is edited, recorded, paid or skipped. `tracked_from` = today: earlier occurrences count as paid (never overdue). A set end is at most 2 years after the start (400 END_TOO_FAR). `auto_create` needs a fixed amount and a wallet (400 AUTO_CREATE_NEEDS_AMOUNT / AUTO_CREATE_NEEDS_WALLET). Errors: 400 VALIDATION_ERROR / INVALID_RULE / END_TOO_FAR / ACCOUNT_NOT_FOUND / INVALID_CATEGORY / TAG_NOT_FOUND.
+        Writes the setting only: its occurrences are COMPUTED from the rule on every read (0.4.0-2), a row is stored only when an occurrence is edited, recorded, paid or skipped. `tracked_from` = today: earlier occurrences count as paid (never overdue). A set end is at most 2 years after the start (400 END_TOO_FAR). `auto_create` (0.4.1-1 R12) takes any setting, amount 0 or no wallet too: it never waits and never fails (see Recurring.auto_create); AUTO_CREATE_NEEDS_AMOUNT / AUTO_CREATE_NEEDS_WALLET are gone. **Overdue limit (0.4.1-1 R7):** a setting holds at most 3 due occurrences; see Recurring.pause_reason. Errors: 400 VALIDATION_ERROR / INVALID_RULE / END_TOO_FAR / ACCOUNT_NOT_FOUND / INVALID_CATEGORY / TAG_NOT_FOUND.
         kind saving (ออมเงิน, replaces the goal auto-saves): 400 SAVING_NEEDS_WALLET without account_id, 400 WALLET_NOT_TRACKED for a wallet that does not track its balance, 404 NOT_FOUND for an unknown goal_id, 409 GOAL_NOT_ACTIVE for a closed / archived goal. Closing or archiving the goal pauses its saving settings (reopening does not resume them; resuming answers 409 GOAL_NOT_ACTIVE while the goal is not active); deleting the goal deletes them.
       requestBody:
         required: true
@@ -3876,7 +3956,7 @@ paths:
       tags: [Recurring]
       summary: Recurring setting page (one call)
       operationId: getRecurring
-      description: 'Reads only (the due check runs once a day from POST /sync and after a recurring write, 0.4.0-4). The setting + the first page of its history (`items`: recorded / paid / skipped / due, newest first) + the first page of what is coming (`upcoming`: a no-end setting = a 12-month window, see listRecurringRuleItems) + `stats`. `tx_update` is null here (it answers an edit with also_update_tx).'
+      description: 'Reads only (the due check runs once a day from POST /sync and after a recurring write, 0.4.0-4). The setting + the first page of its history (`items`: recorded / paid / skipped / due, newest first) + the first page of what is coming (`upcoming`: a no-end setting = a 12-month window, see listRecurringRuleItems) + `stats`.'
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
@@ -3898,7 +3978,7 @@ paths:
       summary: Edit a recurring setting
       operationId: updateRecurring
       description: |
-        Partial. The rule changes; every occurrence that is still only computed follows it (a rule / start / end change moves them), a stored (edited) occurrence keeps its values. `also_update_tx` pushes a change of name / category / wallet / tags / note to the transactions already recorded from the setting (never their date or amount; a name only where the tx description is still the old automatic name); the result is `tx_update`, and `recorded_tx_count` is the N for the app's question. `auto_create` on / off (on: only occurrences that come due from today on are recorded; 400 AUTO_CREATE_NEEDS_AMOUNT / AUTO_CREATE_NEEDS_WALLET, also when an edit clears the amount / wallet). Errors as create, 404 NOT_FOUND.
+        Partial. The rule changes; every occurrence that is still only computed follows it (a rule / start / end change moves them), a stored (edited) occurrence keeps its values. **A filled occurrence (a transaction / saving entry / paid) is never touched (0.4.1-1 R6):** `also_update_tx`, `scope` and `also_update_link` are gone (ignored when sent) and the answer has no `tx_update`; to change a recorded transaction, edit the transaction. `auto_create` on / off (on: only occurrences that come due from today on are recorded; any amount, any wallet, R12). Errors as create, 404 NOT_FOUND.
       requestBody:
         required: true
         content:
@@ -3968,7 +4048,7 @@ paths:
       tags: [Recurring]
       summary: Pause (its dates produce nothing)
       operationId: pauseRecurring
-      description: 'While paused the setting has no occurrences: nothing comes due, nothing is listed or auto-created (stored rows stay). 409 INVALID_TRANSITION unless active.'
+      description: 'While paused the setting makes no new occurrences: nothing new comes due, nothing is auto-created. Its stored occurrences stay as they are; stored DUE ones stay due and listed (0.4.1-1 R7: ต้องจัดการ shows them). pause_reason = manual. 409 INVALID_TRANSITION unless active.'
       responses:
         '200': { description: The setting page., content: { application/json: { schema: { $ref: '#/components/schemas/RecurringDetail' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -3984,7 +4064,9 @@ paths:
       tags: [Recurring]
       summary: Resume
       operationId: resumeRecurring
-      description: 'Occurrences go on from today. What was due before the pause stays due; the occurrences that fell in the pause (from the day it was paused up to yesterday) are stored as SKIPPED (un-skip one to bring it back); `tracked_from` is untouched. The due notice and auto-create start from today. 409 INVALID_TRANSITION unless paused.'
+      description: |
+        0.4.1-1 R8 / R9: the setting goes on from the CURRENT period: its next occurrence is the one whose period holds today (a monthly one on the 1st, resumed on 20 Nov → 1 Nov, due now). The occurrences between the pause and the current period are NEVER made: not stored, not listed, not counted, not skipped (a month really paid in between is added by hand). What was due before the pause stays due. Any reason (manual, overdue_limit, goal_inactive) resumes the same way; a setting that still holds 3 due occurrences turns inactive again at its next due (R7).
+        An installment ending by COUNT loses no number: the next one is the next number, dated in the current period, and the end moves later by the gap (10 installments, 1–3 paid by Mar, resumed in Nov → no. 4 in Nov, no. 10 in May). A setting ending by DATE keeps its end date. `tracked_from` is untouched; the due notice and auto-create start from today. 409 INVALID_TRANSITION unless paused; 409 GOAL_NOT_ACTIVE (saving) while its goal is not active.
       responses:
         '200': { description: The setting page., content: { application/json: { schema: { $ref: '#/components/schemas/RecurringDetail' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -4105,7 +4187,7 @@ paths:
       tags: [Recurring]
       summary: Mark all paid ("จ่ายแล้วทั้งหมด")
       operationId: markRecurringOccurrencesPaidReady
-      description: 'Every due occurrence of the setting becomes paid without a transaction.'
+      description: 'Every due occurrence of the setting becomes paid without a transaction, at its own planned amount (0.4.1-1 R5: paid without a transaction keeps an amount). One with no amount stays due and is listed in `left_out` as needs_amount.'
       responses:
         '200':
           description: The cleared occurrences.
@@ -4136,7 +4218,7 @@ paths:
       tags: [Recurring]
       summary: Confirm / skip / mark paid the picked occurrences ("ยืนยัน / ข้าม / จ่ายแล้วที่เลือก")
       operationId: settleRecurringOccurrences
-      description: 'One action on 1–100 picked occurrences of any settings, in one DB transaction with a savepoint per occurrence: one that can''t take the action is listed in `left_out` and stays as it was; the others go through. confirm records a transaction dated the occurrence date, with the occurrence''s amount or the `amount` sent (an occurrence with neither is left out as needs_amount: it can only be skipped or marked paid). skip and mark_paid take any open occurrence, amount or not. A recorded one is left out as already_recorded.'
+      description: 'One action on 1–100 picked occurrences of any settings, in one DB transaction with a savepoint per occurrence: one that can''t take the action is listed in `left_out` and stays as it was; the others go through. confirm records a transaction dated the occurrence date, with the occurrence''s amount or the `amount` sent (an occurrence with neither is left out as needs_amount). mark_paid (0.4.1-1 R5) does the same with the amount: the occurrence''s planned amount or the `amount` sent, else left out as needs_amount. skip takes any open occurrence. confirm and mark_paid also take a SKIPPED occurrence (R4). A filled one (transaction / saving entry / paid) is left out as already_recorded.'
       requestBody:
         required: true
         content:
@@ -4159,7 +4241,7 @@ paths:
       tags: [Recurring]
       summary: Edit one occurrence ("แก้เฉพาะงวดนี้")
       operationId: updateRecurringOccurrence
-      description: 'Presence-based: a key that is sent overrides that value on this occurrence only (it is stored, edited), null clears the override; the rule is untouched. `date` moves it (the slot stays). With `also_update_link` a recorded occurrence''s transaction gets the same change. 404 when the slot is not an occurrence of the setting.'
+      description: 'Presence-based: a key that is sent overrides that value on this occurrence only (it is stored, edited), null clears the override; the rule is untouched. `date` moves it (the slot stays). Only an OPEN occurrence (upcoming / due / skipped) takes an edit: a filled one reads its transaction (edit the transaction) and answers 409 ALREADY_RECORDED (0.4.1-1 R1; `also_update_link` is gone). A paid one (no transaction) may change its amount. 404 when the slot is not an occurrence of the setting.'
       requestBody:
         required: true
         content:
@@ -4174,6 +4256,7 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: '409 ALREADY_RECORDED (a filled occurrence, 0.4.1-1).', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
       x-breaking: 'New (0.4.0-2).'
   /recurring/{id}/occurrences/{slot}/confirm:
     parameters:
@@ -4183,7 +4266,7 @@ paths:
       tags: [Recurring]
       summary: Confirm one occurrence ("ยืนยัน")
       operationId: confirmRecurringOccurrence
-      description: 'Records the transaction now, dated the occurrence date unless `date` is sent; the other keys override the values first (the description defaults to the occurrence name). 400 AMOUNT_REQUIRED when it has no amount, 409 ALREADY_RECORDED, 404 when the slot is not an occurrence. A saving occurrence makes a saving entry instead (from the wallet into the goal / unallocated pot, source recurring, the note defaults to the occurrence name): `transaction` is null, `item.saving_entry_id` is set; 400 SAVING_NEEDS_WALLET / WALLET_NOT_TRACKED, 409 GOAL_NOT_ACTIVE.'
+      description: 'Records the transaction now, dated the occurrence date unless `date` is sent; the other keys override the values first (the description defaults to the occurrence name). A SKIPPED occurrence can be confirmed straight away (0.4.1-1 R4), with its last values. 400 AMOUNT_REQUIRED when it has no amount, 409 ALREADY_RECORDED, 404 when the slot is not an occurrence. A saving occurrence makes a saving entry instead (from the wallet into the goal / unallocated pot, source recurring, the note defaults to the occurrence name): `transaction` is null, `item.saving_entry_id` is set; 400 SAVING_NEEDS_WALLET / WALLET_NOT_TRACKED, 409 GOAL_NOT_ACTIVE.'
       requestBody:
         required: false
         content:
@@ -4208,7 +4291,7 @@ paths:
       tags: [Recurring]
       summary: Skip one occurrence ("ข้าม")
       operationId: skipRecurringOccurrence
-      description: 'Stores it as skipped. A recorded one keeps its transaction (only the link goes) unless `delete_tx` (the transaction is deleted first; the balances come back).'
+      description: 'Stores it as skipped (it shows no amount and counts nowhere). Only an open one (upcoming / due) or a paid one: a filled occurrence answers 409 ALREADY_RECORDED; unlink its transaction first, or delete the transaction (that skips it, R2). `delete_tx` is gone (0.4.1-1, owner: "skip a filled slot = disconnect the tx first").'
       requestBody:
         required: false
         content:
@@ -4223,6 +4306,7 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: '409 ALREADY_RECORDED (a filled occurrence, 0.4.1-1).', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
       x-breaking: 'New (0.4.0-2).'
   /recurring/{id}/occurrences/{slot}/restore:
     parameters:
@@ -4232,7 +4316,7 @@ paths:
       tags: [Recurring]
       summary: Un-skip one occurrence ("ยกเลิกการข้าม")
       operationId: restoreRecurringOccurrence
-      description: 'A skipped occurrence goes back to due / upcoming by its date.'
+      description: 'A skipped occurrence goes back to due / upcoming by its date, with its last known values: those of the transaction that filled it when one was deleted (R2), else its own edit, else the rule.'
       responses:
         '200':
           description: The occurrence.
@@ -4251,7 +4335,13 @@ paths:
       tags: [Recurring]
       summary: Mark one occurrence paid ("จ่ายแล้ว", no transaction)
       operationId: markRecurringOccurrencePaid
-      description: 'Settled without a transaction (someone else paid, paid outside the app). A transaction can still be linked to it later.'
+      description: |
+        Settled without a transaction (someone else paid, "แม่จ่ายให้", paid outside the app). 0.4.1-1 R5: it keeps an AMOUNT, the only time the occurrence stores its own: `amount` sent, else its planned amount; 400 AMOUNT_REQUIRED when it has neither. That amount counts only in the setting's own totals (stats, chain, progress), never in wallets, budgets or reports. A skipped occurrence may be marked paid straight away (R4). A filled one answers 409 ALREADY_RECORDED. A transaction can still be linked to it later (it then fills it; the paid mark goes).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecurringMarkPaidRequest' }
       responses:
         '200':
           description: The occurrence (paid).
@@ -4261,6 +4351,7 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: '409 ALREADY_RECORDED (a filled occurrence, 0.4.1-1).', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
       x-breaking: 'New (0.4.0-2).'
   /recurring/{id}/occurrences/{slot}/unmark-paid:
     parameters:
@@ -4289,7 +4380,7 @@ paths:
       tags: [Recurring]
       summary: Link an existing transaction to one occurrence
       operationId: linkRecurringOccurrence
-      description: 'One occurrence ↔ one transaction; the transaction keeps its own date and amount (the occurrence shows the transaction''s amount). The type must match the setting''s (400 VALIDATION_ERROR; a saving occurrence never takes a transaction: 400 VALIDATION_ERROR). 409 ITEM_ALREADY_LINKED when the occurrence holds another transaction (`details.transaction`) or this transaction is on another occurrence (`details.other {rule_id, slot}`), unless `replace: true` (one DB transaction: the other side lets go, its transaction stays). `amount_differs` → the app asks "อัปเดตยอดรายการประจำด้วยไหม".'
+      description: 'One occurrence ↔ one transaction; the transaction keeps its own date and amount (the occurrence shows the transaction''s amount). The type must match the setting''s (400 VALIDATION_ERROR; a saving occurrence never takes a transaction: 400 VALIDATION_ERROR). A SKIPPED or PAID occurrence takes one straight away (0.4.1-1 R4): it becomes done, the skip / paid mark goes. 409 ITEM_ALREADY_LINKED when the occurrence holds another transaction (`details.transaction`) or this transaction is on another occurrence (`details.other {rule_id, slot}`), unless `replace: true` (one DB transaction: the other side lets go, its transaction stays). `amount_differs` → the app asks "อัปเดตยอดรายการประจำด้วยไหม".'
       requestBody:
         required: true
         content:
@@ -4314,7 +4405,7 @@ paths:
       tags: [Recurring]
       summary: Remove the transaction from one occurrence
       operationId: unlinkRecurringOccurrence
-      description: 'The transaction stays; the occurrence goes back to computed (due / upcoming), or to paid when it was marked paid first. 400 VALIDATION_ERROR when it has no transaction.'
+      description: 'The transaction stays, a plain transaction; the occurrence is empty again (due / upcoming by its date, with its plan: its own edit, else the rule). 400 VALIDATION_ERROR when it has no transaction.'
       responses:
         '200':
           description: 'The occurrence, open again.'
@@ -4397,7 +4488,7 @@ paths:
       summary: Edit a stored occurrence (by id)
       operationId: updateRecurringItem
       description: |
-        The by-id form of updateRecurringOccurrence for a STORED row: this occurrence only (`scope` other than this is ignored; edit the setting for the rest). With `also_update_link` its transaction gets the same change (balances move). Errors: 400 VALIDATION_ERROR, 404 NOT_FOUND.
+        The by-id form of updateRecurringOccurrence for a STORED row: this occurrence only (`scope` other than this is ignored; edit the setting for the rest). A filled row answers 409 ALREADY_RECORDED (edit its transaction; `also_update_link` is gone, 0.4.1-1 R1). Errors: 400 VALIDATION_ERROR, 404 NOT_FOUND.
       requestBody:
         required: true
         content:
@@ -4575,15 +4666,15 @@ paths:
       - { $ref: '#/components/parameters/PersonKeyPath' }
     post:
       tags: [Debts]
-      summary: Record a repayment (a transaction tied to the person)
+      summary: Record a repayment (a person-book row, transaction optional)
       operationId: createDebtRepayment
       description: |
-        "จ่ายคืนลี 400" / "รับคืนจาก chalee 82": creates ONE transaction: `pay` = expense in the system category Debt Paid (net +), `receive` = income in Debt Received (net −); both are out of reports. It is linked to the PERSON (not to a debt), shows `repayment_person` on the transaction, and moves the wallet like any transaction (`account_id` optional, as on POST /transactions).
-        The person: a `c:` key = that contact (400 CONTACT_NOT_FOUND if not the caller's); an `n:` key = a typed name (`person_name` = the shown spelling). `mark_paid_ids` labels debt entries of the SAME person paid (label only; 400 ENTRY_NOT_FOUND if one is not). `date` default = today.
-        Edit / delete the repayment through PUT / DELETE /transactions/{id} (the link stays; the balance follows). Returns 201 with the transaction, its statement line, the person's new balance, the touched wallet balance and `balance_change` (before → after).
+        "จ่ายคืนลี 400" / "รับคืนจาก chalee 82". **0.4.1-1 D3:** a repayment is a person-book row (`entry.kind` repayment): `pay` → direction paid (net +), `receive` → received (net −). It is tied to the PERSON, never to a debt. The transaction is optional, as on a debt: none = ledger-only ("paid outside the app": the balance moves, no wallet does); `create_transaction` true = a new transaction (pay = expense in DEBT_PAID, receive = income in DEBT_RECEIVED, out of reports; wallet optional); `link_transaction_id` = connect an existing one (its amount and date are used; its category becomes DEBT_PAID / DEBT_RECEIVED, the old one kept for a disconnect).
+        The person: a `c:` key = that contact (400 CONTACT_NOT_FOUND if not the caller's); an `n:` key = a typed name (`person_name` = the shown spelling). `mark_paid_ids` / `mark_all_paid` ("ปิดหนี้") label debts of the SAME person paid (label only; 400 ENTRY_NOT_FOUND if an id is not). `date` default = today.
+        Edit / delete the repayment with PUT / DELETE /personal-debts/{id} (or its transaction with PUT /transactions/{id}: synced). Returns 201 `DebtEntryWriteResult` (was DebtRepaymentResult): the entry, its statement line (`item`), its transaction (null = ledger-only), the person's new balance, the touched wallet balances, `balance_change` and `effects`.
         **Overpay** (0.4.0-3): allowed; the balance crosses 0 and `balance_change.flipped` is true (รอจ่าย 230, pay 300 → รอรับ 70).
         **`?preview=true`** (0.4.0-3, the quick create result box): the write runs and is rolled back → 200 `DebtPreview {preview, people: [PersonDelta], wallets: [WalletDelta]}`; same validation and errors.
-        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND / ENTRY_NOT_FOUND, 409 ACCOUNT_ARCHIVED.
+        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND / ENTRY_NOT_FOUND / LEDGER_ONLY_NO_WALLET / BILL_NOT_FOUND / TX_NOT_LINKABLE, 404 TRANSACTION_NOT_FOUND, 409 ACCOUNT_ARCHIVED / DEBT_TX_ALREADY_LINKED.
       parameters:
         - { name: preview, in: query, description: 'true = dry run (200 DebtPreview), nothing saved.', schema: { type: boolean } }
       requestBody:
@@ -4601,15 +4692,16 @@ paths:
           description: The repayment and everything the pages patch from it.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/DebtRepaymentResult' }
+              schema: { $ref: '#/components/schemas/DebtEntryWriteResult' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: '409 ACCOUNT_ARCHIVED.'
+          description: '409 ACCOUNT_ARCHIVED / DEBT_TX_ALREADY_LINKED.'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
-      x-breaking: "New (0.4.0-3): replaces recording a repayment as an opposite-direction entry via POST …/entries."
+      x-breaking: "0.4.1-1 D3: answers DebtEntryWriteResult (entry kind repayment) instead of DebtRepaymentResult; the repayment is a person-book row (transaction optional, no account_id = ledger-only unless create_transaction true); Transaction.repayment_person is gone (counterparty.kind repayment)."
       x-used-by:
         - { page: quick-create-sheet, calls: 1 }
         - { page: debt-person, calls: 1 }
@@ -4621,13 +4713,14 @@ paths:
       summary: A person's debt entries (filter / sort / page)
       operationId: listDebtEntries
       description: |
-        DEBT entries only (repayments are transactions: the person page statement and GET /transactions?counterparty_key show them). `q` matches description / note (case-insensitive). `direction` paid | received. `paid` true | false (the label). `money=true` = only entries with a wallet transaction (the "ประวัติการจ่าย" tab); `account_id` = only entries whose transaction sits on that wallet. `from` / `to` = entry date range (inclusive). `sort`: date_desc (default) | date_asc | amount_desc | amount_asc (ties: newest created first).
+        `kind` debt (default) | repayment | all (0.4.1-1 D3: repayments are person-book rows too). `q` matches description / note (case-insensitive). `direction` paid | received. `paid` true | false (the label). `money=true` = only entries with a wallet transaction (the "ประวัติการจ่าย" tab); `account_id` = only entries whose transaction sits on that wallet. `from` / `to` = entry date range (inclusive). `sort`: date_desc (default) | date_asc | amount_desc | amount_asc (ties: newest created first).
         Also feeds the "mark entries paid" list (`paid=false`). Unknown key → `{data: [], pagination}` with total 0 (a 400 only for a malformed key).
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PerPage' }
         - { name: q, in: query, schema: { type: string } }
         - { name: sort, in: query, schema: { type: string, enum: [date_desc, date_asc, amount_desc, amount_asc] } }
+        - { name: kind, in: query, schema: { type: string, enum: [debt, repayment, all], default: debt } }
         - { name: direction, in: query, schema: { type: string, enum: [paid, received] } }
         - { name: paid, in: query, schema: { type: boolean } }
         - { name: cycle, in: query, description: 'current = entries after the last time the balance with the person hit 0; earlier = the entries before it (older cycles). Omitted = all.', schema: { type: string, enum: [current, earlier] } }
@@ -4652,11 +4745,11 @@ paths:
       summary: Record a debt with a person
       operationId: createDebtEntry
       description: |
-        DEBTS only ("ลีจ่ายค่าข้าวให้ 60", "ยืมลี 500"); a repayment is POST …/repayments. Paid = I paid them (net + amount); received = they paid me (net − amount). With `account_id` the BE also writes the LINKED wallet transaction (it moves the wallet but NOT the person's balance) (paid = expense, received = income, system category Debt Paid / Debt Received, description / note copied) and `tag_ids` go on that transaction; without it the entry is ledger-only and `tag_ids` must be empty (400 TAGS_NEED_WALLET).
+        DEBTS only ("ให้ลียืม 500", "ยืมลี 500"); a repayment is POST …/repayments. Paid = I paid them (net + amount); received = they paid me (net − amount). The transaction side (0.4.1-1 D10, "บันทึกในรายการ"): none = ledger-only (default); `create_transaction` true (or an `account_id`) = a new transaction (it moves the wallet but NOT the person's balance; paid = expense in LOAN_GIVEN, received = income in LOAN_TAKEN (D5), out of reports; amount / date / description / note one value with the entry) with `tag_ids` on it; `link_transaction_id` = connect one of my existing transactions (as POST /personal-debts/{id}/link: its amount and date are used). Tags without a transaction → 400 LEDGER_ONLY_NO_WALLET.
         The person: a `c:` key = that contact (400 CONTACT_NOT_FOUND if not the caller's); an `n:` key = a typed name (`person_name` sets the shown spelling, default = the key's text as sent). `mark_paid_ids` labels those entries of the SAME person paid in the same call (400 ENTRY_NOT_FOUND if one is not).
         `date` default = today. Returns 201 with the entry, the person's new balance, the linked transaction (full row), the touched wallet balances and `balance_change` (before → after).
         **`?preview=true`** (0.4.0-3, the quick create result box, with or without a transaction): the write runs and is rolled back → 200 `DebtPreview`; same validation and errors.
-        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAGS_NEED_WALLET / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND / ENTRY_NOT_FOUND / BILL_NOT_FOUND.
+        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAGS_NEED_WALLET / LEDGER_ONLY_NO_WALLET / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND / ENTRY_NOT_FOUND / BILL_NOT_FOUND / TX_NOT_LINKABLE, 404 TRANSACTION_NOT_FOUND, 409 DEBT_TX_ALREADY_LINKED.
       parameters:
         - { name: preview, in: query, description: 'true = dry run (200 DebtPreview), nothing saved.', schema: { type: boolean } }
       requestBody:
@@ -4677,7 +4770,7 @@ paths:
               schema: { $ref: '#/components/schemas/DebtEntryWriteResult' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-      x-breaking: "New (replaces POST /personal-debts and POST /personal-debts/{id}/settle). 0.4.0-3: debts only; record repayments with POST …/repayments."
+      x-breaking: "New (replaces POST /personal-debts and POST /personal-debts/{id}/settle). 0.4.0-3: debts only; record repayments with POST …/repayments. 0.4.1-1: amount optional with link_transaction_id; the new transaction's category is LOAN_GIVEN / LOAN_TAKEN; the answer gains item + effects."
       x-used-by:
         - { page: quick-create-sheet, calls: 1 }
   /personal-debts/{id}:
@@ -4688,7 +4781,7 @@ paths:
       summary: Entry detail (the transaction detail page in debt mode)
       operationId: getDebtEntry
       description: |
-        Everything the tx-detail template needs in debt mode: the entry, the person's balance and — when the entry has a wallet transaction — that transaction as a full row (tags, account, flags). A ledger-only entry has `transaction: null` and renders from `entry`. Not the caller's / gone → 404 NOT_FOUND.
+        Everything the tx-detail template needs in debt mode, for a debt OR a repayment (0.4.1-1 D3; every statement line opens here): the entry, the person's balance and — when the entry has a transaction — that transaction as a full row (tags, account, flags). A ledger-only entry has `transaction: null` and renders from `entry`. Not the caller's / gone → 404 NOT_FOUND.
       responses:
         '200':
           description: The entry, page-ready.
@@ -4706,9 +4799,10 @@ paths:
       summary: Edit an entry (and its linked transaction)
       operationId: updateDebtEntry
       description: |
-        Partial; a key present with `null` clears description / note, and `account_id: null` turns the entry ledger-only (its transaction is deleted, the wallet balance comes back). Setting `account_id` on a ledger-only entry creates the linked transaction; changing it moves the transaction. Amount / date / direction / description / note edits are written to the linked transaction too (one record). `tag_ids` replace the transaction's tags (needs a wallet: 400 TAGS_NEED_WALLET). `key` moves a manual entry to another person (`person_name` as in create); the response then also carries `previous_person_balance`.
-        `paid` is the label only. A split-sourced entry (`entry.source` not null) accepts only description / note / paid: anything else → 409 ENTRY_MANAGED_BY_SOURCE.
-        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAGS_NEED_WALLET / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND, 404 NOT_FOUND, 409 ENTRY_MANAGED_BY_SOURCE.
+        Debts and repayments (0.4.1-1 D3). Partial; a key present with `null` clears description / note, and `account_id: null` (or `create_transaction: false`) turns the entry ledger-only (its transaction is deleted, the wallet balance comes back). Setting `account_id` / `create_transaction: true` on a ledger-only entry creates its transaction; changing `account_id` moves it. Amount / date / direction / description / note are one value with the transaction (written to both, 0.4.1-1 D1). `tag_ids` replace the transaction's tags. `key` moves a manual entry to another person (`person_name` as in create); the response then also carries `previous_person_balance`.
+        An entry with a CONNECTED (existing) transaction: account_id / create_transaction / tag_ids → 400 VALIDATION_ERROR (edit the transaction, or disconnect first); direction can't change (the transaction's type would flip): 400 VALIDATION_ERROR.
+        `paid` is the label only (debts; a repayment refuses paid / due_date: 400 VALIDATION_ERROR). A split-sourced entry (`entry.source` not null, not event) accepts only description / note / paid: anything else → 409 ENTRY_MANAGED_BY_SOURCE.
+        Errors: 400 VALIDATION_ERROR / INVALID_PERSON_KEY / CONTACT_NOT_FOUND / TAGS_NEED_WALLET / LEDGER_ONLY_NO_WALLET / TAG_NOT_FOUND / ACCOUNT_NOT_FOUND, 404 NOT_FOUND, 409 ENTRY_MANAGED_BY_SOURCE.
       requestBody:
         required: true
         content:
@@ -4737,7 +4831,7 @@ paths:
       summary: Delete an entry (and its linked transaction)
       operationId: deleteDebtEntry
       description: |
-        Hard delete. An entry with a wallet transaction deletes BOTH (the balance comes back; the confirm modal names both). A split-sourced entry deletes the split from its bill (my_share grows; a linked partner gets split_changed "removed", like a split edit). A `partner` entry with my expense of it (source.id) deletes that expense too (no wallet). A `paid_by` entry is one record with its expense: 409 DEBT_MANAGED_BY_TX (delete / edit the transaction). 404 NOT_FOUND if not the caller's.
+        Hard delete, debts and repayments. An entry with a transaction made from it deletes BOTH (the balance comes back; the confirm modal names both); a CONNECTED (existing) transaction stays, disconnected, with its old category back (0.4.1-1 D2). A split-sourced entry deletes the split from its bill (my_share grows; a linked partner gets split_changed "removed", like a split edit). A `partner` entry with my expense of it (source.id) deletes that expense too (no wallet). A `paid_by` entry is one record with its expense: 409 DEBT_MANAGED_BY_TX (delete / edit the transaction). 404 NOT_FOUND if not the caller's.
       responses:
         '200':
           description: What went and the new balances.
@@ -4760,11 +4854,12 @@ paths:
       - { $ref: '#/components/parameters/IdPath' }
     post:
       tags: [Debts]
-      summary: Link an existing transaction to an entry ("บันทึกในรายการ")
+      summary: Connect an existing transaction to an entry ("ผูกกับรายการที่มีอยู่")
       operationId: linkDebtEntryTx
       description: |
-        0.4.0-4. A soft link (`entry.linked_transaction`): the transaction keeps its category, amount and wallet, and still counts in reports / budgets; the amounts may differ. Only a manual entry (`source` null) and one of my plain transactions of its direction (paid = expense, received = income; not a debt / repayment / event / paid-by / system row). One transaction links one entry. An entry's own transaction (`transaction`) is deleted: the linked one replaces it (its wallet is in `account_balances`). Linking again replaces the link.
-        Errors: 400 TX_NOT_LINKABLE, 404 NOT_FOUND / TRANSACTION_NOT_FOUND, 409 ENTRY_MANAGED_BY_SOURCE / DEBT_TX_ALREADY_LINKED.
+        0.4.1-1 D2 — ONE link kind (the 0.4.0-4 soft link is gone, migrated): the transaction becomes the entry's transaction (`entry.transaction`, connected true), connected AND synced. The entry (debt or repayment) takes the transaction's amount and date; description / note: the entry's when set, else the transaction's; afterwards amount, date, description and note are one value on both. The transaction's category becomes the entry's kind category (LOAN_GIVEN / LOAN_TAKEN / DEBT_PAID / DEBT_RECEIVED, out of reports); its old category is kept and comes back on a disconnect. Wallet and tags stay.
+        Only a manual entry (`source` null) with NO transaction (409 ENTRY_HAS_TRANSACTION: delete or disconnect it first), and one of my plain transactions of its direction (paid = expense, received = income; not a transfer, not another entry's, not in an event, not a split bill, no paid_by, not a system-category row, not filling a recurring slot: 400 TX_NOT_LINKABLE). One transaction, one entry (409 DEBT_TX_ALREADY_LINKED).
+        Errors: 400 TX_NOT_LINKABLE, 404 NOT_FOUND / TRANSACTION_NOT_FOUND, 409 ENTRY_MANAGED_BY_SOURCE / ENTRY_HAS_TRANSACTION / DEBT_TX_ALREADY_LINKED.
       requestBody:
         required: true
         content:
@@ -4784,10 +4879,11 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: 'ENTRY_MANAGED_BY_SOURCE / DEBT_TX_ALREADY_LINKED.'
+          description: 'ENTRY_MANAGED_BY_SOURCE / ENTRY_HAS_TRANSACTION / DEBT_TX_ALREADY_LINKED.'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: "0.4.1-1 D2: connect + sync (the entry takes the transaction's amount / date, the transaction takes the kind category); an entry that already has a transaction → 409 ENTRY_HAS_TRANSACTION (it used to be replaced); repayments too; entry.linked_transaction is gone (entry.transaction.connected)."
       x-used-by:
         - { page: tx-detail, calls: 1 }
   /personal-debts/{id}/unlink:
@@ -4795,19 +4891,52 @@ paths:
       - { $ref: '#/components/parameters/IdPath' }
     post:
       tags: [Debts]
-      summary: Drop an entry's linked transaction (the transaction stays)
+      summary: Disconnect an entry's connected transaction (the transaction stays)
       operationId: unlinkDebtEntryTx
-      description: 0.4.0-4. Clears `entry.linked_transaction`; the transaction is not touched. 404 NOT_FOUND if not the caller's.
+      description: |
+        0.4.1-1 D2. Only for a transaction connected later (`entry.transaction.connected` true): the transaction goes back to a plain row with its old category (none when that category is gone), keeping amount, date, wallet, tags and text; the entry stays, ledger-only (its amount unchanged, so the person's balance doesn't move). A transaction made from the entry can't be disconnected: 409 TX_NOT_DISCONNECTABLE (delete the transaction instead; the entry stays). No transaction → 409 TX_NOT_DISCONNECTABLE. 404 NOT_FOUND if not the caller's.
       responses:
         '200':
-          description: The entry without its link.
+          description: The entry without its transaction (`effects.transactions` has the plain transaction).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/DebtEntryWriteResult' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'TX_NOT_DISCONNECTABLE.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: "0.4.1-1 D2: disconnects entry.transaction (connected only) and restores its category; was: cleared the soft link."
       x-used-by:
         - { page: tx-detail, calls: 1 }
+  /personal-debts/{id}/disconnect:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Debts]
+      summary: Disconnect my copy of a linked debt (cross-user, my side only)
+      operationId: disconnectDebtPartner
+      description: |
+        0.4.1-1 D9. Either side of a linked pair (`entry.partner_linked` true: a split on my bill with a linked contact, their mirror in my book, or a paid-by pair) breaks the link between the two books ("ledger, not sync"). Both entries stay as they are (same amount) and become plain debts with that person, freely editable: the other side's bill edits / deletes no longer reach mine, no more split_changed either way, and pending split_changed notices about the pair are superseded. No reconnect (to link again, split the bill again).
+        My own transaction ⇄ entry link is NOT touched: a split on my bill stays a split of that bill (synced with it); a partner mirror that has my expense of it becomes my own paid-by debt on that expense (source paid_by, editable through the transaction, no more PAID_BY_LOCKED); without that expense it becomes a manual debt.
+        The other user gets a `debt_disconnected` notification. Answers the entry (partner_linked false, disconnected_at set) with `effects`.
+        Errors: 404 NOT_FOUND, 409 DEBT_NOT_LINKED (no copy in another book).
+      responses:
+        '200':
+          description: My entry, now unlinked from the other book.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DebtEntryWriteResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'DEBT_NOT_LINKED.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: "New (0.4.1-1 D9)."
   /personal-debts/split-requests/{notification_id}/accept:
     parameters: [{"name":"notification_id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}]
     post:
@@ -5596,8 +5725,8 @@ components:
         is_system: { type: boolean, description: 'A reserved category (opening balance, adjustment, transfer, debt paid / received …). '}
         system_kind:
           type: [string, 'null']
-          enum: [OPENING_IN, OPENING_OUT, ADJUST_IN, ADJUST_OUT, TRANSFER_IN, TRANSFER_OUT, DEBT_PAID, DEBT_RECEIVED, null]
-          description: 'Null for a normal category. The FE localises system names from this.'
+          enum: [OPENING_IN, OPENING_OUT, ADJUST_IN, ADJUST_OUT, TRANSFER_IN, TRANSFER_OUT, DEBT_PAID, DEBT_RECEIVED, LOAN_GIVEN, LOAN_TAKEN, null]
+          description: 'Null for a normal category. The FE localises system names from this. The four person-book kinds (0.4.1-1 D5): LOAN_GIVEN ให้กู้ยืม (a debt I paid: lend, expense), LOAN_TAKEN กู้ยืม (a debt they paid: borrow, income), DEBT_PAID ชำระหนี้ (a repayment I pay, expense), DEBT_RECEIVED รับชำระหนี้ (a repayment I get, income).'
         parent_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
     EventRef:
       type: object
@@ -5697,7 +5826,6 @@ components:
         - transfer_group_id
         - transfer_peer
         - counterparty
-        - repayment_person
         - event_bill
         - recurring_item
         - source_project_transaction_id
@@ -5732,8 +5860,7 @@ components:
         transfer_peer: { oneOf: [{ $ref: '#/components/schemas/TransferPeer' }, { type: 'null' }], description: 'Non-null on transfer rows only. '}
         recurring_item: { oneOf: [{ $ref: '#/components/schemas/RecurringItemLink' }, { type: 'null' }], description: 'Set when a recurring item is linked to this row (produced into it / created from it).' }
         event_bill: { oneOf: [{ $ref: '#/components/schemas/EventBillLink' }, { type: 'null' }], description: 'Set when the row is in an event (tx detail "อยู่ในอีเวนต์ … ›" → the bill).' }
-        counterparty: { oneOf: [{ $ref: '#/components/schemas/DebtLink' }, { type: 'null' }], description: 'Set when this row is a debt entry''s wallet transaction (one record: editing / deleting either side changes both; open it in debt mode). Replaces is_repayment / source_personal_debt_id.' }
-        repayment_person: { oneOf: [{ $ref: '#/components/schemas/RepaymentPerson' }, { type: 'null' }], description: 'Set when this row is a REPAYMENT to / from a debt person (0.4.0-3; made by POST /personal-debts/people/{key}/repayments): expense = I paid them back, income = they paid me back. Tx detail shows "จ่ายคืนให้ <name> ›" / "รับคืนจาก <name> ›" → the person page (key). Editing the row (PUT /transactions/{id}: amount, date, wallet, text, tags; never the category) keeps the link and moves the person''s balance; deleting it deletes the repayment. Null otherwise (and on another member''s row).' }
+        counterparty: { oneOf: [{ $ref: '#/components/schemas/DebtLink' }, { type: 'null' }], description: 'Set when this row is the transaction of a person-book entry (`kind` debt or repayment; 0.4.1-1 D3: repayments are person-book rows too, `repayment_person` is gone). Connected and synced: amount, date, description and note are one value on both sides (editing either writes both). Deleting the transaction keeps the entry, ledger-only (0.4.1-1 D1). Null otherwise (and on another member''s row).' }
         source_project_transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         my_share: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'Amount minus what others owe on it; expense / income only, null for transfers. What reports and budgets count.' }
         split_count: { type: integer, minimum: 0 }
@@ -5765,7 +5892,6 @@ components:
         transfer_group_id: null
         transfer_peer: null
         counterparty: null
-        repayment_person: null
         event_bill: null
         recurring_item: null
         source_project_transaction_id: null
@@ -5814,8 +5940,8 @@ components:
         balance: { $ref: '#/components/schemas/Money' }
     TransactionWriteResult:
       type: object
-      description: 'What a transaction write returns: the row(s) in their final state and the post-write balance of every wallet touched. A row that is a debt entry''s wallet side also returns that person''s new balance.'
-      required: [rows, account_balances, person_balance]
+      description: 'What a transaction write returns: the row(s) in their final state and the post-write balance of every wallet touched. A row that is a person-book entry''s transaction also returns that person''s new balance. `effects` (0.4.1-1 B2) lists everything the write changed, linked sides included.'
+      required: [rows, account_balances, person_balance, effects]
       properties:
         rows:
           type: array
@@ -5826,8 +5952,9 @@ components:
         account_balances:
           type: array
           items: { $ref: '#/components/schemas/WalletBalance' }
-        person_balance: { oneOf: [{ $ref: '#/components/schemas/DebtPerson' }, { type: 'null' }], description: 'Non-null when the row is a debt entry''s wallet side (counterparty set), a repayment, or carries / dropped a paid_by (that person''s new balance).' }
-        person_balances: { type: array, items: { $ref: '#/components/schemas/DebtPerson' }, description: '0.4.0-3 B3, PUT only, absent when none: every person the row touched before / after the edit (its splits, its paid-by person), with the new balance.' }
+        person_balance: { oneOf: [{ $ref: '#/components/schemas/DebtPerson' }, { type: 'null' }], description: 'Non-null when the row is a person-book entry''s transaction (counterparty set) or carries / dropped a paid_by (that person''s new balance).' }
+        person_balances: { type: array, items: { $ref: '#/components/schemas/DebtPerson' }, description: '0.4.0-3 B3, PUT only, absent when none: every person the row touched before / after the edit (its splits, its paid-by person), with the new balance. Same list as effects.person_balances.' }
+        effects: { $ref: '#/components/schemas/Effects' }
     TransactionPreview:
       type: object
       description: 'PUT /transactions/{id}?preview=true: what the edit would do; nothing saved.'
@@ -5898,7 +6025,7 @@ components:
         account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         transfer_to_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         tag_ids: { $ref: '#/components/schemas/Ids' }
-        also_update_link: { type: boolean, description: 'Also change the linked side (an event bill made from this row, a recurring item); the app asks at save.' }
+        also_update_link: { type: boolean, description: 'Also change the event bill made from this row; the app asks at save. A recurring occurrence needs nothing (it reads the row, 0.4.1-1 R1).' }
         link_mode: { type: string, enum: [personal, split, paid, event], description: '0.4.0-3 B3: switch how the bill is shared (see updateTransaction).' }
         splits: { type: array, items: { $ref: '#/components/schemas/SplitEdit' }, description: 'Replaces the splits (as PUT /transactions/{id}/splits); with link_mode split, or alone on a split / personal row.' }
         event:
@@ -5932,13 +6059,14 @@ components:
         tag_ids: { $ref: '#/components/schemas/Ids' }
     DeleteTransactionResult:
       type: object
-      required: [id, account_balances, debt_entry_id, person_balance, recurring_item_id, bill_id]
+      required: [id, account_balances, debt_entry_id, person_balance, recurring_item_id, bill_id, effects]
       properties:
+        effects: { $ref: '#/components/schemas/Effects', description: '0.4.1-1 B2: everything the delete changed (the row itself as transactions[] deleted, the entry that lost it, the slot, the bill, balances).' }
         id: { $ref: '#/components/schemas/Uuid' }
-        recurring_item_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The stored recurring occurrence it was recorded for (released, or skipped with skip_occurrence); null when it had none.' }
+        recurring_item_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The recurring occurrence it filled, now skipped with its last values (0.4.1-1 R2); null when it filled none.' }
         bill_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The event bill deleted with it (also_delete_link).' }
-        debt_entry_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The debt entry deleted with it (the row was its wallet side; one record).' }
-        person_balance: { oneOf: [{ $ref: '#/components/schemas/DebtPerson' }, { type: 'null' }], description: 'That person''s new balance (null when no entry went).' }
+        debt_entry_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.1-1 D1: the person-book entry (debt or repayment) whose transaction this was. The entry STAYS, ledger-only (it no longer goes with the transaction); the person''s balance does not change. A paid-by debt still goes with its expense (part of the bill), and a split bill''s split debts go with it (D8; linked partners get split_changed removed).' }
+        person_balance: { oneOf: [{ $ref: '#/components/schemas/DebtPerson' }, { type: 'null' }], description: 'That person''s balance after the delete (null when the row touched no person).' }
         account_balances:
           type: array
           description: 'The balance of every wallet the delete touched (a transfer touches two).'
@@ -8604,10 +8732,11 @@ components:
       }
     NotificationType: {
         "type": "string",
-        "description": "recurring_due: ONE grouped notice while unread counting the occurrences that came due, payload {count}, deep_link /recurring?focus=due (ต้องจัดการ). recurring_ending: payload {recurring_id, name, left, start_date, end {kind: none|date|count, date?, count?}} (what ต่ออีก extends by), deep_link /recurring/{id}. recurring_auto_created: ONE quiet notice per user per day (read or not, the day's row only grows), payload {count, date} = the transactions auto-create recorded for that date, deep_link /recurring; it can be muted. All are written by the recurring due check, which runs inside GET /me/counts, GET /notifications/unread-count, GET /notifications, GET /dashboard and every recurring read (pull-to-refresh = recheck).",
+        "description": "debt_disconnected (0.4.1-1 D9 / B3): the other user disconnected their copy of a linked debt (\"X ตัดการเชื่อมหนี้ ฿300 แล้ว\"); payload {debt_id (MY entry, now a plain debt), key (my person key for them), person_name (their name as I see it), amount, direction (my entry's), description}, actor = them, deep_link /personal-debts/{debt_id}; info only (no action), it can be muted. recurring_due: ONE grouped notice while unread counting the occurrences that came due, payload {count}, deep_link /recurring?focus=due (ต้องจัดการ). recurring_ending: payload {recurring_id, name, left, start_date, end {kind: none|date|count, date?, count?}} (what ต่ออีก extends by), deep_link /recurring/{id}. recurring_auto_created: ONE quiet notice per user per day (read or not, the day's row only grows), payload {count, date} = the transactions auto-create recorded for that date, deep_link /recurring; it can be muted. All are written by the recurring due check, which runs inside GET /me/counts, GET /notifications/unread-count, GET /notifications, GET /dashboard and every recurring read (pull-to-refresh = recheck).",
         "enum": [
           "split_created",
           "split_changed",
+          "debt_disconnected",
           "project_tx_recorded_for_you",
           "project_tx_changed",
           "project_invite",
@@ -10008,7 +10137,7 @@ components:
               required: [kind, id, title, direction, amount, signed_amount, date]
               properties:
                 kind: { type: string, enum: [debt, repayment] }
-                id: { $ref: '#/components/schemas/Uuid', description: 'debt = the entry id; repayment = the transaction id.' }
+                id: { $ref: '#/components/schemas/Uuid', description: 'The entry id (both kinds, 0.4.1-1 D3).' }
                 title: { type: [string, 'null'], description: 'Its description (null = none: word it from kind / direction).' }
                 direction: { type: string, enum: [paid, received], description: 'paid = net + (I paid for them / I paid back), received = net −.' }
                 amount: { $ref: '#/components/schemas/Money' }
@@ -10017,7 +10146,7 @@ components:
             - type: 'null'
         key: { $ref: '#/components/schemas/PersonKey' }
         person: { $ref: '#/components/schemas/PersonRef' }
-        net: { $ref: '#/components/schemas/Money', description: 'Σ signed debts + Σ signed repayments: debt paid +, debt received −, repayment I paid (expense) +, repayment I received (income) −. A debt''s own linked transaction never counts. > 0 = they owe me (รอรับ), < 0 = I owe them (รอจ่าย), 0 = หายกัน.' }
+        net: { $ref: '#/components/schemas/Money', description: 'Σ signed person-book rows, one ledger query (0.4.1-1 D3): paid +, received − (debts and repayments alike; a repayment I paid back is paid, one I got back is received). Transactions never count, with or without an entry. > 0 = they owe me (รอรับ), < 0 = I owe them (รอจ่าย), 0 = หายกัน.' }
         open_count: { type: integer, minimum: 0, description: 'Debt entries not labelled paid (repayments are never open).' }
         entry_count: { type: integer, minimum: 0, description: 'Statement lines: debts + repayments.' }
         cleared_at: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The CYCLE boundary: the date of the last line (debt or repayment) after which the running balance (book order: date, created, id) was 0; null when it never was. Lines after it = the current cycle.' }
@@ -10137,33 +10266,40 @@ components:
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
     DebtEntryTx:
       type: object
-      description: 'The wallet transaction of an entry (light ref for list rows).'
-      required: [id, account]
+      description: 'The transaction of an entry (light ref for list rows). Connected + synced: amount, date, description and note are one value with the entry.'
+      required: [id, account, connected]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
-        account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'Null only for an old floating repayment.' }
+        account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'Null = a transaction with no wallet ("ไม่ระบุกระเป๋า").' }
+        connected: { type: boolean, description: '0.4.1-1 D2: true = an existing transaction connected later (can disconnect: POST /personal-debts/{id}/unlink); false = made from the entry (can''t disconnect; deleting the transaction keeps the entry).' }
     DebtEntry:
       type: object
-      required: [id, key, direction, amount, date, description, note, paid, source, transaction, created_at, in_current_cycle, updated_at, origin]
+      description: |
+        A person-book row (0.4.1-1 D3): `kind` debt (ให้ยืม paid / ยืม received, or a split / paid-by / event debt) or repayment (จ่ายคืน paid / รับคืน received). Both count in the person's balance (paid +, received −), each with an optional transaction (`transaction`), connected and synced.
+        A repayment: `paid` always false (no label), `due_date` null, `source` null or {kind event} for an event payback, `origin` null.
+      required: [id, kind, key, direction, amount, date, description, note, paid, source, transaction, partner_linked, disconnected_at, created_at, in_current_cycle, updated_at, origin]
       properties:
-        origin: { oneOf: [{ $ref: '#/components/schemas/DebtOrigin' }, { type: 'null' }] }
+        kind: { type: string, enum: [debt, repayment], description: '0.4.1-1 D3.' }
+        origin: { oneOf: [{ $ref: '#/components/schemas/DebtOrigin' }, { type: 'null' }], description: 'Debts only (null on a repayment).' }
         id: { $ref: '#/components/schemas/Uuid' }
         key: { $ref: '#/components/schemas/PersonKey' }
-        direction: { type: string, enum: [paid, received], description: 'paid = I paid them (net +); received = they paid me (net −).' }
-        amount: { $ref: '#/components/schemas/Money', description: 'Always > 0.' }
+        direction: { type: string, enum: [paid, received], description: 'paid = net + (a debt: I paid them / for them; a repayment: I paid back, expense); received = net − (a debt: they paid me / for me; a repayment: they paid me back, income).' }
+        amount: { $ref: '#/components/schemas/Money', description: '> 0; 0 only on a row the system synced from a 0 transaction (0.4.1-1 B1).' }
         date: { $ref: '#/components/schemas/Date' }
-        description: { type: [string, 'null'], maxLength: 200 }
+        description: { type: [string, 'null'], maxLength: 200, description: 'Free text; null = show the category name of the kind (0.4.1-1 D7: nothing is generated any more; old rows keep what they saved).' }
         note: { type: [string, 'null'], maxLength: 500 }
-        paid: { type: boolean, description: 'The "จ่ายแล้ว" label. Never changes a number.' }
-        due_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: '0.4.0-3 "กำหนดจ่าย": optional, never before `date`.' }
+        paid: { type: boolean, description: 'Debts: the "จ่ายแล้ว" label. Never changes a number. Always false on a repayment.' }
+        due_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: '0.4.0-3 "กำหนดจ่าย": debts only, optional, never before `date`.' }
         source: { oneOf: [{ $ref: '#/components/schemas/DebtSource' }, { type: 'null' }], description: 'Null = a manual entry (fully editable).' }
-        transaction: { oneOf: [{ $ref: '#/components/schemas/DebtEntryTx' }, { type: 'null' }], description: 'Null = ledger-only.' }
-        linked_transaction: { oneOf: [{ $ref: '#/components/schemas/DebtEntryTx' }, { type: 'null' }], description: '0.4.0-4: one of my existing transactions linked to the entry (soft link, POST /personal-debts/{id}/link). Never set together with `transaction`.' }
+        transaction: { oneOf: [{ $ref: '#/components/schemas/DebtEntryTx' }, { type: 'null' }], description: 'Null = ledger-only (person book only, no wallet moves). 0.4.1-1 D2: the 0.4.0-4 soft link (`linked_transaction`) is gone; a connected existing transaction shows here with connected true.' }
+        partner_linked: { type: boolean, description: '0.4.1-1 D9: the entry has a copy in the other user''s book right now (a split / paid-by pair with a linked contact). Only then do split_changed / "อัปเดตตาม" and POST /personal-debts/{id}/disconnect apply.' }
+        disconnected_at: { oneOf: [{ $ref: '#/components/schemas/DateTime' }, { type: 'null' }], description: '0.4.1-1 D9: when the pair was disconnected (by either side); the entry is then a plain debt with that person (partner_linked false). Null = never linked or still linked.' }
         created_at: { $ref: '#/components/schemas/DateTime' }
         in_current_cycle: { type: [boolean, 'null'], description: 'Only in the person''s entry lists (person page, entries): true = after the cycle boundary (cleared_at); null elsewhere.' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
       example:
         id: 0191c2a0-0000-7000-8000-0000000000e1
+        kind: debt
         key: n:mom
         direction: paid
         amount: 200
@@ -10172,7 +10308,7 @@ components:
         note: null
         paid: false
         source: null
-        transaction: { id: 0191c2a0-0000-7000-8000-0000000000f1, account: null }
+        transaction: { id: 0191c2a0-0000-7000-8000-0000000000f1, account: null, connected: false }
         created_at: '2026-10-12T09:30:00Z'
         updated_at: '2026-10-12T09:30:00Z'
     DebtEntryList:
@@ -10213,42 +10349,45 @@ components:
             pagination: { $ref: '#/components/schemas/Page' }
     DebtEntryDetail:
       type: object
-      description: 'The tx-detail page in debt mode: the entry, the person''s balance and the linked transaction as a full row (null = ledger-only).'
+      description: 'The tx-detail page in debt mode (debts and repayments): the entry, the person''s balance and its transaction as a full row (null = ledger-only).'
       required: [entry, person_balance, transaction]
       properties:
         entry: { $ref: '#/components/schemas/DebtEntry' }
         person_balance: { $ref: '#/components/schemas/DebtPerson' }
         transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }] }
-        linked_transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }], description: '0.4.0-4: entry.linked_transaction as a full row.' }
     DebtEntryWriteResult:
       type: object
-      description: 'Every debt write returns the final state: the entry, the person''s new balance, the linked transaction (full row, null = ledger-only) and the post-write balance of every wallet touched.'
-      required: [entry, person_balance, previous_person_balance, transaction, account_balances, balance_change]
+      description: 'Every person-book write (debt or repayment) returns the final state: the entry, the person''s new balance, its transaction (full row, null = ledger-only), the post-write balance of every wallet touched and `effects` (0.4.1-1 B2).'
+      required: [entry, item, person_balance, previous_person_balance, transaction, account_balances, balance_change, effects]
       properties:
-        balance_change: { oneOf: [{ $ref: '#/components/schemas/PersonDelta' }, { type: 'null' }], description: '0.4.0-3, create only: the person''s balance before → after (flipped = crossed sides). Null on other writes.' }
+        balance_change: { oneOf: [{ $ref: '#/components/schemas/PersonDelta' }, { type: 'null' }], description: '0.4.0-3, create only: the person''s balance before → after (flipped = crossed sides; an overpaid repayment is allowed). Null on other writes.' }
         entry: { $ref: '#/components/schemas/DebtEntry' }
+        item: { oneOf: [{ $ref: '#/components/schemas/DebtStatementItem' }, { type: 'null' }], description: '0.4.1-1, create only: the entry as its person-page statement line (running_balance, in_current_cycle). Null on other writes.' }
         person_balance: { $ref: '#/components/schemas/DebtPerson' }
         previous_person_balance: { oneOf: [{ $ref: '#/components/schemas/DebtPerson' }, { type: 'null' }], description: 'Set only when an edit moved the entry to another person (the old person''s new balance).' }
         transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }] }
-        linked_transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }], description: '0.4.0-4: entry.linked_transaction as a full row.' }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
+        effects: { $ref: '#/components/schemas/Effects' }
     DebtEntryDeleteResult:
       type: object
-      required: [id, transaction_id, person_balance, account_balances]
+      required: [id, transaction_id, person_balance, account_balances, effects]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
-        transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The linked transaction deleted with it (null = ledger-only).' }
+        transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Its transaction deleted with it (null = ledger-only). A connected (existing) transaction is NOT deleted: it is disconnected and gets its old category back (then null here; it shows in effects.transactions).' }
         person_balance: { $ref: '#/components/schemas/DebtPerson' }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
+        effects: { $ref: '#/components/schemas/Effects' }
     DebtEntryCreateRequest:
       type: object
-      required: [direction, amount]
+      description: 'A DEBT (ให้ยืม = paid / ยืม = received). The transaction side, one of: none (ledger-only, the default), a new transaction (create_transaction true, wallet optional), or an existing one (link_transaction_id).'
+      required: [direction]
       properties:
         direction: { type: string, enum: [paid, received] }
-        amount: { type: number, exclusiveMinimum: 0 }
-        date: { $ref: '#/components/schemas/Date' }
-        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The wallet of the transaction. Null / absent with no create_transaction = ledger-only.' }
-        create_transaction: { type: boolean, description: 'true = also write a transaction (it counts in income / expense; the wallet is optional, no wallet = no balance moves). false = ledger-only (no account_id, no tags). Absent = the old rule: a transaction exactly when account_id is given.' }
+        amount: { type: number, exclusiveMinimum: 0, description: 'Required, except with link_transaction_id (then the transaction''s amount is used and this is ignored).' }
+        date: { $ref: '#/components/schemas/Date', description: 'Default today; with link_transaction_id the transaction''s date.' }
+        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The wallet of the new transaction. Null / absent with no create_transaction = ledger-only.' }
+        create_transaction: { type: boolean, description: 'true = also write a new transaction (category LOAN_GIVEN / LOAN_TAKEN, out of reports; the wallet is optional, no wallet = no balance moves). false = ledger-only (no account_id, no tags). Absent = a transaction exactly when account_id is given.' }
+        link_transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.1-1 D10 "ผูกกับรายการที่มีอยู่": connect one of my existing transactions in the same call (as POST /personal-debts/{id}/link). Exclusive with create_transaction true / account_id / tag_ids (400 VALIDATION_ERROR). Errors as link.' }
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
         tag_ids: { $ref: '#/components/schemas/Ids', description: 'Go on the transaction: needs create_transaction true, or an account_id.' }
@@ -10259,7 +10398,7 @@ components:
         event_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.0-4, without bill_id: the debt records an event''s จัดการ line (settle `recorded`). I must be an active member (else 400 BILL_NOT_FOUND). Source {kind: event, id: the event}, no bill.' }
     DebtEntryUpdateRequest:
       type: object
-      description: 'Partial. A split-sourced entry accepts only description / note / paid.'
+      description: 'Partial, debts and repayments. A split-sourced entry accepts only description / note / paid. A repayment refuses paid / due_date (400 VALIDATION_ERROR). An entry with a connected (existing) transaction: account_id / create_transaction / tag_ids go through the transaction (PUT /transactions/{id}) → 400 VALIDATION_ERROR here; amount / date / description / note write both sides.'
       properties:
         direction: { type: string, enum: [paid, received] }
         amount: { type: number, exclusiveMinimum: 0 }
@@ -10273,37 +10412,28 @@ components:
         key: { $ref: '#/components/schemas/PersonKey' }
         person_name: { type: string, minLength: 1, maxLength: 100 }
         due_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: '0.4.0-3 "กำหนดจ่าย": null clears it, absent leaves it. Before the entry''s (new) date → 400 VALIDATION_ERROR.' }
-    RepaymentPerson:
-      type: object
-      description: 'The debt person of a repayment transaction (Transaction.repayment_person).'
-      required: [key, name, contact_id, person]
-      properties:
-        key: { $ref: '#/components/schemas/PersonKey' }
-        name: { type: string, description: 'Same as person.name: the live contact name, or the typed name.' }
-        contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Null = a typed name (or the contact was deleted).' }
-        person: { $ref: '#/components/schemas/PersonRef' }
     DebtStatementItem:
       type: object
       description: |
-        One line of a person's statement ("ที่มาของยอด"): a DEBT entry or a REPAYMENT transaction, interleaved by date (book order: date, created_at, id).
-        `direction` follows the sign: paid = net + (a debt I paid for them / a repayment I paid back, expense), received = net − (a debt they paid for me / a repayment I got back, income).
-        A debt opens GET /personal-debts/{id}; a repayment opens GET /transactions/{id} (`id` is the transaction id).
+        One line of a person's statement ("ที่มาของยอด"): a person-book row, debt or repayment, by date (book order: date, created_at, id).
+        `direction` follows the sign: paid = net + (a debt I paid for them / a repayment I paid back), received = net − (a debt they paid for me / a repayment I got back).
+        0.4.1-1 D3: every line opens GET /personal-debts/{id} (`id` = the entry id for both kinds; it was the transaction id on a repayment).
       required: [kind, id, key, direction, amount, signed_amount, date, description, note, paid, source, transaction, in_current_cycle, created_at, updated_at, running_balance, origin]
       properties:
         running_balance: { $ref: '#/components/schemas/Money', description: '0.4.0-3: the person''s balance right after this line (book order over ALL their lines).' }
         origin: { oneOf: [{ $ref: '#/components/schemas/DebtOrigin' }, { type: 'null' }], description: 'Debts: where it came from (sub-line: "ลีจ่ายแทน", "เข้ากระเป๋า …", "แบ่งบิล ฿120"). Null on a repayment (its wallet: transaction.account).' }
         kind: { type: string, enum: [debt, repayment] }
-        id: { $ref: '#/components/schemas/Uuid', description: 'debt = the entry id; repayment = the transaction id.' }
+        id: { $ref: '#/components/schemas/Uuid', description: 'The entry id (both kinds).' }
         key: { $ref: '#/components/schemas/PersonKey' }
         direction: { type: string, enum: [paid, received] }
-        amount: { $ref: '#/components/schemas/Money', description: 'Always > 0.' }
+        amount: { $ref: '#/components/schemas/Money', description: '> 0 (0 only on a system-synced row).' }
         signed_amount: { $ref: '#/components/schemas/Money', description: 'What the line adds to net: + for paid, − for received.' }
         date: { $ref: '#/components/schemas/Date' }
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
         paid: { type: [boolean, 'null'], description: 'Debts: the "จ่ายแล้ว" label (never changes a number). Null on a repayment.' }
-        source: { oneOf: [{ $ref: '#/components/schemas/DebtSource' }, { type: 'null' }], description: 'Debts only: the split source (null = manual). Null on a repayment.' }
-        transaction: { oneOf: [{ $ref: '#/components/schemas/DebtEntryTx' }, { type: 'null' }], description: 'Debt: its linked wallet transaction (does NOT count in net; null = ledger-only). Repayment: the transaction itself (account null = no wallet).' }
+        source: { oneOf: [{ $ref: '#/components/schemas/DebtSource' }, { type: 'null' }], description: 'The split source (null = manual); on a repayment null or {kind event} (an event payback).' }
+        transaction: { oneOf: [{ $ref: '#/components/schemas/DebtEntryTx' }, { type: 'null' }], description: 'Its transaction, debt or repayment (null = ledger-only). The transaction itself never counts in net: the entry does.' }
         in_current_cycle: { type: [boolean, 'null'], description: 'true = after the cycle boundary (cleared_at).' }
         created_at: { $ref: '#/components/schemas/DateTime' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
@@ -10319,34 +10449,28 @@ components:
         note: null
         paid: null
         source: null
-        transaction: { id: 0191c2a0-0000-7000-8000-0000000000f2, account: null }
+        transaction: { id: 0191c2a0-0000-7000-8000-0000000000f3, account: null, connected: false }
         in_current_cycle: true
         created_at: '2026-10-20T09:30:00Z'
         updated_at: '2026-10-20T09:30:00Z'
     DebtRepaymentCreateRequest:
       type: object
-      required: [kind, amount]
+      description: 'A REPAYMENT (จ่ายคืน = pay / รับคืน = receive), a person-book row like a debt (0.4.1-1 D3). The transaction side, one of: none (ledger-only, the default: "paid outside the app"), a new transaction (create_transaction true, wallet optional), or an existing one (link_transaction_id).'
+      required: [kind]
       properties:
-        kind: { type: string, enum: [pay, receive], description: 'pay = I pay them back (expense, Debt Paid, net +); receive = they pay me back (income, Debt Received, net −).' }
-        amount: { type: number, exclusiveMinimum: 0 }
-        date: { $ref: '#/components/schemas/Date', description: 'Default = today.' }
-        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The wallet (optional, as on POST /transactions: none = no balance moves).' }
+        kind: { type: string, enum: [pay, receive], description: 'pay = I pay them back (entry direction paid, net +; its transaction an expense in DEBT_PAID); receive = they pay me back (direction received, net −; income in DEBT_RECEIVED).' }
+        amount: { type: number, exclusiveMinimum: 0, description: 'Required, except with link_transaction_id (the transaction''s amount is used).' }
+        date: { $ref: '#/components/schemas/Date', description: 'Default = today; with link_transaction_id the transaction''s date.' }
+        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The wallet of the new transaction.' }
+        create_transaction: { type: boolean, description: '0.4.1-1: true = also write a new transaction (wallet optional: none = "ไม่ระบุกระเป๋า", no balance moves); false = ledger-only (no account_id, no tags: 400 LEDGER_ONLY_NO_WALLET). Absent = a transaction exactly when account_id is given (breaking: a repayment with no account_id used to make a wallet-less transaction).' }
+        link_transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.1-1 D10: connect one of my existing transactions (pay = an expense, receive = an income) in the same call, as POST /personal-debts/{id}/link. Exclusive with create_transaction true / account_id / tag_ids (400 VALIDATION_ERROR).' }
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
-        tag_ids: { $ref: '#/components/schemas/Ids', description: 'Tags on the transaction.' }
+        tag_ids: { $ref: '#/components/schemas/Ids', description: 'Tags on the new transaction.' }
         mark_paid_ids: { $ref: '#/components/schemas/Ids', description: 'Debt entries of the same person to label paid in the same call (label only, numbers never change).' }
+        mark_all_paid: { type: boolean, description: '0.4.1-1 D10 "ปิดหนี้": label every open debt of this person on the side this repayment pays down paid (pay → their received debts, receive → their paid debts). Label only. Combines with mark_paid_ids.' }
         person_name: { type: string, minLength: 1, maxLength: 100, description: '`n:` keys only: the shown spelling of a typed name.' }
-        bill_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.0-3: an event payback row (in an event I''m an active member of) this repayment records in my books: the transaction gets source_project_transaction_id + project_id, and the row''s my_booked turns true. 404 BILL_NOT_FOUND otherwise.' }
-    DebtRepaymentResult:
-      type: object
-      description: 'The repayment as a full transaction row (same view as GET /transactions/{id}, with repayment_person), its statement line, the person''s new balance and the touched wallet balance.'
-      required: [transaction, item, person_balance, account_balances, balance_change]
-      properties:
-        transaction: { $ref: '#/components/schemas/Transaction' }
-        item: { $ref: '#/components/schemas/DebtStatementItem' }
-        person_balance: { $ref: '#/components/schemas/DebtPerson' }
-        account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
-        balance_change: { $ref: '#/components/schemas/PersonDelta', description: '0.4.0-3: before → after. An overpaid settle is allowed: flipped = true (e.g. รอจ่าย 230, pay 300 → รอรับ 70).' }
+        bill_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.0-3: an event payback row (in an event I''m an active member of) this repayment records in my books. 0.4.1-1: the link sits on the ROW (entry source {kind event}), not on its transaction; the bill''s my_booked turns true. 400 BILL_NOT_FOUND otherwise.' }
     PersonDelta:
       type: object
       description: 'A person''s balance before / after a write or a preview (net: > 0 รอรับ, < 0 รอจ่าย).'
@@ -10378,14 +10502,16 @@ components:
         wallets: { type: array, items: { $ref: '#/components/schemas/WalletDelta' }, description: 'The wallet when one is sent ([] = no money moves).' }
     DebtLink:
       type: object
-      description: 'On a transaction that IS a debt entry''s wallet side (one record with the entry).'
-      required: [entry_id, key, person, direction, paid]
+      description: 'On a transaction that is a person-book entry''s transaction (connected + synced with the entry).'
+      required: [entry_id, kind, key, person, direction, paid, connected]
       properties:
-        entry_id: { $ref: '#/components/schemas/Uuid' }
+        entry_id: { $ref: '#/components/schemas/Uuid', description: 'GET /personal-debts/{id} (debts and repayments).' }
+        kind: { type: string, enum: [debt, repayment], description: '0.4.1-1 D3.' }
+        connected: { type: boolean, description: '0.4.1-1 D2: true = an existing transaction connected later (POST /personal-debts/{id}/unlink disconnects it and gives back its old category); false = made from the entry (can''t disconnect: delete the transaction, the entry stays).' }
         key: { $ref: '#/components/schemas/PersonKey' }
         person: { $ref: '#/components/schemas/PersonRef' }
         direction: { type: string, enum: [paid, received] }
-        paid: { type: boolean }
+        paid: { type: boolean, description: 'The debt''s "จ่ายแล้ว" label; always false on a repayment.' }
     DebtSplitChangeResult:
       type: object
       required: [result, entry, person_balance]
@@ -10393,6 +10519,24 @@ components:
         result: { type: string, enum: [updated, deleted], description: 'updated = my entry took the new amount; deleted = the split was removed and my entry is gone.' }
         entry: { oneOf: [{ $ref: '#/components/schemas/DebtEntry' }, { type: 'null' }], description: 'null when result=deleted.' }
         person_balance: { $ref: '#/components/schemas/DebtPerson' }
+        effects: { $ref: '#/components/schemas/Effects' }
+    Effects:
+      type: object
+      description: |
+        0.4.1-1 B2 — what a write changed, linked sides included, page-ready so the app patches its caches without re-fetching (one generic handler, next to the X-Sync-Versions resync). Every write that touches a connected side answers with it (debt / repayment writes, transaction writes, split-change apply, recurring slot writes, event bill writes).
+        Every key is always present; [] = nothing of that kind changed. The answer's own record is listed too (so the handler needs nothing else). Changed records are in their final state (the caller's view); removed ones by id only.
+        Example: DELETE /transactions/{id} of a repayment's transaction → transactions [], removed_transaction_ids [the tx], debts [the repayment, now ledger-only], person_balances [] (the balance doesn't move), account_balances [the wallet].
+      required: [transactions, removed_transaction_ids, debts, removed_debt_ids, slots, bills, removed_bill_ids, person_balances, account_balances]
+      properties:
+        transactions: { type: array, items: { $ref: '#/components/schemas/Transaction' }, description: 'My transactions created or changed (e.g. a debt''s transaction made / re-synced, a connected transaction''s category).' }
+        removed_transaction_ids: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+        debts: { type: array, items: { $ref: '#/components/schemas/DebtEntry' }, description: 'Person-book rows (debts and repayments) created or changed.' }
+        removed_debt_ids: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+        slots: { type: array, items: { $ref: '#/components/schemas/RecurringItem' }, description: 'Recurring slots that changed (filled, skipped, emptied, re-planned).' }
+        bills: { type: array, items: { $ref: '#/components/schemas/BoardRow' }, description: 'Event bills that changed (the caller''s view).' }
+        removed_bill_ids: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+        person_balances: { type: array, items: { $ref: '#/components/schemas/DebtPerson' }, description: 'Every person whose balance moved, with the new balance (people list row / person page header).' }
+        account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' }, description: 'Every wallet whose balance moved (a top-level account_balances, where the answer has one, carries the same list).' }
     # ───────── events (projects, 0.3.1-10) ─────────
     Event:
       type: object
@@ -10537,6 +10681,79 @@ components:
           required: [relinked]
           properties:
             relinked: { type: array, items: { type: string, enum: [tx, debt, repay] } }
+    EventBillPerson:
+      allOf:
+        - { $ref: '#/components/schemas/BillMember' }
+        - type: object
+          properties:
+            paid_back: { type: boolean, description: '"คืนแล้ว": paid the payer back on the spot (a payback row on the board; my book per bookEventBill). Ignored on the payer.' }
+    EventBillInput:
+      type: object
+      required: [kind, amount, date]
+      description: 'The bill of the sheet. kind expense / income: payer + members (the payer may be listed; their share is the rest). kind payback: from paid back to (one each, not the same person).'
+      properties:
+        kind: { type: string, enum: [expense, income, payback] }
+        amount: { type: number, exclusiveMinimum: 0, description: 'The whole bill / the payback.' }
+        date: { $ref: '#/components/schemas/Date' }
+        description: { type: [string, 'null'], maxLength: 200 }
+        note: { type: [string, 'null'], maxLength: 500 }
+        tag_ids: { $ref: '#/components/schemas/Ids', description: 'This event''s tags (absent and I paid: my transaction''s tags by name).' }
+        payer: { oneOf: [{ $ref: '#/components/schemas/BillPerson' }, { type: 'null' }], description: 'expense / income; default me. Someone else only on an expense (400 VALIDATION_ERROR).' }
+        members: { type: array, items: { $ref: '#/components/schemas/EventBillPerson' } }
+        from: { oneOf: [{ $ref: '#/components/schemas/BillPerson' }, { type: 'null' }], description: 'payback: who paid back.' }
+        to: { oneOf: [{ $ref: '#/components/schemas/BillPerson' }, { type: 'null' }], description: 'payback: who got it.' }
+    EventBillBooks:
+      type: object
+      required: ['on']
+      description: 'What MY book holds of the bill (see bookEventBill).'
+      properties:
+        'on': { type: boolean, description: '"ลงบัญชีของฉัน". false = nothing in my book (on an edit: every linked part is unlinked, its rows stay).' }
+        tx: { type: boolean, description: 'My transaction (the whole bill when I paid, my share when someone else did, the repayment on a payback).' }
+        debt: { type: [boolean, 'null'], description: 'The debts (see bookEventBill). Payback: null / absent = the server decides.' }
+        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The wallet my money moves on (ignored for my share of a bill someone else paid and I did not pay back).' }
+        category_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        tag_ids: { $ref: '#/components/schemas/Ids', description: 'My personal tags on my transaction.' }
+    EventBillBookRequest:
+      type: object
+      required: [bill, my_books]
+      description: 'project_id or new_event (exactly one).'
+      properties:
+        project_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        new_event:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 100 }
+                icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
+        bill: { $ref: '#/components/schemas/EventBillInput' }
+        my_books: { $ref: '#/components/schemas/EventBillBooks' }
+    EventBillRebookRequest:
+      type: object
+      required: [my_books]
+      properties:
+        bill: { oneOf: [{ $ref: '#/components/schemas/EventBillInput' }, { type: 'null' }], description: 'Absent / null = my book only. kind can''t change (400 VALIDATION_ERROR).' }
+        my_books: { $ref: '#/components/schemas/EventBillBooks' }
+        apply_to_my_tx: { type: boolean }
+    EventBillBookResult:
+      allOf:
+        - { $ref: '#/components/schemas/EventPatch' }
+        - type: object
+          required: [my_books, paybacks, transaction_id, effects]
+          properties:
+            my_books: { $ref: '#/components/schemas/MyBooks', description: 'What my book holds of the bill now.' }
+            paybacks: { type: array, items: { $ref: '#/components/schemas/BoardRow' }, description: 'The payback rows made for the people marked paid_back.' }
+            transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'My transaction for the bill (made or kept); null when none.' }
+            effects: { $ref: '#/components/schemas/Effects' }
+    EventBillBookPreview:
+      type: object
+      required: [preview, people, wallets, debt_default]
+      properties:
+        preview: { type: boolean, enum: [true] }
+        people: { type: array, items: { $ref: '#/components/schemas/PersonDelta' } }
+        wallets: { type: array, items: { $ref: '#/components/schemas/WalletDelta' } }
+        debt_default: { type: boolean, description: 'What my_books.debt null would do (a payback: false when my book already holds this event''s debt with that person).' }
     EventSettle:
       type: object
       required: [pairs, simplified]
@@ -10569,13 +10786,14 @@ components:
     BoardSplit:
       type: object
       description: 'One split of a bill (a child row).'
-      required: [id, transaction_member, amount, marks, my_mark]
+      required: [id, transaction_member, amount, marks, my_mark, paid_back]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         transaction_member: { $ref: '#/components/schemas/MemberRef' }
         amount: { $ref: '#/components/schemas/Money' }
         marks: { type: array, items: { $ref: '#/components/schemas/Uuid' }, description: 'Member ids who ticked it.' }
         my_mark: { type: boolean }
+        paid_back: { type: boolean, description: '0.4.1-1: "คืนแล้ว" — a payback row (this member → the payer) was made for this bill (the bill sheet shows the tick; un-ticking it on PUT /event-bills removes it).' }
     BoardRow:
       type: object
       description: 'A bill (parent row) with its splits nested, page-ready. A payback (type payback, 0.4.0-3) is "transaction_member paid children[0].transaction_member back", one child for the whole amount.'
@@ -10910,10 +11128,11 @@ components:
         name: { type: string }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
         kind: { type: string, enum: [subscription, installment, income, reminder, saving], description: 'Sent by the recurring module (its items); absent on refs other modules embed.' }
+        pause_reason: { type: [string, 'null'], enum: [manual, overdue_limit, goal_inactive, null], description: '0.4.1-1 R7, as Recurring.pause_reason (null = not paused): ต้องจัดการ shows "ค้าง 3 งวด" on a due row of an overdue_limit setting. Sent by the recurring module (its items); absent on refs other modules embed.' }
     Recurring:
       type: object
       description: 'A recurring setting (the generator), page-ready.'
-      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal_id, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, monthly_amount, saved_count, pending_count, next_amount, current_occurrence, next_date, days_until, progress, ending_soon, counts, likely, edited_any, actions, created_at, updated_at, due_count, avg_amount, chain, auto_create, recorded_tx_count]
+      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal_id, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, monthly_amount, saved_count, pending_count, next_amount, current_occurrence, next_date, days_until, progress, ending_soon, counts, likely, edited_any, actions, created_at, updated_at, due_count, avg_amount, chain, auto_create, recorded_tx_count, pause_reason]
       properties:
         likely: { type: boolean, description: 'Only meaningful with the picker hints (for_type + category_id / amount): the setting matches the transaction by category or amount (±5%); such settings are listed first. false otherwise.' }
         id: { $ref: '#/components/schemas/Uuid' }
@@ -10942,8 +11161,17 @@ components:
             properties:
               slot: { $ref: '#/components/schemas/Date' }
               status: { type: string, enum: [upcoming, due, done, paid, skipped, pending] }
-        auto_create: { type: boolean, description: '"บันทึกอัตโนมัติเมื่อถึงวัน": each occurrence that comes due is recorded by itself (dated its date, the occurrence name as description).' }
-        recorded_tx_count: { type: integer, description: 'Transactions recorded from this setting: the N of "ใช้กับ N รายการที่บันทึกแล้วด้วยไหม" (updateRecurring also_update_tx).' }
+        auto_create: { type: boolean, description: '"บันทึกอัตโนมัติเมื่อถึงวัน": each occurrence that comes due is recorded by itself (dated its date, the occurrence name as description). 0.4.1-1 R12: it never waits and never fails: amount 0 is recorded as 0; a wallet / category that is gone or archived is left empty on the transaction and the setting keeps running; every missed occurrence is made at the next due check (each dated its own date); the overdue limit never applies. The app warns when it is set with amount 0 or on a varying amount.' }
+        recorded_tx_count: { type: integer, description: 'Transactions recorded from this setting (the delete question''s N is delete_preview.linked_transactions).' }
+        pause_reason:
+          type: [string, 'null']
+          enum: [manual, overdue_limit, goal_inactive, null]
+          description: |
+            0.4.1-1 R7: why a paused setting is paused; null unless status = paused (an archived one keeps the reason it had).
+            - manual: the user paused it.
+            - overdue_limit ("ค้าง 3 งวด", the app shows it in ต้องจัดการ and on the detail): a setting holds at most 3 due occurrences, whatever its frequency. When a 4th would come due while 3 are waiting (any 3), the setting turns paused instead of making it: the 3 stay due (stored) and listed; nothing after them is made. Clearing them does NOT resume it; the user resumes it (see resumeRecurring). Auto-create settings are never limited. At the release every setting already over the limit is paused at its first due check.
+            - goal_inactive: a saving setting whose goal was closed / archived.
+            A wallet that is archived no longer pauses anything (R12).
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
         to_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'Transfers only.' }
         category: { oneOf: [{ $ref: '#/components/schemas/CategoryRef' }, { type: 'null' }] }
@@ -11008,8 +11236,9 @@ components:
         replace: { type: boolean, description: 'Swap: the occurrence''s current transaction (or the other occurrence this transaction is on) lets go first, in the same DB transaction. Without it a taken side answers 409 ITEM_ALREADY_LINKED.' }
     RecurringLinkResult:
       type: object
-      required: [item, transaction, amount_differs, rule_amount, transaction_amount, account_balances, setting]
+      required: [item, transaction, amount_differs, rule_amount, transaction_amount, account_balances, setting, effects]
       properties:
+        effects: { $ref: '#/components/schemas/Effects', description: '0.4.1-1 B2: slots = the occurrences the write changed (final state), transactions = the ones it made / linked / let go, removed_transaction_ids = the ones it deleted, account_balances as the top-level list.' }
         setting: { oneOf: [{ $ref: '#/components/schemas/Recurring' }, { type: 'null' }], description: 'The owning setting after the write (no re-fetch); null when the items belong to no / several settings.' }
         item: { $ref: '#/components/schemas/RecurringItem' }
         transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }] }
@@ -11158,7 +11387,7 @@ components:
                 next_from: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }] }
     RecurringDetail:
       type: object
-      required: [recurring, items, upcoming, stats, tx_update, account_balances, delete_preview]
+      required: [recurring, items, upcoming, stats, account_balances, delete_preview]
       properties:
         recurring: { $ref: '#/components/schemas/Recurring' }
         items: { $ref: '#/components/schemas/RecurringItemList', description: 'The history (recorded / paid / skipped / due), newest first.' }
@@ -11168,8 +11397,8 @@ components:
           description: 'The detail hero''s numbers.'
           required: [paid_count, paid_total, remaining_total, last_period, avg_amount, last_amount, max_amount, series]
           properties:
-            paid_count: { type: integer, description: 'Occurrences recorded.' }
-            paid_total: { $ref: '#/components/schemas/Money' }
+            paid_count: { type: integer, description: 'Occurrences settled: recorded + paid without a transaction (0.4.1-1).' }
+            paid_total: { $ref: '#/components/schemas/Money', description: 'Their amounts: the transactions'' + the paid-without-transaction amounts (R5; this is the only total those count in).' }
             remaining_total: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'A setting with an end: what is left to pay; null otherwise.' }
             last_period: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The slot of the latest recorded occurrence.' }
             avg_amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
@@ -11185,22 +11414,6 @@ components:
                   slot: { $ref: '#/components/schemas/Date' }
                   date: { $ref: '#/components/schemas/Date' }
                   amount: { $ref: '#/components/schemas/Money' }
-        tx_update:
-          description: 'Only after updateRecurring with also_update_tx, else null: how many recorded transactions took the change, and the ones that could not.'
-          oneOf:
-            - type: 'null'
-            - type: object
-              required: [updated_tx_count, failed]
-              properties:
-                updated_tx_count: { type: integer }
-                failed:
-                  type: array
-                  items:
-                    type: object
-                    required: [transaction_id, reason]
-                    properties:
-                      transaction_id: { $ref: '#/components/schemas/Uuid' }
-                      reason: { type: string, enum: [not_found, account_archived, transfer, refused] }
         delete_preview:
           description: 'Only with ?include=delete_preview, else null: what a delete touches.'
           oneOf:
@@ -11238,7 +11451,7 @@ components:
             rule: { $ref: '#/components/schemas/RecurrenceRuleInput' }
             start_date: { $ref: '#/components/schemas/Date' }
             end: { $ref: '#/components/schemas/RecurrenceEndInput' }
-            auto_create: { type: boolean, description: 'Record each occurrence by itself when it comes due; needs a fixed amount and a wallet (400 AUTO_CREATE_NEEDS_AMOUNT / AUTO_CREATE_NEEDS_WALLET).' }
+            auto_create: { type: boolean, description: 'Record each occurrence by itself when it comes due; any amount (0 too) and any wallet (none too), see Recurring.auto_create (0.4.1-1 R12).' }
     RecurringUpdateRequest:
       allOf:
         - { $ref: '#/components/schemas/RecurringFields' }
@@ -11251,18 +11464,16 @@ components:
             rule: { $ref: '#/components/schemas/RecurrenceRuleInput' }
             start_date: { $ref: '#/components/schemas/Date' }
             end: { $ref: '#/components/schemas/RecurrenceEndInput' }
-            scope: { type: string, enum: [upcoming, all], default: upcoming }
-            also_update_link: { type: boolean, description: 'With scope all: the produced items'' drafts / transactions change too.' }
-            auto_create: { type: boolean, description: 'Switch auto-create on / off (on: only occurrences that come due from today on; never back-creates). 400 AUTO_CREATE_NEEDS_AMOUNT / AUTO_CREATE_NEEDS_WALLET.' }
-            also_update_tx: { type: boolean, description: 'Push a change of name / category / wallet / tags / note to the transactions already recorded from this setting (never date or amount); the result carries tx_update.' }
+            auto_create: { type: boolean, description: 'Switch auto-create on / off (on: only occurrences that come due from today on; never back-creates). Any amount, any wallet (R12).' }
     RecurringExtendRequest:
       type: object
       properties:
         end: { oneOf: [{ $ref: '#/components/schemas/RecurrenceEndInput' }, { type: 'null' }] }
     RecurringDeleteResult:
       type: object
-      required: [id, deleted_transaction_count, account_balances]
+      required: [id, deleted_transaction_count, account_balances, effects]
       properties:
+        effects: { $ref: '#/components/schemas/Effects', description: '0.4.1-1 B2: slots = the occurrences the write changed (final state), transactions = the ones it made / linked / let go, removed_transaction_ids = the ones it deleted, account_balances as the top-level list.' }
         id: { $ref: '#/components/schemas/Uuid' }
         deleted_transaction_count: { type: integer }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
@@ -11281,7 +11492,6 @@ components:
           properties:
             date: { $ref: '#/components/schemas/Date' }
             scope: { type: string, enum: [this, following, past, upcoming, all], default: this }
-            also_update_link: { type: boolean }
     RecurringOccurrenceEditRequest:
       description: 'Presence-based (updateRecurringOccurrence): a key that is sent overrides that value on this occurrence, null clears the override, an absent key is untouched.'
       allOf:
@@ -11289,7 +11499,6 @@ components:
         - type: object
           properties:
             date: { $ref: '#/components/schemas/Date', description: 'Moves the occurrence (its slot stays).' }
-            also_update_link: { type: boolean, description: 'A recorded occurrence: its transaction gets the same change.' }
     RecurringConfirmRequest:
       description: 'Optional overrides for the transaction confirmRecurringOccurrence records (absent = the occurrence''s values).'
       allOf:
@@ -11300,7 +11509,12 @@ components:
     RecurringSkipRequest:
       type: object
       properties:
-        delete_tx: { type: boolean, description: 'A recorded occurrence: delete its transaction too (else it stays, unlinked).' }
+        delete_tx: { type: boolean, deprecated: true, description: 'Gone in 0.4.1-1 (ignored): a filled occurrence answers 409 ALREADY_RECORDED; unlink or delete its transaction first.' }
+    RecurringMarkPaidRequest:
+      type: object
+      description: '0.4.1-1 R5: paid without a transaction keeps an amount.'
+      properties:
+        amount: { type: number, exclusiveMinimum: 0, description: 'What was paid; absent = the occurrence''s planned amount (400 AMOUNT_REQUIRED when it has none).' }
     RecurringOccurrencesResult:
       type: object
       required: [data, suggested_slot]
@@ -11309,8 +11523,9 @@ components:
         suggested_slot: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: '"งวดใกล้เคียง": the oldest overdue occurrence, else the open one nearest tx_date; null when none is open.' }
     RecurringBulkResult:
       type: object
-      required: [items, left_out, account_balances, setting]
+      required: [items, left_out, account_balances, setting, effects]
       properties:
+        effects: { $ref: '#/components/schemas/Effects', description: '0.4.1-1 B2: slots = the occurrences the write changed (final state), transactions = the ones it made / linked / let go, removed_transaction_ids = the ones it deleted, account_balances as the top-level list.' }
         setting: { oneOf: [{ $ref: '#/components/schemas/Recurring' }, { type: 'null' }], description: 'The setting after the write (no re-fetch).' }
         items: { type: array, items: { $ref: '#/components/schemas/RecurringItem' }, description: 'The occurrences the action settled.' }
         left_out:
@@ -11338,11 +11553,12 @@ components:
             properties:
               rule_id: { $ref: '#/components/schemas/Uuid' }
               slot: { $ref: '#/components/schemas/Date' }
-              amount: { type: number, exclusiveMinimum: 0, description: 'confirm only: the amount typed for an occurrence that has none (or overrides its amount).' }
+              amount: { type: number, exclusiveMinimum: 0, description: 'confirm and mark_paid (0.4.1-1 R5): the amount typed for an occurrence that has none (or overrides its amount). 400 with skip.' }
     RecurringOccurrenceBulkResult:
       type: object
-      required: [items, left_out, account_balances, settings]
+      required: [items, left_out, account_balances, settings, effects]
       properties:
+        effects: { $ref: '#/components/schemas/Effects', description: '0.4.1-1 B2: slots = the occurrences the write changed (final state), transactions = the ones it made / linked / let go, removed_transaction_ids = the ones it deleted, account_balances as the top-level list.' }
         items: { type: array, items: { $ref: '#/components/schemas/RecurringItem' }, description: 'The occurrences the action settled, in request order.' }
         left_out:
           type: array
@@ -11358,29 +11574,33 @@ components:
         settings: { type: array, items: { $ref: '#/components/schemas/Recurring' }, description: 'Every setting with a settled occurrence, after the write (no re-fetch).' }
     RecurringUnlinkResult:
       type: object
-      required: [item, setting]
+      required: [item, setting, effects]
       properties:
+        effects: { $ref: '#/components/schemas/Effects', description: '0.4.1-1 B2: slots = the occurrences the write changed (final state), transactions = the ones it made / linked / let go, removed_transaction_ids = the ones it deleted, account_balances as the top-level list.' }
         item: { $ref: '#/components/schemas/RecurringItem' }
         setting: { oneOf: [{ $ref: '#/components/schemas/Recurring' }, { type: 'null' }] }
     RecurringItemWriteResult:
       type: object
-      required: [item, transaction, account_balances, setting]
+      required: [item, transaction, account_balances, setting, effects]
       properties:
+        effects: { $ref: '#/components/schemas/Effects', description: '0.4.1-1 B2: slots = the occurrences the write changed (final state), transactions = the ones it made / linked / let go, removed_transaction_ids = the ones it deleted, account_balances as the top-level list.' }
         setting: { oneOf: [{ $ref: '#/components/schemas/Recurring' }, { type: 'null' }], description: 'The owning setting after the write (no re-fetch); null when the items belong to no / several settings.' }
         item: { $ref: '#/components/schemas/RecurringItem' }
         transaction: { oneOf: [{ $ref: '#/components/schemas/Transaction' }, { type: 'null' }], description: 'The transaction the write made (confirm), else null.' }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
     RecurringItemsWriteResult:
       type: object
-      required: [items, account_balances, setting]
+      required: [items, account_balances, setting, effects]
       properties:
+        effects: { $ref: '#/components/schemas/Effects', description: '0.4.1-1 B2: slots = the occurrences the write changed (final state), transactions = the ones it made / linked / let go, removed_transaction_ids = the ones it deleted, account_balances as the top-level list.' }
         setting: { oneOf: [{ $ref: '#/components/schemas/Recurring' }, { type: 'null' }], description: 'The owning setting after the write (no re-fetch); null when the items belong to no / several settings.' }
         items: { type: array, items: { $ref: '#/components/schemas/RecurringItem' } }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
     RecurringItemDeleteResult:
       type: object
-      required: [id, transaction_id, account_balances, setting]
+      required: [id, transaction_id, account_balances, setting, effects]
       properties:
+        effects: { $ref: '#/components/schemas/Effects', description: '0.4.1-1 B2: slots = the occurrences the write changed (final state), transactions = the ones it made / linked / let go, removed_transaction_ids = the ones it deleted, account_balances as the top-level list.' }
         setting: { oneOf: [{ $ref: '#/components/schemas/Recurring' }, { type: 'null' }], description: 'The owning setting after the write (no re-fetch); null when the items belong to no / several settings.' }
         id: { $ref: '#/components/schemas/Uuid' }
         transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The linked transaction deleted with it.' }

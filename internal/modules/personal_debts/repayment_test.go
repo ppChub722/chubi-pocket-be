@@ -44,19 +44,23 @@ func TestRepaymentLeeScenario(t *testing.T) {
 		"kind": "pay", "amount": 400, "date": day(-8), "account_id": f.wallet,
 		"description": "Pay Lee back", "tag_ids": []uuid.UUID{f.tag},
 	}, "createDebtRepayment", http.StatusCreated)
+	entry := obj(pay, "entry")
 	tx := obj(pay, "transaction")
-	if tx["type"] != "expense" || obj(tx, "category")["system_kind"] != "DEBT_PAID" || tx["counterparty"] != nil {
+	if entry["kind"] != "repayment" || entry["direction"] != "paid" || entry["paid"] != false || entry["origin"] != nil {
+		t.Fatalf("repayment entry = %v", entry)
+	}
+	if tx["type"] != "expense" || obj(tx, "category")["system_kind"] != "DEBT_PAID" {
 		t.Fatalf("repayment tx = %v", tx)
 	}
-	rp := obj(tx, "repayment_person")
-	if rp["key"] != "n:lee" || rp["name"] != "Lee" || rp["contact_id"] != nil {
-		t.Errorf("repayment_person = %v", rp)
+	cp := obj(tx, "counterparty")
+	if cp["kind"] != "repayment" || cp["key"] != "n:lee" || cp["entry_id"] != entry["id"] || cp["connected"] != false {
+		t.Errorf("counterparty = %v", cp)
 	}
 	if tags, _ := tx["tags"].([]any); len(tags) != 1 {
 		t.Errorf("repayment tags = %v", tx["tags"])
 	}
 	item := obj(pay, "item")
-	if item["kind"] != "repayment" || item["id"] != tx["id"] || num(item, "signed_amount") != 400 ||
+	if item["kind"] != "repayment" || item["id"] != entry["id"] || num(item, "signed_amount") != 400 ||
 		item["direction"] != "paid" || item["paid"] != nil || item["in_current_cycle"] != true {
 		t.Errorf("item = %v", item)
 	}
@@ -65,6 +69,16 @@ func TestRepaymentLeeScenario(t *testing.T) {
 	}
 	if bs, _ := pay["account_balances"].([]any); len(bs) != 1 {
 		t.Errorf("account_balances = %v", pay["account_balances"])
+	}
+	eff := obj(pay, "effects")
+	if ds, _ := eff["debts"].([]any); len(ds) != 1 {
+		t.Errorf("effects.debts = %v", eff["debts"])
+	}
+	if ts, _ := eff["transactions"].([]any); len(ts) != 1 {
+		t.Errorf("effects.transactions = %v", eff["transactions"])
+	}
+	if ps, _ := eff["person_balances"].([]any); len(ps) != 1 || num(ps[0].(map[string]any), "net") != -160 {
+		t.Errorf("effects.person_balances = %v", eff["person_balances"])
 	}
 
 	last := debt(70, day(-7), false)
@@ -78,12 +92,13 @@ func TestRepaymentLeeScenario(t *testing.T) {
 			page["net"], page["counts"], page["entry_count"], page["open_count"], page["cleared_at"])
 	}
 
+	// No wallet, no create_transaction: a ledger-only repayment ("paid outside the app", D3).
 	final := f.call("POST", repayPath("n:lee"), map[string]any{"kind": "pay", "amount": 230, "date": day(-6)},
 		"createDebtRepayment", http.StatusCreated)
-	finalTx := uuid.MustParse(obj(final, "transaction")["id"].(string))
+	finalID := uuid.MustParse(obj(final, "entry")["id"].(string))
 	if num(final, "person_balance", "net") != 0 || obj(final, "person_balance")["cleared_at"] != day(-6) ||
-		obj(final, "transaction")["account"] != nil || f.balance() != 1100 {
-		t.Errorf("after the final 230: %v (wallet %v)", final["person_balance"], f.balance())
+		final["transaction"] != nil || f.balance() != 1100 {
+		t.Errorf("after the final 230: %v tx %v (wallet %v)", final["person_balance"], final["transaction"], f.balance())
 	}
 
 	all := f.call("GET", personPath("n:lee", "?cycle=all"), nil, "getDebtPerson", http.StatusOK)
@@ -103,7 +118,10 @@ func TestRepaymentLeeScenario(t *testing.T) {
 		}
 	}
 	if d := items[3].(map[string]any); obj(d, "transaction")["id"] == nil || d["paid"] != false {
-		t.Errorf("the borrowed debt keeps its linked tx + paid label: %v", d)
+		t.Errorf("the borrowed debt keeps its tx + paid label: %v", d)
+	}
+	if r := items[0].(map[string]any); r["transaction"] != nil || r["id"] != finalID.String() {
+		t.Errorf("the ledger-only repayment line = %v", r)
 	}
 	if cur := f.call("GET", personPath("n:lee", ""), nil, "getDebtPerson", http.StatusOK); len(cur["items"].([]any)) != 0 ||
 		num(cur, "counts", "earlier") != 5 {
@@ -113,37 +131,54 @@ func TestRepaymentLeeScenario(t *testing.T) {
 	if rows := people["data"].([]any); len(rows) != 1 || num(rows[0].(map[string]any), "net") != 0 {
 		t.Errorf("people (Lee still listed: unpaid debts) = %v", rows)
 	}
+	reps := f.call("GET", entriesPath("n:lee")+"?kind=repayment", nil, "listDebtEntries", http.StatusOK)
+	if rows := reps["data"].([]any); len(rows) != 2 {
+		t.Errorf("entries?kind=repayment = %v", rows)
+	}
 
-	// Editing the repayment tx moves the balance (it is computed); the link stays.
+	// Editing the repayment's tx moves the entry with it (one value, D1); the link stays.
 	amt := 300.0
 	w, err := f.txs.UpdateWrite(f.ctx, f.me, uuid.MustParse(tx["id"].(string)), transactions.UpdateRequest{Amount: &amt})
 	if err != nil {
-		t.Fatalf("edit the repayment: %v", err)
+		t.Fatalf("edit the repayment tx: %v", err)
 	}
 	if pb, ok := w.PersonBalance.(DebtPerson); !ok || pb.Net != -100 {
 		t.Errorf("after 400 → 300: person_balance %+v, want −100", w.PersonBalance)
 	}
-	if w.Rows[0].RepaymentPerson == nil || w.Rows[0].RepaymentPerson.Key != "n:lee" || f.balance() != 1200 {
-		t.Errorf("edited row keeps the link: %+v (wallet %v)", w.Rows[0].RepaymentPerson, f.balance())
+	if w.Rows[0].Counterparty == nil || w.Rows[0].Counterparty.Kind != KindRepayment || f.balance() != 1200 {
+		t.Errorf("edited row keeps the link: %+v (wallet %v)", w.Rows[0].Counterparty, f.balance())
 	}
 	cat := uuid.New()
 	if _, err := f.txs.UpdateWrite(f.ctx, f.me, w.Rows[0].ID, transactions.UpdateRequest{CategoryID: &cat}); err == nil {
 		t.Errorf("a repayment's category must stay")
 	}
 
-	// Deleting it removes the repayment.
-	dr, err := f.txs.DeleteWrite(f.ctx, f.me, finalTx, false, false)
+	// Deleting the ledger-only repayment row moves the balance back.
+	dr, err := f.svc.DeleteEntry(f.ctx, f.me, finalID)
 	if err != nil {
 		t.Fatalf("delete the repayment: %v", err)
 	}
-	if pb, ok := dr.PersonBalance.(DebtPerson); !ok || pb.Net != -330 || pb.ClearedAt != nil {
-		t.Errorf("after deleting the 230: person_balance %+v, want −330, never cleared", dr.PersonBalance)
+	if dr.PersonBalance.Net != -330 || dr.PersonBalance.ClearedAt != nil || dr.TransactionID != nil {
+		t.Errorf("after deleting the 230: %+v, want −330, never cleared, no tx", dr)
 	}
 
-	// The person's money list: the borrowed debt's tx + the repayment left.
+	// The person's money list: the borrowed debt's tx + the repayment's.
 	res, err := f.txs.List(f.ctx, f.me, transactions.ListFilter{CounterpartyKey: "n:lee", Page: 1, PerPage: 50})
 	if err != nil || len(res.Data) != 2 {
 		t.Fatalf("counterparty_key=n:lee = %d rows (%v), want 2", len(res.Data), err)
+	}
+
+	// Deleting the repayment's tx keeps the repayment (D1): balance unchanged, wallet back.
+	del, err := f.txs.DeleteWrite(f.ctx, f.me, w.Rows[0].ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pb, ok := del.PersonBalance.(DebtPerson); !ok || pb.Net != -330 || f.balance() != 1500 {
+		t.Errorf("after deleting the repayment tx: %+v (wallet %v), want −330 / 1500", del.PersonBalance, f.balance())
+	}
+	got, err := f.svc.GetEntry(f.ctx, f.me, uuid.MustParse(entry["id"].(string)))
+	if err != nil || got.Transaction != nil || got.Entry.Amount != 300 {
+		t.Errorf("the repayment after its tx went = %+v (%v), want ledger-only 300", got, err)
 	}
 }
 
@@ -162,11 +197,13 @@ func TestRepaymentReceiveAndKeys(t *testing.T) {
 		"kind": "receive", "amount": 30, "date": "2026-10-05", "account_id": f.wallet, "mark_paid_ids": []string{lentID},
 	}, "createDebtRepayment", http.StatusCreated)
 	tx := obj(got, "transaction")
-	rp := obj(tx, "repayment_person")
+	cp := obj(tx, "counterparty")
 	if tx["type"] != "income" || obj(tx, "category")["system_kind"] != "DEBT_RECEIVED" ||
-		rp["key"] != key || rp["contact_id"] != f.contact.String() || rp["name"] != "Bee Live" || obj(rp, "person")["linked"] != true {
+		cp["kind"] != "repayment" || cp["key"] != key || obj(cp, "person")["name"] != "Bee Live" || obj(cp, "person")["linked"] != true {
 		t.Fatalf("receive tx = %v", tx)
 	}
+	f.code("POST", repayPath(key), map[string]any{"kind": "pay", "amount": 5, "tag_ids": []uuid.UUID{f.tag}},
+		http.StatusBadRequest, "LEDGER_ONLY_NO_WALLET")
 	if num(got, "person_balance", "net") != 70 || num(got, "person_balance", "open_count") != 0 ||
 		num(got, "item", "signed_amount") != -30 || obj(got, "item")["direction"] != "received" || f.balance() != 1030 {
 		t.Errorf("after receive 30: %v item %v (wallet %v)", got["person_balance"], got["item"], f.balance())
@@ -216,8 +253,8 @@ func TestRepaymentReceiveAndKeys(t *testing.T) {
 	}
 }
 
-// TestRepayEntryMakesRepaymentTx — the pending settle_debt path writes a repayment TRANSACTION (not
-// a personal_debts row) in the opposite direction of the debt.
+// TestRepayEntryMakesRepaymentTx — the pending settle_debt path writes a repayment row in the
+// opposite direction of the debt, with its transaction when a wallet is given (0.4.1-1 D3).
 func TestRepayEntryMakesRepaymentTx(t *testing.T) {
 	f := newDebtHFix(t)
 	owe, err := f.svc.CreateEntry(f.ctx, f.me, "n:Mom", CreateEntryRequest{Direction: DirectionReceived, Amount: 90})
@@ -228,12 +265,13 @@ func TestRepayEntryMakesRepaymentTx(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Transaction == nil || res.Transaction.Type != transactions.TypeExpense || res.Transaction.RepaymentPerson == nil ||
-		res.Transaction.RepaymentPerson.Name != "Mom" || res.PersonBalance.Net != -40 || f.balance() != 950 {
+	if res.Transaction == nil || res.Transaction.Type != transactions.TypeExpense || res.Transaction.Counterparty == nil ||
+		res.Transaction.Counterparty.Person.Name != "Mom" || res.Entry.Kind != KindRepayment ||
+		res.PersonBalance.Net != -40 || f.balance() != 950 {
 		t.Fatalf("repay = %+v / %+v (wallet %v)", res.Transaction, res.PersonBalance, f.balance())
 	}
 	var rows int
-	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1`, f.me).Scan(&rows); err != nil || rows != 1 {
-		t.Errorf("personal_debts rows = %d (%v), want 1 (no repayment row)", rows, err)
+	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1`, f.me).Scan(&rows); err != nil || rows != 2 {
+		t.Errorf("personal_debts rows = %d (%v), want 2 (the debt + the repayment row)", rows, err)
 	}
 }

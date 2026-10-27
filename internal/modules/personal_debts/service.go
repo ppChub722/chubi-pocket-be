@@ -141,11 +141,6 @@ func (s *Service) GetEntry(ctx context.Context, userID, id uuid.UUID) (*EntryDet
 			return nil, err
 		}
 	}
-	if v.LinkedTransaction != nil {
-		if out.LinkedTransaction, err = s.txs.Get(ctx, userID, v.LinkedTransaction.ID); err != nil {
-			return nil, err
-		}
-	}
 	return out, nil
 }
 
@@ -212,13 +207,22 @@ func (s *Service) CreateEntry(ctx context.Context, userID uuid.UUID, rawKey stri
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	out, err := s.writeResult(ctx, userID, e.ID, touched, nil)
+	return s.createdResult(ctx, userID, e, touched)
+}
+
+// createdResult — a create's answer: the write result + balance_change + the statement line.
+func (s *Service) createdResult(ctx context.Context, userID uuid.UUID, e *Entry, wallets []uuid.UUID) (*WriteResult, error) {
+	out, err := s.writeResult(ctx, userID, e.ID, touch{wallets: wallets}, nil)
 	if err != nil {
 		return nil, err
 	}
+	// An overpaid repayment is allowed: the balance simply crosses 0 (balance_change.flipped says so).
 	bc := transactions.NewPersonDelta(out.PersonBalance.Key, out.PersonBalance.Person,
 		out.PersonBalance.Net-e.Signed(), out.PersonBalance.Net)
 	out.BalanceChange = &bc
+	if out.Item, err = s.itemOf(ctx, userID, e.Key(), e.ID); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -234,17 +238,19 @@ func (s *Service) PreviewEntry(ctx context.Context, userID uuid.UUID, rawKey str
 	})
 }
 
-// createEntryTx — POST …/entries' write: the debt (and its wallet transaction, when asked).
+// wantsTx — the transaction side of a create: create_transaction when sent, else a transaction
+// exactly when a wallet is given.
+func wantsTx(create *bool, accountID *uuid.UUID) bool {
+	if create != nil {
+		return *create
+	}
+	return accountID != nil
+}
+
+// createEntryTx — POST …/entries' write: the debt (and its transaction, new or connected).
 func (s *Service) createEntryTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, rawKey string, req CreateEntryRequest) (*Entry, []uuid.UUID, error) {
-	createTx := req.AccountID != nil
-	if req.CreateTransaction != nil {
-		createTx = *req.CreateTransaction
-	}
-	if req.CreateTransaction == nil && req.AccountID == nil && len(req.TagIDs) > 0 {
+	if req.CreateTransaction == nil && req.AccountID == nil && req.LinkTransactionID == nil && len(req.TagIDs) > 0 {
 		return nil, nil, ErrTagsNeedWallet // the old contract, for clients that don't send create_transaction
-	}
-	if !createTx && (req.AccountID != nil || len(req.TagIDs) > 0) {
-		return nil, nil, ErrLedgerOnlyNoWallet
 	}
 	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
 	if err != nil {
@@ -256,60 +262,19 @@ func (s *Service) createEntryTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID
 	} else if date, err = today(ctx, tx); err != nil {
 		return nil, nil, err
 	}
-	if req.DueDate != nil && *req.DueDate < date {
-		return nil, nil, ErrDueBeforeDate
-	}
-	entry := &Entry{
-		UserID: userID, Direction: req.Direction, ContactID: contactID, PersonName: name,
-		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note,
-		DueDate: req.DueDate,
-	}
-	if req.BillID != nil {
-		// The event resolve sheet's "as debt" (0.4.0-3 B3): the debt keeps its bill and event.
-		var projectID uuid.UUID
-		err := tx.QueryRow(ctx, `SELECT pt.project_id FROM project_transactions pt
-			JOIN project_members pm ON pm.project_id = pt.project_id AND pm.user_id = $2 AND pm.status = 'active'
-			WHERE pt.id = $1`, *req.BillID, userID).Scan(&projectID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil, ErrBillNotFound
-		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("debt bill: %w", err)
-		}
-		kind := SourceEvent
-		entry.SourceKind, entry.SourceProjectTransactionID, entry.ProjectID = &kind, req.BillID, &projectID
-	} else if req.EventID != nil {
-		var ok bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM project_members
-			WHERE project_id = $1 AND user_id = $2 AND status = 'active')`, *req.EventID, userID).Scan(&ok); err != nil {
-			return nil, nil, fmt.Errorf("debt event: %w", err)
-		}
-		if !ok {
-			return nil, nil, ErrBillNotFound
-		}
-		kind := SourceEvent
-		entry.SourceKind, entry.ProjectID = &kind, req.EventID
-	}
-	e, err := insertEntryTx(ctx, tx, entry)
+	e, wallets, err := s.insertRowTx(ctx, tx, userID, EntryInput{
+		Kind: KindDebt, Direction: req.Direction, ContactID: contactID, PersonName: name,
+		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note, DueDate: req.DueDate,
+		CreateTransaction: wantsTx(req.CreateTransaction, req.AccountID), AccountID: req.AccountID, TagIDs: req.TagIDs,
+		LinkTransactionID: req.LinkTransactionID, BillID: req.BillID, EventID: req.EventID,
+	})
 	if err != nil {
 		return nil, nil, err
-	}
-	var touched []uuid.UUID
-	if createTx {
-		if _, err := s.txs.CreateDebtTxInTx(ctx, tx, userID, e.ID, transactions.DebtTxInput{
-			Direction: e.Direction, AccountID: req.AccountID, Amount: e.Amount, Date: e.Date,
-			Description: e.Description, Note: e.Note, TagIDs: req.TagIDs,
-		}); err != nil {
-			return nil, nil, err
-		}
-		if req.AccountID != nil {
-			touched = append(touched, *req.AccountID)
-		}
 	}
 	if err := markPaidTx(ctx, tx, userID, e.Key(), req.MarkPaidIDs); err != nil {
 		return nil, nil, err
 	}
-	return e, touched, nil
+	return e, wallets, nil
 }
 
 // preview — run write in a DB transaction that is always rolled back, and read the person's balance
@@ -357,7 +322,7 @@ func markPaidTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, key string, id
 		return nil
 	}
 	tag, err := tx.Exec(ctx, `UPDATE personal_debts SET paid = TRUE, updated_by_user_id = $1
-		WHERE user_id = $1 AND id = ANY($2) AND `+shared.DebtKeySQL("personal_debts")+` = $3`, userID, ids, key)
+		WHERE user_id = $1 AND id = ANY($2) AND kind = 'debt' AND `+shared.DebtKeySQL("personal_debts")+` = $3`, userID, ids, key)
 	if err != nil {
 		return fmt.Errorf("mark paid: %w", err)
 	}
@@ -379,7 +344,9 @@ func uniqueIDs(ids []uuid.UUID) []uuid.UUID {
 	return out
 }
 
-func (s *Service) writeResult(ctx context.Context, userID, entryID uuid.UUID, touched []uuid.UUID, previousKey *string) (*WriteResult, error) {
+// writeResult — a write's answer (after commit): the entry, its transaction, the person's balance
+// (and the previous person's when it moved), the wallets and the effects.
+func (s *Service) writeResult(ctx context.Context, userID, entryID uuid.UUID, t touch, previousKey *string) (*WriteResult, error) {
 	v, err := entryView(ctx, s.store.db, userID, entryID)
 	if err != nil {
 		return nil, err
@@ -388,32 +355,33 @@ func (s *Service) writeResult(ctx context.Context, userID, entryID uuid.UUID, to
 	if out.PersonBalance, err = s.balanceOfKey(ctx, s.store.db, userID, v.Key); err != nil {
 		return nil, err
 	}
+	t.debts = append(t.debts, entryID)
 	if previousKey != nil && *previousKey != v.Key {
 		prev, err := s.balanceOfKey(ctx, s.store.db, userID, *previousKey)
 		if err != nil {
 			return nil, err
 		}
 		out.PreviousPersonBalance = &prev
+		t.keys = append(t.keys, *previousKey)
 	}
 	if v.Transaction != nil {
 		if out.Transaction, err = s.txs.Get(ctx, userID, v.Transaction.ID); err != nil {
 			return nil, err
 		}
 	}
-	if v.LinkedTransaction != nil {
-		if out.LinkedTransaction, err = s.txs.Get(ctx, userID, v.LinkedTransaction.ID); err != nil {
-			return nil, err
-		}
+	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.store.db, t.wallets); err != nil {
+		return nil, err
 	}
-	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.store.db, touched); err != nil {
+	if out.Effects, err = s.effects(ctx, s.store.db, userID, t); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// LinkTx points a manual entry at one of my plain transactions of its direction (paid =
-// expense, received = income). The transaction keeps its category and amount. The entry's own
-// transaction, if it has one, is deleted: the linked one replaces it.
+// LinkTx — POST /personal-debts/{id}/link (0.4.1-1 D2): one of my plain transactions of the entry's
+// direction becomes its transaction, connected + synced. The entry takes its amount and date
+// (description / note: the entry's when set, else the transaction's); the transaction takes the kind
+// category (its own is kept for a disconnect).
 func (s *Service) LinkTx(ctx context.Context, userID, id, txID uuid.UUID) (*WriteResult, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -425,72 +393,66 @@ func (s *Service) LinkTx(ctx context.Context, userID, id, txID uuid.UUID) (*Writ
 	if err != nil {
 		return nil, err
 	}
-	if e.SourceKind != nil {
+	if e.SourceKind != nil && *e.SourceKind != SourceEvent {
 		return nil, ErrManagedBySource
 	}
-	var (
-		typ   string
-		plain bool
-	)
-	err = tx.QueryRow(ctx, `SELECT t.type,
-		t.project_id IS NULL AND t.source_personal_debt_id IS NULL AND t.source_project_transaction_id IS NULL
-		AND t.repay_person_name IS NULL AND t.paid_by_amount IS NULL
-		AND NOT EXISTS (SELECT 1 FROM categories c WHERE c.id = t.category_id AND c.is_system)
-		FROM transactions t WHERE t.id = $1 AND t.user_id = $2`, txID, userID).Scan(&typ, &plain)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, transactions.ErrTxNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("link tx: %w", err)
-	}
-	want := "income"
-	if e.Direction == DirectionPaid {
-		want = "expense"
-	}
-	if !plain || typ != want {
-		return nil, ErrTxNotLinkable
-	}
-	var taken bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM personal_debts
-		WHERE linked_transaction_id = $1 AND id <> $2)`, txID, e.ID).Scan(&taken); err != nil {
-		return nil, fmt.Errorf("link tx taken: %w", err)
-	}
-	if taken {
-		return nil, ErrTxLinkedElsewhere
-	}
-
-	var touched []uuid.UUID
 	own, err := entryTxID(ctx, tx, e.ID)
 	if err != nil {
 		return nil, err
 	}
 	if own != nil {
-		acc, err := s.txs.DeleteDebtTxInTx(ctx, tx, userID, *own)
-		if err != nil {
-			return nil, err
-		}
-		touched = nonNil(acc)
+		return nil, ErrEntryHasTx
 	}
-	if _, err := tx.Exec(ctx, `UPDATE personal_debts SET linked_transaction_id = $2, updated_by_user_id = $3
-		WHERE id = $1`, e.ID, txID, userID); err != nil {
+	row, err := linkableTx(ctx, tx, userID, txID, e.Direction)
+	if err != nil {
+		return nil, err
+	}
+	descr, note := firstText(e.Description, row.Description), firstText(e.Note, row.Note)
+	if _, err := tx.Exec(ctx, `UPDATE personal_debts
+		SET amount = $2, date = $3::date, description = $4, note = $5, updated_by_user_id = $6
+		WHERE id = $1`, e.ID, row.Amount, row.Date, descr, note, userID); err != nil {
 		return nil, fmt.Errorf("link tx: %w", err)
+	}
+	if _, err := s.txs.ConnectDebtTxInTx(ctx, tx, userID, e.ID, txID, e.Kind, descr, note); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return s.writeResult(ctx, userID, e.ID, touched, nil)
+	return s.writeResult(ctx, userID, e.ID, touch{}, nil)
 }
 
-// UnlinkTx drops the entry's link; the transaction stays as it is.
+// UnlinkTx — POST /personal-debts/{id}/unlink (0.4.1-1 D2): a connected transaction goes back to a
+// plain row with its old category; the entry stays, ledger-only.
 func (s *Service) UnlinkTx(ctx context.Context, userID, id uuid.UUID) (*WriteResult, error) {
-	if _, err := entryView(ctx, s.store.db, userID, id); err != nil {
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	e, err := getEntry(ctx, tx, userID, id, true)
+	if err != nil {
 		return nil, err
 	}
-	if _, err := s.store.db.Exec(ctx, `UPDATE personal_debts SET linked_transaction_id = NULL, updated_by_user_id = $3
-		WHERE id = $1 AND user_id = $2`, id, userID, userID); err != nil {
+	var (
+		txID      uuid.UUID
+		connected bool
+	)
+	err = tx.QueryRow(ctx, `SELECT id, debt_connected FROM transactions WHERE source_personal_debt_id = $1`, e.ID).
+		Scan(&txID, &connected)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !connected) {
+		return nil, ErrTxNotDisconnectable
+	}
+	if err != nil {
 		return nil, fmt.Errorf("unlink tx: %w", err)
 	}
-	return s.writeResult(ctx, userID, id, nil, nil)
+	if err := s.txs.DisconnectDebtTxInTx(ctx, tx, userID, txID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.writeResult(ctx, userID, e.ID, touch{txs: []uuid.UUID{txID}}, nil)
 }
 
 func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req UpdateEntryRequest) (*WriteResult, error) {
@@ -508,6 +470,9 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 	// my own record of the bill and stays editable.
 	if e.SourceKind != nil && *e.SourceKind != SourceEvent && req.moneyChange() {
 		return nil, ErrManagedBySource
+	}
+	if e.Kind == KindRepayment && (req.Paid != nil || req.has("due_date")) {
+		return nil, invalid("a repayment has no paid label or due_date")
 	}
 	prevKey := e.Key()
 	next := *e
@@ -547,11 +512,20 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 	if err != nil {
 		return nil, err
 	}
-	var wallet *uuid.UUID
+	var (
+		wallet    *uuid.UUID
+		connected bool
+	)
 	if txID != nil {
-		if err := tx.QueryRow(ctx, `SELECT account_id FROM transactions WHERE id = $1`, *txID).Scan(&wallet); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT account_id, debt_connected FROM transactions WHERE id = $1`, *txID).
+			Scan(&wallet, &connected); err != nil {
 			return nil, fmt.Errorf("entry wallet: %w", err)
 		}
+	}
+	// A connected (existing) transaction keeps its own wallet / tags / type: edit it there.
+	if connected && (req.has("account_id") || req.CreateTransaction != nil || req.has("tag_ids") ||
+		(req.Direction != nil && *req.Direction != e.Direction)) {
+		return nil, invalid("a connected transaction's wallet, tags and type change on the transaction (or disconnect it first)")
 	}
 	walletChange := req.has("account_id")
 	if walletChange {
@@ -585,7 +559,7 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 
 	var touched []uuid.UUID
 	in := transactions.DebtTxInput{
-		Direction: next.Direction, Amount: next.Amount, Date: next.Date,
+		Kind: e.Kind, Direction: next.Direction, Amount: next.Amount, Date: next.Date,
 		Description: next.Description, Note: next.Note, TagIDs: req.TagIDs, TagsSet: req.has("tag_ids"),
 	}
 	in.AccountID = wallet
@@ -605,15 +579,15 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 			return nil, err
 		}
 		touched = nonNil(wallet)
-		// The entry's own transaction replaces a linked one.
-		if _, err := tx.Exec(ctx, `UPDATE personal_debts SET linked_transaction_id = NULL WHERE id = $1`, e.ID); err != nil {
-			return nil, fmt.Errorf("drop link: %w", err)
-		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return s.writeResult(ctx, userID, e.ID, touched, &prevKey)
+	t := touch{wallets: touched}
+	if txID != nil && !wantTx {
+		t.removedTxs = []uuid.UUID{*txID}
+	}
+	return s.writeResult(ctx, userID, e.ID, t, &prevKey)
 }
 
 func nonNil(id *uuid.UUID) []uuid.UUID {
@@ -641,13 +615,31 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, id uuid.UUID) (*Delet
 	if err != nil {
 		return nil, err
 	}
-	var touched []uuid.UUID
+	var (
+		touched   []uuid.UUID
+		connected bool
+		t         = touch{removedDebts: []uuid.UUID{e.ID}, keys: []string{e.Key()}}
+	)
 	if txID != nil {
+		if err := tx.QueryRow(ctx, `SELECT debt_connected FROM transactions WHERE id = $1`, *txID).Scan(&connected); err != nil {
+			return nil, fmt.Errorf("entry tx: %w", err)
+		}
+	}
+	switch {
+	case txID != nil && connected:
+		// A connected (existing) transaction stays, disconnected, with its old category (D2).
+		if err := s.txs.DisconnectDebtTxInTx(ctx, tx, userID, *txID); err != nil {
+			return nil, err
+		}
+		t.txs = []uuid.UUID{*txID}
+		txID = nil
+	case txID != nil:
 		acc, err := s.txs.DeleteDebtTxInTx(ctx, tx, userID, *txID)
 		if err != nil {
 			return nil, err
 		}
 		touched = nonNil(acc)
+		t.removedTxs = []uuid.UUID{*txID}
 	}
 	if e.PaidForTransactionID != nil {
 		// A partner's split on me: my expense of it goes with it (it has no wallet).
@@ -656,6 +648,9 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, id uuid.UUID) (*Delet
 			return nil, err
 		}
 		touched = append(touched, acc...)
+		if err == nil {
+			t.removedTxs = append(t.removedTxs, *e.PaidForTransactionID)
+		}
 	}
 	if e.SourceKind != nil && *e.SourceKind == SourceTransaction {
 		if err := s.notifySplitChangeTx(ctx, tx, e, 0, notifications.SplitChangeRemoved); err != nil {
@@ -675,128 +670,88 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, id uuid.UUID) (*Delet
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.store.db, touched); err != nil {
 		return nil, err
 	}
+	t.wallets = touched
+	if out.Effects, err = s.effects(ctx, s.store.db, userID, t); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
-// CreateRepayment — POST /personal-debts/people/{key}/repayments: ONE transaction tied to the person
-// (pay = expense in Debt Paid, receive = income in Debt Received). It counts in the person's
-// balance (pay +, receive −); mark_paid_ids only label debts paid.
-func (s *Service) CreateRepayment(ctx context.Context, userID uuid.UUID, rawKey string, req RepaymentRequest) (*RepaymentResult, error) {
+// CreateRepayment — POST /personal-debts/people/{key}/repayments (0.4.1-1 D3): a person-book row of
+// kind repayment (pay = direction paid, net +; receive = received, net −), tied to the person, its
+// transaction optional (new, connected, or none = ledger-only). mark_paid_ids / mark_all_paid only
+// label debts paid.
+func (s *Service) CreateRepayment(ctx context.Context, userID uuid.UUID, rawKey string, req RepaymentRequest) (*WriteResult, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	row, key, err := s.createRepaymentTx(ctx, tx, userID, rawKey, req)
+	e, wallets, err := s.createRepaymentTx(ctx, tx, userID, rawKey, req)
 	if err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	out, err := s.repaymentResult(ctx, userID, row.ID, key, nonNil(req.AccountID))
-	if err != nil {
-		return nil, err
-	}
-	// An overpaid settle is allowed: the balance simply crosses 0 (balance_change.flipped says so).
-	bc := transactions.NewPersonDelta(key, out.PersonBalance.Person, out.PersonBalance.Net-repaySigned(req), out.PersonBalance.Net)
-	out.BalanceChange = &bc
-	return out, nil
+	return s.createdResult(ctx, userID, e, wallets)
 }
 
 // PreviewRepayment — POST …/repayments?preview=true: the settle's before → after, nothing saved.
 func (s *Service) PreviewRepayment(ctx context.Context, userID uuid.UUID, rawKey string, req RepaymentRequest) (*DebtPreview, error) {
 	return s.preview(ctx, userID, nonNil(req.AccountID), func(tx pgx.Tx) (string, float64, error) {
-		_, key, err := s.createRepaymentTx(ctx, tx, userID, rawKey, req)
-		return key, repaySigned(req), err
+		e, _, err := s.createRepaymentTx(ctx, tx, userID, rawKey, req)
+		if err != nil {
+			return "", 0, err
+		}
+		return e.Key(), e.Signed(), nil
 	})
 }
 
-// repaySigned — a repayment's effect on the balance: pay +, receive −.
-func repaySigned(req RepaymentRequest) float64 {
-	if req.Kind == RepayPay {
-		return req.Amount
+// repayDirection — pay (I pay back) = paid, net +; receive = received, net −.
+func repayDirection(kind string) string {
+	if kind == RepayPay {
+		return DirectionPaid
 	}
-	return -req.Amount
+	return DirectionReceived
 }
 
-func (s *Service) createRepaymentTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, rawKey string, req RepaymentRequest) (*transactions.Transaction, string, error) {
+func (s *Service) createRepaymentTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, rawKey string, req RepaymentRequest) (*Entry, []uuid.UUID, error) {
 	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 	date := ""
 	if req.Date != nil {
 		date = *req.Date
 	} else if date, err = today(ctx, tx); err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
-	row, err := s.txs.CreateRepaymentInTx(ctx, tx, userID, transactions.RepayInput{
-		Kind: req.Kind, ContactID: contactID, PersonName: strings.TrimSpace(name), AccountID: req.AccountID,
-		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note, TagIDs: req.TagIDs,
+	e, wallets, err := s.insertRowTx(ctx, tx, userID, EntryInput{
+		Kind: KindRepayment, Direction: repayDirection(req.Kind), ContactID: contactID, PersonName: strings.TrimSpace(name),
+		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note,
+		CreateTransaction: wantsTx(req.CreateTransaction, req.AccountID), AccountID: req.AccountID, TagIDs: req.TagIDs,
+		LinkTransactionID: req.LinkTransactionID, BillID: req.BillID,
 	})
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
-	if req.BillID != nil {
-		var projectID uuid.UUID
-		err := tx.QueryRow(ctx, `SELECT pt.project_id FROM project_transactions pt
-			JOIN project_members pm ON pm.project_id = pt.project_id AND pm.user_id = $2 AND pm.status = 'active'
-			WHERE pt.id = $1`, *req.BillID, userID).Scan(&projectID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, "", ErrBillNotFound
-		}
-		if err != nil {
-			return nil, "", fmt.Errorf("repayment bill: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `UPDATE transactions SET source_project_transaction_id = $2, project_id = $3
-			WHERE id = $1 AND user_id = $4`, row.ID, *req.BillID, projectID, userID); err != nil {
-			return nil, "", fmt.Errorf("repayment bill link: %w", err)
+	if err := markPaidTx(ctx, tx, userID, e.Key(), req.MarkPaidIDs); err != nil {
+		return nil, nil, err
+	}
+	if req.MarkAllPaid {
+		if err := markAllPaidTx(ctx, tx, userID, e.Key(), e.Direction); err != nil {
+			return nil, nil, err
 		}
 	}
-	key := shared.DebtKey(contactID, name)
-	if err := markPaidTx(ctx, tx, userID, key, req.MarkPaidIDs); err != nil {
-		return nil, "", err
-	}
-	if contactID != nil {
-		_, _ = tx.Exec(ctx, `UPDATE contacts SET last_used_at = NOW() WHERE id = $1 AND user_id = $2`, *contactID, userID)
-	}
-	return row, key, nil
+	return e, wallets, nil
 }
 
-func (s *Service) repaymentResult(ctx context.Context, userID, txID uuid.UUID, key string, touched []uuid.UUID) (*RepaymentResult, error) {
-	out := &RepaymentResult{}
-	var err error
-	if out.Transaction, err = s.txs.Get(ctx, userID, txID); err != nil {
-		return nil, err
-	}
-	items, err := loadRepayments(ctx, s.store.db, userID, []uuid.UUID{txID})
-	if err != nil {
-		return nil, err
-	}
-	if len(items) == 1 {
-		out.Item = items[0]
-		mark, err := s.store.cycleBoundary(ctx, s.store.db, userID, key)
-		if err != nil {
-			return nil, err
-		}
-		cur := mark.after(out.Item.Date, out.Item.CreatedAt, out.Item.ID)
-		out.Item.InCurrentCycle = &cur
-	}
-	if out.PersonBalance, err = s.balanceOfKey(ctx, s.store.db, userID, key); err != nil {
-		return nil, err
-	}
-	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.store.db, touched); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// RepayEntry — a pending settle_debt draft: a repayment TRANSACTION to / from the debt's person
-// (a paid debt → they pay me back = receive; a received debt → I pay back = pay). The debt itself
-// is not touched (the paid label stays the user's call).
+// RepayEntry — a pending settle_debt draft: a repayment to / from the debt's person (a paid debt →
+// they pay me back = receive; a received debt → I pay back = pay), with a transaction when a wallet
+// is given. The debt itself is not touched (the paid label stays the user's call).
 func (s *Service) RepayEntry(ctx context.Context, userID, targetID uuid.UUID, amount float64, accountID *uuid.UUID,
-	date, description, note *string) (*RepaymentResult, error) {
+	date, description, note *string) (*WriteResult, error) {
 	e, err := getEntry(ctx, s.store.db, userID, targetID, false)
 	if err != nil {
 		return nil, err
@@ -822,16 +777,15 @@ func (s *Service) TxEditedTx(ctx context.Context, tx pgx.Tx, userID, entryID uui
 	return nil
 }
 
+// TxDeletedTx — the entry's transaction was deleted (0.4.1-1 D1: deleting my tx = disconnecting it):
+// the entry stays, ledger-only, so the person's balance doesn't move.
 func (s *Service) TxDeletedTx(ctx context.Context, tx pgx.Tx, userID, entryID uuid.UUID) (string, error) {
-	e, err := getEntry(ctx, tx, userID, entryID, true)
+	e, err := getEntry(ctx, tx, userID, entryID, false)
 	if errors.Is(err, ErrEntryNotFound) {
 		return "", nil
 	}
 	if err != nil {
 		return "", err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM personal_debts WHERE id = $1`, entryID); err != nil {
-		return "", fmt.Errorf("delete entry: %w", err)
 	}
 	return e.Key(), nil
 }

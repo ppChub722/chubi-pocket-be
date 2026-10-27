@@ -209,6 +209,7 @@ func newQCFixture(t *testing.T) *qcFixture {
 	f.svc = NewService(NewStore(pool))
 	f.svc.WithNotificationService(notifSvc)
 	f.svc.WithTransactionsService(txSvc)
+	f.svc.WithDebts(pdSvc)
 	txSvc.WithDebtLinks(pdSvc)
 	txSvc.WithEventBillSyncer(f.svc.SyncBillFromTxTx)
 	txSvc.WithEventBillDeleter(f.svc.DeleteBillOfTxTx)

@@ -209,6 +209,8 @@ type BoardSplit struct {
 	Amount            float64          `json:"amount"`
 	Marks             []uuid.UUID      `json:"marks"`
 	MyMark            bool             `json:"my_mark"`
+	// PaidBack (0.4.1-1) — "คืนแล้ว": a payback row (this member → the payer) was made for this bill.
+	PaidBack bool `json:"paid_back"`
 }
 
 type BoardRow struct {

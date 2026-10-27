@@ -82,8 +82,14 @@ func (h *Handler) Entries(c *gin.Context) {
 	}
 	f := EntryFilter{
 		Q: c.Query("q"), Sort: c.Query("sort"), Direction: c.Query("direction"),
-		Money: c.Query("money") == "true", Cycle: c.Query("cycle"),
+		Money: c.Query("money") == "true", Cycle: c.Query("cycle"), Kind: c.Query("kind"),
 		Page: atoiOr(c.Query("page"), 1), PerPage: atoiOr(c.Query("per_page"), 30),
+	}
+	switch f.Kind {
+	case "", KindDebt, KindRepayment, "all":
+	default:
+		response.BadRequest(c, "VALIDATION_ERROR", "kind must be debt, repayment or all", nil)
+		return
 	}
 	switch f.Cycle {
 	case "", "current", "earlier", "all":
@@ -251,7 +257,25 @@ func (h *Handler) LinkTx(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// UnlinkTx — POST /personal-debts/{id}/unlink: drops the link; the transaction stays.
+// Disconnect — POST /personal-debts/{id}/disconnect (0.4.1-1 D9): my copy of a cross-user pair.
+func (h *Handler) Disconnect(c *gin.Context) {
+	userID, ok := caller(c)
+	if !ok {
+		return
+	}
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.Disconnect(c.Request.Context(), userID, id)
+	if err != nil {
+		mapServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// UnlinkTx — POST /personal-debts/{id}/unlink: disconnects a connected transaction (D2).
 func (h *Handler) UnlinkTx(c *gin.Context) {
 	userID, ok := caller(c)
 	if !ok {
@@ -335,6 +359,14 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "TX_NOT_LINKABLE", err.Error(), nil)
 	case errors.Is(err, ErrTxLinkedElsewhere):
 		response.Fail(c, http.StatusConflict, "DEBT_TX_ALREADY_LINKED", err.Error(), nil)
+	case errors.Is(err, ErrEntryHasTx):
+		response.Fail(c, http.StatusConflict, "ENTRY_HAS_TRANSACTION", err.Error(), nil)
+	case errors.Is(err, ErrTxNotDisconnectable):
+		response.Fail(c, http.StatusConflict, "TX_NOT_DISCONNECTABLE", err.Error(), nil)
+	case errors.Is(err, ErrDebtNotLinked):
+		response.Fail(c, http.StatusConflict, "DEBT_NOT_LINKED", err.Error(), nil)
+	case errors.Is(err, ErrInvalidInput):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, transactions.ErrAccountArchived):
 		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, transactions.ErrAccountForbidden):

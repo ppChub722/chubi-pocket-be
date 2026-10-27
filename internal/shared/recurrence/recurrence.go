@@ -58,6 +58,39 @@ type Spec struct {
 	EndCount       *int
 	TotalCount     *int
 	GeneratedUntil *time.Time
+	// Gaps — spans the schedule skips (a setting resumed after a pause, 0.4.1-1 R8):
+	// no occurrence is made in them, and a count end counts past them (R9).
+	Gaps []Gap
+}
+
+// Gap — the occurrences d with From <= d < To are not made (YYYY-MM-DD).
+type Gap struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+func (r *Spec) inGap(d time.Time) bool {
+	s := d.Format(DateLayout)
+	for _, g := range r.Gaps {
+		if s >= g.From && s < g.To {
+			return true
+		}
+	}
+	return false
+}
+
+// dropGaps keeps the dates outside every gap.
+func (r *Spec) dropGaps(ds []time.Time) []time.Time {
+	if len(r.Gaps) == 0 {
+		return ds
+	}
+	out := ds[:0]
+	for _, d := range ds {
+		if !r.inGap(d) {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func ParseDate(s string) (time.Time, error) {
@@ -100,6 +133,9 @@ func (r *Spec) Occurrences(until time.Time, limit int) []time.Time {
 	add := func(d time.Time) bool {
 		if d.Before(r.StartDate) || d.After(until) {
 			return !d.After(until)
+		}
+		if r.inGap(d) {
+			return true
 		}
 		out = append(out, d)
 		return limit == 0 || len(out) < limit
@@ -195,7 +231,18 @@ func (r *Spec) HorizonSpan(from time.Time) time.Time {
 	return from.AddDate(1, 0, 0)
 }
 
-func (r *Spec) MaxEnd() time.Time { return r.StartDate.AddDate(2, 0, 0) }
+// MaxEnd — 2 years after the start, plus the time spent in gaps.
+func (r *Spec) MaxEnd() time.Time {
+	end := r.StartDate.AddDate(2, 0, 0)
+	for _, g := range r.Gaps {
+		f, err1 := ParseDate(g.From)
+		t, err2 := ParseDate(g.To)
+		if err1 == nil && err2 == nil && t.After(f) {
+			end = end.Add(t.Sub(f))
+		}
+	}
+	return end
+}
 
 func (r *Spec) Limits(today time.Time) error {
 	switch r.Freq {
@@ -451,7 +498,7 @@ func (r *Spec) Between(from, to time.Time) []time.Time {
 	}
 	hi := r.endCap(to)
 	if lo.After(hi) {
-		return out
+		return r.dropGaps(out)
 	}
 	step := r.Interval
 	if step < 1 {
@@ -492,7 +539,7 @@ func (r *Spec) Between(from, to time.Time) []time.Time {
 					continue
 				}
 				if d.After(hi) {
-					return out
+					return r.dropGaps(out)
 				}
 				out = append(out, d)
 			}
@@ -560,5 +607,5 @@ func (r *Spec) Between(from, to time.Time) []time.Time {
 			out = append(out, d)
 		}
 	}
-	return out
+	return r.dropGaps(out)
 }

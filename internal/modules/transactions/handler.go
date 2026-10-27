@@ -234,7 +234,7 @@ func (h *Handler) Delete(c *gin.Context) {
 		return
 	}
 
-	res, err := h.service.DeleteWrite(c.Request.Context(), userID, id, c.Query("also_delete_link") == "true", c.Query("skip_occurrence") == "true")
+	res, err := h.service.DeleteWrite(c.Request.Context(), userID, id, c.Query("also_delete_link") == "true")
 	if err != nil {
 		mapServiceError(c, err)
 		return

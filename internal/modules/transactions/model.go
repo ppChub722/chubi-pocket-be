@@ -31,10 +31,10 @@ type Transaction struct {
 	SourcePersonalDebtID       *uuid.UUID `json:"-"` // the debt entry this row is the wallet side of (see Counterparty)
 	SourceProjectTransactionID *uuid.UUID `json:"source_project_transaction_id"`
 	ProjectID                  *uuid.UUID `json:"-"`
-	// A repayment (0.4.0-3): the debt person this expense (I paid back) / income (I got paid back)
-	// is tied to. RepayPersonName is set on every repayment; RepayContactID only for a contact.
-	RepayContactID  *uuid.UUID `json:"-"`
-	RepayPersonName *string    `json:"-"`
+	// DebtConnected (0.4.1-1 D2) — an existing transaction connected to a person-book row later (it
+	// can be disconnected); DebtPrevCategoryID is its category from before, restored then.
+	DebtConnected      bool       `json:"-"`
+	DebtPrevCategoryID *uuid.UUID `json:"-"`
 	// PaidByAmount (0.4.0-3) — the part of this expense someone else paid (the bill stays Amount; the
 	// wallet moves only Amount − PaidByAmount). nil = I paid it all.
 	PaidByAmount *float64  `json:"-"`
@@ -180,21 +180,18 @@ type TransferPeer struct {
 
 type TransactionDetail struct {
 	Transaction
-	Currency     string              `json:"currency"`
-	Account      *shared.AccountRef  `json:"account"`
-	Category     *shared.CategoryRef `json:"category"`
-	Tags         []shared.TagRef     `json:"tags"` // the caller's tags on the row
-	Project      *shared.EventRef    `json:"project"`
-	TransferPeer *TransferPeer       `json:"transfer_peer"` // transfer rows only
-	Counterparty *shared.DebtLink    `json:"counterparty"`
-	// RepaymentPerson — set when this row is a repayment to / from a debt person (tx detail
-	// "จ่ายคืนให้ ลี ›"); null otherwise.
-	RepaymentPerson *RepaymentPerson          `json:"repayment_person"`
-	EventBill       *EventBillLink            `json:"event_bill"`
-	RecurringItem   *shared.RecurringItemLink `json:"recurring_item"`
-	MyShare         *float64                  `json:"my_share"`
-	SplitCount      int                       `json:"split_count"`
-	Splits          *[]SplitRef               `json:"splits"`
+	Currency      string                    `json:"currency"`
+	Account       *shared.AccountRef        `json:"account"`
+	Category      *shared.CategoryRef       `json:"category"`
+	Tags          []shared.TagRef           `json:"tags"` // the caller's tags on the row
+	Project       *shared.EventRef          `json:"project"`
+	TransferPeer  *TransferPeer             `json:"transfer_peer"` // transfer rows only
+	Counterparty  *shared.DebtLink          `json:"counterparty"`
+	EventBill     *EventBillLink            `json:"event_bill"`
+	RecurringItem *shared.RecurringItemLink `json:"recurring_item"`
+	MyShare       *float64                  `json:"my_share"`
+	SplitCount    int                       `json:"split_count"`
+	Splits        *[]SplitRef               `json:"splits"`
 	// LinkMode — personal | split | paid | event (the quick-create view the row was saved with).
 	LinkMode string  `json:"link_mode"`
 	PaidBy   *PaidBy `json:"paid_by"`
@@ -208,15 +205,6 @@ type TransactionDetail struct {
 	CanEditCategory bool            `json:"can_edit_category"`
 
 	HasSplits bool `json:"-"`
-}
-
-// RepaymentPerson — the debt person of a repayment transaction (name = the live contact name, or
-// the typed name).
-type RepaymentPerson struct {
-	Key       string           `json:"key"`
-	Name      string           `json:"name"`
-	ContactID *uuid.UUID       `json:"contact_id"`
-	Person    shared.PersonRef `json:"person"`
 }
 
 type EventBillLink struct {
@@ -250,6 +238,8 @@ type WriteResult struct {
 	// PersonBalances (0.4.0-3 B3) — every person whose balance the write moved (a link-mode switch can
 	// touch several: the split people, the payer). Omitted when none.
 	PersonBalances []any `json:"person_balances,omitempty"`
+	// Effects (0.4.1-1 B2) — everything the write changed, linked sides included.
+	Effects shared.Effects `json:"effects"`
 }
 
 type DeleteResult struct {
@@ -259,6 +249,7 @@ type DeleteResult struct {
 	PersonBalance   any                    `json:"person_balance"`
 	RecurringItemID *uuid.UUID             `json:"recurring_item_id"`
 	BillID          *uuid.UUID             `json:"bill_id"`
+	Effects         shared.Effects         `json:"effects"` // 0.4.1-1 B2
 }
 
 type CreateRequest struct {
@@ -271,6 +262,8 @@ type CreateRequest struct {
 	Note                *string     `json:"note"                    binding:"omitempty,max=500"`
 	TransferToAccountID *uuid.UUID  `json:"transfer_to_account_id"  binding:"omitempty"`
 	TagIDs              []uuid.UUID `json:"tag_ids" binding:"omitempty"`
+	// AllowZero — system callers only (recurring auto-create, 0.4.1-1 R12): amount 0 is recorded.
+	AllowZero bool `json:"-"`
 
 	Splits                     []SplitInput `json:"splits"                         binding:"omitempty,dive"`
 	PaidBy                     *PaidByInput `json:"paid_by"                        binding:"omitempty"`

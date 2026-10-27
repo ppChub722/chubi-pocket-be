@@ -30,7 +30,8 @@ type OccBulkRequest struct {
 type OccBulkItem struct {
 	RuleID uuid.UUID `json:"rule_id"`
 	Slot   string    `json:"slot"`
-	// Amount — confirm only: the amount typed for an occurrence that has none (or overrides it).
+	// Amount — confirm and mark_paid (0.4.1-1 R5): the amount typed for an occurrence that has
+	// none (or overrides it).
 	Amount *float64 `json:"amount"`
 }
 
@@ -45,6 +46,7 @@ type OccBulkResult struct {
 	LeftOut         []OccLeftOut           `json:"left_out"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
 	Settings        []Recurring            `json:"settings"`
+	Effects         shared.Effects         `json:"effects"`
 }
 
 func validateBulk(req *OccBulkRequest) ([]time.Time, error) {
@@ -65,8 +67,8 @@ func validateBulk(req *OccBulkRequest) ([]time.Time, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: items[%d].slot must be YYYY-MM-DD", ErrValidation, i)
 		}
-		if it.Amount != nil && (req.Action != BulkConfirm || *it.Amount <= 0) {
-			return nil, fmt.Errorf("%w: items[%d].amount must be > 0 and only comes with confirm", ErrValidation, i)
+		if it.Amount != nil && (req.Action == BulkSkip || *it.Amount <= 0) {
+			return nil, fmt.Errorf("%w: items[%d].amount must be > 0 and only comes with confirm / mark_paid", ErrValidation, i)
 		}
 		slots[i] = d
 	}
@@ -156,6 +158,7 @@ func (s *Service) SettleOccurrences(ctx context.Context, userID uuid.UUID, req O
 		}
 		out.Settings = append(out.Settings, views...)
 	}
+	out.Effects = s.effectsOf(ctx, userID, out.Items, nil, nil, out.AccountBalances)
 	return out, nil
 }
 
@@ -173,7 +176,7 @@ func (s *Service) settleOne(ctx context.Context, tx pgx.Tx, r *Rule, slot time.T
 	if o.status == StatusDone {
 		return nil, "already_recorded", nil
 	}
-	if action == BulkConfirm && amount == nil && (o.draft.Amount == nil || *o.draft.Amount <= 0) {
+	if action != BulkSkip && amount == nil && (o.draft.Amount == nil || *o.draft.Amount <= 0) {
 		return nil, "needs_amount", nil
 	}
 	sp, err := tx.Begin(ctx)
@@ -222,8 +225,9 @@ func (s *Service) settleRow(ctx context.Context, sp pgx.Tx, r *Rule, o *occ, act
 		}
 		row.AutoCreatedAt, row.Archived, row.ClearedAt = nil, true, nil
 	default: // BulkMarkPaid
-		now := time.Now()
-		row.Archived, row.ClearedAt = false, &now
+		if err := markPaid(row, amount); err != nil {
+			return nil, "needs_amount"
+		}
 	}
 	if err := saveItemTx(ctx, sp, row); err != nil {
 		return nil, "refused"

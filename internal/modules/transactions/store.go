@@ -59,13 +59,13 @@ func (s *Store) LookupSourcePTTx(
 const txColumns = `id, user_id, account_id, type, amount, category_id,
 	to_char(date, 'YYYY-MM-DD') AS date, description, note, transfer_group_id,
 	source_personal_debt_id, source_project_transaction_id, project_id,
-	repay_contact_id, repay_person_name, paid_by_amount,
+	debt_connected, debt_prev_category_id, paid_by_amount,
 	created_at, updated_at`
 
 const txColumnsT = `t.id, t.user_id, t.account_id, t.type, t.amount, t.category_id,
 	to_char(t.date, 'YYYY-MM-DD') AS date, t.description, t.note, t.transfer_group_id,
 	t.source_personal_debt_id, t.source_project_transaction_id, t.project_id,
-	t.repay_contact_id, t.repay_person_name, t.paid_by_amount,
+	t.debt_connected, t.debt_prev_category_id, t.paid_by_amount,
 	t.created_at, t.updated_at`
 
 func scanTx(row pgx.Row) (*Transaction, error) {
@@ -74,7 +74,7 @@ func scanTx(row pgx.Row) (*Transaction, error) {
 		&t.ID, &t.UserID, &t.AccountID, &t.Type, &t.Amount, &t.CategoryID,
 		&t.Date, &t.Description, &t.Note, &t.TransferGroupID,
 		&t.SourcePersonalDebtID, &t.SourceProjectTransactionID, &t.ProjectID,
-		&t.RepayContactID, &t.RepayPersonName, &t.PaidByAmount,
+		&t.DebtConnected, &t.DebtPrevCategoryID, &t.PaidByAmount,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
 	return &t, err
@@ -238,13 +238,12 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	}
 	if f.CounterpartyKey != "" {
 		args = append(args, f.CounterpartyKey)
-		// The person's money: their debts' own transactions, the bills split with them, the bills
-		// they paid / received for me, the transactions linked to their debts, and the repayments.
-		whereClauses = append(whereClauses, fmt.Sprintf(`t.user_id = $1 AND (EXISTS (SELECT 1 FROM personal_debts kd
-			WHERE kd.user_id = t.user_id AND %[1]s = $%[3]d
+		// The person's money: the transactions of their person-book rows (debts and repayments,
+		// connected ones included), the bills split with them, the bills they paid / received for me.
+		whereClauses = append(whereClauses, fmt.Sprintf(`t.user_id = $1 AND EXISTS (SELECT 1 FROM personal_debts kd
+			WHERE kd.user_id = t.user_id AND %[1]s = $%[2]d
 			  AND (kd.id = t.source_personal_debt_id
-			       OR t.id IN (kd.source_transaction_id, kd.paid_for_transaction_id, kd.linked_transaction_id)))
-			OR (t.repay_person_name IS NOT NULL AND %[2]s = $%[3]d))`, shared.DebtKeySQL("kd"), shared.RepayKeySQL("t"), len(args)))
+			       OR t.id IN (kd.source_transaction_id, kd.paid_for_transaction_id)))`, shared.DebtKeySQL("kd"), len(args)))
 	}
 
 	where := strings.Join(whereClauses, " AND ")
@@ -379,14 +378,14 @@ func (s *Store) InsertRowTx(ctx context.Context, tx pgx.Tx, t *Transaction) (*Tr
 	q := `INSERT INTO transactions
 		(id, user_id, account_id, type, amount, category_id, date, note,
 		 transfer_group_id, source_personal_debt_id, source_project_transaction_id, project_id,
-		 description, repay_contact_id, repay_person_name, paid_by_amount, created_by_user_id)
+		 description, debt_connected, debt_prev_category_id, paid_by_amount, created_by_user_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16, $2)
 		RETURNING ` + txColumns
 	created, err := scanTx(tx.QueryRow(ctx, q,
 		t.ID, t.UserID, t.AccountID, string(t.Type), t.Amount, t.CategoryID,
 		t.Date, shared.CleanText(t.Note), t.TransferGroupID,
 		t.SourcePersonalDebtID, t.SourceProjectTransactionID, t.ProjectID, shared.CleanText(t.Description),
-		t.RepayContactID, t.RepayPersonName, t.PaidByAmount))
+		t.DebtConnected, t.DebtPrevCategoryID, t.PaidByAmount))
 	if err != nil {
 		return nil, fmt.Errorf("insert tx: %w", err)
 	}

@@ -20,6 +20,7 @@ const (
 	TypeRecurringDue            = "recurring_due"
 	TypeRecurringEnding         = "recurring_ending"
 	TypeRecurringAutoCreated    = "recurring_auto_created"
+	TypeDebtDisconnected        = "debt_disconnected" // 0.4.1-1 D9
 )
 
 type Notification struct {
