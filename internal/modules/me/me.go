@@ -113,7 +113,7 @@ var archivedTotalSQL = `(
 	+ (SELECT COUNT(*) FROM budgets WHERE user_id = $1 AND status = 'archived')
 	+ (SELECT COUNT(*) FROM saving_goals WHERE user_id = $1 AND status = 'archived')
 	+ (SELECT COUNT(*) FROM projects p JOIN project_members m ON m.project_id = p.id AND m.user_id = $1 AND m.status = 'active'
-	   WHERE p.status = 'archived')
+	   WHERE p.status = 'archived' AND p.kind = 'event')
 	+ (SELECT COUNT(*) FROM contacts WHERE user_id = $1 AND status = 'archived')
 	+ (SELECT COUNT(*) FROM recurring_rules WHERE user_id = $1 AND status = 'archived'))`
 
@@ -121,7 +121,7 @@ var countsSQL = `SELECT
 	(SELECT COUNT(*) FROM categories WHERE user_id = $1 AND is_system = FALSE),
 	(SELECT COUNT(*) FROM tags WHERE user_id = $1),
 	(SELECT COUNT(*) FROM contacts WHERE user_id = $1 AND status = 'active'),
-	(SELECT COUNT(*) FROM projects p WHERE p.status = 'active' AND (p.owner_user_id = $1 OR EXISTS (
+	(SELECT COUNT(*) FROM projects p WHERE p.status = 'active' AND p.kind = 'event' AND (p.owner_user_id = $1 OR EXISTS (
 		SELECT 1 FROM project_members m WHERE m.project_id = p.id AND m.user_id = $1 AND m.status = 'active'))),
 	(SELECT COUNT(*) FROM (SELECT 1 FROM (` + shared.DebtLedgerSQL("$1") + `) l
 		GROUP BY l.key

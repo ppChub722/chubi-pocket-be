@@ -14,6 +14,7 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
@@ -27,6 +28,7 @@ type Service struct {
 	pending *pending.Service
 	notifs  *notifications.Service
 	savings *saving_goals.Service
+	debts   *personal_debts.Service // the "หนี้" kind's person book (0.4.1-2 K)
 }
 
 func NewService(db *pgxpool.Pool, txs *transactions.Service, p *pending.Service, n *notifications.Service) *Service {
@@ -68,7 +70,9 @@ func (s *Service) DueCheckDaily(ctx context.Context, userID uuid.UUID, headerTZ 
 	}
 	var skip bool
 	if err := s.db.QueryRow(ctx, `SELECT
-		EXISTS (SELECT 1 FROM recurring_due_checks c WHERE c.user_id = $1 AND c.checked_on >= $2)`,
+		EXISTS (SELECT 1 FROM recurring_due_checks c WHERE c.user_id = $1 AND c.checked_on >= $2)
+		AND NOT EXISTS (SELECT 1 FROM recurring_rules r WHERE r.user_id = $1 AND r.status = 'paused'
+			AND r.pause_reason = '`+PauseNoBalance+`' AND `+owedAgainSQL()+`)`,
 		userID, today).Scan(&skip); err != nil {
 		return fmt.Errorf("due check guard: %w", err)
 	}
@@ -96,6 +100,9 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 	}
 	defer tx.Rollback(ctx)
 
+	if err := s.resumeNoBalanceTx(ctx, tx, userID, today); err != nil { // K5: a new debt runs them again
+		return err
+	}
 	rows, err := tx.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1 AND status = 'active'
 		ORDER BY created_at, id FOR UPDATE SKIP LOCKED`, userID)
 	if err != nil {
@@ -118,6 +125,9 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 	newlyDue, autoMade := 0, 0
 	var ends []ending
 	for _, r := range rules {
+		if err := s.repaymentRoundsTx(ctx, tx, r, today); err != nil { // K5, before the overdue limit
+			return err
+		}
 		if err := s.overdueLimit(ctx, tx, r, today); err != nil {
 			return err
 		}
@@ -429,6 +439,10 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 	if err != nil {
 		return nil, err
 	}
+	people, err := loadDebtPeople(ctx, s.db, userID, rules)
+	if err != nil {
+		return nil, err
+	}
 	lang := s.lang(ctx, userID)
 	for _, r := range rules {
 		a := s.aggregate(r, byRule[r.ID], today, lang)
@@ -501,6 +515,7 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 			Archive: r.Status != "archived", Restore: r.Status == "archived",
 			Extend: r.Status != "archived" && r.Freq != "dates" && r.TotalCount != nil,
 		}
+		people.fillDebtView(&v, r)
 		out = append(out, v)
 	}
 	return out, nil
@@ -832,7 +847,7 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, page, perPage i
 		return d, err
 	}
 	p := &DeletePreview{}
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE transaction_id IS NOT NULL OR saving_entry_id IS NOT NULL), COUNT(*) FILTER (WHERE pending_id IS NOT NULL)
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE transaction_id IS NOT NULL OR saving_entry_id IS NOT NULL OR debt_entry_id IS NOT NULL), COUNT(*) FILTER (WHERE pending_id IS NOT NULL)
 		FROM recurring_items WHERE rule_id = $1 AND user_id = $2`, id, userID).Scan(&p.Items, &p.LinkedTransactions, &p.PendingDrafts); err != nil {
 		return nil, err
 	}

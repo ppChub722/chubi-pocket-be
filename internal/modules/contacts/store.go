@@ -386,7 +386,7 @@ func (s *Store) DeletePreview(ctx context.Context, userID uuid.UUID, c *Contact)
 	if err := s.db.QueryRow(ctx, `SELECT
 		(SELECT COUNT(*) FROM personal_debts WHERE user_id = $1 AND counterparty_contact_id = $2),
 		(SELECT COUNT(*) FROM project_members pm JOIN projects p ON p.id = pm.project_id
-		 WHERE p.owner_user_id = $1 AND pm.user_id = $3 AND pm.left_at IS NULL)`,
+		 WHERE p.owner_user_id = $1 AND p.kind = 'event' AND pm.user_id = $3 AND pm.left_at IS NULL)`,
 		userID, c.ID, c.LinkedUserID).
 		Scan(&p.DebtRecords, &p.EventMembers); err != nil {
 		return nil, fmt.Errorf("delete preview: %w", err)

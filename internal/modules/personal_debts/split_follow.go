@@ -7,7 +7,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
@@ -34,37 +33,35 @@ func (s *Service) SplitsFollowTxTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 	return nil
 }
 
-func (s *Service) SplitsDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) error {
+func (s *Service) SplitsDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) ([]uuid.UUID, []string, error) {
 	rows, err := tx.Query(ctx, `SELECT `+entryColumns+` FROM personal_debts
 		WHERE source_transaction_id = $1 AND user_id = $2 AND source_kind = 'transaction' FOR UPDATE`, txID, userID)
 	if err != nil {
-		return fmt.Errorf("bill splits: %w", err)
+		return nil, nil, fmt.Errorf("bill splits: %w", err)
 	}
 	var splits []*Entry
 	for rows.Next() {
 		e, err := scanEntry(rows)
 		if err != nil {
 			rows.Close()
-			return err
+			return nil, nil, err
 		}
 		splits = append(splits, e)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, nil, err
 	}
 	ids := make([]uuid.UUID, 0, len(splits))
+	keys := make([]string, 0, len(splits))
 	for _, e := range splits {
-		if err := s.notifySplitChangeTx(ctx, tx, e, 0, notifications.SplitChangeRemoved); err != nil {
-			return err
-		}
-		ids = append(ids, e.ID)
+		ids, keys = append(ids, e.ID), append(keys, e.Key())
 	}
 	if len(ids) == 0 {
-		return nil
+		return nil, nil, nil
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM personal_debts WHERE id = ANY($1)`, ids); err != nil {
-		return fmt.Errorf("delete bill splits: %w", err)
+		return nil, nil, fmt.Errorf("delete bill splits: %w", err)
 	}
-	return nil
+	return ids, keys, nil
 }

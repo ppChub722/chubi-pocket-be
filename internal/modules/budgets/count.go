@@ -88,6 +88,10 @@ WITH ev AS (
 	JOIN project_members pm ON pm.project_id = pt.project_id AND pm.user_id = $1 AND pm.status = 'active'
 	JOIN projects p ON p.id = pt.project_id AND p.status <> 'cancelled'
 	WHERE pt.parent_project_transaction_id IS NULL AND pt.type = 'expense' AND pt.date BETWEEN $2 AND $3
+	  -- V4 / X5: a bill counts once. My tx unlinked from it ("ลงบัญชีของฉัน" off, a tx-detail
+	  -- disconnect) counts as a plain tx in the first branch, so the bill's share doesn't.
+	  AND NOT EXISTS (SELECT 1 FROM transactions u WHERE u.user_id = $1 AND (u.unlinked_project_transaction_id = pt.id
+		OR u.unlinked_project_transaction_id IN (SELECT c.id FROM project_transactions c WHERE c.parent_project_transaction_id = pt.id)))
 ),
 all_rows AS (
 	SELECT 'transaction' AS kind, t.id, CASE WHEN ri.id IS NULL THEN 'normal' ELSE 'recurring' END AS source,

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -51,7 +52,21 @@ type EventBillInput struct {
 	Members     []EventBillPerson `json:"members"`
 	From        *BillPerson       `json:"from"`
 	To          *BillPerson       `json:"to"`
+	// PaybackKind (0.4.1-2 V11) — kind payback only: payback (default) | loan.
+	PaybackKind *string `json:"payback_kind"`
+	// Payers (multi-payer, owner 2026-10-28) — expense / income: who paid what (Σ = amount); never
+	// with payer.
+	Payers []BillPayerInput `json:"payers"`
 }
+
+// BillPayerInput — a payer of a bill (a bill person) and what they paid.
+type BillPayerInput struct {
+	BillPerson
+	Amount float64 `json:"amount"`
+}
+
+// ErrPayersSum — the payers don't add up to the bill (400 PAYERS_SUM).
+var ErrPayersSum = errors.New("payers must add up to the bill")
 
 type EventBillBooks struct {
 	On         bool        `json:"on"`
@@ -60,6 +75,17 @@ type EventBillBooks struct {
 	AccountID  *uuid.UUID  `json:"account_id"`
 	CategoryID *uuid.UUID  `json:"category_id"`
 	TagIDs     []uuid.UUID `json:"tag_ids"`
+	// PrivateNote (0.4.1-2 S11) — my private note on my copy (absent = unchanged, null / "" = clear).
+	PrivateNote *string `json:"private_note"`
+
+	privateNoteSet bool
+}
+
+func (b *EventBillBooks) UnmarshalJSON(data []byte) error {
+	type alias EventBillBooks
+	present, err := shared.DecodeTracked(data, (*alias)(b))
+	b.privateNoteSet = present["private_note"]
+	return err
 }
 
 type NewEventInput struct {
@@ -68,6 +94,8 @@ type NewEventInput struct {
 }
 
 type EventBillBookRequest struct {
+	// Split (0.4.1-2 S1 / S2) — a split bill (no event): exactly one of split / project_id / new_event.
+	Split     bool           `json:"split"`
 	ProjectID *uuid.UUID     `json:"project_id"`
 	NewEvent  *NewEventInput `json:"new_event"`
 	Bill      EventBillInput `json:"bill"`
@@ -75,9 +103,21 @@ type EventBillBookRequest struct {
 }
 
 type EventBillRebookRequest struct {
-	Bill        *EventBillInput `json:"bill"`
-	MyBooks     EventBillBooks  `json:"my_books"`
-	ApplyToMyTx bool            `json:"apply_to_my_tx"`
+	Bill    *EventBillInput `json:"bill"`
+	MyBooks EventBillBooks  `json:"my_books"`
+	// ApplyToMyTx — ignored since 0.4.1-2 (my copy always follows the bill I save).
+	ApplyToMyTx bool `json:"apply_to_my_tx"`
+	// ExpectedUpdatedAt (0.4.1-2 S14) — the bill's updated_at as the form loaded it; changed since →
+	// 409 BILL_CHANGED.
+	ExpectedUpdatedAt *time.Time     `json:"expected_updated_at"`
+	Move              *EventBillMove `json:"move"`
+}
+
+// EventBillMove (0.4.1-2 S17) — move a bill to another event / into a split bill (exactly one).
+type EventBillMove struct {
+	ProjectID *uuid.UUID     `json:"project_id"`
+	NewEvent  *NewEventInput `json:"new_event"`
+	Split     bool           `json:"split"`
 }
 
 type EventBillBookResult struct {
@@ -101,6 +141,7 @@ type booking struct {
 	tx      pgx.Tx
 	me      uuid.UUID // the caller (user)
 	project *Project
+	kind    string    // event | split (0.4.1-2 S1)
 	meMem   uuid.UUID // my member row
 	mb      *quickMemberBuilder
 
@@ -113,6 +154,9 @@ type booking struct {
 	wallets      []uuid.UUID
 	effects      shared.Effects
 	debtDflt     bool
+	copyDebts    []uuid.UUID // my person-book rows the copy wrote / kept (effects, read after commit)
+	copied       bool        // my copy went through applyCopyTx
+	moved        bool        // S17: the bill moved to b.project
 }
 
 func validBillInput(b *EventBillInput) error {
@@ -126,6 +170,9 @@ func validBillInput(b *EventBillInput) error {
 	}
 	if b.Description != nil && len([]rune(*b.Description)) > 200 || b.Note != nil && len([]rune(*b.Note)) > 500 {
 		return ErrBookBillInput
+	}
+	if b.PaybackKind != nil && (b.Kind != PTTypePayback || (*b.PaybackKind != "payback" && *b.PaybackKind != "loan")) {
+		return fmt.Errorf("%w: payback_kind is payback or loan, on a payback only", ErrBookBillInput)
 	}
 	if b.Kind == PTTypePayback {
 		if b.From == nil || b.To == nil || b.From.Empty() || b.To.Empty() {
@@ -146,7 +193,13 @@ func validBillInput(b *EventBillInput) error {
 
 // BookBill — POST /event-bills.
 func (s *Service) BookBill(ctx context.Context, userID uuid.UUID, req EventBillBookRequest, preview bool) (any, error) {
-	if (req.ProjectID == nil) == (req.NewEvent == nil) {
+	targets := 0
+	for _, set := range []bool{req.ProjectID != nil, req.NewEvent != nil, req.Split} {
+		if set {
+			targets++
+		}
+	}
+	if targets != 1 {
 		return nil, ErrBookBillTarget
 	}
 	if err := validBillInput(&req.Bill); err != nil {
@@ -156,12 +209,23 @@ func (s *Service) BookBill(ctx context.Context, userID uuid.UUID, req EventBillB
 		return nil, ErrBookBillInput
 	}
 	return s.runBooking(ctx, userID, preview, func(b *booking) error {
-		if req.NewEvent != nil {
+		switch {
+		case req.Split:
+			if err := b.newSplit(ctx, req.Bill); err != nil {
+				return err
+			}
+			req.Bill.TagIDs = nil // a split bill has no event tags
+		case req.NewEvent != nil:
 			if err := b.newEvent(ctx, *req.NewEvent); err != nil {
 				return err
 			}
-		} else if err := b.open(ctx, *req.ProjectID, "create_pt"); err != nil {
-			return err
+		default:
+			if err := b.open(ctx, *req.ProjectID, "create_pt"); err != nil {
+				return err
+			}
+			if b.kind != KindEvent {
+				return ErrProjectNotFound
+			}
 		}
 		return b.writeNew(ctx, req.Bill, req.MyBooks)
 	})
@@ -184,7 +248,7 @@ func (s *Service) RebookBill(ctx context.Context, userID, ptID uuid.UUID, req Ev
 	if req.Bill != nil && (req.Bill.Kind == PTTypePayback) != (current.Type == PTTypePayback) {
 		return nil, ErrBookBillKind
 	}
-	return s.runBooking(ctx, userID, preview, func(b *booking) error {
+	out, err := s.runBooking(ctx, userID, preview, func(b *booking) error {
 		op := "resolve"
 		if req.Bill != nil {
 			op = "edit_pt"
@@ -194,6 +258,14 @@ func (s *Service) RebookBill(ctx context.Context, userID, ptID uuid.UUID, req Ev
 		}
 		return b.writeEdit(ctx, current, req)
 	})
+	if errors.Is(err, ErrBillChanged) { // S14: the form gets the bill as it is now
+		now, verr := s.billView(ctx, userID, current)
+		if verr != nil {
+			return nil, verr
+		}
+		return nil, &BillChangedError{Bill: now}
+	}
+	return out, err
 }
 
 // runBooking runs fn in one DB transaction: a preview rolls it back and answers the deltas.
@@ -275,6 +347,29 @@ func (b *booking) open(ctx context.Context, projectID uuid.UUID, op string) erro
 		return err
 	}
 	b.project, b.meMem, b.mb = p, me.ID, mb
+	if err := b.tx.QueryRow(ctx, `SELECT kind FROM projects WHERE id = $1`, projectID).Scan(&b.kind); err != nil {
+		return fmt.Errorf("event kind: %w", err)
+	}
+	return nil
+}
+
+// newSplit — a split bill (0.4.1-2 S1 / S2): its hidden one-bill "event" (kind split, never listed),
+// owned by me; its people join as members as the bill resolves them (linked ones active at once).
+func (b *booking) newSplit(ctx context.Context, in EventBillInput) error {
+	name := ""
+	if d := shared.CleanText(in.Description); d != nil {
+		name = *d
+		if len([]rune(name)) > 100 {
+			name = string([]rune(name)[:100])
+		}
+	}
+	if err := b.newEvent(ctx, NewEventInput{Name: name}); err != nil {
+		return err
+	}
+	if _, err := b.tx.Exec(ctx, `UPDATE projects SET kind = $2 WHERE id = $1`, b.project.ID, KindSplit); err != nil {
+		return fmt.Errorf("split bill: %w", err)
+	}
+	b.kind = KindSplit
 	return nil
 }
 
@@ -287,7 +382,7 @@ func (b *booking) newEvent(ctx context.Context, in NewEventInput) error {
 	if err != nil {
 		return err
 	}
-	b.project, b.meMem = p, owner.ID
+	b.project, b.meMem, b.kind = p, owner.ID, KindEvent
 	b.mb = &quickMemberBuilder{svc: b.s, tx: b.tx, projectID: p.ID, callerUserID: b.me,
 		byUser: map[uuid.UUID]uuid.UUID{b.me: owner.ID}, byContact: map[uuid.UUID]uuid.UUID{}, byName: map[string]uuid.UUID{}}
 	return nil
@@ -410,7 +505,8 @@ func (b *booking) payback(ctx context.Context, from, to uuid.UUID, amount float6
 
 // resolvedBill — a bill input with its people as event members.
 type resolvedBill struct {
-	payer    uuid.UUID
+	payer    uuid.UUID             // the main (biggest) payer
+	payers   map[uuid.UUID]float64 // multi-payer: what each paid (one payer = the bill)
 	splits   []ProjectSplitInput
 	shares   map[uuid.UUID]float64 // every member's share, the payer's = the rest
 	paidBack map[uuid.UUID]bool
@@ -433,18 +529,53 @@ func (b *booking) resolve(ctx context.Context, in EventBillInput, fixedPayer *uu
 		r.splits = []ProjectSplitInput{{MemberID: r.to, Amount: in.Amount}}
 		return r, nil
 	}
-	if fixedPayer != nil {
-		r.payer = *fixedPayer
+	r.payers = map[uuid.UUID]float64{}
+	switch {
+	case len(in.Payers) > 0: // multi-payer (owner 2026-10-28)
 		if in.Payer != nil {
-			id, err := b.mb.memberForPerson(ctx, *in.Payer, b.meMem)
+			return nil, fmt.Errorf("%w: payer or payers, not both", ErrBookBillInput)
+		}
+		var total float64
+		for _, p := range in.Payers {
+			if p.Amount <= 0 || math.IsNaN(p.Amount) {
+				return nil, fmt.Errorf("%w: a payer pays > 0", ErrBookBillInput)
+			}
+			id, err := b.mb.memberForPerson(ctx, p.BillPerson, b.meMem)
 			if err != nil {
 				return nil, err
 			}
-			if id != *fixedPayer {
-				return nil, ErrPayerFixed
+			if _, dup := r.payers[id]; dup {
+				return nil, ErrBadBillPeople
+			}
+			r.payers[id] = round2(p.Amount)
+			total += p.Amount
+		}
+		if math.Abs(total-in.Amount) > 0.005 {
+			return nil, ErrPayersSum
+		}
+		var best float64
+		for id, a := range r.payers {
+			if a > best || (a == best && id.String() < r.payer.String()) {
+				r.payer, best = id, a
 			}
 		}
-	} else {
+	case fixedPayer != nil: // an edit that sent no payer: the payers stay
+		r.payer = *fixedPayer
+		current, err := BillPayersTx(ctx, b.tx, b.rowID)
+		if err != nil {
+			return nil, err
+		}
+		var total float64
+		for _, p := range current {
+			r.payers[p.Creditor] = p.Amount
+			total += p.Amount
+		}
+		if len(current) <= 1 {
+			r.payers = map[uuid.UUID]float64{r.payer: in.Amount}
+		} else if math.Abs(total-in.Amount) > 0.005 {
+			return nil, ErrPayersSum
+		}
+	default:
 		payer := BillPerson{Me: true}
 		if in.Payer != nil {
 			payer = *in.Payer
@@ -454,10 +585,9 @@ func (b *booking) resolve(ctx context.Context, in EventBillInput, fixedPayer *uu
 			return nil, err
 		}
 		r.payer = id
+		r.payers[id] = in.Amount
 	}
-	if r.payer != b.meMem && in.Kind != PTTypeExpense {
-		return nil, ErrPayerIncome
-	}
+	// 0.4.1-2 Q-E3: someone else may receive an income bill too ("รับแทน").
 	var sum float64
 	for _, m := range in.Members {
 		id, err := b.mb.memberForPerson(ctx, m.BillPerson, b.meMem)
@@ -509,13 +639,21 @@ func (b *booking) writeNew(ctx context.Context, in EventBillInput, books EventBi
 		return err
 	}
 	b.rowID = pt.ID
+	if err := b.setPaybackKind(ctx, in); err != nil {
+		return err
+	}
+	if in.Kind != PTTypePayback {
+		if err := SetBillPayersTx(ctx, b.tx, b.rowID, r.payers); err != nil {
+			return err
+		}
+	}
 	if err := b.paidBackRows(ctx, in, r, books); err != nil {
 		return err
 	}
 	if err := b.books(ctx, in, r, books, MyBooks{}); err != nil {
 		return err
 	}
-	return b.notifyNew(ctx, payer, in.Kind)
+	return b.notifyNew(ctx)
 }
 
 // paidBackRows makes the board follow the "คืนแล้ว" ticks of the bill's members: a ticked member
@@ -531,83 +669,82 @@ func (b *booking) paidBackRows(ctx context.Context, in EventBillInput, r *resolv
 		id     uuid.UUID
 		amount float64
 	}
-	have := map[uuid.UUID]made{}
-	rows, err := b.tx.Query(ctx, `SELECT id, transaction_member_id, amount::float8 FROM project_transactions
-		WHERE paid_back_for_id = $1 AND parent_project_transaction_id IS NULL`, b.rowID)
+	type pair struct{ by, to uuid.UUID }
+	// multi-payer: a ticked member pays EACH payer their pair (share × paid / bill), one row per payer
+	want := map[pair]float64{}
+	for id, back := range r.paidBack {
+		share := r.shares[id]
+		if !back || share <= 0.005 {
+			continue
+		}
+		for p, paid := range r.payers {
+			if a := round2(share * paid / in.Amount); p != id && a > 0.005 {
+				want[pair{id, p}] = a
+			}
+		}
+	}
+	have := map[pair]made{}
+	rows, err := b.tx.Query(ctx, `SELECT pb.id, pb.transaction_member_id, c.transaction_member_id, pb.amount::float8
+		FROM project_transactions pb JOIN project_transactions c ON c.parent_project_transaction_id = pb.id
+		WHERE pb.paid_back_for_id = $1 AND pb.parent_project_transaction_id IS NULL`, b.rowID)
 	if err != nil {
 		return fmt.Errorf("paybacks of bill: %w", err)
 	}
 	for rows.Next() {
 		var (
-			m  made
-			by uuid.UUID
+			m      made
+			by, to uuid.UUID
 		)
-		if err := rows.Scan(&m.id, &by, &m.amount); err != nil {
+		if err := rows.Scan(&m.id, &by, &to, &m.amount); err != nil {
 			rows.Close()
 			return err
 		}
-		have[by] = m
+		have[pair{by, to}] = m
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	repay := r.payer == b.meMem && books.On && (books.Debt == nil || *books.Debt)
-	for id, m := range have {
-		share := r.shares[id]
-		if r.paidBack[id] && share > 0.005 && math.Abs(share-m.amount) <= 0.005 {
-			continue // as it was
+	for k, m := range have {
+		if a, ok := want[k]; ok && math.Abs(a-m.amount) <= 0.005 {
+			delete(want, k) // as it was
+			continue
 		}
 		if err := b.removePayback(ctx, m.id); err != nil {
 			return err
 		}
-		delete(have, id)
 	}
-	for id, back := range r.paidBack {
-		share := r.shares[id]
-		if _, ok := have[id]; ok || !back || share <= 0.005 || id == r.payer {
-			continue
-		}
-		row, err := b.payback(ctx, id, r.payer, share, in.Date, &b.rowID)
-		if err != nil {
+	for k, a := range want {
+		if _, err := b.payback(ctx, k.by, k.to, a, in.Date, &b.rowID); err != nil {
 			return err
 		}
-		if repay {
-			if err := b.entry(ctx, id, row, personal_debts.KindRepayment, "received", share, in.Date, in.Description,
-				in.Note, books.AccountID); err != nil {
-				return err
-			}
-		}
 	}
-	return nil
+	return nil // the payers' repayments of them are part of the payers' copies (applyCopyTx)
 }
 
-// removePayback deletes a payback row made for a bill, and my repayments of it (their wallet
-// transactions too).
+// removePayback deletes a payback row made for a bill, and every member's repayment of it (their
+// wallet transactions too): the tick is gone for the whole bill.
 func (b *booking) removePayback(ctx context.Context, rowID uuid.UUID) error {
-	rows, err := b.tx.Query(ctx, `SELECT pd.id, `+shared.DebtKeySQL("pd")+`, t.id, t.account_id, pd.counterparty_contact_id, pd.counterparty_person_name
+	rows, err := b.tx.Query(ctx, `SELECT pd.id, pd.user_id, `+shared.DebtKeySQL("pd")+`, t.id, t.account_id, pd.counterparty_contact_id, pd.counterparty_person_name
 		FROM personal_debts pd LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id
-		WHERE pd.user_id = $1 AND pd.source_project_transaction_id = $2`, b.me, rowID)
+		WHERE pd.source_project_transaction_id = $1`, rowID)
 	if err != nil {
 		return fmt.Errorf("repayments of payback: %w", err)
 	}
 	type rep struct {
-		id, txID *uuid.UUID
-		key      string
-		acc      *uuid.UUID
-		person   shared.PersonRef
+		id, owner uuid.UUID
+		txID      *uuid.UUID
+		key       string
+		acc       *uuid.UUID
+		person    shared.PersonRef
 	}
 	var reps []rep
 	for rows.Next() {
-		var (
-			r  rep
-			id uuid.UUID
-		)
-		if err := rows.Scan(&id, &r.key, &r.txID, &r.acc, &r.person.ContactID, &r.person.Name); err != nil {
+		var r rep
+		if err := rows.Scan(&r.id, &r.owner, &r.key, &r.txID, &r.acc, &r.person.ContactID, &r.person.Name); err != nil {
 			rows.Close()
 			return err
 		}
-		r.id = &id
 		reps = append(reps, r)
 	}
 	rows.Close()
@@ -615,26 +752,33 @@ func (b *booking) removePayback(ctx context.Context, rowID uuid.UUID) error {
 		return err
 	}
 	for _, r := range reps {
-		if err := b.beforeKey(r.key); err != nil {
-			return err
+		mine := r.owner == b.me
+		if mine {
+			if err := b.beforeKey(r.key); err != nil {
+				return err
+			}
 		}
 		if r.txID != nil {
-			if r.acc != nil {
+			if mine && r.acc != nil {
 				if err := b.beforeWallet(*r.acc); err != nil {
 					return err
 				}
 				b.wallets = append(b.wallets, *r.acc)
 			}
-			if _, err := b.s.txs.DeleteDebtTxInTx(ctx, b.tx, b.me, *r.txID); err != nil {
+			if _, err := b.s.txs.DeleteDebtTxInTx(ctx, b.tx, r.owner, *r.txID); err != nil {
 				return err
 			}
-			b.effects.RemovedTransactionIDs = append(b.effects.RemovedTransactionIDs, *r.txID)
+			if mine {
+				b.effects.RemovedTransactionIDs = append(b.effects.RemovedTransactionIDs, *r.txID)
+			}
 		}
-		if _, err := b.tx.Exec(ctx, `DELETE FROM personal_debts WHERE id = $1`, *r.id); err != nil {
+		if _, err := b.tx.Exec(ctx, `DELETE FROM personal_debts WHERE id = $1`, r.id); err != nil {
 			return fmt.Errorf("delete repayment: %w", err)
 		}
-		b.effects.RemovedDebtIDs = append(b.effects.RemovedDebtIDs, *r.id)
-		b.keys[r.key] = r.person
+		if mine {
+			b.effects.RemovedDebtIDs = append(b.effects.RemovedDebtIDs, r.id)
+			b.keys[r.key] = r.person
+		}
 	}
 	if err := b.s.deleteBoardRowTx(ctx, b.tx, b.me, b.project.ID, rowID); err != nil {
 		return err
@@ -648,64 +792,48 @@ func (b *booking) books(ctx context.Context, in EventBillInput, r *resolvedBill,
 	if in.Kind == PTTypePayback {
 		return b.paybackBooks(ctx, in, r, books, have)
 	}
-	iPaid := r.payer == b.meMem
-	share, inBill := r.shares[b.meMem]
 	b.debtDflt = true
-	if !books.On || (!iPaid && (!inBill || share <= 0.005)) {
-		if books.On {
-			return ErrNoShareToCopy
-		}
+	if !books.On {
 		return nil
 	}
-	wantDebt := books.Debt == nil || *books.Debt
-	if iPaid {
-		if books.Tx && !have.Tx {
-			id, err := b.myTxFor(ctx, in.Kind, in.Amount, in, books, books.AccountID, b.rowID)
-			if err != nil {
-				return err
-			}
-			if err := b.asOrigin(ctx, b.rowID, id); err != nil { // E6
-				return err
-			}
-		}
-		if !wantDebt || have.Debt {
-			return nil
-		}
-		for id, amount := range r.shares {
-			if id == b.meMem || amount <= 0.005 {
-				continue
-			}
-			if err := b.entry(ctx, id, b.rowID, personal_debts.KindDebt, "paid", amount, in.Date, in.Description, in.Note, nil); err != nil {
-				return err
-			}
-		}
-		return nil
+	return b.myCopy(ctx, books)
+}
+
+// myCopy writes MY copy of the bill (0.4.1-2 S5: the same engine as every member's, plus my own
+// wallet / category / tags / private note): I paid → the whole bill from my wallet (the origin, E6)
+// + the debts of the others (and a "คืนแล้ว" member's repayment into my wallet, E2); someone else
+// paid → my share with no wallet + my debt (E4), or from my wallet with no debt when I paid back (E3).
+func (b *booking) myCopy(ctx context.Context, books EventBillBooks) error {
+	if _, err := b.tx.Exec(ctx, `DELETE FROM shared_bill_opt_outs WHERE project_transaction_id = $1 AND user_id = $2`,
+		b.rowID, b.me); err != nil {
+		return fmt.Errorf("connect my copy: %w", err)
 	}
-	// someone else paid; I have a share
-	if r.paidBack[b.meMem] { // E3: my share from my wallet, no debt
-		if books.Tx && !have.Tx {
-			src, err := b.mySplitRow(ctx, b.rowID)
-			if err != nil {
-				return err
-			}
-			if _, err := b.myTxFor(ctx, PTTypeExpense, share, in, books, books.AccountID, src); err != nil {
-				return err
-			}
-		}
-		return nil
+	st, err := b.s.loadBillTx(ctx, b.tx, b.rowID)
+	if err != nil {
+		return err
 	}
-	if books.Tx && !have.Tx { // E4: "จ่ายโดย X": no wallet
-		src, err := b.mySplitRow(ctx, b.rowID)
-		if err != nil {
-			return err
-		}
-		if _, err := b.myTxFor(ctx, PTTypeExpense, share, in, books, nil, src); err != nil {
-			return err
-		}
+	if role, _ := st.role(b.meMem); role == roleNone {
+		return ErrNoShareToCopy
 	}
-	if wantDebt && !have.Debt {
-		return b.entry(ctx, r.payer, b.rowID, personal_debts.KindDebt, "received", share, in.Date, in.Description, in.Note, nil)
+	opts := &copyOptions{wantTx: books.Tx, wantDebt: books.Debt == nil || *books.Debt,
+		account: books.AccountID, category: books.CategoryID, tagIDs: books.TagIDs, tagsSet: books.TagIDs != nil,
+		privateNote: books.PrivateNote, privateNoteSet: books.privateNoteSet || books.PrivateNote != nil, repayAccount: books.AccountID,
+		beforeKey: b.beforeKey, beforeWallet: b.beforeWallet}
+	res, err := b.s.applyCopyTx(ctx, b.tx, st, b.me, opts)
+	if err != nil {
+		return err
 	}
+	b.copied = true
+	if res.txID != nil {
+		b.myTx = res.txID
+	}
+	for k, p := range res.keys {
+		b.keys[k] = p
+	}
+	b.wallets = append(b.wallets, res.wallets...)
+	b.copyDebts = append(b.copyDebts, res.debts...)
+	b.effects.RemovedDebtIDs = append(b.effects.RemovedDebtIDs, res.removedDebts...)
+	b.effects.RemovedTransactionIDs = append(b.effects.RemovedTransactionIDs, res.removedTxs...)
 	return nil
 }
 
@@ -767,16 +895,32 @@ func eventDebtWithTx(ctx context.Context, q pgx.Tx, userID, projectID uuid.UUID,
 // writeEdit — an existing bill: the bill (when sent), the new "คืนแล้ว" paybacks, my book.
 func (b *booking) writeEdit(ctx context.Context, current *ProjectTransaction, req EventBillRebookRequest) error {
 	b.rowID = current.ID
+	if req.ExpectedUpdatedAt != nil &&
+		!current.UpdatedAt.Truncate(time.Microsecond).Equal(req.ExpectedUpdatedAt.Truncate(time.Microsecond)) {
+		return ErrBillChanged // S14
+	}
+	if req.Move != nil {
+		if err := b.moveBill(ctx, current, *req.Move); err != nil { // S17
+			return err
+		}
+	}
 	in := EventBillInput{Kind: current.Type, Amount: current.Amount, Date: current.Date,
 		Description: current.Description, Note: current.Note}
-	var r *resolvedBill
-	var err error
+	var (
+		r    *resolvedBill
+		err  error
+		diff map[string][2]interface{}
+	)
 	if req.Bill != nil {
 		in = *req.Bill
-		payer := current.TransactionMemberID
-		fixed := &payer
-		if current.Type == PTTypePayback {
-			fixed = nil
+		if b.kind == KindSplit {
+			in.TagIDs = nil
+		}
+		// 0.4.1-2 Q-B4: the payer may change; no payer sent = it stays.
+		var fixed *uuid.UUID
+		if in.Payer == nil && current.Type != PTTypePayback {
+			payer := current.TransactionMemberID
+			fixed = &payer
 		}
 		if r, err = b.resolve(ctx, in, fixed); err != nil {
 			return err
@@ -786,34 +930,85 @@ func (b *booking) writeEdit(ctx context.Context, current *ProjectTransaction, re
 		if in.TagIDs != nil && current.Type != PTTypePayback {
 			up.TagIDs = in.TagIDs
 		}
-		if current.Type == PTTypePayback {
+		switch {
+		case current.Type == PTTypePayback:
 			up.TransactionMemberID = &r.from
+		case r.payer != current.TransactionMemberID:
+			up.TransactionMemberID = &r.payer
 		}
-		if _, err := b.s.applyBillEditTx(ctx, b.tx, b.me, b.project.ID, current, up); err != nil {
+		// The others hear once the paybacks are made (fan-out below).
+		updated, err := b.s.store.UpdatePTTx(ctx, b.tx, b.project.ID, current.ID, b.me, up)
+		if err != nil {
 			return err
+		}
+		diff = buildDiff(current, updated)
+		if err := b.setPaybackKind(ctx, in); err != nil {
+			return err
+		}
+		if in.Kind != PTTypePayback {
+			if err := SetBillPayersTx(ctx, b.tx, b.rowID, r.payers); err != nil {
+				return err
+			}
 		}
 		if err := b.paidBackRows(ctx, in, r, req.MyBooks); err != nil {
 			return err
 		}
-		if req.ApplyToMyTx {
-			if mine, err := myLinkedTxTx(ctx, b.tx, b.me, current.ID); err != nil {
-				return err
-			} else if mine != nil && current.Type != PTTypePayback {
-				t, err := b.s.applyBillToTxTx(ctx, b.tx, b.me, *mine)
-				if err != nil {
-					return err
-				}
-				b.wallets = append(b.wallets, t...)
-			}
-		}
 	} else if r, err = b.currentPeople(ctx, current); err != nil {
 		return err
+	}
+	if err := b.editMine(ctx, current, in, r, req.MyBooks); err != nil {
+		return err
+	}
+	if b.moved && b.kind == KindEvent {
+		if err := b.s.dispatchAddedTx(ctx, b.tx, b.project, b.mb, userDisplayOrEmpty(ctx, b.tx, b.me)); err != nil {
+			return err
+		}
+	}
+	if req.Bill != nil || b.moved {
+		return b.s.fanOutTx(ctx, b.tx, b.me, current.ID, false, diff)
+	}
+	return nil
+}
+
+// setPaybackKind — V11 (BE-2): a payback's kind (payback | loan) on its parent row.
+func (b *booking) setPaybackKind(ctx context.Context, in EventBillInput) error {
+	if in.Kind != PTTypePayback {
+		return nil
+	}
+	kind := "payback"
+	if in.PaybackKind != nil {
+		kind = *in.PaybackKind
+	}
+	if _, err := b.tx.Exec(ctx, `UPDATE project_transactions SET payback_kind = $2 WHERE id = $1`, b.rowID, kind); err != nil {
+		return fmt.Errorf("payback kind: %w", err)
+	}
+	return nil
+}
+
+// editMine — my book after an edit: off = my copy disconnected; a payback as before (E5); a bill =
+// my copy follows it (S5).
+func (b *booking) editMine(ctx context.Context, current *ProjectTransaction, in EventBillInput, r *resolvedBill,
+	books EventBillBooks) error {
+	if !books.On {
+		res, err := b.s.disconnectCopyTx(ctx, b.tx, current.ID, b.me)
+		if err != nil {
+			return err
+		}
+		b.copyDebts = append(b.copyDebts, res.debts...)
+		b.effects.Transactions = nil
+		return nil
+	}
+	if current.Type != PTTypePayback {
+		if err := b.s.reconnectCopyTx(ctx, b.tx, current.ID, b.me); err != nil {
+			return err
+		}
+		return b.myCopy(ctx, books)
 	}
 	have, err := myBooksOfRowTx(ctx, b.tx, b.me, current.ID)
 	if err != nil {
 		return err
 	}
-	want := wantedBooks(in.Kind, req.MyBooks, r, b.meMem)
+	want := wantedBooks(in.Kind, books, r, b.meMem)
 	var unlink, relink []string
 	for _, k := range []string{BookTx, BookDebt, BookRepay} {
 		switch has, w := have.has(k), want.has(k); {
@@ -837,7 +1032,7 @@ func (b *booking) writeEdit(ctx context.Context, current *ProjectTransaction, re
 			have.set(k)
 		}
 	}
-	return b.books(ctx, in, r, req.MyBooks, have)
+	return b.books(ctx, in, r, books, have)
 }
 
 // currentPeople — the bill's people as they are (a books-only save).
@@ -907,22 +1102,14 @@ func myBooksOfRowTx(ctx context.Context, tx pgx.Tx, userID, ptID uuid.UUID) (MyB
 	return m, err
 }
 
-// notifyNew — a linked payer hears about a bill recorded for them; linked people added hear about it.
-func (b *booking) notifyNew(ctx context.Context, payer uuid.UUID, kind string) error {
-	if b.s.notifs != nil && kind != PTTypePayback {
-		var payerUser *uuid.UUID
-		if err := b.tx.QueryRow(ctx, `SELECT user_id FROM project_members WHERE id = $1`, payer).Scan(&payerUser); err != nil {
-			return fmt.Errorf("payer: %w", err)
-		}
-		if payerUser != nil && *payerUser != b.me {
-			full, err := b.s.store.GetPTTx(ctx, b.tx, b.rowID)
-			if err != nil {
-				return err
-			}
-			if err := b.s.notifyRecordedTx(ctx, b.tx, *payerUser, payer, b.me, full); err != nil {
-				return err
-			}
-		}
+// notifyNew — every other member with a part gets the bill by their switch (0.4.1-2 S6:
+// shared_bill_created); linked people added to an EVENT hear about it (project_added).
+func (b *booking) notifyNew(ctx context.Context) error {
+	if err := b.s.fanOutTx(ctx, b.tx, b.me, b.rowID, true, nil); err != nil {
+		return err
+	}
+	if b.kind == KindSplit {
+		return nil
 	}
 	name := userDisplayOrEmpty(ctx, b.tx, b.me)
 	return b.s.dispatchAddedTx(ctx, b.tx, b.project, b.mb, name)
@@ -959,6 +1146,19 @@ func (b *booking) result(ctx context.Context) (*EventBillBookResult, error) {
 		if d, err := b.s.txs.Get(ctx, b.me, *b.myTx); err == nil {
 			out.Effects.Transactions = append(out.Effects.Transactions, *d)
 		}
+	}
+	if b.copied { // my copy's debts / repayments and the people they move
+		keys := make([]string, 0, len(b.keys))
+		for k := range b.keys {
+			keys = append(keys, k)
+		}
+		eff, err := b.s.debts.RowEffects(ctx, b.s.store.Pool(), b.me, uniqueIDs(b.copyDebts), nil, keys)
+		if err != nil {
+			return nil, err
+		}
+		eff.RemovedDebtIDs, eff.RemovedTransactionIDs = nil, nil
+		eff.AccountBalances = nil
+		out.Effects.Merge(eff)
 	}
 	out.Effects.AccountBalances = p.AccountBalances
 	return out, nil

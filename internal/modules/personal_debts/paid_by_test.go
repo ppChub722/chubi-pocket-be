@@ -8,7 +8,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
@@ -134,6 +133,13 @@ func TestPaidByLeeScenario(t *testing.T) {
 	var n int
 	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM personal_debts WHERE id = $1`, again.Rows[0].PaidBy.DebtID).Scan(&n); err != nil || n != 0 {
 		t.Errorf("the paid-by debt outlived its expense: %d (%v)", n, err)
+	}
+	// 0.4.1-2 X4: the paid-by debt is in removed_debt_ids, Lee in person_balances.
+	if ids := dr.Effects.RemovedDebtIDs; len(ids) != 1 || ids[0] != again.Rows[0].PaidBy.DebtID {
+		t.Errorf("effects.removed_debt_ids = %v, want the paid-by debt", ids)
+	}
+	if len(dr.Effects.PersonBalances) != 1 {
+		t.Errorf("effects.person_balances = %d people, want Lee", len(dr.Effects.PersonBalances))
 	}
 }
 
@@ -278,76 +284,10 @@ func TestListTotalsSkipDebtCategories(t *testing.T) {
 	}
 }
 
-// TestPartnerSplitMakesMyExpense — a linked user's split on me lands as my expense of my share (no
-// wallet, paid by them, my same-named category); "อัปเดตตาม" moves both; its money is locked.
-func TestPartnerSplitMakesMyExpense(t *testing.T) {
-	f := newSplitEditFixture(t)
-	meFood, partnerFood := uuid.New(), uuid.New()
-	if _, err := f.pool.Exec(f.ctx, `INSERT INTO categories (id, user_id, name, type) VALUES
-		($1, $2, 'Food', 'expense'), ($3, $4, ' food ', 'expense')`, meFood, f.me, partnerFood, f.partner); err != nil {
-		t.Fatal(err)
-	}
-	created, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
-		Type: transactions.TypeExpense, Amount: 90, Date: "2026-10-11", CategoryID: &meFood,
-		Description: testdb.Str("Noodles"),
-		Splits:      []transactions.SplitInput{{PersonName: "Partner", ContactID: &f.partnerContact, OwedAmount: 30}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	bill := created.(*transactions.TransactionDetail)
-	mirror := f.mirror(t)
-	if mirror == nil || mirror.Amount != 30 || mirror.Direction != DirectionReceived || mirror.PaidForTransactionID == nil {
-		t.Fatalf("mirror = %+v, want received 30 with my expense", mirror)
-	}
-	mine, err := f.txs.Get(f.ctx, f.partner, *mirror.PaidForTransactionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mine.Amount != 30 || mine.Account != nil || mine.WalletAmount != 0 || mine.LinkMode != transactions.LinkPaid ||
-		mine.Category == nil || mine.Category.ID != partnerFood || testdb.Text(mine.Description) != "Noodles" ||
-		mine.PaidBy == nil || mine.PaidBy.Source != transactions.PaidBySourcePartner || mine.PaidBy.Amount != 30 {
-		t.Fatalf("partner's expense = %+v / paid_by %+v", mine, mine.PaidBy)
-	}
-	// Its money is the splitter's; its category / text are the partner's own.
-	if _, err := f.txs.UpdateWrite(f.ctx, f.partner, mine.ID, transactions.UpdateRequest{Amount: f64(10)}); !errors.Is(err, transactions.ErrPaidByLocked) {
-		t.Errorf("edit a mirrored amount: err = %v", err)
-	}
-	if _, err := f.txs.UpdateWrite(f.ctx, f.partner, mine.ID, transactions.UpdateRequest{Note: testdb.Str("lunch with P")}); err != nil {
-		t.Errorf("edit the note: %v", err)
-	}
-
-	// The splitter changes the split; the partner applies it: both follow.
-	s := f.txs
-	if _, err := s.EditSplits(f.ctx, f.me, bill.ID, []transactions.SplitEdit{{DebtID: &(*bill.Splits)[0].DebtID, OwedAmount: 45}}); err != nil {
-		t.Fatal(err)
-	}
-	var change notifications.Notification
-	if err := f.pool.QueryRow(f.ctx, `SELECT id FROM notifications WHERE recipient_user_id = $1 AND type = 'split_changed'
-		ORDER BY created_at DESC LIMIT 1`, f.partner).Scan(&change.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.debts.ApplySplitChange(f.ctx, f.partner, change.ID); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := f.txs.Get(f.ctx, f.partner, mine.ID); got.Amount != 45 || got.PaidBy.Amount != 45 || testdb.Text(got.Note) != "lunch with P" {
-		t.Errorf("after อัปเดตตาม: amount %v paid_by %+v", got.Amount, got.PaidBy)
-	}
-
-	// Deleting my record of it keeps their debt on me.
-	if _, err := f.txs.DeleteWrite(f.ctx, f.partner, mine.ID, false); err != nil {
-		t.Fatal(err)
-	}
-	if m := f.mirror(t); m == nil || m.Amount != 45 || m.PaidForTransactionID != nil {
-		t.Errorf("mirror after deleting the expense = %+v, want kept, unlinked", m)
-	}
-}
-
-// TestPaidByLinkedPayer — a linked contact who paid for me gets the usual split_created notice with
-// recipient_direction paid (they are owed); their mirror is a plain debt (no expense for them).
+// TestPaidByLinkedPayer — a linked contact who paid for me is a plain paid-by debt in my book only
+// (0.4.1-2 S16: no copy, no notice in theirs); it goes with its expense.
 func TestPaidByLinkedPayer(t *testing.T) {
 	f := newSplitEditFixture(t)
-	before := f.mirror(t)
 	w, err := f.txs.CreateWrite(f.ctx, f.me, transactions.CreateRequest{
 		Type: transactions.TypeExpense, Amount: 60, Date: "2026-10-11",
 		PaidBy: &transactions.PaidByInput{ContactID: &f.partnerContact, Amount: 60},
@@ -355,29 +295,18 @@ func TestPaidByLinkedPayer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var raw []byte
-	if err := f.pool.QueryRow(f.ctx, `SELECT payload FROM notifications WHERE recipient_user_id = $1 AND type = 'split_created'
-		AND payload->>'split_id' = $2`, f.partner, w.Rows[0].PaidBy.DebtID.String()).Scan(&raw); err != nil {
-		t.Fatalf("split_created for the payer: %v", err)
+	pb := w.Rows[0].PaidBy
+	if pb == nil || pb.Source != transactions.PaidBySourceMe || pb.Amount != 60 || pb.Key != "c:"+f.partnerContact.String() {
+		t.Fatalf("paid_by = %+v", pb)
 	}
-	var p notifications.SplitCreatedPayload
-	_ = json.Unmarshal(raw, &p)
-	if p.RecipientDirection != DirectionPaid || p.Amount != 60 || p.ParentID != w.Rows[0].ID {
-		t.Errorf("payload = %+v", p)
+	if debts, notices := f.partnerBook(t, f.partner); debts != 0 || notices != 0 {
+		t.Errorf("payer's book = %d debts / %d split notices, want none", debts, notices)
 	}
-	m := f.mirror(t)
-	if m == nil || (before != nil && m.ID == before.ID) || m.Direction != DirectionPaid || m.PaidForTransactionID != nil {
-		t.Errorf("payer's mirror = %+v, want a paid debt with no expense", m)
+	if _, err := f.txs.DeleteWrite(f.ctx, f.me, w.Rows[0].ID, false); err != nil {
+		t.Fatalf("delete: %v", err)
 	}
-	// Removing the paid_by tells them.
-	unset := transactions.UpdateRequest{}
-	_ = json.Unmarshal([]byte(`{"paid_by": null}`), &unset)
-	if _, err := f.txs.UpdateWrite(f.ctx, f.me, w.Rows[0].ID, unset); err != nil {
-		t.Fatal(err)
-	}
-	var removed int
-	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1 AND type = 'split_changed'
-		AND payload->>'change' = 'removed' AND payload->>'split_id' = $2`, f.partner, w.Rows[0].PaidBy.DebtID.String()).Scan(&removed); err != nil || removed != 1 {
-		t.Errorf("removed notices = %d (%v), want 1", removed, err)
+	var n int
+	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM personal_debts WHERE id = $1`, pb.DebtID).Scan(&n); err != nil || n != 0 {
+		t.Errorf("the paid-by debt outlived its expense: %d (%v)", n, err)
 	}
 }

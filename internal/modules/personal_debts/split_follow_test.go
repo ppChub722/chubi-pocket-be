@@ -1,15 +1,16 @@
 package personal_debts
 
 import (
-	"encoding/json"
 	"errors"
 	"testing"
+
+	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
 // 0.4.1-1 D8 — the three "แบ่ง follows its tx" bugs. The fixture bill is 300 with splits Beam 100 +
-// Partner 100 (a linked user, mirrored).
+// Partner 100 (a linked contact; 0.4.1-2 S16: no copy in their book).
 func TestSplitsFollowTheirBill(t *testing.T) {
 	f := newSplitEditFixture(t)
 	s := f.splits(t)
@@ -37,8 +38,7 @@ func TestSplitsFollowTheirBill(t *testing.T) {
 		t.Errorf("bill → 200 (= the splits): %v", err)
 	}
 
-	// 3. Deleting the bill deletes its splits and tells the partner.
-	before := len(f.changes(t))
+	// 3. Deleting the bill deletes its splits.
 	res, err := f.txs.DeleteWrite(f.ctx, f.me, f.billID, false)
 	if err != nil {
 		t.Fatal(err)
@@ -48,18 +48,18 @@ func TestSplitsFollowTheirBill(t *testing.T) {
 		[]any{s["Beam"].DebtID, s["Partner"].DebtID}).Scan(&left); err != nil || left != 0 {
 		t.Errorf("split debts left after the bill went = %d (%v)", left, err)
 	}
-	ch := f.changes(t)
-	if len(ch) != before+1 {
-		t.Fatalf("partner split_changed %d → %d, want one more", before, len(ch))
-	}
-	var p struct {
-		Change string `json:"change"`
-	}
-	_ = json.Unmarshal(ch[len(ch)-1].Payload, &p)
-	if p.Change != "removed" {
-		t.Errorf("partner notice change = %q, want removed", p.Change)
-	}
 	if ids := res.Effects.RemovedTransactionIDs; len(ids) != 1 || ids[0] != f.billID {
 		t.Errorf("effects.removed_transaction_ids = %v", ids)
+	}
+	// 0.4.1-2 X4: the split debts are in removed_debt_ids, their people in person_balances.
+	gone := map[uuid.UUID]bool{}
+	for _, id := range res.Effects.RemovedDebtIDs {
+		gone[id] = true
+	}
+	if !gone[s["Beam"].DebtID] || !gone[s["Partner"].DebtID] {
+		t.Errorf("effects.removed_debt_ids = %v, want both split debts", res.Effects.RemovedDebtIDs)
+	}
+	if len(res.Effects.PersonBalances) < 2 {
+		t.Errorf("effects.person_balances = %d people, want the 2 split people", len(res.Effects.PersonBalances))
 	}
 }

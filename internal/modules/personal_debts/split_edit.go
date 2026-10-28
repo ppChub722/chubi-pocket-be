@@ -10,15 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
-)
-
-var (
-	ErrNotSplitChange       = errors.New("notification is not a split change")
-	ErrSplitChangeStale     = errors.New("this change no longer applies — the split was changed again or removed")
-	ErrNotificationActioned = errors.New("this notification's action was already used")
 )
 
 const amountEps = 0.005
@@ -85,23 +78,8 @@ func (s *Service) EditForTransactionTx(
 	for _, id := range order {
 		d := existing[id]
 		newAmount, ok := kept[id]
-		if ident, swap := idents[id]; ok && swap && ident.replace {
-			if err := s.notifySplitChangeTx(ctx, tx, d, 0, notifications.SplitChangeRemoved); err != nil {
-				return err
-			}
-			if err := removeDebtTx(ctx, tx, d); err != nil {
-				return fmt.Errorf("remove split: %w", err)
-			}
-			added = append(added, transactions.SplitInput{
-				PersonName: ident.name, ContactID: ident.contactID, OwedAmount: newAmount,
-			})
-			continue
-		}
 		switch {
 		case !ok:
-			if err := s.notifySplitChangeTx(ctx, tx, d, 0, notifications.SplitChangeRemoved); err != nil {
-				return err
-			}
 			if err := removeDebtTx(ctx, tx, d); err != nil {
 				return fmt.Errorf("remove split: %w", err)
 			}
@@ -109,12 +87,9 @@ func (s *Service) EditForTransactionTx(
 			if err := setDebtAmountTx(ctx, tx, id, newAmount); err != nil {
 				return fmt.Errorf("re-amount split: %w", err)
 			}
-			if err := s.notifySplitChangeTx(ctx, tx, d, newAmount, notifications.SplitChangeAmount); err != nil {
-				return err
-			}
 		}
 		if ident, ok := idents[id]; ok {
-			if err := s.applyIdentityEditTx(ctx, tx, d.ID, parentTxID, ident); err != nil {
+			if err := applyIdentityEditTx(ctx, tx, d.ID, ident); err != nil {
 				return err
 			}
 		}
@@ -129,7 +104,6 @@ type identityEdit struct {
 	name      string
 	contactID *uuid.UUID // the split's contact after the edit; nil = a free name
 	newLink   bool       // contactID is a different contact than before
-	replace   bool
 }
 
 func checkIdentityEditTx(
@@ -148,7 +122,6 @@ func checkIdentityEditTx(
 	if !nameChanged && !contactChanged {
 		return identityEdit{}, false, nil
 	}
-	out.replace = contactChanged && linkedPartnerTx(ctx, tx, d) != nil
 	if out.contactID == nil {
 		if name != "" {
 			out.name = name
@@ -174,27 +147,15 @@ func sameUUID(a, b *uuid.UUID) bool {
 	return *a == *b
 }
 
-func (s *Service) applyIdentityEditTx(
-	ctx context.Context, tx pgx.Tx, debtID, parentTxID uuid.UUID, e identityEdit,
-) error {
+// applyIdentityEditTx — the split's person changes in place (0.4.1-2 S16: no mirror to swap).
+func applyIdentityEditTx(ctx context.Context, tx pgx.Tx, debtID uuid.UUID, e identityEdit) error {
 	if _, err := tx.Exec(ctx, `UPDATE personal_debts
 		SET counterparty_person_name = $2, counterparty_contact_id = $3,
 		    updated_by_user_id = user_id
 		WHERE id = $1`, debtID, e.name, e.contactID); err != nil {
 		return fmt.Errorf("split person: %w", err)
 	}
-	if !e.newLink {
-		return nil
-	}
-	d, err := getAnyEntryTx(ctx, tx, debtID)
-	if err != nil {
-		return err
-	}
-	partner := linkedPartnerTx(ctx, tx, d)
-	if partner == nil {
-		return nil
-	}
-	return s.splitToPartnerTx(ctx, tx, d, *partner, parentTxID)
+	return nil
 }
 
 // assertSplitContactTx — a new split's contact must be the caller's own (an archived contact is
@@ -207,75 +168,4 @@ func assertSplitContactTx(ctx context.Context, tx pgx.Tx, userID, contactID uuid
 		return transactions.ErrSplitContactNotFound
 	}
 	return err
-}
-
-func linkedPartnerTx(ctx context.Context, tx pgx.Tx, d *Entry) *uuid.UUID {
-	if d.ContactID == nil {
-		return nil
-	}
-	var linked *uuid.UUID
-	_ = tx.QueryRow(ctx, `SELECT linked_user_id FROM contacts WHERE id = $1 AND user_id = $2`,
-		*d.ContactID, d.UserID).Scan(&linked)
-	if linked == nil || *linked == d.UserID {
-		return nil
-	}
-	return linked
-}
-
-func (s *Service) notifySplitChangeTx(
-	ctx context.Context, tx pgx.Tx, d *Entry, newAmount float64, change string,
-) error {
-	if s.notifs == nil || d.DisconnectedAt != nil {
-		return nil // a disconnected pair (D9): the other book no longer hears about it
-	}
-	partner := linkedPartnerTx(ctx, tx, d)
-	if partner == nil {
-		return nil
-	}
-	var mirror *Entry
-	if d.CounterpartDebtID != nil {
-		m, err := getAnyEntryTx(ctx, tx, *d.CounterpartDebtID)
-		if err != nil && !errors.Is(err, ErrEntryNotFound) {
-			return err
-		}
-		if m != nil && m.UserID == *partner {
-			mirror = m
-		}
-	}
-	if mirror == nil {
-		if change == notifications.SplitChangeRemoved {
-			return s.notifs.SupersedeSplitNoticesTx(ctx, tx, *partner, notifications.TypeSplitCreated, d.ID)
-		}
-		_, err := s.notifs.RefreshSplitCreatedTx(ctx, tx, *partner, d.ID, newAmount)
-		return err
-	}
-
-	dl, err := s.notifs.DeliveryFor(ctx, tx, *partner, &d.UserID, notifications.TypeSplitChanged)
-	if err != nil || !dl.Deliver {
-		return err
-	}
-	p := notifications.SplitChangedPayload{
-		SplitID:             d.ID,
-		ParentKind:          "transaction",
-		Change:              change,
-		SplitterDisplayName: displayNameTx(ctx, tx, d.UserID),
-		OldAmount:           d.Amount,
-		NewAmount:           newAmount,
-		Currency:            d.Currency,
-		Description:         d.Description,
-		RecipientDebtID:     mirror.ID,
-	}
-	if d.SourceTransactionID != nil {
-		p.ParentID = *d.SourceTransactionID
-	} else if d.PaidForTransactionID != nil {
-		p.ParentID = *d.PaidForTransactionID
-	}
-	actioned := false
-	if dl.Auto {
-		if _, err := s.applySplitChangeTx(ctx, tx, mirror, p); err != nil {
-			return err
-		}
-		actioned = true
-	}
-	return s.notifs.DispatchSplitChanged(ctx, tx, *partner, d.UserID, p, actioned)
 }

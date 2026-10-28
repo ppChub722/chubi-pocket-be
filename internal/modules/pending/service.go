@@ -507,6 +507,7 @@ func toSubmitError(err error) SubmitError {
 		{projects.ErrSplitsExceedParent, "SPLITS_EXCEED_AMOUNT"},
 		{projects.ErrProjectNotFound, "PROJECT_NOT_FOUND"},
 		{projects.ErrProjectNotActive, "PROJECT_NOT_ACTIVE"},
+		{projects.ErrEventCompleted, "PROJECT_NOT_ACTIVE"},
 		{projects.ErrProjectLocked, "PROJECT_LOCKED"},
 		{projects.ErrNotMember, "PROJECT_NOT_MEMBER"},
 		{projects.ErrMemberNotFound, "PROJECT_NOT_MEMBER"},

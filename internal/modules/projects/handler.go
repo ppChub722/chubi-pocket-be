@@ -9,9 +9,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
@@ -61,24 +63,6 @@ func (h *Handler) Create(c *gin.Context) {
 	}
 	out, err := h.service.Create(c.Request.Context(), userID, req)
 	reply(c, http.StatusCreated, out, err)
-}
-
-func (h *Handler) QuickCreate(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
-		return
-	}
-	var req QuickCreateRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	out, err := h.service.QuickCreate(c.Request.Context(), userID, req)
-	if err != nil {
-		mapQuickCreateError(c, err)
-		return
-	}
-	c.JSON(http.StatusCreated, out)
 }
 
 func (h *Handler) List(c *gin.Context) {
@@ -153,7 +137,7 @@ func (h *Handler) Delete(c *gin.Context) {
 	if !ok {
 		return
 	}
-	out, err := h.service.Delete(c.Request.Context(), userID, id, c.Query("delete_linked_txs") == "true")
+	out, err := h.service.Delete(c.Request.Context(), userID, id, false) // delete_linked_txs retired (0.4.1-2)
 	reply(c, http.StatusOK, out, err)
 }
 
@@ -426,36 +410,6 @@ func (h *Handler) ToggleMark(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-func (h *Handler) SetMyBooks(c *gin.Context) {
-	userID, id, ok := h.bindProjectID(c)
-	if !ok {
-		return
-	}
-	ptID, ok := pathID(c, "pt_id", "project transaction id")
-	if !ok {
-		return
-	}
-	var req MyBooksRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	out, err := h.service.SetMyBooks(c.Request.Context(), userID, id, ptID, req)
-	reply(c, http.StatusOK, out, err)
-}
-
-func (h *Handler) CopyToPersonal(c *gin.Context) {
-	userID, id, ok := h.bindProjectID(c)
-	if !ok {
-		return
-	}
-	ptID, ok := pathID(c, "pt_id", "project transaction id")
-	if !ok {
-		return
-	}
-	out, err := h.service.CopyToPersonal(c.Request.Context(), userID, id, ptID)
-	reply(c, http.StatusCreated, out, err)
-}
-
 // ApplyEventToTx — POST /transactions/:id/apply-event: my transaction takes its event bill as it is
 // now (0.4.0-3 B3).
 func (h *Handler) ApplyEventToTx(c *gin.Context) {
@@ -464,40 +418,6 @@ func (h *Handler) ApplyEventToTx(c *gin.Context) {
 		return
 	}
 	out, err := h.service.ApplyEventToTx(c.Request.Context(), userID, id)
-	if err != nil {
-		mapQuickCreateError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}
-
-func (h *Handler) AddBills(c *gin.Context) {
-	userID, id, ok := h.bindProjectID(c)
-	if !ok {
-		return
-	}
-	var req AddBillsRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	out, err := h.service.AddBills(c.Request.Context(), userID, id, req)
-	if err != nil {
-		mapQuickCreateError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}
-
-func (h *Handler) RemoveBill(c *gin.Context) {
-	userID, id, ok := h.bindProjectID(c)
-	if !ok {
-		return
-	}
-	txID, ok := pathID(c, "transaction_id", "transaction id")
-	if !ok {
-		return
-	}
-	out, err := h.service.RemoveBill(c.Request.Context(), userID, id, txID)
 	if err != nil {
 		mapQuickCreateError(c, err)
 		return
@@ -581,7 +501,37 @@ func (h *Handler) bindProjectID(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 }
 
 func mapServiceError(c *gin.Context, err error) {
+	var (
+		empty    *EmptyPersonError
+		claimErr *ClaimError
+	)
 	switch {
+	case errors.As(err, &empty):
+		response.Fail(c, http.StatusConflict, "EVENT_HAS_EMPTY_PERSON", err.Error(), gin.H{"bill_ids": empty.BillIDs})
+	case errors.Is(err, ErrEventCompleted), isEventCompletedPg(err):
+		response.Fail(c, http.StatusConflict, "EVENT_COMPLETED", ErrEventCompleted.Error(), nil)
+	case errors.Is(err, ErrUseCompleteEndpoint):
+		response.BadRequest(c, "USE_COMPLETE_ENDPOINT", err.Error(), nil)
+	case errors.Is(err, ErrCompleteNotActive):
+		response.Fail(c, http.StatusConflict, "PROJECT_NOT_ACTIVE", err.Error(), nil)
+	case errors.Is(err, ErrMemberNotRemoved):
+		response.Fail(c, http.StatusConflict, "MEMBER_NOT_REMOVED", err.Error(), nil)
+	case errors.As(err, &claimErr) && errors.Is(err, ErrNotInBill):
+		response.BadRequest(c, "NOT_IN_BILL", err.Error(), gin.H{"bill_ids": claimErr.BillIDs})
+	case errors.As(err, &claimErr):
+		response.Fail(c, http.StatusConflict, "BILL_ALREADY_BOOKED", err.Error(), gin.H{"bill_ids": claimErr.BillIDs})
+	case errors.Is(err, personal_debts.ErrBillAlreadyBooked):
+		response.Fail(c, http.StatusConflict, "BILL_ALREADY_BOOKED", err.Error(), nil)
+	case errors.Is(err, ErrSettleNotCompleted):
+		response.Fail(c, http.StatusConflict, "EVENT_NOT_COMPLETED", err.Error(), nil)
+	case errors.Is(err, ErrSettleBooked):
+		response.Fail(c, http.StatusConflict, "SETTLE_BOOKED", err.Error(), nil)
+	case errors.Is(err, ErrSettleLines):
+		response.BadRequest(c, "SETTLE_LINES", err.Error(), nil)
+	case errors.Is(err, ErrClaimMixedDirection):
+		response.BadRequest(c, "CLAIM_MIXED_DIRECTION", err.Error(), nil)
+	case errors.Is(err, ErrClaimLinkOne), errors.Is(err, ErrClaimTxNotLinkable):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, ErrProjectNotFound):
 		response.NotFound(c, "NOT_FOUND", "Project not found")
 	case errors.Is(err, ErrPTNotFound):
@@ -716,3 +666,87 @@ func (h *Handler) setStatus(c *gin.Context, status string) {
 func (h *Handler) Archive(c *gin.Context) { h.setStatus(c, StatusArchived) }
 
 func (h *Handler) Restore(c *gin.Context) { h.setStatus(c, StatusActive) }
+
+// Complete — POST /projects/:id/complete (0.4.1-2 V2).
+func (h *Handler) Complete(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.Complete(c.Request.Context(), userID, id)
+	reply(c, http.StatusOK, out, err)
+}
+
+// AssignRemoved — POST /projects/:id/members/:member_id/assign (0.4.1-2 V15).
+func (h *Handler) AssignRemoved(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	memberID, err := uuid.Parse(c.Param("member_id"))
+	if err != nil {
+		response.BadRequest(c, "VALIDATION_ERROR", "Invalid member_id", nil)
+		return
+	}
+	var req AssignRemovedRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	out, err := h.service.AssignRemoved(c.Request.Context(), userID, id, memberID, req)
+	reply(c, http.StatusOK, out, err)
+}
+
+// ListClaimable — GET /projects/:id/claimable[?member_id=] (0.4.1-2).
+func (h *Handler) ListClaimable(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	who := ClaimablePerson{PersonName: c.Query("person_name")}
+	for key, dst := range map[string]**uuid.UUID{"member_id": &who.MemberID, "contact_id": &who.ContactID} {
+		if v := c.Query(key); v != "" {
+			m, err := uuid.Parse(v)
+			if err != nil {
+				response.BadRequest(c, "VALIDATION_ERROR", "Invalid "+key, nil)
+				return
+			}
+			*dst = &m
+		}
+	}
+	out, err := h.service.ListClaimable(c.Request.Context(), userID, id, who)
+	reply(c, http.StatusOK, out, err)
+}
+
+// Claim — POST /projects/:id/claim (0.4.1-2 V6 / V9 / V11).
+func (h *Handler) Claim(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	var req ClaimBillsRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	out, err := h.service.Claim(c.Request.Context(), userID, id, req)
+	reply(c, http.StatusOK, out, err)
+}
+
+// BookSettle — POST /projects/:id/settle/book (0.4.1-2 V12).
+func (h *Handler) BookSettle(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	var req SettleBookRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	out, err := h.service.BookSettle(c.Request.Context(), userID, id, req)
+	reply(c, http.StatusOK, out, err)
+}
+
+// isEventCompletedPg — the 101 trigger refused a bill write racing the complete call.
+func isEventCompletedPg(err error) bool {
+	var pg *pgconn.PgError
+	return errors.As(err, &pg) && pg.Message == "EVENT_COMPLETED"
+}

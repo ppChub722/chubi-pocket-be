@@ -18,6 +18,8 @@ var ErrTxNotFound = errors.New("transaction not found")
 
 type LinkRequest struct {
 	TransactionID uuid.UUID `json:"transaction_id"`
+	// DebtEntryID — a debt occurrence links a person-book entry instead (0.4.1-2 K3).
+	DebtEntryID *uuid.UUID `json:"debt_entry_id"`
 	// Replace — swap (see LinkSlotRequest).
 	Replace bool `json:"replace"`
 }
@@ -43,7 +45,8 @@ func (s *Service) Link(ctx context.Context, userID, itemID uuid.UUID, req LinkRe
 	if it.Slot != nil {
 		slot = *it.Slot
 	}
-	return s.linkOcc(ctx, userID, it.RuleID, slot, LinkSlotRequest{TransactionID: req.TransactionID, Replace: req.Replace}, "", it)
+	return s.linkOcc(ctx, userID, it.RuleID, slot,
+		LinkSlotRequest{TransactionID: req.TransactionID, DebtEntryID: req.DebtEntryID, Replace: req.Replace}, "", it)
 }
 
 // LinkOcc makes an existing transaction the record of the occurrence: one
@@ -58,6 +61,12 @@ func (s *Service) LinkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 // linkOcc — byRow set: the occurrence IS that stored row (a manual item has no slot
 // of its own, so it can only be reached by its id).
 func (s *Service) linkOcc(ctx context.Context, userID, ruleID uuid.UUID, slot time.Time, req LinkSlotRequest, tz string, byRow *itemRow) (*LinkResult, error) {
+	if req.DebtEntryID != nil {
+		if req.TransactionID != uuid.Nil {
+			return nil, ErrValidation // exactly one of the two
+		}
+		return s.linkDebtOcc(ctx, userID, ruleID, slot, *req.DebtEntryID, req.Replace, tz, byRow)
+	}
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err

@@ -9,7 +9,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
@@ -166,92 +165,5 @@ func (s *Service) CopyToPersonal(ctx context.Context, userID, projectID, ptID uu
 	return &EventCopyResult{EventPatch: *p, Transaction: d}, nil
 }
 
-func (s *Service) notifyRecordedTx(
-	ctx context.Context, tx pgx.Tx, actorUserID, actorMemberID, recorderUserID uuid.UUID, pt *ProjectTransaction,
-) error {
-	d, err := s.notifs.DeliveryFor(ctx, tx, actorUserID, &recorderUserID, notifications.TypeProjectTxRecordedForYou)
-	if err != nil || !d.Deliver {
-		return err
-	}
-	var copyID *uuid.UUID
-	if d.Auto && s.txs != nil {
-		id, err := s.copyToPersonalTx(ctx, tx, actorUserID, actorMemberID, pt)
-		switch {
-		case errors.Is(err, ErrNoShareToCopy): // fully split to others — nothing to copy
-		case err != nil:
-			return err
-		default:
-			copyID = &id
-		}
-	}
-	return s.notifs.DispatchProjectTxRecorded(ctx, tx, actorUserID, recorderUserID,
-		notifications.ProjectTxRecordedPayload{
-			ProjectTransactionID:  pt.ID,
-			ProjectID:             pt.ProjectID,
-			RecorderUserID:        recorderUserID,
-			RecorderDisplayName:   userDisplayOrEmpty(ctx, tx, recorderUserID),
-			Amount:                pt.Amount,
-			Currency:              pt.Currency,
-			Type:                  pt.Type,
-			Description:           pt.Description,
-			Note:                  pt.Note,
-			PersonalTransactionID: copyID,
-		}, copyID != nil)
-}
-
-func suggestedUpdate(
-	copyAmount, beforeFull, beforeShare, afterFull, afterShare float64, after *ProjectTransaction,
-) *notifications.PersonalUpdate {
-	amount := copyAmount
-	switch copyAmount {
-	case beforeFull:
-		amount = afterFull
-	case beforeShare:
-		amount = afterShare
-	}
-	return &notifications.PersonalUpdate{
-		Amount: amount, Date: after.Date, Description: after.Description, Note: after.Note,
-	}
-}
-
-func (s *Service) notifyChangedTx(
-	ctx context.Context, tx pgx.Tx, recipientUserID, editorUserID uuid.UUID,
-	before, after *ProjectTransaction, beforeShares, afterShares map[uuid.UUID]float64,
-	diff map[string][2]interface{},
-) error {
-	d, err := s.notifs.DeliveryFor(ctx, tx, recipientUserID, &editorUserID, notifications.TypeProjectTxChanged)
-	if err != nil || !d.Deliver {
-		return err
-	}
-	p := notifications.ProjectTxChangedPayload{
-		ProjectTransactionID: after.ID,
-		ProjectID:            after.ProjectID,
-		EditorUserID:         editorUserID,
-		EditorDisplayName:    userDisplayOrEmpty(ctx, tx, editorUserID),
-		ChangeKind:           "edited",
-		Diff:                 diff,
-	}
-	applied := false
-	if copyID, copyAmount, ok := personalCopyTx(ctx, tx, recipientUserID, after.ID); ok {
-		var beforeShare, afterShare float64
-		if m, err := s.store.MemberByUserID(ctx, after.ProjectID, recipientUserID); err == nil && m.ID != after.TransactionMemberID {
-			beforeShare, afterShare = beforeShares[m.ID], afterShares[m.ID]
-		} else {
-			beforeShare = before.Amount - sumShares(beforeShares)
-			afterShare = after.Amount - sumShares(afterShares)
-		}
-		sug := suggestedUpdate(copyAmount, before.Amount, beforeShare, after.Amount, afterShare, after)
-		p.PersonalTransactionID = &copyID
-		p.Suggested = sug
-		if d.Auto && s.txs != nil {
-			amount, date := sug.Amount, sug.Date
-			req := transactions.UpdateRequest{Amount: &amount, Date: &date}
-			req.SetText(sug.Description, sug.Note)
-			if err := s.txs.UpdateInTx(ctx, tx, recipientUserID, copyID, req); err != nil {
-				return fmt.Errorf("update personal copy: %w", err)
-			}
-			applied = true
-		}
-	}
-	return s.notifs.DispatchProjectTxChanged(ctx, tx, recipientUserID, editorUserID, p, applied)
-}
+// (notifyRecordedTx / notifyChangedTx / suggestedUpdate, the one-way copy notices, were retired in
+// 0.4.1-2 S16: a bill save fans out to every member by their switch, shared_bill.go.)

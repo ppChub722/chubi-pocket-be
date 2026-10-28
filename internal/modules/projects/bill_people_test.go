@@ -114,12 +114,18 @@ func TestBillPeopleSomeoneElsePaid(t *testing.T) {
 	var payer uuid.UUID
 	var linked *uuid.UUID
 	if err := f.pool.QueryRow(ctx, `SELECT transaction_member_id, linked_transaction_id FROM project_transactions WHERE id = $1`,
-		mine.EventBill.BillID).Scan(&payer, &linked); err != nil || payer != beeMember || linked != nil {
-		t.Errorf("board bill payer %v linked %v (%v), want Bee, no linked tx", payer, linked, err)
+		mine.EventBill.BillID).Scan(&payer, &linked); err != nil || payer != beeMember {
+		t.Errorf("board bill payer %v (%v), want Bee", payer, err)
 	}
-	// A linked payer hears about it.
-	if n := f.countRows(t, `SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1 AND type = 'project_tx_recorded_for_you'`, f.friend); n != 1 {
-		t.Errorf("recorded-for-you notices to Bee = %d, want 1", n)
+	// 0.4.1-2 S6: Bee (switch on by default) gets her copy, the whole bill, as the bill's origin, and
+	// the info notice.
+	var beeCopy uuid.UUID
+	if err := f.pool.QueryRow(ctx, `SELECT id FROM transactions WHERE user_id = $1 AND source_project_transaction_id = $2 AND amount = 300`,
+		f.friend, mine.EventBill.BillID).Scan(&beeCopy); err != nil || linked == nil || *linked != beeCopy {
+		t.Errorf("Bee's copy %v (%v), the bill's origin %v: want her copy of 300 as the origin", beeCopy, err, linked)
+	}
+	if n := f.countRows(t, `SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1 AND type = 'shared_bill_created'`, f.friend); n != 1 {
+		t.Errorf("shared_bill_created to Bee = %d, want 1", n)
 	}
 
 	// Rules.

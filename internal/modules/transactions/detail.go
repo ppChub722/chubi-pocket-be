@@ -77,6 +77,9 @@ func buildDetails(
 	var accIDs, catIDs, eventIDs, debtContacts []uuid.UUID
 	for i := range rows {
 		r := &rows[i]
+		if r.UserID != callerID {
+			r.PrivateNote = nil // mine only (0.4.1-2 S11)
+		}
 		if f, ok := facts[r.ID]; ok && f.debtContactID != nil && r.UserID == callerID {
 			debtContacts = append(debtContacts, *f.debtContactID)
 		}
@@ -116,23 +119,26 @@ func buildDetails(
 	if err != nil {
 		return nil, err
 	}
-	var (
-		splits     map[uuid.UUID][]SplitRef
-		billPeople map[uuid.UUID]shared.EventBillPeople
-	)
+	var splits map[uuid.UUID][]SplitRef
 	if withSplits {
 		if splits, err = loadSplits(ctx, q, callerID, ids); err != nil {
 			return nil, err
 		}
-		var billIDs []uuid.UUID
-		for _, f := range facts {
-			if f.billID != nil {
-				billIDs = append(billIDs, *f.billID)
-			}
+	}
+	// 0.4.1-2 S8: the bill of every row in one (in_sync / differences on list rows too).
+	var billIDs []uuid.UUID
+	for _, f := range facts {
+		if f.billID != nil {
+			billIDs = append(billIDs, *f.billID)
 		}
-		if billPeople, err = shared.LoadEventBillPeople(ctx, q, callerID, billIDs); err != nil {
-			return nil, err
-		}
+	}
+	billPeople, err := shared.LoadEventBillPeople(ctx, q, callerID, billIDs)
+	if err != nil {
+		return nil, err
+	}
+	pending, err := loadPendingBills(ctx, q, callerID, billIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	for i := range rows {
@@ -195,14 +201,22 @@ func buildDetails(
 				d.EventBill.Kind = "origin"
 			}
 			if bp, ok := billPeople[*f.billID]; ok {
-				payer := bp.Payer
 				eb := d.EventBill
-				eb.Payer, eb.BillAmount, eb.Members = &payer, bp.Amount, bp.Members
+				if withSplits {
+					payer := bp.Payer
+					eb.Payer, eb.BillAmount, eb.Members = &payer, bp.Amount, bp.Members
+				}
 				if r.UserID == callerID {
 					eb.Differences = bp.Differences(f.eventBill, r.Amount, r.Date, r.Description, r.Note)
 					inSync := len(eb.Differences) == 0
 					eb.InSync = &inSync
+					// SA1: a connected copy of a bill whose event still syncs opens the bill form.
+					eb.EditInBill = d.Project.Status == "active"
+					eb.PendingUpdate = pending[*f.billID]
 				}
+			}
+			if d.Project.Kind == "split" {
+				d.Project = nil // a split bill shows no event chip (event_bill.event.kind = split)
 			}
 		}
 		d.Currency = f.currency
@@ -217,9 +231,6 @@ func buildDetails(
 				name = *f.pbName
 			}
 			src := PaidBySourceMe
-			if f.pbKind != nil && *f.pbKind == "partner" {
-				src = PaidBySourcePartner
-			}
 			d.PaidBy = &PaidBy{
 				DebtID: *f.pbID, Key: shared.DebtKey(f.pbContactID, name),
 				Person: shared.ResolvePerson(debtPersons, shared.PersonKey{ContactID: f.pbContactID, Snapshot: name}),

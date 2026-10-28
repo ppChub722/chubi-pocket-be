@@ -42,19 +42,54 @@ func (s *Service) GetSettings(ctx context.Context, userID uuid.UUID) (*Settings,
 	return s.store.GetSettings(ctx, userID)
 }
 
+// Notification-page groups (0.4.1-2 P7).
+const (
+	GroupSharedBill = "shared_bill"
+	GroupEvent      = "event"
+	GroupRecurring  = "recurring"
+	GroupRequest    = "request"
+)
+
+// pageTypes — every type the notification settings page lists, in page order. Request types are
+// never muted (mutable false); every other listed type can be.
+var pageTypes = []struct{ Type, Group string }{
+	{TypeSharedBillCreated, GroupSharedBill},
+	{TypeSharedBillDeleted, GroupSharedBill},
+	{TypeSharedBillDisconnected, GroupSharedBill},
+	{TypeDebtDisconnected, GroupSharedBill},
+	{TypeProjectTxChanged, GroupEvent},
+	{TypeProjectAdded, GroupEvent},
+	{TypeEventCompleted, GroupEvent},
+	{TypeEventMemberRemoved, GroupEvent},
+	{TypeRecurringDue, GroupRecurring},
+	{TypeRecurringEnding, GroupRecurring},
+	{TypeRecurringAutoCreated, GroupRecurring},
+	{TypeProjectInvite, GroupRequest},
+	{TypeContactLinkRequest, GroupRequest},
+	{TypeAccountInvite, GroupRequest},
+}
+
+const (
+	syncEvents = "events"
+	syncDebts  = "debts"
+)
+
+// syncSwitch — the auto-sync switch a notice's "apply" follows (S4). Shared-bill types are not
+// here: their switch depends on the bill kind (callers read Delivery.SyncEvents / SyncDebts).
+var syncSwitch = map[string]string{
+	TypeProjectTxChanged: syncEvents, // update my copy to match (shared-bill callers pick by kind)
+}
+
 var (
-	mutableTypes = map[string]bool{
-		TypeSplitCreated: true, TypeRecurringDue: true, TypeRecurringEnding: true,
-		TypeRecurringAutoCreated:    true,
-		TypeProjectTxRecordedForYou: true, TypeProjectTxChanged: true, TypeProjectAdded: true,
-		TypeSplitChanged: true, TypeDebtDisconnected: true,
-	}
-	autoableTypes = map[string]bool{
-		TypeSplitCreated:            true, // add to my debts
-		TypeProjectTxRecordedForYou: true, // copy into my book
-		TypeProjectTxChanged:        true, // update my copy to match
-		TypeSplitChanged:            true, // update my debt to match
-	}
+	mutableTypes = func() map[string]bool {
+		m := map[string]bool{}
+		for _, t := range pageTypes {
+			if t.Group != GroupRequest {
+				m[t.Type] = true
+			}
+		}
+		return m
+	}()
 	actionTypes = map[string]bool{
 		TypeAccountInvite: true, TypeProjectInvite: true, TypeContactLinkRequest: true,
 	}
@@ -90,13 +125,6 @@ func (s *Service) UpdateSettings(ctx context.Context, userID uuid.UUID, req Upda
 			return nil, err
 		}
 		req.MutedTypes = &clean
-	}
-	if req.AutoTypes != nil {
-		clean, err := cleanTypes(*req.AutoTypes, autoableTypes)
-		if err != nil {
-			return nil, err
-		}
-		req.AutoTypes = &clean
 	}
 	if req.DefaultAccountID != nil && !req.ClearDefaultAccount {
 		ok, err := s.store.IsActiveWalletMember(ctx, userID, *req.DefaultAccountID)
@@ -176,7 +204,8 @@ func (s *Service) MarkDismissedTx(ctx context.Context, tx pgx.Tx, userID, id uui
 	return s.store.MarkDismissedTx(ctx, tx, userID, id)
 }
 
-func SettingsCounts(muted, auto []string) (on, autoN int) {
+// SettingsCounts — the settings main page line: mutable types not muted, of all mutable types.
+func SettingsCounts(muted []string) (on, total int) {
 	m := map[string]bool{}
 	for _, t := range muted {
 		m[t] = true
@@ -186,10 +215,5 @@ func SettingsCounts(muted, auto []string) (on, autoN int) {
 			on++
 		}
 	}
-	for _, t := range auto {
-		if autoableTypes[t] {
-			autoN++
-		}
-	}
-	return on, autoN
+	return on, len(mutableTypes)
 }

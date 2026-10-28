@@ -28,14 +28,16 @@ type DebtLinks interface {
 	// SetPaidByTx — writes the paid-by debt of row (in nil = remove it); returns the person's key.
 	SetPaidByTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, row *Transaction, in *PaidByInput) (key string, err error)
 	// PaidByDeletingTx — row txID (with a paid-by debt) is about to be deleted: my own paid-by debt
-	// goes with it (the partner is told); a partner's mirrored debt stays, unlinked.
-	PaidByDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (key string, err error)
+	// goes with it (the partner is told); a partner's mirrored debt stays, unlinked. debtID = that
+	// debt (nil = none), gone = it was deleted (else it was kept, unlinked).
+	PaidByDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (key string, debtID *uuid.UUID, gone bool, err error)
 	// SplitsFollowTxTx — 0.4.1-1 D8: row (a bill) was edited: its split debts take its date;
 	// checkAmount (an amount-only edit) refuses an amount below their sum (ErrSplitsExceedAmount).
 	SplitsFollowTxTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, row *Transaction, checkAmount bool) error
 	// SplitsDeletingTx — 0.4.1-1 D8: bill txID is about to be deleted: its split debts go with it
-	// and linked partners are told (split_changed removed).
-	SplitsDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) error
+	// and linked partners are told (split_changed removed). It answers the deleted debts and their
+	// people's keys (0.4.1-2 X4: the delete's effects list them).
+	SplitsDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (removed []uuid.UUID, keys []string, err error)
 	// DebtEffects — the person-book rows (DebtEntry views) and people's balances for a write's
 	// effects (0.4.1-1 B2).
 	DebtEffects(ctx context.Context, userID uuid.UUID, ids []uuid.UUID, keys []string) (debts, persons []any, err error)
@@ -175,7 +177,7 @@ func (s *Service) DeleteDebtTxInTx(ctx context.Context, tx pgx.Tx, userID, txID 
 	if err != nil {
 		return nil, err
 	}
-	if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
+	if _, err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
 		return nil, err
 	}
 	return current.AccountID, nil
@@ -276,7 +278,7 @@ func (s *Service) DeleteInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUI
 	if _, err := s.paidByDeletingTx(ctx, tx, userID, current); err != nil {
 		return nil, err
 	}
-	if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
+	if _, err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
 		return nil, err
 	}
 	if current.SourcePersonalDebtID != nil && s.debtLinks != nil {
@@ -287,31 +289,34 @@ func (s *Service) DeleteInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUI
 	return nonNilIDs(current.AccountID), nil
 }
 
-// paidByDeletingTx — the paid-by debt of a row about to go (key "" when it has none).
-func (s *Service) paidByDeletingTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) (string, error) {
+// debtsTouched — the person-book rows a transaction delete took along (removed) or changed, and
+// their people (0.4.1-2 X4: the delete's effects list them).
+type debtsTouched struct {
+	removed, changed []uuid.UUID
+	keys             []string
+}
+
+func (d *debtsTouched) add(o debtsTouched) {
+	d.removed = append(d.removed, o.removed...)
+	d.changed = append(d.changed, o.changed...)
+	d.keys = append(d.keys, o.keys...)
+}
+
+// paidByDeletingTx — the paid-by debt of a row about to go (nothing when it has none).
+func (s *Service) paidByDeletingTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) (debtsTouched, error) {
+	var out debtsTouched
 	if current.PaidByAmount == nil || s.debtLinks == nil {
-		return "", nil
+		return out, nil
 	}
-	return s.debtLinks.PaidByDeletingTx(ctx, tx, userID, current.ID)
-}
-
-// CreatePaidForTxInTx — a partner's split mirrored into my book (0.4.0-3): my expense of my share,
-// paid in full by them, so no wallet. categoryID is optional (a same-named category of mine).
-func (s *Service) CreatePaidForTxInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID,
-	amount float64, date string, categoryID *uuid.UUID, description *string) (*Transaction, error) {
-	paid := amount
-	return s.store.InsertRowTx(ctx, tx, &Transaction{
-		UserID: userID, Type: TypeExpense, Amount: amount, CategoryID: categoryID,
-		Date: date, Description: description, PaidByAmount: &paid,
-	})
-}
-
-// SetPaidForAmountTx — the partner changed their split ("อัปเดตตาม"): my mirrored expense follows
-// (it has no wallet, so no balance moves).
-func (s *Service) SetPaidForAmountTx(ctx context.Context, tx pgx.Tx, txID uuid.UUID, amount float64) error {
-	if _, err := tx.Exec(ctx, `UPDATE transactions SET amount = $2, paid_by_amount = $2
-		WHERE id = $1 AND account_id IS NULL`, txID, amount); err != nil {
-		return fmt.Errorf("mirror amount: %w", err)
+	key, id, gone, err := s.debtLinks.PaidByDeletingTx(ctx, tx, userID, current.ID)
+	if err != nil || id == nil {
+		return out, err
 	}
-	return nil
+	out.keys = []string{key}
+	if gone {
+		out.removed = []uuid.UUID{*id}
+	} else {
+		out.changed = []uuid.UUID{*id}
+	}
+	return out, nil
 }

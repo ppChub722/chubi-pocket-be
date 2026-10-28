@@ -120,7 +120,9 @@ func main() {
 		transactionsService, tagsService, personalDebtsService, projectsService)
 	pendingHandler := pending.NewHandler(pendingService)
 
-	recurringService := recurring.NewService(dbPool, transactionsService, pendingService, notificationsService)
+	recurringService := recurring.NewService(dbPool, transactionsService, pendingService, notificationsService).
+		WithDebts(personalDebtsService) // 0.4.1-2 K: the "หนี้" kind books person-book entries
+	personalDebtsService.WithRecurring(recurringService.PersonRecurring) // K13: the person page lists them
 	recurringHandler := recurring.NewHandler(recurringService)
 
 	ocrReader := ocr.NewTesseract(ocr.Config{
@@ -224,7 +226,7 @@ func main() {
 	syncHandler := datasync.NewHandler(dbPool, log, datasync.Services{
 		Accounts: accountsService, Categories: categoriesService, Tags: tagsService, Contacts: contactsService,
 		Debts: personalDebtsService, Projects: projectsService, Recurring: recurringService,
-		Transactions: transactionsService, Providers: providersStore,
+		Transactions: transactionsService, Providers: providersStore, Users: usersService,
 	})
 
 	packPermsStore := user_pack_permissions.NewStore(dbPool)
@@ -384,8 +386,6 @@ func main() {
 			protected.GET("/personal-debts/people/:key/entries", personalDebtsHandler.Entries)
 			protected.POST("/personal-debts/people/:key/entries", personalDebtsHandler.CreateEntry)
 			protected.POST("/personal-debts/people/:key/repayments", personalDebtsHandler.CreateRepayment)
-			protected.POST("/personal-debts/split-requests/:notification_id/accept", personalDebtsHandler.AcceptSplitRequest)
-			protected.POST("/personal-debts/split-changes/:notification_id/apply", personalDebtsHandler.ApplySplitChange)
 			protected.GET("/personal-debts/:id", personalDebtsHandler.Get)
 			protected.PUT("/personal-debts/:id", personalDebtsHandler.Update)
 			protected.DELETE("/personal-debts/:id", personalDebtsHandler.Delete)
@@ -406,7 +406,6 @@ func main() {
 
 			protected.POST("/projects", projectsHandler.Create)
 			protected.GET("/projects", projectsHandler.List)
-			protected.POST("/projects/quick", projectsHandler.QuickCreate)
 			protected.POST("/projects/link-requests/:notification_id/accept", projectsHandler.AcceptLinkRequest)
 			protected.POST("/projects/link-requests/:notification_id/reject", projectsHandler.RejectLinkRequest)
 			protected.GET("/projects/:id", projectsHandler.Get)
@@ -415,6 +414,11 @@ func main() {
 			protected.DELETE("/projects/:id", projectsHandler.Delete)
 			protected.POST("/projects/:id/archive", projectsHandler.Archive)
 			protected.POST("/projects/:id/restore", projectsHandler.Restore)
+			protected.POST("/projects/:id/complete", projectsHandler.Complete)                       // 0.4.1-2 V2
+			protected.POST("/projects/:id/members/:member_id/assign", projectsHandler.AssignRemoved) // 0.4.1-2 V15
+			protected.GET("/projects/:id/claimable", projectsHandler.ListClaimable)                  // 0.4.1-2 V6 / V9
+			protected.POST("/projects/:id/claim", projectsHandler.Claim)                             // 0.4.1-2 V6 / V9 / V11
+			protected.POST("/projects/:id/settle/book", projectsHandler.BookSettle)                  // 0.4.1-2 V12
 			protected.GET("/projects/:id/members", projectsHandler.ListMembers)
 			protected.POST("/projects/:id/members", projectsHandler.AddMember)
 			protected.PUT("/projects/:id/members/:member_id", projectsHandler.UpdateMember)
@@ -424,15 +428,15 @@ func main() {
 			protected.POST("/projects/:id/leave", projectsHandler.Leave)
 			protected.GET("/projects/:id/transactions", projectsHandler.ListPT)
 			protected.POST("/projects/:id/project-transactions", projectsHandler.CreatePT)
-			protected.POST("/projects/:id/bills", projectsHandler.AddBills)
 			protected.POST("/event-bills", projectsHandler.BookBill)
 			protected.PUT("/event-bills/:pt_id", projectsHandler.RebookBill)
-			protected.DELETE("/projects/:id/bills/:transaction_id", projectsHandler.RemoveBill)
+			protected.GET("/event-bills/:pt_id", projectsHandler.GetBill)
+			protected.DELETE("/event-bills/:pt_id", projectsHandler.DeleteBill)
+			protected.POST("/event-bills/:pt_id/apply", projectsHandler.ApplyBill)
+			protected.POST("/event-bills/:pt_id/disconnect", projectsHandler.DisconnectBill)
 			protected.PUT("/projects/:id/project-transactions/:pt_id", projectsHandler.UpdatePT)
 			protected.DELETE("/projects/:id/project-transactions/:pt_id", projectsHandler.DeletePT)
 			protected.PUT("/projects/:id/project-transactions/:pt_id/mark", projectsHandler.ToggleMark)
-			protected.POST("/projects/:id/project-transactions/:pt_id/copy", projectsHandler.CopyToPersonal)
-			protected.PUT("/projects/:id/project-transactions/:pt_id/my-books", projectsHandler.SetMyBooks)
 			protected.GET("/projects/:id/summary", projectsHandler.Summary)
 			protected.GET("/projects/:id/settle", projectsHandler.Settle)
 			protected.POST("/projects/:id/people", projectsHandler.ResolvePeople)

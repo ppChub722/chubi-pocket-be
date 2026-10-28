@@ -14,6 +14,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/recurring"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/users"
 )
 
 // Loader returns the body of the dataset's existing endpoint.
@@ -31,6 +32,7 @@ type Services struct {
 	Recurring    *recurring.Service
 	Transactions *transactions.Service
 	Providers    *providers.Store
+	Users        *users.Service
 }
 
 // dataset is one A dataset.
@@ -82,6 +84,9 @@ func datasets(s Services) map[string]dataset {
 				return nil, err
 			}
 			return providers.ListResponse{Data: list, Count: len(list)}, nil
+		}},
+		Profile: {load: func(ctx context.Context, uid uuid.UUID, _ string) (any, error) {
+			return s.Users.GetProfile(ctx, uid)
 		}},
 	}
 }

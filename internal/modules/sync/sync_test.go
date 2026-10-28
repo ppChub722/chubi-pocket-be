@@ -28,6 +28,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/recurring"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/users"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
@@ -51,9 +52,10 @@ func testServices(pool *pgxpool.Pool) Services {
 		Contacts:     contactsService,
 		Debts:        debtsService,
 		Projects:     projectsService,
-		Recurring:    recurring.NewService(pool, transactionsService, pendingService, notificationsService),
+		Recurring:    recurring.NewService(pool, transactionsService, pendingService, notificationsService).WithDebts(debtsService),
 		Transactions: transactionsService,
 		Providers:    providers.NewStore(pool),
+		Users:        users.NewService(users.NewStore(pool)),
 	}
 }
 

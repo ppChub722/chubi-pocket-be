@@ -10,40 +10,73 @@ import (
 )
 
 type Profile struct {
-	ID              uuid.UUID        `json:"id"`
-	Username        string           `json:"username"`
-	Email           *string          `json:"email"`
-	EmailVerifiedAt *time.Time       `json:"email_verified_at"`
-	DisplayName     string           `json:"display_name"`
-	Currency        string           `json:"currency"`
-	IconCode        *shared.IconCode `json:"icon_code"`
-	Status          string           `json:"status"`
-	Preferences     Preferences      `json:"preferences"`
-	DefaultAccount *shared.AccountRef `json:"default_account"`
-	AutoCopyOwnEventBills bool `json:"auto_copy_own_event_bills"`
+	ID              uuid.UUID           `json:"id"`
+	Username        string              `json:"username"`
+	Email           *string             `json:"email"`
+	EmailVerifiedAt *time.Time          `json:"email_verified_at"`
+	DisplayName     string              `json:"display_name"`
+	Currency        string              `json:"currency"`
+	IconCode        *shared.IconCode    `json:"icon_code"`
+	Status          string              `json:"status"`
+	Preferences     Preferences         `json:"preferences"`
+	DefaultAccount  *shared.AccountRef  `json:"default_account"`
+	FeeCategory     *shared.CategoryRef `json:"fee_category"`
+	// AutoSyncEvents / AutoSyncDebts (0.4.1-2 S4) — the two auto-sync switches (user_notification_settings).
+	AutoSyncEvents bool `json:"auto_sync_events"`
+	AutoSyncDebts  bool `json:"auto_sync_debts"`
+	// AutoAcceptEvents / AutoAcceptDebts (0.4.1-2, owner 2026-10-28) — new shared bills land at once.
+	AutoAcceptEvents    bool                `json:"auto_accept_events"`
+	AutoAcceptDebts     bool                `json:"auto_accept_debts"`
 	NotificationSummary NotificationSummary `json:"notification_summary"`
 	CreatedAt           time.Time           `json:"created_at"`
 	UpdatedAt           time.Time           `json:"updated_at"`
 }
 
 type UpdateProfileRequest struct {
-	DisplayName *string `json:"display_name" binding:"omitempty,min=1,max=100"`
-	Currency *string          `json:"currency" binding:"omitempty,len=3,alpha"`
-	IconCode *shared.IconCode `json:"icon_code"    binding:"omitempty"`
-	Email       *string        `json:"email"        binding:"omitempty,email,max=255"`
-	Preferences map[string]any `json:"preferences"  binding:"omitempty"`
-	DefaultAccountID      json.RawMessage `json:"default_account_id"`
-	AutoCopyOwnEventBills *bool           `json:"auto_copy_own_event_bills"`
+	DisplayName      *string          `json:"display_name" binding:"omitempty,min=1,max=100"`
+	Currency         *string          `json:"currency" binding:"omitempty,len=3,alpha"`
+	IconCode         *shared.IconCode `json:"icon_code"    binding:"omitempty"`
+	Email            *string          `json:"email"        binding:"omitempty,email,max=255"`
+	Preferences      map[string]any   `json:"preferences"  binding:"omitempty"`
+	DefaultAccountID json.RawMessage  `json:"default_account_id"`
+	AutoSyncEvents   *bool            `json:"auto_sync_events"`
+	AutoSyncDebts    *bool            `json:"auto_sync_debts"`
+	AutoAcceptEvents *bool            `json:"auto_accept_events"`
+	AutoAcceptDebts  *bool            `json:"auto_accept_debts"`
 }
 
+// Preference keys (0.4.1-2 P1 / P6: theme_mode / theme_id / font_th / font_en / page_prefs added,
+// `theme` dropped).
+const (
+	PrefTimezone   = "timezone"
+	PrefThemeMode  = "theme_mode"
+	PrefThemeID    = "theme_id"
+	PrefLanguage   = "language"
+	PrefFontTH     = "font_th"
+	PrefFontEN     = "font_en"
+	PrefPagePrefs  = "page_prefs"
+	maxAppIDLength = 50
+	// maxPagePrefBytes — one page's entry in page_prefs, as JSON.
+	maxPagePrefBytes = 2048
+)
+
 var allowedPreferenceKeys = map[string]bool{
-	"timezone": true,
-	"theme":    true,
-	"language": true,
+	PrefTimezone: true, PrefThemeMode: true, PrefThemeID: true, PrefLanguage: true,
+	PrefFontTH: true, PrefFontEN: true, PrefPagePrefs: true,
 	PrefFeeCategoryID: true,
 	PrefMoneyStyle:    true,
 	PrefMoneyDecimals: true,
 }
+
+var (
+	ThemeModes = map[string]bool{"light": true, "dark": true, "system": true}
+	Languages  = map[string]bool{"th": true, "en": true}
+	// PageIDs — the pages whose last choice (sort / filter / ...) page_prefs remembers.
+	PageIDs = map[string]bool{
+		"wallets": true, "budgets": true, "goals": true, "recurring": true, "events": true,
+		"categories": true, "tags": true, "contacts": true, "debts": true, "pending": true,
+	}
+)
 
 const PrefFeeCategoryID = "fee_category_id"
 
@@ -69,12 +102,16 @@ func ValidatePreferenceKeys(prefs map[string]any) (string, bool) {
 }
 
 type Preferences struct {
-	Timezone      *string `json:"timezone"`
-	Theme         *string `json:"theme"`
-	Language      *string `json:"language"`
-	FeeCategoryID *string `json:"fee_category_id"`
-	MoneyStyle    *string `json:"money_style"`
-	MoneyDecimals *string `json:"money_decimals"`
+	Timezone      *string        `json:"timezone"`
+	ThemeMode     *string        `json:"theme_mode"`
+	ThemeID       *string        `json:"theme_id"`
+	Language      *string        `json:"language"`
+	FontTH        *string        `json:"font_th"`
+	FontEN        *string        `json:"font_en"`
+	PagePrefs     map[string]any `json:"page_prefs"`
+	FeeCategoryID *string        `json:"fee_category_id"`
+	MoneyStyle    *string        `json:"money_style"`
+	MoneyDecimals *string        `json:"money_decimals"`
 }
 
 func prefsFromMap(m map[string]any) Preferences {
@@ -84,8 +121,18 @@ func prefsFromMap(m map[string]any) Preferences {
 		}
 		return nil
 	}
+	pages := map[string]any{}
+	if pp, ok := m[PrefPagePrefs].(map[string]any); ok {
+		for k, v := range pp {
+			if obj, ok := v.(map[string]any); ok && PageIDs[k] {
+				pages[k] = obj
+			}
+		}
+	}
 	return Preferences{
-		Timezone: str("timezone"), Theme: str("theme"), Language: str("language"),
+		Timezone: str(PrefTimezone), ThemeMode: str(PrefThemeMode), ThemeID: str(PrefThemeID),
+		Language: str(PrefLanguage), FontTH: str(PrefFontTH), FontEN: str(PrefFontEN),
+		PagePrefs:     pages,
 		FeeCategoryID: str(PrefFeeCategoryID), MoneyStyle: str(PrefMoneyStyle),
 		MoneyDecimals: str(PrefMoneyDecimals),
 	}
@@ -99,6 +146,6 @@ func apiStatus(stored string) string {
 }
 
 type NotificationSummary struct {
-	On   int `json:"on"`
-	Auto int `json:"auto"`
+	On    int `json:"on"`
+	Total int `json:"total"`
 }

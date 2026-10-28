@@ -19,6 +19,14 @@ type Service struct {
 	store  *Store
 	txs    *transactions.Service
 	notifs *notifications.Service // optional — see split_flow.go
+	// recurringFor — the person's "หนี้" recurring settings for the person page (0.4.1-2 K13;
+	// a hook: recurring imports this module).
+	recurringFor func(ctx context.Context, userID uuid.UUID, key string) ([]shared.PersonRecurring, error)
+}
+
+// WithRecurring wires the person page's list of "หนี้" recurring settings.
+func (s *Service) WithRecurring(fn func(ctx context.Context, userID uuid.UUID, key string) ([]shared.PersonRecurring, error)) {
+	s.recurringFor = fn
 }
 
 func NewService(store *Store, txs *transactions.Service) *Service {
@@ -109,8 +117,18 @@ func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey, cycle st
 	if err != nil {
 		return nil, err
 	}
-	return &PersonPage{DebtPerson: bal, Counts: counts, Items: items, Days: statementDays(items), SummaryMessage: msg,
-		Pagination: shared.NewPage(page, perPage, total)}, nil
+	prefs, err := shared.UserPrefs(ctx, s.store.db, userID) // cached: the summary message read it
+	if err != nil {
+		return nil, err
+	}
+	out := &PersonPage{DebtPerson: bal, Counts: counts, Items: items, Days: statementDays(items), SummaryMessage: msg,
+		Pagination: shared.NewPage(page, perPage, total), AutoSyncDebts: prefs.AutoSyncDebts, AutoAcceptDebts: prefs.AutoAcceptDebts, Recurring: []shared.PersonRecurring{}}
+	if s.recurringFor != nil {
+		if out.Recurring, err = s.recurringFor(ctx, userID, bal.Key); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) Entries(ctx context.Context, userID uuid.UUID, rawKey string, f EntryFilter) (*EntryList, error) {
@@ -251,6 +269,9 @@ func wantsTx(create *bool, accountID *uuid.UUID) bool {
 func (s *Service) createEntryTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, rawKey string, req CreateEntryRequest) (*Entry, []uuid.UUID, error) {
 	if req.CreateTransaction == nil && req.AccountID == nil && req.LinkTransactionID == nil && len(req.TagIDs) > 0 {
 		return nil, nil, ErrTagsNeedWallet // the old contract, for clients that don't send create_transaction
+	}
+	if req.BillID != nil || req.EventID != nil {
+		return nil, nil, ErrUseClaim // 0.4.1-2 V8 / V9
 	}
 	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
 	if err != nil {
@@ -466,6 +487,11 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 	if err != nil {
 		return nil, err
 	}
+	// 0.4.1-2 S9 / S11: a row of a shared bill follows the bill; only paid / due_date / private_note
+	// are mine.
+	if err := billRowGuardTx(ctx, tx, userID, id, &req); err != nil {
+		return nil, err
+	}
 	// A split-sourced entry's money belongs to its source; an event-resolve debt (source event) is
 	// my own record of the bill and stays editable.
 	if e.SourceKind != nil && *e.SourceKind != SourceEvent && req.moneyChange() {
@@ -652,11 +678,6 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, id uuid.UUID) (*Delet
 			t.removedTxs = append(t.removedTxs, *e.PaidForTransactionID)
 		}
 	}
-	if e.SourceKind != nil && *e.SourceKind == SourceTransaction {
-		if err := s.notifySplitChangeTx(ctx, tx, e, 0, notifications.SplitChangeRemoved); err != nil {
-			return nil, err
-		}
-	}
 	if _, err := tx.Exec(ctx, `DELETE FROM personal_debts WHERE id = $1`, e.ID); err != nil {
 		return nil, fmt.Errorf("delete entry: %w", err)
 	}
@@ -717,6 +738,9 @@ func repayDirection(kind string) string {
 }
 
 func (s *Service) createRepaymentTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, rawKey string, req RepaymentRequest) (*Entry, []uuid.UUID, error) {
+	if req.BillID != nil {
+		return nil, nil, ErrUseClaim // 0.4.1-2 V9: a payback is claimed through POST /projects/{id}/claim
+	}
 	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
 	if err != nil {
 		return nil, nil, err
@@ -837,18 +861,12 @@ func (s *Service) CreateForTransactionTx(
 	kind := SourceTransaction
 	for i := range inputs {
 		in := inputs[i]
-		splitter, err := insertEntryTx(ctx, tx, &Entry{
+		if _, err := insertEntryTx(ctx, tx, &Entry{
 			UserID: userID, Direction: direction, ContactID: in.ContactID, PersonName: in.PersonName,
 			SourceTransactionID: &parentTxID, Amount: in.OwedAmount,
 			Date: date, SourceKind: &kind, Description: parentDescription,
-		})
-		if err != nil {
+		}); err != nil {
 			return err
-		}
-		if partner := linkedPartnerTx(ctx, tx, splitter); partner != nil {
-			if err := s.splitToPartnerTx(ctx, tx, splitter, *partner, parentTxID); err != nil {
-				return err
-			}
 		}
 	}
 	return nil

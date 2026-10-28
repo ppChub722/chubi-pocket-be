@@ -308,6 +308,45 @@ func TestBudgetFutureEventBillIsExpected(t *testing.T) {
 	}
 }
 
+// V4 / X5: my copy of a bill unlinked from it counts as a plain tx; the bill's share doesn't count
+// again.
+func TestBudgetUnlinkedBillCountsOnce(t *testing.T) {
+	f := newBudFix(t)
+	var d Detail
+	f.call("POST", "/budgets", "createBudget", map[string]any{
+		"name": "Trip", "amount": 1000, "warn_pct": nil, "start_date": f.day(-4), "end": map[string]any{"kind": "date", "date": f.day(6)},
+		"scope": map[string]any{"tags": []string{"Trip"}},
+	}, http.StatusCreated, &d)
+	id := d.Budget.ID.String()
+
+	ev, meM, beeM := uuid.New(), uuid.New(), uuid.New()
+	f.exec(`INSERT INTO projects (id, owner_user_id, name, status) VALUES ($1, $2, 'CNX', 'active')`, ev, f.me)
+	f.exec(`INSERT INTO project_members (id, project_id, user_id, display_name, role, status) VALUES
+		($1, $2, $3, 'Me', 'owner', 'active'), ($4, $2, NULL, 'Bee', 'contributor', 'active')`, meM, ev, f.me, beeM)
+	tag := uuid.New()
+	f.exec(`INSERT INTO event_tags (id, project_id, name) VALUES ($1, $2, 'trip')`, tag, ev)
+	b, c := uuid.New(), uuid.New()
+	f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date) VALUES
+		($1, $2, $3, $4, 'expense', 300, 'THB', $5)`, b, ev, beeM, f.me, f.day(-1))
+	f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date, parent_project_transaction_id) VALUES
+		($1, $2, $3, $4, 'expense', 100, 'THB', $5, $6)`, c, ev, meM, f.me, f.day(-1), b)
+	f.exec(`INSERT INTO project_transaction_tags (project_transaction_id, event_tag_id) VALUES ($1, $2)`, b, tag)
+	copyTx := f.tx(100, &f.food, f.day(-1), "trip")
+	f.exec(`UPDATE transactions SET project_id = $2, source_project_transaction_id = $3 WHERE id = $1`, copyTx, ev, c)
+
+	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
+	if p := d.Budget.Period; p.Used != 100 {
+		t.Fatalf("linked: used %v, want 100; sources %+v", p.Used, d.BySource)
+	}
+	// "ลงบัญชีของฉัน" off / a tx-detail disconnect: the tx remembers the bill it left.
+	f.exec(`UPDATE transactions SET project_id = NULL, source_project_transaction_id = NULL,
+		unlinked_project_transaction_id = $2 WHERE id = $1`, copyTx, c)
+	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
+	if p := d.Budget.Period; p.Used != 100 || src(d, SourceEvent) != nil {
+		t.Fatalf("unlinked: used %v, want 100 (the tx only); sources %+v", p.Used, d.BySource)
+	}
+}
+
 func TestBudgetTagRangeWithEvent(t *testing.T) {
 	f := newBudFix(t)
 	var d Detail

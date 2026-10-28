@@ -49,6 +49,11 @@ type EntryInput struct {
 	// transaction). EventID without BillID — an event's จัดการ line.
 	BillID  *uuid.UUID
 	EventID *uuid.UUID
+	// MemberID (0.4.1-2 V5) — with BillID on a debt: the other person of that bill; the debt gets
+	// its bill part (personal_debt_bills), with BillTransactionID = my tx of that bill (my "จ่ายโดย X"
+	// copy, or my origin when I paid).
+	MemberID          *uuid.UUID
+	BillTransactionID *uuid.UUID
 }
 
 // CreateEntryTx writes the row (and its transaction) inside the caller's DB transaction and answers
@@ -103,6 +108,12 @@ func (s *Service) insertRowTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, 
 	e, err := insertEntryTx(ctx, tx, entry)
 	if err != nil {
 		return nil, nil, err
+	}
+	if in.BillID != nil && in.MemberID != nil && e.Kind == KindDebt { // V5: a lump of one
+		if err := s.LinkBillPartTx(ctx, tx, userID, e.ID, BillPartInput{PtID: *in.BillID, MemberID: *in.MemberID,
+			TransactionID: in.BillTransactionID, Amount: e.Amount}); err != nil {
+			return nil, nil, err
+		}
 	}
 	var wallets []uuid.UUID
 	switch {

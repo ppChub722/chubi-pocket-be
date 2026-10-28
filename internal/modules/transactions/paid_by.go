@@ -25,17 +25,12 @@ var (
 	ErrPaidByExceedsAmount  = errors.New("paid_by.amount is more than the bill")
 	ErrPaidByPersonRequired = errors.New("paid_by needs a contact_id or a person_name")
 	ErrLinkModeConflict     = errors.New("a bill is shared one way at a time: splits, paid_by or an event")
-	// ErrPaidByLocked — a partner's split mirrored into my book: its money follows their bill
-	// ("อัปเดตตาม"); only the category, text and tags are mine to change.
-	ErrPaidByLocked = errors.New("this expense mirrors another user's split: its amount, date and wallet follow their bill")
 )
 
 const paidByEps = 0.005
 
-const (
-	PaidBySourceMe      = "me"
-	PaidBySourcePartner = "partner"
-)
+// PaidBySourceMe — the only paid_by source since 0.4.1-2 S16 (the partner mirror is gone).
+const PaidBySourceMe = "me"
 
 // paidByDebt — the debt a paid-by row carries.
 type paidByDebt struct {
@@ -45,8 +40,6 @@ type paidByDebt struct {
 	Name       string
 	Amount     float64
 }
-
-func (d *paidByDebt) partner() bool { return d.SourceKind != nil && *d.SourceKind == "partner" }
 
 func loadPaidByDebtTx(ctx context.Context, q pgx.Tx, txID uuid.UUID) (*paidByDebt, error) {
 	var d paidByDebt
@@ -104,9 +97,6 @@ func (s *Service) planPaidBy(ctx context.Context, tx pgx.Tx, current *Transactio
 	if p.existing, err = loadPaidByDebtTx(ctx, tx, current.ID); err != nil {
 		return nil, err
 	}
-	if p.existing != nil && p.existing.partner() && req.moneyChange() {
-		return nil, ErrPaidByLocked
-	}
 	p.sent = sent
 	if sent {
 		if in == nil {
@@ -128,7 +118,7 @@ func (s *Service) planPaidBy(ctx context.Context, tx pgx.Tx, current *Transactio
 			a := in.Amount
 			p.amount, p.input = &a, in
 		}
-	} else if p.existing != nil && !p.existing.partner() {
+	} else if p.existing != nil {
 		p.input = &PaidByInput{ContactID: p.existing.ContactID, PersonName: p.existing.Name, Amount: *current.PaidByAmount}
 	}
 	if p.amount == nil {
@@ -154,9 +144,6 @@ func (s *Service) planPaidBy(ctx context.Context, tx pgx.Tx, current *Transactio
 func (s *Service) syncPaidByTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, row *Transaction, p *paidByPlan) (string, error) {
 	if p == nil || (p.existing == nil && p.input == nil) {
 		return "", nil
-	}
-	if p.existing != nil && p.existing.partner() {
-		return shared.DebtKey(p.existing.ContactID, p.existing.Name), nil
 	}
 	if s.debtLinks == nil {
 		return "", ErrSplitsNotSupportedYet

@@ -39,19 +39,33 @@ type Notification struct {
 }
 
 type Settings struct {
-	UserID                   uuid.UUID  `json:"user_id"`
-	MutedTypes               []string   `json:"muted_types"`
-	AutoTypes                []string   `json:"auto_types"`
-	DefaultAccountID         *uuid.UUID `json:"default_account_id"`
-	AutoResolveOwnInProjects bool       `json:"-"` // read by projects; set via /users/me
-	CreatedAt                time.Time  `json:"created_at"`
-	UpdatedAt                time.Time  `json:"updated_at"`
+	UserID           uuid.UUID  `json:"user_id"`
+	MutedTypes       []string   `json:"muted_types"`
+	DefaultAccountID *uuid.UUID `json:"default_account_id"`
+	// AutoSyncEvents / AutoSyncDebts (0.4.1-2 S4) — the two auto-sync switches: another member's
+	// save reaches my book at once (on) or as a notice that asks (off). Independent of mute.
+	AutoSyncEvents bool `json:"auto_sync_events"`
+	AutoSyncDebts  bool `json:"auto_sync_debts"`
+	// AutoAcceptEvents / AutoAcceptDebts (0.4.1-2, owner 2026-10-28) — a NEW shared bill lands in
+	// my book at once (on) or as a notice with "เพิ่มในสมุด" (off). Events default on, debts off.
+	AutoAcceptEvents bool      `json:"auto_accept_events"`
+	AutoAcceptDebts  bool      `json:"auto_accept_debts"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 func (s *Settings) Deliver(notifType string) bool { return !contains(s.MutedTypes, notifType) }
 
+// Auto — the type's auto-sync switch (syncSwitch); a muted type still auto-applies (silently).
+// Types whose switch depends on the bill kind (shared bills) read AutoSyncEvents / AutoSyncDebts.
 func (s *Settings) Auto(notifType string) bool {
-	return s.Deliver(notifType) && contains(s.AutoTypes, notifType)
+	switch syncSwitch[notifType] {
+	case syncEvents:
+		return s.AutoSyncEvents
+	case syncDebts:
+		return s.AutoSyncDebts
+	}
+	return false
 }
 
 func contains(list []string, v string) bool {
@@ -65,7 +79,10 @@ func contains(list []string, v string) bool {
 
 type UpdateSettingsRequest struct {
 	MutedTypes          *[]string  `json:"muted_types"`
-	AutoTypes           *[]string  `json:"auto_types"`
+	AutoSyncEvents      *bool      `json:"auto_sync_events"`
+	AutoSyncDebts       *bool      `json:"auto_sync_debts"`
+	AutoAcceptEvents    *bool      `json:"auto_accept_events"`
+	AutoAcceptDebts     *bool      `json:"auto_accept_debts"`
 	DefaultAccountID    *uuid.UUID `json:"default_account_id"`
 	ClearDefaultAccount bool       `json:"-"`
 }
@@ -96,55 +113,8 @@ type ListResponse struct {
 	Pagination  Pagination     `json:"pagination"`
 }
 
-type SplitCreatedPayload struct {
-	SplitID             uuid.UUID  `json:"split_id"`
-	ParentKind          string     `json:"parent_kind"` // "transaction" | "project_transaction"
-	ParentID            uuid.UUID  `json:"parent_id"`
-	ProjectID           *uuid.UUID `json:"project_id"`
-	SplitterDisplayName string     `json:"splitter_display_name"`
-	Amount              float64    `json:"amount"`
-	Currency            string     `json:"currency"`
-	Description         *string    `json:"description"`
-	Note                *string    `json:"note"`
-	RecipientDebtID     *uuid.UUID `json:"recipient_debt_id"`
-	// RecipientDirection (0.4.0-3) — the recipient's side of the debt: received = they owe the
-	// splitter (a split on the splitter's bill), paid = the splitter owes them (the splitter recorded
-	// that the recipient paid for them). Empty on notices from before 0.4.0-3 (= received).
-	RecipientDirection string `json:"recipient_direction,omitempty"`
-	Superseded         bool   `json:"superseded,omitempty"`
-}
-
-type SplitChangedPayload struct {
-	SplitID             uuid.UUID `json:"split_id"`
-	ParentKind          string    `json:"parent_kind"` // "transaction"
-	ParentID            uuid.UUID `json:"parent_id"`
-	Change              string    `json:"change"`
-	SplitterDisplayName string    `json:"splitter_display_name"`
-	OldAmount           float64   `json:"old_amount"`
-	NewAmount           float64   `json:"new_amount"`
-	Currency            string    `json:"currency"`
-	Description         *string   `json:"description"`
-	RecipientDebtID     uuid.UUID `json:"recipient_debt_id"`
-	Superseded          bool      `json:"superseded,omitempty"`
-}
-
-const (
-	SplitChangeAmount  = "amount"
-	SplitChangeRemoved = "removed"
-)
-
-type ProjectTxRecordedPayload struct {
-	ProjectTransactionID  uuid.UUID  `json:"project_transaction_id"`
-	ProjectID             uuid.UUID  `json:"project_id"`
-	RecorderUserID        uuid.UUID  `json:"recorder_user_id"`
-	RecorderDisplayName   string     `json:"recorder_display_name"`
-	Amount                float64    `json:"amount"`
-	Currency              string     `json:"currency"`
-	Type                  string     `json:"type"`
-	Description           *string    `json:"description"`
-	Note                  *string    `json:"note"`
-	PersonalTransactionID *uuid.UUID `json:"personal_transaction_id"`
-}
+// (SplitCreatedPayload / SplitChangedPayload / ProjectTxRecordedPayload went with the one-way mirror,
+// 0.4.1-2 S16; old rows were wiped by migration 094.)
 
 type ProjectTxChangedPayload struct {
 	ProjectTransactionID  uuid.UUID                 `json:"project_transaction_id"`
@@ -155,6 +125,10 @@ type ProjectTxChangedPayload struct {
 	Diff                  map[string][2]interface{} `json:"diff,omitempty"`
 	PersonalTransactionID *uuid.UUID                `json:"personal_transaction_id"`
 	Suggested             *PersonalUpdate           `json:"suggested,omitempty"`
+	// ProjectKind / Applied (0.4.1-2): event | split; true = my auto-sync switch applied the edit to
+	// my copy, false = "อัปเดตตาม" (POST /event-bills/{id}/apply).
+	ProjectKind string `json:"project_kind,omitempty"`
+	Applied     bool   `json:"applied"`
 }
 
 type ProjectInvitePayload struct {

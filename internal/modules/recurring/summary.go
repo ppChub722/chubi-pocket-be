@@ -123,7 +123,7 @@ func (s *Service) summary(ctx context.Context, userID uuid.UUID, today time.Time
 		if !upcoming && r.Freq != "dates" {
 			continue // ended: nothing left to happen
 		}
-		switch r.Type {
+		switch r.moneyWay() {
 		case "expense":
 			out.MonthPay += r.Amount * monthlyCount(r, today)
 		case "income":
@@ -157,10 +157,13 @@ type KindsSum struct {
 	Income       KindTotals `json:"income"`
 	Reminder     KindTotals `json:"reminder"`
 	Saving       KindTotals `json:"saving"`
+	Debt         KindTotals `json:"debt"`
 }
 
 func (k *KindsSum) of(kind string) *KindTotals {
 	switch kind {
+	case KindDebt:
+		return &k.Debt
 	case KindInstallment:
 		return &k.Installment
 	case KindIncome:
@@ -193,13 +196,14 @@ func (s *Service) dueWindow(ctx context.Context, userID uuid.UUID, today time.Ti
 		if !has {
 			out.AwaitingAmountCount++
 		}
+		pay := o.draft.Type != nil && (*o.draft.Type == "expense" || (*o.draft.Type == typeDebt && o.rule.moneyWay() == "expense"))
 		if o.status == StatusDue {
 			out.DueCount++
-			if has && o.draft.Type != nil && *o.draft.Type == "expense" {
+			if has && pay {
 				dueTotal += *o.draft.Amount
 			}
 		}
-		if has && o.draft.Type != nil && *o.draft.Type == "expense" {
+		if has && pay {
 			total += *o.draft.Amount
 		}
 	}

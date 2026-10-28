@@ -260,10 +260,26 @@ func TestNotificationSettings(t *testing.T) {
 	if _, ok := out["user_id"]; ok {
 		t.Error("user_id must not be sent")
 	}
+	if out["auto_sync_events"] != true || out["auto_sync_debts"] != true {
+		t.Errorf("switches must default on: %v / %v", out["auto_sync_events"], out["auto_sync_debts"])
+	}
+	if _, ok := out["auto_types"]; ok {
+		t.Error("auto_types is gone (0.4.1-2)")
+	}
+	types := out["types"].([]any)
+	if len(types) != len(pageTypes) {
+		t.Fatalf("types = %d rows, want %d", len(types), len(pageTypes))
+	}
+	if first := types[0].(map[string]any); first["group"] != GroupSharedBill || first["on"] != true || first["mutable"] != true {
+		t.Errorf("first type row = %v", first)
+	}
+	if last := types[len(types)-1].(map[string]any); last["group"] != GroupRequest || last["mutable"] != false || last["on"] != true {
+		t.Errorf("request row = %v", last)
+	}
 
 	body := map[string]any{
 		"muted_types":        []string{TypeProjectAdded},
-		"auto_types":         []string{TypeProjectTxRecordedForYou},
+		"auto_sync_events":   false,
 		"default_account_id": acc.String(),
 	}
 	apitest.ConformRequest(t, "updateNotificationSettings", body)
@@ -274,6 +290,21 @@ func TestNotificationSettings(t *testing.T) {
 	}
 	if got := out["muted_types"].([]any); len(got) != 1 || got[0] != TypeProjectAdded {
 		t.Errorf("muted = %v", got)
+	}
+	if out["auto_sync_events"] != false || out["auto_sync_debts"] != true {
+		t.Errorf("switches = %v / %v", out["auto_sync_events"], out["auto_sync_debts"])
+	}
+	if out["auto_accept_events"] != true || out["auto_accept_debts"] != false {
+		t.Errorf("auto-accept defaults = %v / %v", out["auto_accept_events"], out["auto_accept_debts"])
+	}
+	out = f.do(t, "PUT", "/api/v1/notifications/settings", map[string]any{"auto_accept_debts": true}, "updateNotificationSettings", http.StatusOK)
+	if out["auto_accept_debts"] != true || out["auto_accept_events"] != true {
+		t.Errorf("auto-accept after set = %v / %v", out["auto_accept_events"], out["auto_accept_debts"])
+	}
+	for _, r := range out["types"].([]any) {
+		if row := r.(map[string]any); row["type"] == TypeProjectAdded && row["on"] != false {
+			t.Errorf("muted row = %v", row)
+		}
 	}
 
 	out = f.do(t, "PUT", "/api/v1/notifications/settings", map[string]any{"muted_types": []string{}}, "updateNotificationSettings", http.StatusOK)

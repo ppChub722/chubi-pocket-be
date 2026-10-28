@@ -192,10 +192,8 @@ func TestRemoveBill(t *testing.T) {
 		  AND counterparty_person_name = 'Grandma'`, f.bill1); n != 1 {
 		t.Errorf("Grandma's split should come back by name")
 	}
-	if n := f.countRows(t, `
-		SELECT COUNT(*) FROM notifications WHERE type = 'split_created' AND recipient_user_id = $1`,
-		f.friend); n != 1 {
-		t.Errorf("split_created to Bee = %d, want 1 (her split is back in my book)", n)
+	if n := f.countRows(t, `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1`, f.friend); n != 0 {
+		t.Errorf("Bee's book = %d debts, want 0 (her split is back in my book only; 0.4.1-2 S16 no mirror)", n)
 	}
 	if n := f.countRows(t, `
 		SELECT COUNT(*) FROM notifications
@@ -336,7 +334,9 @@ func TestPullBlocksPaidSplits(t *testing.T) {
 	}
 }
 
-func TestPullMovesLinkedSplitOffPartnersBook(t *testing.T) {
+// A pulled bill's split with a linked contact leaves my personal debts for the board (0.4.1-2 S16:
+// the split never had a copy in the partner's book).
+func TestPullMovesLinkedSplitToBoard(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
 
@@ -349,9 +349,8 @@ func TestPullMovesLinkedSplitOffPartnersBook(t *testing.T) {
 		t.Fatalf("create split bill: %v", err)
 	}
 	billID := created.(*transactions.TransactionDetail).ID
-	if n := f.countRows(t, `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1 AND direction = 'received'`,
-		f.friend); n != 1 {
-		t.Fatalf("Bee's copy of the split = %d, want 1 (split_created auto)", n)
+	if n := f.countRows(t, `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1`, f.friend); n != 0 {
+		t.Fatalf("Bee's book = %d debts, want 0 (no mirror)", n)
 	}
 
 	if _, err := f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{
@@ -361,12 +360,6 @@ func TestPullMovesLinkedSplitOffPartnersBook(t *testing.T) {
 	}
 	if n := f.countRows(t, `SELECT COUNT(*) FROM personal_debts WHERE source_transaction_id = $1`, billID); n != 0 {
 		t.Errorf("my split still on the bill: %d", n)
-	}
-	if n := f.countRows(t, `
-		SELECT COUNT(*) FROM notifications
-		WHERE type = 'split_changed' AND recipient_user_id = $1 AND payload->>'change' = 'removed'`,
-		f.friend); n != 1 {
-		t.Errorf("split_changed(removed) to Bee = %d, want 1", n)
 	}
 	if n := f.countRows(t, `
 		SELECT COUNT(*) FROM project_transactions WHERE parent_project_transaction_id = $1 AND amount = 30`,
@@ -469,8 +462,8 @@ func TestCopyIsMyShare(t *testing.T) {
 	me, bee := memberOf("user_id = $2", f.owner), memberOf("user_id = $2", f.friend)
 	gran := memberOf("display_name = $2", "Grandma")
 	if _, err := f.pool.Exec(ctx, `
-		INSERT INTO user_notification_settings (user_id, auto_resolve_own_in_projects) VALUES ($1, TRUE)
-		ON CONFLICT (user_id) DO UPDATE SET auto_resolve_own_in_projects = TRUE`, f.owner); err != nil {
+		INSERT INTO user_notification_settings (user_id, auto_sync_events) VALUES ($1, TRUE)
+		ON CONFLICT (user_id) DO UPDATE SET auto_sync_events = TRUE`, f.owner); err != nil {
 		t.Fatal(err)
 	}
 
@@ -501,8 +494,14 @@ func TestCopyIsMyShare(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record fully split: %v", err)
 	}
-	if n := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE source_project_transaction_id = $1`, full.Row.ID); n != 0 {
-		t.Errorf("fully split row got %d copies, want 0", n)
+	if n := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE source_project_transaction_id = $1 AND user_id = $2`,
+		full.Row.ID, f.owner); n != 0 {
+		t.Errorf("fully split row: my copies %d, want 0 (no share)", n)
+	}
+	// 0.4.1-2 S6: Bee's switch is on (default): she holds her copy of her 300.
+	if n := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE source_project_transaction_id = $1 AND user_id = $2 AND amount = 300`,
+		full.Row.ID, f.friend); n != 1 {
+		t.Errorf("Bee's copy of the fully split row: %d, want 1", n)
 	}
 }
 

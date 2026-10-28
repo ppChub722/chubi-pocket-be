@@ -144,13 +144,11 @@ func (f *sdFixture) runCreator(t *testing.T, billID uuid.UUID, parentType string
 
 func (f *sdFixture) directions(t *testing.T, userID uuid.UUID, source *uuid.UUID) []string {
 	t.Helper()
-	// $2::uuid IS NULL matches the mirror rows (partner side has no transaction in their book);
-	// otherwise filter by the source bill.
+	// $2::uuid IS NULL matches every row of the user; otherwise filter by the source bill.
 	rows, err := f.pool.Query(context.Background(), `
 		SELECT direction FROM personal_debts
 		WHERE user_id = $1
-		  AND (($2::uuid IS NULL AND source_transaction_id IS NULL)
-		    OR source_transaction_id = $2::uuid)
+		  AND ($2::uuid IS NULL OR source_transaction_id = $2::uuid)
 		ORDER BY created_at`, userID, source)
 	if err != nil {
 		t.Fatalf("query directions: %v", err)
@@ -175,28 +173,17 @@ func TestSplitDirectionsByParentType(t *testing.T) {
 
 	expense := f.newBill(t, "expense", 900)
 	f.runCreator(t, expense, "expense")
-	for _, d := range f.directions(t, f.splitter, &expense) {
-		if d != DirectionPaid {
-			t.Fatalf("expense splitter debt direction = %s, want paid", d)
-		}
-	}
-	mirrors := f.directions(t, f.partner, nil)
-	if len(mirrors) != 1 || mirrors[0] != DirectionReceived {
-		t.Fatalf("expense partner mirror = %v, want [received]", mirrors)
+	if ds := f.directions(t, f.splitter, &expense); len(ds) != 2 || ds[0] != DirectionPaid || ds[1] != DirectionPaid {
+		t.Fatalf("expense splitter debt directions = %v, want [paid paid]", ds)
 	}
 
 	income := f.newBill(t, "income", 1000)
 	f.runCreator(t, income, "income")
-	for _, d := range f.directions(t, f.splitter, &income) {
-		if d != DirectionReceived {
-			t.Fatalf("income splitter debt direction = %s, want received", d)
-		}
+	if ds := f.directions(t, f.splitter, &income); len(ds) != 2 || ds[0] != DirectionReceived || ds[1] != DirectionReceived {
+		t.Fatalf("income splitter debt directions = %v, want [received received]", ds)
 	}
-	mirrors = f.directions(t, f.partner, nil)
-	if len(mirrors) != 2 {
-		t.Fatalf("partner mirrors = %v, want 2 rows", mirrors)
-	}
-	if mirrors[1] != DirectionPaid {
-		t.Fatalf("income partner mirror = %s, want paid", mirrors[1])
+	// 0.4.1-2 S16: a split with a linked contact makes no copy in the partner's book.
+	if ds := f.directions(t, f.partner, nil); len(ds) != 0 {
+		t.Fatalf("partner's book = %v, want no rows (no mirror)", ds)
 	}
 }

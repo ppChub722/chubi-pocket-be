@@ -2,15 +2,17 @@ package users
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
 
 type Service struct {
-	store *Store
+	store            *Store
 	feeCategoryCheck func(ctx context.Context, userID, categoryID uuid.UUID) error
 }
 
@@ -66,8 +68,31 @@ func (s *Service) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdatePro
 			return nil, fmt.Errorf("%w: %q", ErrUnknownPreferenceKey, k)
 		}
 		for k, v := range req.Preferences {
+			if k == PrefPagePrefs {
+				if err := validPagePrefs(v); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			if _, isStr := v.(string); v != nil && !isStr {
 				return nil, fmt.Errorf("%w: %q must be a string or null", ErrUnknownPreferenceKey, k)
+			}
+		}
+		if v, ok := req.Preferences[PrefThemeMode]; ok && v != nil {
+			if str, _ := v.(string); !ThemeModes[str] {
+				return nil, fmt.Errorf("%w: %q is not a theme mode", ErrUnknownPreferenceKey, str)
+			}
+		}
+		if v, ok := req.Preferences[PrefLanguage]; ok && v != nil {
+			if str, _ := v.(string); !Languages[str] {
+				return nil, fmt.Errorf("%w: %q is not a language", ErrUnknownPreferenceKey, str)
+			}
+		}
+		for _, k := range []string{PrefThemeID, PrefFontTH, PrefFontEN} {
+			if v, ok := req.Preferences[k]; ok && v != nil {
+				if n := utf8.RuneCountInString(v.(string)); n < 1 || n > maxAppIDLength {
+					return nil, fmt.Errorf("%w: %q must be 1-%d characters", ErrUnknownPreferenceKey, k, maxAppIDLength)
+				}
 			}
 		}
 		if v, ok := req.Preferences[PrefMoneyStyle]; ok && v != nil {
@@ -102,6 +127,34 @@ func (s *Service) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdatePro
 		return nil, err
 	}
 	return s.store.GetProfile(ctx, id)
+}
+
+// validPagePrefs — page_prefs: null (reset every page) or an object keyed by known page ids, each
+// entry null (reset that page) or an object of at most maxPagePrefBytes as JSON. Inner keys are the
+// app's own.
+func validPagePrefs(v any) error {
+	if v == nil {
+		return nil
+	}
+	pages, ok := v.(map[string]any)
+	if !ok {
+		return fmt.Errorf("%w: page_prefs must be an object or null", ErrUnknownPreferenceKey)
+	}
+	for page, entry := range pages {
+		if !PageIDs[page] {
+			return fmt.Errorf("%w: page_prefs.%s", ErrUnknownPreferenceKey, page)
+		}
+		if entry == nil {
+			continue
+		}
+		if _, ok := entry.(map[string]any); !ok {
+			return fmt.Errorf("%w: page_prefs.%s must be an object or null", ErrUnknownPreferenceKey, page)
+		}
+		if b, err := json.Marshal(entry); err != nil || len(b) > maxPagePrefBytes {
+			return fmt.Errorf("%w: page_prefs.%s is over %d bytes", ErrUnknownPreferenceKey, page, maxPagePrefBytes)
+		}
+	}
+	return nil
 }
 
 func (s *Service) Deactivate(ctx context.Context, id uuid.UUID) error {

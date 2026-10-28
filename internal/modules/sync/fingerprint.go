@@ -25,6 +25,8 @@ const (
 	Recurring    = "recurring"
 	FormDefaults = "form_defaults"
 	Providers    = "providers"
+	// Profile (0.4.1-2 P4) — GET /users/me: every preference, the switches, the main wallet.
+	Profile = "profile"
 )
 
 // B keys: page data. Fingerprints only; the app reloads the pages with its existing endpoints.
@@ -36,7 +38,7 @@ const (
 )
 
 // DatasetNames is every A dataset in a stable order.
-var DatasetNames = []string{Accounts, Categories, Tags, Contacts, DebtPeople, Projects, Recurring, FormDefaults, Providers}
+var DatasetNames = []string{Accounts, Categories, Tags, Contacts, DebtPeople, Projects, Recurring, FormDefaults, Providers, Profile}
 
 var keyNames = append(append([]string{}, DatasetNames...), Transactions, Budgets, SavingGoals, Pending)
 
@@ -47,7 +49,18 @@ const (
 	visProj    = `(SELECT pm.project_id FROM project_members pm WHERE pm.user_id = $1)`
 	visTx      = `(SELECT vt.id FROM transactions vt WHERE vt.user_id = $1 OR vt.account_id IN ` + visAcc + `)`
 	linkedUser = `(SELECT lc.linked_user_id FROM contacts lc WHERE lc.user_id = $1 AND lc.linked_user_id IS NOT NULL)`
+	// prefKeys — only the named preference keys of the caller (P4: a page_prefs or theme write
+	// must not re-sync the sets that read one key).
+	prefKeys = `(SELECT up.user_id, %s FROM user_preferences up) x WHERE x.user_id = $1`
 )
+
+func prefs(keys ...string) source {
+	cols := make([]string, len(keys))
+	for i, k := range keys {
+		cols[i] = fmt.Sprintf(`up.preferences->'%s' AS %s`, k, k)
+	}
+	return content(fmt.Sprintf(prefKeys, strings.Join(cols, ", ")))
+}
 
 type kind int
 
@@ -115,17 +128,27 @@ var sources = map[string][]source{
 		ts(`categories x WHERE x.user_id = $1`),
 		ts(`tags x WHERE x.user_id = $1`),
 		ts(`saving_goals x WHERE x.user_id = $1`),
-		ts(`user_preferences x WHERE x.user_id = $1`),
+		prefs("timezone", "language"),               // occurrence names and today
+		ts(`contacts x WHERE x.user_id = $1`),       // a "หนี้" setting's person
+		ts(`personal_debts x WHERE x.user_id = $1`), // its balance and filled slots
 	},
 	FormDefaults: {
 		ts(`transactions x WHERE x.user_id = $1`),
 		ts(`accounts x WHERE x.id IN ` + visAcc),
 		ts(`account_members x WHERE x.user_id = $1`),
 		ts(`categories x WHERE x.user_id = $1`),
-		ts(`user_preferences x WHERE x.user_id = $1`),
+		prefs("fee_category_id"),
+		content(`(SELECT ns.user_id, ns.default_account_id FROM user_notification_settings ns) x WHERE x.user_id = $1`), // X10 main wallet
 	},
 	Providers: {
 		ts(`payment_providers x`),
+	},
+	Profile: {
+		ts(`users x WHERE x.id = $1`),
+		ts(`user_preferences x WHERE x.user_id = $1`),
+		ts(`user_notification_settings x WHERE x.user_id = $1`),
+		ts(`accounts x WHERE x.id IN ` + visAcc), // the main wallet's name / icon
+		ts(`categories x WHERE x.user_id = $1`),  // the fee category's name / icon
 	},
 	Transactions: {
 		ts(`transactions x WHERE x.id IN ` + visTx),

@@ -97,12 +97,18 @@ func (s *Service) detachBillTx(
 			return children, nil
 		}
 	}
+	// V4 / X5: the tx remembers the bill it left (unlinked_project_transaction_id), so the budget
+	// counts it as a plain tx and not the bill's share again.
 	_, err := tx.Exec(ctx, `
 		UPDATE transactions
-		SET project_id = NULL, source_project_transaction_id = NULL, updated_by_user_id = $1
+		SET project_id = NULL, unlinked_project_transaction_id = source_project_transaction_id,
+		    source_project_transaction_id = NULL, updated_by_user_id = $1
 		WHERE id = $2`, callerUserID, txID)
 	if err != nil {
 		return nil, fmt.Errorf("unlink bill %s: %w", txID, err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE personal_debt_bills SET transaction_id = NULL WHERE transaction_id = $1`, txID); err != nil {
+		return nil, fmt.Errorf("unlink bill part tx %s: %w", txID, err)
 	}
 	return nil, nil
 }

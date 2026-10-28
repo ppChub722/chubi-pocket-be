@@ -14,10 +14,26 @@ func (s *Service) effectsOf(ctx context.Context, userID uuid.UUID, items []Item,
 	balances []shared.WalletBalance) shared.Effects {
 	e := shared.NewEffects()
 	txIDs := append([]uuid.UUID(nil), extra...)
+	var (
+		debtIDs []uuid.UUID
+		keys    []string
+	)
 	for _, it := range items {
 		e.Slots = append(e.Slots, it)
-		if it.Transaction != nil {
+		switch {
+		case it.DebtEntry != nil: // K4: the entry, its transaction and its person's balance
+			debtIDs = append(debtIDs, it.DebtEntry.ID)
+			if it.Person != nil {
+				keys = append(keys, shared.DebtKey(it.Person.ContactID, it.Person.Name))
+			}
+		case it.Transaction != nil:
 			txIDs = append(txIDs, it.Transaction.ID)
+		}
+	}
+	if s.debts != nil && len(debtIDs) > 0 {
+		if de, err := s.debts.RowEffects(ctx, s.db, userID, debtIDs, nil, keys); err == nil {
+			e.Debts, e.PersonBalances = append(e.Debts, de.Debts...), append(e.PersonBalances, de.PersonBalances...)
+			e.Transactions = append(e.Transactions, de.Transactions...)
 		}
 	}
 	if s.txs != nil {

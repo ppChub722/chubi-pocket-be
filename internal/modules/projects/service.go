@@ -143,6 +143,9 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdatePr
 	if p.OwnerUserID != userID && !req.onlyMyTags() {
 		return nil, ErrNotOwner
 	}
+	if err := completedUpdate(p, &req); err != nil {
+		return nil, err
+	}
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
@@ -164,6 +167,29 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdatePr
 	return s.patch(ctx, userID, id, nil, nil, nil)
 }
 
+// completedUpdate — V2 rules for PUT /projects/{id}: `completed` only through /complete; a completed
+// event takes only my tags and archive, and restoring it from the archive returns it to completed.
+func completedUpdate(p *Project, req *UpdateProjectRequest) error {
+	if req.Status != nil && *req.Status == StatusCompleted && p.Status != StatusCompleted {
+		return ErrUseCompleteEndpoint
+	}
+	if p.CompletedAt == nil {
+		return nil
+	}
+	for k := range req.present {
+		switch {
+		case k == "tag_ids":
+		case k == "status" && req.Status != nil && (*req.Status == StatusArchived || *req.Status == StatusCompleted):
+		case k == "status" && req.Status != nil && *req.Status == StatusActive && p.Status == StatusArchived:
+			done := StatusCompleted // restore
+			req.Status = &done
+		default:
+			return ErrEventCompleted
+		}
+	}
+	return nil
+}
+
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked bool) (*EventDeleteResult, error) {
 	p, err := s.store.GetByIDForCaller(ctx, userID, id)
 	if err != nil {
@@ -177,50 +203,97 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	out := &EventDeleteResult{ID: id}
-	var touched []uuid.UUID
-	if deleteLinked {
-		if s.txs == nil {
-			return nil, errors.New("transactions module not wired")
+	// owner 2026-10-28: the bills stay — each becomes a standalone split bill (BE-1's billToSplitTx),
+	// every copy / debt still connected; then the event (members, settle bookings) goes. A completed
+	// event is unlocked first so its bills can move (the event row goes anyway).
+	if _, err := tx.Exec(ctx, `UPDATE projects SET completed_at = NULL WHERE id = $1`, id); err != nil {
+		return nil, fmt.Errorf("unlock: %w", err)
+	}
+	others, err := collectIDs(ctx, tx, `SELECT user_id FROM project_members
+		WHERE project_id = $1 AND user_id IS NOT NULL AND user_id <> $2 AND status = 'active'`, id, userID)
+	if err != nil {
+		return nil, fmt.Errorf("members: %w", err)
+	}
+	out := &EventDeleteResult{ID: id, Effects: shared.NewEffects()}
+	var splits []uuid.UUID
+	for guard := 0; ; guard++ {
+		var ptID uuid.UUID
+		err := tx.QueryRow(ctx, `SELECT id FROM project_transactions WHERE project_id = $1 AND parent_project_transaction_id IS NULL
+			ORDER BY date, created_at, id LIMIT 1`, id).Scan(&ptID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			break
 		}
-		rows, err := tx.Query(ctx, `SELECT id FROM transactions WHERE project_id = $1 AND user_id = $2`, id, userID)
 		if err != nil {
-			return nil, fmt.Errorf("linked txs: %w", err)
+			return nil, fmt.Errorf("next bill: %w", err)
 		}
-		var ids []uuid.UUID
-		for rows.Next() {
-			var tid uuid.UUID
-			if err := rows.Scan(&tid); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			ids = append(ids, tid)
+		if guard > 10000 {
+			return nil, errors.New("delete event: bills keep coming back")
 		}
-		rows.Close()
-		if _, err := tx.Exec(ctx, `UPDATE transactions SET project_id = NULL, source_project_transaction_id = NULL
-			WHERE id = ANY($1)`, ids); err != nil {
-			return nil, fmt.Errorf("unlink: %w", err)
+		split, err := s.billToSplitTx(ctx, tx, userID, ptID)
+		if err != nil {
+			return nil, err
 		}
-		for _, tid := range ids {
-			acc, err := s.txs.DeleteInTx(ctx, tx, userID, tid)
-			if err != nil {
-				return nil, err
-			}
-			touched = append(touched, acc...)
-		}
-		out.DeletedTransactionCount = len(ids)
+		splits = append(splits, split)
+		out.SplitBillCount++
 	}
 	if err := s.store.DeleteTx(ctx, tx, id); err != nil {
 		return nil, err
 	}
+	if s.notifs != nil {
+		for _, u := range others {
+			if err := s.notifs.DispatchEventDeleted(ctx, tx, u, userID, notifications.EventDeletedPayload{
+				ProjectID: id, ProjectName: p.Name, SplitBillCount: out.SplitBillCount,
+			}); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	var err2 error
-	if out.AccountBalances, err2 = shared.LoadWalletBalances(ctx, s.store.db, uniqueIDs(touched)); err2 != nil {
-		return nil, err2
+	// effects: my records, now pointing at the split bills
+	myTxs, err := collectPoolIDs(ctx, s.store.db, `SELECT t.id FROM transactions t WHERE t.user_id = $2 AND (t.project_id = ANY($1)
+		OR t.source_project_transaction_id IN (SELECT x.id FROM project_transactions x WHERE x.project_id = ANY($1)))`, splits, userID)
+	if err != nil {
+		return nil, err
+	}
+	for _, tid := range myTxs {
+		if d, err := s.txs.Get(ctx, userID, tid); err == nil {
+			out.Effects.Transactions = append(out.Effects.Transactions, *d)
+		}
+	}
+	if s.debts != nil {
+		myDebts, err := collectPoolIDs(ctx, s.store.db, `SELECT d.id FROM personal_debts d WHERE d.user_id = $2 AND (d.project_id = ANY($1)
+			OR d.id IN (SELECT b.debt_id FROM personal_debt_bills b JOIN project_transactions x ON x.id = b.pt_id
+				WHERE b.user_id = $2 AND x.project_id = ANY($1)))`, splits, userID)
+		if err != nil {
+			return nil, err
+		}
+		if len(myDebts) > 0 {
+			if out.Effects.Debts, _, err = s.debts.DebtEffects(ctx, userID, myDebts, nil); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return out, nil
+}
+
+// collectPoolIDs — ids from a read outside a DB transaction.
+func collectPoolIDs(ctx context.Context, q shared.Querier, sql string, args ...any) ([]uuid.UUID, error) {
+	rows, err := q.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("ids: %w", err)
+	}
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 func (s *Service) Leave(ctx context.Context, userID, projectID uuid.UUID) (*DeletedResult, error) {
@@ -240,8 +313,16 @@ func (s *Service) Leave(ctx context.Context, userID, projectID uuid.UUID) (*Dele
 		}
 		return nil, fmt.Errorf("find member: %w", err)
 	}
-	if _, err := s.store.SoftRemoveMember(ctx, projectID, memberID, userID); err != nil {
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, _, _, err := s.leaveTx(ctx, tx, projectID, memberID, userID, false); err != nil { // V15
 		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return &DeletedResult{ID: projectID}, nil
 }
@@ -413,8 +494,24 @@ func (s *Service) RemoveMember(ctx context.Context, callerUserID, projectID, mem
 	if target.Role == RoleOwner {
 		return nil, ErrCannotRemoveOwner
 	}
-	if _, err := s.store.SoftRemoveMember(ctx, projectID, memberID, callerUserID); err != nil {
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	m, txs, debts, err := s.leaveTx(ctx, tx, projectID, memberID, callerUserID, true) // V15
+	if err != nil {
 		return nil, err
+	}
+	if m.UserID != nil && s.notifs != nil && m.Status != MemberStatusPending {
+		if err := s.notifs.DispatchEventMemberRemoved(ctx, tx, *m.UserID, callerUserID, notifications.EventMemberRemovedPayload{
+			ProjectID: projectID, ProjectName: p.Name, TransactionCount: txs, DebtCount: debts,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
 }

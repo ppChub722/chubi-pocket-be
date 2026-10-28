@@ -27,7 +27,10 @@ type Transaction struct {
 	Date                       string     `json:"date"` // YYYY-MM-DD; calendar date in user's tz
 	Description                *string    `json:"description"`
 	Note                       *string    `json:"note"`
-	TransferGroupID            *uuid.UUID `json:"transfer_group_id"`
+	// PrivateNote (0.4.1-2 S11) — mine only, on a copy of a shared bill; never synced. Null on
+	// another member's row.
+	PrivateNote     *string    `json:"private_note"`
+	TransferGroupID *uuid.UUID `json:"transfer_group_id"`
 	SourcePersonalDebtID       *uuid.UUID `json:"-"` // the debt entry this row is the wallet side of (see Counterparty)
 	SourceProjectTransactionID *uuid.UUID `json:"source_project_transaction_id"`
 	ProjectID                  *uuid.UUID `json:"-"`
@@ -222,6 +225,10 @@ type EventBillLink struct {
 	Kind        string                  `json:"kind"`
 	InSync      *bool                   `json:"in_sync"`
 	Differences []shared.BillDifference `json:"differences"`
+	// EditInBill (0.4.1-2 SA1) — "edit" opens the bill form: a connected copy, the event not
+	// completed. PendingUpdate (S8) — an unanswered notice about the bill waits.
+	EditInBill    bool `json:"edit_in_bill"`
+	PendingUpdate bool `json:"pending_update"`
 }
 
 type TransferResponse struct {
@@ -298,7 +305,10 @@ type UpdateRequest struct {
 	// origin's tags) go to its event bill. also_update_link does the same (and reaches a recurring
 	// item).
 	ApplyToEvent bool `json:"apply_to_event"`
+	// PrivateNote (0.4.1-2 S11) — only on a copy of a shared bill; null / "" clears.
+	PrivateNote *string `json:"private_note"`
 
+	privateNotePresent         bool
 	paidByPresent              bool
 	categoryIDPresent          bool
 	descriptionPresent         bool
@@ -324,7 +334,13 @@ func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
 	_, r.transferToAccountIDPresent = probe["transfer_to_account_id"]
 	_, r.tagIDsPresent = probe["tag_ids"]
 	_, r.paidByPresent = probe["paid_by"]
+	_, r.privateNotePresent = probe["private_note"]
 	return nil
+}
+
+// PrivateNoteChange — the private note sent (nil = clear) and whether it was sent at all.
+func (r *UpdateRequest) PrivateNoteChange() (*string, bool) {
+	return r.PrivateNote, r.privateNotePresent || r.PrivateNote != nil
 }
 
 // PaidByChange — the paid_by sent (nil = remove it) and whether it was sent at all.

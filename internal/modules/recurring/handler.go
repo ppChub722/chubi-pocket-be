@@ -105,6 +105,8 @@ func mapError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusConflict, "ITEM_ALREADY_LINKED", err.Error(), gin.H{"transaction": link.Linked, "other": link.Other})
 	case errors.Is(err, ErrAmountRequired):
 		response.BadRequest(c, "AMOUNT_REQUIRED", err.Error(), nil)
+	case errors.Is(err, ErrNothingOwed):
+		response.Fail(c, http.StatusConflict, "NOTHING_OWED", err.Error(), nil)
 	case errors.Is(err, ErrAlreadyRecorded):
 		response.Fail(c, http.StatusConflict, "ALREADY_RECORDED", err.Error(), nil)
 	case errors.Is(err, ErrNotFound):
@@ -127,6 +129,10 @@ func mapError(c *gin.Context, err error) {
 		response.BadRequest(c, "INVALID_CATEGORY", err.Error(), nil)
 	case errors.Is(err, ErrTagNotFound):
 		response.BadRequest(c, "TAG_NOT_FOUND", err.Error(), nil)
+	case errors.Is(err, ErrContactNotFound):
+		response.BadRequest(c, "CONTACT_NOT_FOUND", err.Error(), nil)
+	case errors.Is(err, ErrContactArchived):
+		response.BadRequest(c, "CONTACT_ARCHIVED", err.Error(), nil)
 	case errors.Is(err, ErrInvalidTransition):
 		response.Fail(c, http.StatusConflict, "INVALID_TRANSITION", err.Error(), nil)
 	case errors.Is(err, ErrSavingNeedsWallet):

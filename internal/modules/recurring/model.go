@@ -29,7 +29,7 @@ const (
 
 // statusSQL is the status of a STORED item row (alias i); a computed
 // occurrence has no row and gets its status in Go.
-var statusSQL = `(CASE WHEN i.transaction_id IS NOT NULL OR i.saving_entry_id IS NOT NULL THEN 'done'
+var statusSQL = `(CASE WHEN i.transaction_id IS NOT NULL OR i.saving_entry_id IS NOT NULL OR i.debt_entry_id IS NOT NULL THEN 'done'
 	WHEN i.archived THEN 'skipped'
 	WHEN i.cleared_at IS NOT NULL THEN 'paid'
 	WHEN i.pending_id IS NOT NULL THEN 'pending'
@@ -68,8 +68,16 @@ type Rule struct {
 	// PausedFrom — the day it was paused (or archived while active); resuming skips the
 	// occurrences of the gap.
 	PausedFrom *time.Time
-	// PauseReason — why it is paused (0.4.1-1 R7): manual | overdue_limit | goal_inactive; nil unless paused.
+	// PauseReason — why it is paused (0.4.1-1 R7): manual | overdue_limit | goal_inactive | no_balance; nil unless paused.
 	PauseReason *string
+	// Kind debt (0.4.1-2 K): the person (ContactID, else the typed PersonName; the name is always
+	// kept), DebtKind debt | repayment, DebtDirection paid | received; ZeroRounds = repayment rounds
+	// in a row with nothing owed.
+	ContactID     *uuid.UUID
+	PersonName    *string
+	DebtKind      *string
+	DebtDirection *string
+	ZeroRounds    int
 }
 
 type (
@@ -186,8 +194,15 @@ type Recurring struct {
 	AutoCreate bool `json:"auto_create"`
 	// RecordedTxCount — recorded occurrences that have a transaction.
 	RecordedTxCount int `json:"recorded_tx_count"`
-	// PauseReason — manual | overdue_limit | goal_inactive; null unless paused (0.4.1-1 R7).
+	// PauseReason — manual | overdue_limit | goal_inactive | no_balance; null unless paused (0.4.1-1 R7).
 	PauseReason *string `json:"pause_reason"`
+	// Kind debt (0.4.1-2 K): the person, debt | repayment, paid | received, the person's net now
+	// (> 0 = they owe me) and the repayment rounds in a row with nothing owed. null / 0 otherwise.
+	Person        *shared.PersonRef `json:"person"`
+	DebtKind      *string           `json:"debt_kind"`
+	Direction     *string           `json:"direction"`
+	PersonBalance *float64          `json:"person_balance"`
+	ZeroRounds    int               `json:"zero_rounds"`
 }
 
 type ListCounts struct {
@@ -243,8 +258,23 @@ type Item struct {
 	PendingID     *uuid.UUID              `json:"pending_id"`
 	Transaction   *LinkedTx               `json:"transaction"`
 	SavingEntryID *uuid.UUID              `json:"saving_entry_id"`
-	CreatedAt     *time.Time              `json:"created_at"` // null while computed
-	UpdatedAt     *time.Time              `json:"updated_at"`
+	// Person / DebtEntry — kind debt (0.4.1-2 K): the setting's person; the entry that fills it.
+	Person    *shared.PersonRef `json:"person"`
+	DebtEntry *DebtEntryRef     `json:"debt_entry"`
+	DebtKind  *string           `json:"debt_kind"`  // kind debt: the setting's debt | repayment
+	Direction *string           `json:"direction"`  // kind debt: paid (money out) | received (in)
+	CreatedAt *time.Time        `json:"created_at"` // null while computed
+	UpdatedAt *time.Time        `json:"updated_at"`
+}
+
+// DebtEntryRef — the person-book entry that fills a debt occurrence.
+type DebtEntryRef struct {
+	ID            uuid.UUID  `json:"id"`
+	Kind          string     `json:"kind"`
+	Direction     string     `json:"direction"`
+	Amount        float64    `json:"amount"`
+	Date          string     `json:"date"`
+	TransactionID *uuid.UUID `json:"transaction_id"`
 }
 
 type ItemList struct {
@@ -312,6 +342,12 @@ type Fields struct {
 	Note        *string     `json:"note"`
 	TagIDs      []uuid.UUID `json:"tag_ids"`
 	Date        *string     `json:"date"`
+	// Kind debt (0.4.1-2 K), settings only: the person (a contact of mine, else a typed name), what
+	// each occurrence books and its direction.
+	ContactID  *uuid.UUID `json:"contact_id"`
+	PersonName *string    `json:"person_name"`
+	DebtKind   *string    `json:"debt_kind"`
+	Direction  *string    `json:"direction"`
 
 	present map[string]bool
 }

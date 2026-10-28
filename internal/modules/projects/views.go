@@ -34,7 +34,7 @@ func loadEvents(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids [
 		)
 		SELECT p.id, p.owner_user_id, p.name, p.description, p.note,
 		       to_char(p.start_date, 'YYYY-MM-DD'), to_char(p.end_date, 'YYYY-MM-DD'),
-		       p.status, p.icon_code, p.planned_amount, p.created_at, p.updated_at,
+		       p.status, p.icon_code, p.planned_amount, p.created_at, p.updated_at, p.completed_at, p.kind,
 		       (SELECT COUNT(*) FROM project_members m WHERE m.project_id = p.id AND m.status = 'active'),
 		       COALESCE((SELECT SUM(amount) FROM project_transactions x
 		                 WHERE x.project_id = p.id AND x.parent_project_transaction_id IS NULL AND x.type = 'expense'), 0),
@@ -42,14 +42,12 @@ func loadEvents(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids [
 		                 WHERE x.project_id = p.id AND x.parent_project_transaction_id IS NULL AND x.type = 'income'), 0),
 		       me.id, me.role, me.status,
 		       (SELECT COUNT(*) FROM transactions lt WHERE lt.project_id = p.id AND lt.user_id = $2),
-		       COALESCE((SELECT SUM(c.amount) FROM project_transactions c
-		                 JOIN project_transactions x ON x.id = c.parent_project_transaction_id
-		                 WHERE x.project_id = p.id AND x.type IN ('expense', 'payback') AND x.transaction_member_id = me.id
-		                   AND c.transaction_member_id <> me.id), 0)
-		       - COALESCE((SELECT SUM(c.amount) FROM project_transactions c
-		                   JOIN project_transactions x ON x.id = c.parent_project_transaction_id
-		                   WHERE x.project_id = p.id AND x.type IN ('expense', 'payback') AND c.transaction_member_id = me.id
-		                     AND x.transaction_member_id <> me.id), 0)
+		       -- my real pairs (project_bill_pairs: income flipped, multi-payer proportional)
+		       COALESCE((SELECT SUM(CASE WHEN v.creditor = me.id THEN v.amount ELSE -v.amount END)
+		                 FROM project_bill_pairs v WHERE v.project_id = p.id AND me.id IN (v.debtor, v.creditor)), 0),
+		       (SELECT COUNT(DISTINCT COALESCE(x.parent_project_transaction_id, x.id)) FROM project_transactions x
+		         JOIN project_members rm ON rm.id = x.transaction_member_id
+		         WHERE x.project_id = p.id AND rm.removed_at IS NOT NULL)
 		FROM projects p
 		LEFT JOIN me ON me.project_id = p.id
 		WHERE p.id = ANY($1)`, ids, callerID)
@@ -65,8 +63,9 @@ func loadEvents(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids [
 			status *string
 		)
 		if err := rows.Scan(&e.ID, &e.OwnerUserID, &e.Name, &e.Description, &e.Note,
-			&e.StartDate, &e.EndDate, &e.Status, &icon, &e.PlannedAmount, &e.CreatedAt, &e.UpdatedAt,
-			&e.MembersCount, &e.TotalExpense, &e.TotalIncome, &mid, &role, &status, &e.LinkedTxCount, &e.MyNet); err != nil {
+			&e.StartDate, &e.EndDate, &e.Status, &icon, &e.PlannedAmount, &e.CreatedAt, &e.UpdatedAt, &e.CompletedAt, &e.Kind,
+			&e.MembersCount, &e.TotalExpense, &e.TotalIncome, &mid, &role, &status, &e.LinkedTxCount, &e.MyNet,
+			&e.EmptyPersonBillCount); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("events scan: %w", err)
 		}
@@ -81,8 +80,9 @@ func loadEvents(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids [
 			e.MyMemberID, e.MyRole, e.myStatus = mid, role, *status
 		}
 		e.CanAddBill = e.Status == StatusActive && me.canWrite()
-		e.CanEdit = e.IsOwner
-		e.CanManageMembers = e.IsOwner && e.Status != StatusArchived
+		e.CanEdit = e.IsOwner && e.CompletedAt == nil
+		e.CanManageMembers = e.IsOwner && e.Status != StatusArchived && e.CompletedAt == nil
+		e.CanComplete = e.IsOwner && e.Status == StatusActive
 		out[e.ID] = e
 	}
 	rows.Close()
@@ -136,7 +136,7 @@ func loadEvent(ctx context.Context, q shared.Querier, callerID, id uuid.UUID) (E
 func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid.UUID) ([]EventMember, error) {
 	rows, err := q.Query(ctx, `SELECT pm.id, pm.user_id, COALESCE(u.display_name, pm.display_name),
 			COALESCE(u.icon_code, pm.icon_code), pm.role, pm.status, pm.invited_at, pm.joined_at, pm.left_at,
-			mc.id
+			mc.id, pm.removed_at
 		FROM project_members pm LEFT JOIN users u ON u.id = pm.user_id
 		LEFT JOIN LATERAL (
 			SELECT c.id FROM contacts c
@@ -156,7 +156,7 @@ func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid
 			icon []byte
 		)
 		if err := rows.Scan(&m.ID, &m.UserID, &m.Name, &icon, &m.Role, &m.Status, &m.InvitedAt, &m.JoinedAt, &m.LeftAt,
-			&m.ContactID); err != nil {
+			&m.ContactID, &m.RemovedAt); err != nil {
 			return nil, err
 		}
 		m.IconCode = shared.IconFromJSON(icon)
@@ -169,7 +169,8 @@ func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid
 	}
 	refs := make([]shared.MemberRef, len(out))
 	for i, m := range out {
-		refs[i] = shared.MemberRef{ID: m.ID, UserID: m.UserID, Name: m.Name, Icon: m.IconCode, IsMe: m.IsMe}
+		refs[i] = shared.MemberRef{ID: m.ID, UserID: m.UserID, Name: m.Name, Icon: m.IconCode, IsMe: m.IsMe,
+			Removed: m.RemovedAt != nil}
 	}
 	shared.RememberMemberRefs(ctx, callerID, refs)
 	return out, nil
@@ -229,7 +230,9 @@ func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid
 			SELECT c.transaction_member_id AS m, c.amount, c.parent_project_transaction_id AS pid
 			FROM project_transactions c JOIN parents p ON p.id = c.parent_project_transaction_id
 		),
-		paid AS (SELECT m, SUM(amount) AS v FROM parents GROUP BY m),
+		-- multi-payer (105): what each payer paid; else the bill's member paid it all
+		paid AS (SELECT COALESCE(x.member_id, p.m) AS m, SUM(COALESCE(x.amount, p.amount)) AS v
+			FROM parents p LEFT JOIN project_transaction_payers x ON x.project_transaction_id = p.id GROUP BY 1),
 		share AS (
 			SELECT m, SUM(amount) AS v FROM (
 				SELECT m, amount FROM kids
@@ -247,28 +250,41 @@ func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid
 			SELECT c.transaction_member_id AS m, SUM(c.amount) AS v
 			FROM project_transactions c JOIN backs b ON b.id = c.parent_project_transaction_id
 			GROUP BY c.transaction_member_id
-		)
-		SELECT pm.id, COALESCE(paid.v, 0), COALESCE(share.v, 0), COALESCE(sent.v, 0), COALESCE(received.v, 0)
+		),
+		-- V14: an income bill — the receiver owes each split; net = Σ my splits − Σ others' splits I received
+		inc AS (
+			SELECT c.transaction_member_id AS m, c.amount AS v FROM project_transactions c
+			JOIN project_transactions p ON p.id = c.parent_project_transaction_id
+			WHERE p.project_id = $1 AND p.type = 'income' AND c.transaction_member_id <> p.transaction_member_id
+			UNION ALL
+			SELECT p.transaction_member_id, -c.amount FROM project_transactions c
+			JOIN project_transactions p ON p.id = c.parent_project_transaction_id
+			WHERE p.project_id = $1 AND p.type = 'income' AND c.transaction_member_id <> p.transaction_member_id
+		),
+		incnet AS (SELECT m, SUM(v) AS v FROM inc GROUP BY m)
+		SELECT pm.id, COALESCE(paid.v, 0), COALESCE(share.v, 0), COALESCE(sent.v, 0), COALESCE(received.v, 0),
+		       COALESCE(incnet.v, 0)
 		FROM project_members pm
+		LEFT JOIN incnet ON incnet.m = pm.id
 		LEFT JOIN paid ON paid.m = pm.id
 		LEFT JOIN share ON share.m = pm.id
 		LEFT JOIN sent ON sent.m = pm.id
 		LEFT JOIN received ON received.m = pm.id
 		WHERE pm.project_id = $1 AND (pm.status = 'active' OR paid.v IS NOT NULL OR share.v IS NOT NULL
-		      OR sent.v IS NOT NULL OR received.v IS NOT NULL)
+		      OR sent.v IS NOT NULL OR received.v IS NOT NULL OR incnet.v IS NOT NULL)
 		ORDER BY COALESCE(paid.v, 0) DESC, pm.created_at`, projectID)
 	if err != nil {
 		return s, fmt.Errorf("positions: %w", err)
 	}
 	type pos struct {
-		id                          uuid.UUID
-		paid, share, sent, received float64
+		id                               uuid.UUID
+		paid, share, sent, received, inc float64
 	}
 	var ps []pos
 	var memberIDs []uuid.UUID
 	for rows.Next() {
 		var p pos
-		if err := rows.Scan(&p.id, &p.paid, &p.share, &p.sent, &p.received); err != nil {
+		if err := rows.Scan(&p.id, &p.paid, &p.share, &p.sent, &p.received, &p.inc); err != nil {
 			rows.Close()
 			return s, err
 		}
@@ -285,7 +301,7 @@ func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid
 	}
 	for _, p := range ps {
 		ep := EventPosition{Member: refs[p.id], Paid: round2(p.paid), Share: round2(p.share),
-			Sent: round2(p.sent), Received: round2(p.received), Net: round2(p.paid - p.share + p.sent - p.received)}
+			Sent: round2(p.sent), Received: round2(p.received), Net: round2(p.paid - p.share + p.sent - p.received + p.inc)}
 		if ep.Net > 0.005 {
 			ep.Receivable = ep.Net
 		} else if ep.Net < -0.005 {
@@ -490,7 +506,8 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 				'repay', EXISTS (SELECT 1 FROM personal_debts d
 					WHERE d.user_id = `+caller+` AND d.source_project_transaction_id = x.id AND d.kind = 'repayment'),
 				'debt', EXISTS (SELECT 1 FROM personal_debts d
-					WHERE d.user_id = `+caller+` AND d.source_project_transaction_id = x.id AND d.kind = 'debt'))
+					WHERE d.user_id = `+caller+` AND d.source_project_transaction_id = x.id AND d.kind = 'debt')
+					OR EXISTS (SELECT 1 FROM personal_debt_bills pb WHERE pb.user_id = `+caller+` AND pb.pt_id = x.id))
 			FROM (SELECT 1) one
 			LEFT JOIN transactions t ON t.user_id = `+caller+` AND (
 				t.id = x.linked_transaction_id OR t.source_project_transaction_id = x.id
@@ -498,7 +515,10 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 					WHERE c.parent_project_transaction_id = x.id))) END,
 		CASE WHEN x.parent_project_transaction_id IS NOT NULL THEN EXISTS (SELECT 1 FROM project_transactions pb
 			WHERE pb.paid_back_for_id = x.parent_project_transaction_id AND pb.transaction_member_id = x.transaction_member_id
-			  AND pb.parent_project_transaction_id IS NULL) END
+			  AND pb.parent_project_transaction_id IS NULL) END,
+		CASE WHEN x.parent_project_transaction_id IS NULL THEN (
+			SELECT json_agg(json_build_object('m', y.member_id, 'a', y.amount) ORDER BY y.amount DESC, y.member_id)
+			FROM project_transaction_payers y WHERE y.project_transaction_id = x.id) END
 		FROM page JOIN project_transactions x ON x.id = page.id OR x.parent_project_transaction_id = page.id
 		ORDER BY page.rn, (x.parent_project_transaction_id IS NOT NULL), x.created_at, x.id`, args...)
 	if err != nil {
@@ -509,14 +529,14 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 		children = map[uuid.UUID][]ProjectTransaction{}
 		extras   = boardExtras{
 			tags: map[uuid.UUID][]EventTagRef{}, sources: map[uuid.UUID]boardSource{}, booked: map[uuid.UUID]MyBooks{},
-			paidBack: map[uuid.UUID]map[uuid.UUID]bool{},
+			paidBack: map[uuid.UUID]map[uuid.UUID]bool{}, payers: map[uuid.UUID][]payerRow{},
 		}
 		total int
 	)
 	for rows.Next() {
-		var tagsJSON, srcJSON, bookedJSON []byte
+		var tagsJSON, srcJSON, bookedJSON, payersJSON []byte
 		var paidBack *bool
-		pt, err := scanPTAround(rows, []any{&total}, []any{&tagsJSON, &srcJSON, &bookedJSON, &paidBack})
+		pt, err := scanPTAround(rows, []any{&total}, []any{&tagsJSON, &srcJSON, &bookedJSON, &paidBack, &payersJSON})
 		if err != nil {
 			rows.Close()
 			return nil, 0, err
@@ -533,6 +553,10 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 		}
 		parents = append(parents, *pt)
 		if err := extras.add(pt.ID, tagsJSON, srcJSON, bookedJSON); err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
+		if err := extras.addPayers(*pt, payersJSON); err != nil {
 			rows.Close()
 			return nil, 0, err
 		}
@@ -562,7 +586,7 @@ const ptColumnsPrefixed = `@id, @project_id, @parent_project_transaction_id,
 	@type, @amount, @currency,
 	to_char(@date, 'YYYY-MM-DD'),
 	@note, @description,
-	@marks, @created_at, @updated_at`
+	@marks, @created_at, @updated_at, @payback_kind`
 
 // boardSource is the transaction a bill was made from; account is set only for the caller's own.
 type boardSource struct {
@@ -580,6 +604,26 @@ type boardExtras struct {
 	booked  map[uuid.UUID]MyBooks
 	// paidBack — bill → the members a "คืนแล้ว" payback row was made for (0.4.1-1)
 	paidBack map[uuid.UUID]map[uuid.UUID]bool
+	// payers — bill → its payers, biggest first (0.4.1-2 multi-payer; one = the bill's member)
+	payers map[uuid.UUID][]payerRow
+}
+
+func (x *boardExtras) addPayers(p ProjectTransaction, js []byte) error {
+	if len(js) == 0 {
+		x.payers[p.ID] = []payerRow{{member: p.TransactionMemberID, amount: p.Amount}}
+		return nil
+	}
+	var rows []struct {
+		M uuid.UUID `json:"m"`
+		A float64   `json:"a"`
+	}
+	if err := json.Unmarshal(js, &rows); err != nil {
+		return fmt.Errorf("bill payers: %w", err)
+	}
+	for _, r := range rows {
+		x.payers[p.ID] = append(x.payers[p.ID], payerRow{member: r.M, amount: r.A})
+	}
+	return nil
 }
 
 func (x *boardExtras) add(id uuid.UUID, tagsJSON, srcJSON, bookedJSON []byte) error {
@@ -646,6 +690,11 @@ func buildRows(ctx context.Context, q shared.Querier, callerID uuid.UUID, e Even
 			memberIDs = append(memberIDs, c.TransactionMemberID)
 		}
 	}
+	for _, ps := range extras.payers {
+		for _, p := range ps {
+			memberIDs = append(memberIDs, p.member)
+		}
+	}
 	members, err := LoadMemberRefs(ctx, q, callerID, memberIDs)
 	if err != nil {
 		return nil, err
@@ -661,7 +710,7 @@ func buildRows(ctx context.Context, q shared.Querier, callerID uuid.UUID, e Even
 		writable(e.Status, "edit_pt") == nil
 	for _, p := range parents {
 		r := BoardRow{
-			ID: p.ID, ProjectID: p.ProjectID, Type: p.Type, Amount: p.Amount, Date: p.Date,
+			ID: p.ID, ProjectID: p.ProjectID, Type: p.Type, PaybackKind: paybackKindOf(p), Amount: p.Amount, Date: p.Date,
 			Description: p.Description, Note: p.Note, TransactionMember: members[p.TransactionMemberID],
 			RecordUserID: p.RecordUserID, Tags: tags[p.ID], Marks: p.Marks,
 			MyMark: containsID(p.Marks, me), Locked: !canWrite, MyBooks: booked[p.ID],
@@ -670,6 +719,10 @@ func buildRows(ctx context.Context, q shared.Querier, callerID uuid.UUID, e Even
 		}
 		if r.Tags == nil {
 			r.Tags = []EventTagRef{}
+		}
+		r.Payers = []BillPayer{}
+		for _, py := range extras.payers[p.ID] {
+			r.Payers = append(r.Payers, BillPayer{Member: members[py.member], Amount: py.amount})
 		}
 		if r.Marks == nil {
 			r.Marks = []uuid.UUID{}
@@ -748,6 +801,11 @@ func (s *Service) detail(ctx context.Context, callerID, projectID uuid.UUID, pag
 		return nil, err
 	}
 	out.Board = BoardRowList{Data: rows, Pagination: shared.NewPage(page, perPage, total)}
+	prefs, err := shared.UserPrefs(ctx, q, callerID) // the auto-sync switch (S4); cached per request
+	if err != nil {
+		return nil, err
+	}
+	out.AutoSyncEvents, out.AutoAcceptEvents = prefs.AutoSyncEvents, prefs.AutoAcceptEvents
 	return out, nil
 }
 

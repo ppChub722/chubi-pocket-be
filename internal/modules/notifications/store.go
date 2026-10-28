@@ -25,7 +25,7 @@ func (s *Store) Pool() *pgxpool.Pool { return s.db }
 var (
 	ErrNotificationNotFound = errors.New("notification not found")
 	ErrNotForYou            = errors.New("notification is not addressed to caller")
-	ErrStateConflict = errors.New("notification already in the other terminal state")
+	ErrStateConflict        = errors.New("notification already in the other terminal state")
 )
 
 const notificationColumns = `id, recipient_user_id, type, actor_user_id, payload,
@@ -278,23 +278,27 @@ func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 	return nil
 }
 
-const settingsColumns = `user_id, muted_types, auto_types, default_account_id,
-	auto_resolve_own_in_projects, created_at, updated_at`
+const settingsColumns = `user_id, muted_types, default_account_id,
+	auto_sync_events, auto_sync_debts, auto_accept_events, auto_accept_debts, created_at, updated_at`
 
 func scanSettings(row pgx.Row) (*Settings, error) {
 	var s Settings
 	err := row.Scan(
-		&s.UserID, &s.MutedTypes, &s.AutoTypes, &s.DefaultAccountID,
-		&s.AutoResolveOwnInProjects, &s.CreatedAt, &s.UpdatedAt,
+		&s.UserID, &s.MutedTypes, &s.DefaultAccountID,
+		&s.AutoSyncEvents, &s.AutoSyncDebts, &s.AutoAcceptEvents, &s.AutoAcceptDebts, &s.CreatedAt, &s.UpdatedAt,
 	)
 	return &s, err
 }
 
+// DefaultSettings — a user without a settings row: nothing muted, both sync switches on (110),
+// auto-accept on for events and off for debts (113).
 func DefaultSettings(userID uuid.UUID) *Settings {
 	return &Settings{
-		UserID:     userID,
-		MutedTypes: []string{},
-		AutoTypes:  []string{TypeSplitCreated},
+		UserID:           userID,
+		MutedTypes:       []string{},
+		AutoSyncEvents:   true,
+		AutoSyncDebts:    true,
+		AutoAcceptEvents: true,
 	}
 }
 
@@ -330,6 +334,10 @@ func (s *Store) SeedSettingsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID)
 }
 
 func (s *Store) UpdateSettings(ctx context.Context, userID uuid.UUID, req UpdateSettingsRequest) (*Settings, error) {
+	if _, err := s.db.Exec(ctx, `INSERT INTO user_notification_settings (user_id, created_by_user_id, updated_by_user_id)
+		VALUES ($1, $1, $1) ON CONFLICT (user_id) DO NOTHING`, userID); err != nil {
+		return nil, fmt.Errorf("settings row: %w", err)
+	}
 	q := `UPDATE user_notification_settings SET updated_by_user_id = $1`
 	args := []any{userID}
 
@@ -337,9 +345,21 @@ func (s *Store) UpdateSettings(ctx context.Context, userID uuid.UUID, req Update
 		args = append(args, *req.MutedTypes)
 		q += fmt.Sprintf(", muted_types = $%d", len(args))
 	}
-	if req.AutoTypes != nil {
-		args = append(args, *req.AutoTypes)
-		q += fmt.Sprintf(", auto_types = $%d", len(args))
+	if req.AutoSyncEvents != nil {
+		args = append(args, *req.AutoSyncEvents)
+		q += fmt.Sprintf(", auto_sync_events = $%d", len(args))
+	}
+	if req.AutoSyncDebts != nil {
+		args = append(args, *req.AutoSyncDebts)
+		q += fmt.Sprintf(", auto_sync_debts = $%d", len(args))
+	}
+	if req.AutoAcceptEvents != nil {
+		args = append(args, *req.AutoAcceptEvents)
+		q += fmt.Sprintf(", auto_accept_events = $%d", len(args))
+	}
+	if req.AutoAcceptDebts != nil {
+		args = append(args, *req.AutoAcceptDebts)
+		q += fmt.Sprintf(", auto_accept_debts = $%d", len(args))
 	}
 	if req.ClearDefaultAccount {
 		q += ", default_account_id = NULL"
@@ -438,29 +458,6 @@ func (s *Store) IsActiveWalletMember(ctx context.Context, userID, accountID uuid
 		return false, fmt.Errorf("wallet member: %w", err)
 	}
 	return ok, nil
-}
-
-func (s *Store) SupersedeSplitNoticesTx(ctx context.Context, tx pgx.Tx, recipientUserID uuid.UUID, notifType string, splitID uuid.UUID) error {
-	_, err := tx.Exec(ctx, `
-		UPDATE notifications SET payload = payload || '{"superseded": true}'::jsonb, updated_at = NOW()
-		WHERE recipient_user_id = $1 AND type = $2 AND payload->>'split_id' = $3::text
-		  AND actioned_at IS NULL`, recipientUserID, notifType, splitID.String())
-	if err != nil {
-		return fmt.Errorf("supersede %s: %w", notifType, err)
-	}
-	return nil
-}
-
-func (s *Store) RefreshSplitCreatedTx(ctx context.Context, tx pgx.Tx, recipientUserID, splitID uuid.UUID, amount float64) (bool, error) {
-	tag, err := tx.Exec(ctx, `
-		UPDATE notifications SET payload = jsonb_set(payload, '{amount}', to_jsonb($4::numeric)), updated_at = NOW()
-		WHERE recipient_user_id = $1 AND type = $2 AND payload->>'split_id' = $3::text
-		  AND actioned_at IS NULL AND dismissed_at IS NULL`,
-		recipientUserID, TypeSplitCreated, splitID.String(), amount)
-	if err != nil {
-		return false, fmt.Errorf("refresh split_created: %w", err)
-	}
-	return tag.RowsAffected() > 0, nil
 }
 
 func (s *Store) Restore(ctx context.Context, userID, id uuid.UUID) (*Notification, error) {

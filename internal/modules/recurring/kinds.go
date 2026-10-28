@@ -13,11 +13,21 @@ const (
 	KindReminder     = "reminder"
 	// KindSaving — money from a wallet into a saving goal (goal_id NULL = the unallocated pot).
 	KindSaving = "saving"
+	// KindDebt — หนี้ (0.4.1-2 K): person-book entries with a person, never a plain transaction.
+	KindDebt = "debt"
+)
+
+// typeDebt — the type of a debt setting (kind debt only).
+const typeDebt = "debt"
+
+const (
+	DebtKindDebt      = "debt"      // จดหนี้
+	DebtKindRepayment = "repayment" // จ่ายหนี้
 )
 
 func validKind(k string) bool {
 	switch k {
-	case KindSubscription, KindInstallment, KindIncome, KindReminder, KindSaving:
+	case KindSubscription, KindInstallment, KindIncome, KindReminder, KindSaving, KindDebt:
 		return true
 	}
 	return false
@@ -31,6 +41,8 @@ func deriveKind(typ, endKind string) string {
 		return KindReminder
 	case typeSaving:
 		return KindSaving
+	case typeDebt:
+		return KindDebt
 	}
 	if endKind == "count" {
 		return KindInstallment
@@ -44,6 +56,8 @@ func typeForKind(k string) string {
 		return "income"
 	case KindSaving:
 		return typeSaving
+	case KindDebt:
+		return typeDebt
 	}
 	return "expense"
 }
@@ -78,9 +92,17 @@ func (r *Rule) finishKind(kind *string) error {
 		if r.Type != typeSaving || r.Amount <= 0 {
 			return ErrValidation
 		}
+	case KindDebt:
+		if r.Type != typeDebt || r.Amount <= 0 || (r.PersonName == nil && r.ContactID == nil) || r.DebtKind == nil || r.DebtDirection == nil ||
+			r.CategoryID != nil || r.GoalID != nil || r.ToAccountID != nil || len(r.TagIDs) > 0 {
+			return ErrValidation
+		}
 	}
-	if r.Type == typeSaving && r.Kind != KindSaving {
+	if (r.Type == typeSaving) != (r.Kind == KindSaving) || (r.Type == typeDebt) != (r.Kind == KindDebt) {
 		return ErrValidation
+	}
+	if r.Kind != KindDebt {
+		r.ContactID, r.PersonName, r.DebtKind, r.DebtDirection, r.ZeroRounds = nil, nil, nil, nil, 0
 	}
 	if r.Kind != KindSubscription {
 		r.TrialUntil = nil

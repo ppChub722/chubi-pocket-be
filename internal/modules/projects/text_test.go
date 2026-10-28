@@ -79,12 +79,3 @@ func TestUpdateTextFields(t *testing.T) {
 		testdb.CheckText(t, "row "+body, got.Description, got.Note, st.WantD, st.WantN)
 	}
 }
-
-func TestSuggestedUpdateCarriesText(t *testing.T) {
-	after := &ProjectTransaction{Date: "2026-10-10", Description: testdb.Str("Dinner"), Note: nil}
-	sug := suggestedUpdate(100, 100, 50, 120, 60, after)
-	testdb.CheckText(t, "suggested", sug.Description, sug.Note, "Dinner", "")
-	if sug.Amount != 120 {
-		t.Errorf("amount = %v, want 120", sug.Amount)
-	}
-}

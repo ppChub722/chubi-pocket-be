@@ -16,7 +16,7 @@ const ptColumns = `id, project_id, parent_project_transaction_id,
 	type, amount, currency,
 	to_char(date, 'YYYY-MM-DD') AS date,
 	note, description,
-	marks, created_at, updated_at`
+	marks, created_at, updated_at, payback_kind`
 
 func scanPT(row pgx.Row) (*ProjectTransaction, error) { return scanPTAround(row, nil, nil) }
 
@@ -28,7 +28,7 @@ func scanPTAround(row pgx.Row, lead, trail []any) (*ProjectTransaction, error) {
 		&pt.TransactionMemberID, &pt.RecordUserID,
 		&pt.Type, &pt.Amount, &pt.Currency,
 		&pt.Date, &pt.Note, &pt.Description,
-		&pt.Marks, &pt.CreatedAt, &pt.UpdatedAt)
+		&pt.Marks, &pt.CreatedAt, &pt.UpdatedAt, &pt.PaybackKind)
 	if err := row.Scan(append(dest, trail...)...); err != nil {
 		return nil, err
 	}
@@ -353,7 +353,8 @@ func (s *Store) PTRecipientsForChange(
 	ctx context.Context, ptID, editorUserID uuid.UUID,
 ) ([]uuid.UUID, error) {
 	// The bill's people, and (0.4.0-3) anyone whose transaction is linked to it or to one of its
-	// split rows (a copy).
+	// split rows (a copy). 0.4.1-2 X8: only ACTIVE members of the event (a member who left or was
+	// removed hears nothing more), and nobody who disconnected their copy of this bill.
 	rows, err := s.db.Query(ctx, `
 		SELECT DISTINCT u FROM (
 			SELECT pm.user_id AS u FROM (
@@ -367,7 +368,11 @@ func (s *Store) PTRecipientsForChange(
 			WHERE t.source_project_transaction_id = $1
 			   OR t.source_project_transaction_id IN (SELECT c.id FROM project_transactions c WHERE c.parent_project_transaction_id = $1)
 		) x
-		WHERE u IS NOT NULL AND u <> $2`, ptID, editorUserID)
+		WHERE u IS NOT NULL AND u <> $2
+		  AND EXISTS (SELECT 1 FROM project_members am JOIN project_transactions b ON b.project_id = am.project_id
+		              WHERE b.id = $1 AND am.user_id = x.u AND am.status = 'active')
+		  AND NOT EXISTS (SELECT 1 FROM shared_bill_opt_outs o WHERE o.project_transaction_id = $1 AND o.user_id = x.u)`,
+		ptID, editorUserID)
 	if err != nil {
 		return nil, fmt.Errorf("recipients: %w", err)
 	}

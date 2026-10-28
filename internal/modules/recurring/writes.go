@@ -27,8 +27,19 @@ func validateFields(f *Fields) error {
 			return ErrValidation
 		}
 		switch *f.Type {
-		case "expense", "income", "transfer", typeSaving:
+		case "expense", "income", "transfer", typeSaving, typeDebt:
 		default:
+			return ErrValidation
+		}
+	}
+	if f.has("debt_kind") && (f.DebtKind == nil || (*f.DebtKind != DebtKindDebt && *f.DebtKind != DebtKindRepayment)) {
+		return ErrValidation
+	}
+	if f.has("direction") && (f.Direction == nil || (*f.Direction != "paid" && *f.Direction != "received")) {
+		return ErrValidation
+	}
+	if f.PersonName != nil {
+		if n := len([]rune(strings.TrimSpace(*f.PersonName))); n == 0 || n > 100 {
 			return ErrValidation
 		}
 	}
@@ -120,12 +131,30 @@ func applyToRule(r *Rule, f *Fields) {
 	if f.has("goal_id") {
 		r.GoalID = f.GoalID
 	}
+	if f.has("contact_id") {
+		r.ContactID = f.ContactID
+		if f.ContactID != nil && !f.has("person_name") {
+			r.PersonName = nil // the contact's name is taken in checkRuleRefsTx
+		}
+	}
+	if f.has("person_name") {
+		r.PersonName = shared.CleanText(f.PersonName)
+		if !f.has("contact_id") {
+			r.ContactID = nil // a typed name replaces the contact
+		}
+	}
+	if f.has("debt_kind") {
+		r.DebtKind = f.DebtKind
+	}
+	if f.has("direction") {
+		r.DebtDirection = f.Direction
+	}
 	switch r.Type {
 	case "transfer":
 		r.CategoryID, r.GoalID = nil, nil
 	case typeSaving:
 		r.CategoryID, r.ToAccountID, r.TagIDs = nil, nil, []uuid.UUID{}
-	default:
+	default: // a debt setting keeps a sent category / tags so finishKind rejects them
 		r.ToAccountID, r.GoalID = nil, nil
 	}
 }
@@ -345,8 +374,8 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 	if err := r.finishKind(req.Kind); err != nil {
 		return nil, err
 	}
-	if (old.Type == typeSaving) != (r.Type == typeSaving) {
-		return nil, ErrValidation // a saving setting stays one (and a money one never becomes one)
+	if (old.Type == typeSaving) != (r.Type == typeSaving) || (old.Type == typeDebt) != (r.Type == typeDebt) {
+		return nil, ErrValidation // a saving / debt setting stays one (and a money one never becomes one)
 	}
 	if rebuild {
 		r.GeneratedUntil, r.EndingNotified = nil, false
@@ -504,20 +533,25 @@ func (s *Service) Resume(ctx context.Context, userID, id uuid.UUID, tz string) (
 				return err
 			}
 		}
-		r.Status = "active"
-		r.resumeGap(today)
-		if err := r.limits(today); err != nil {
-			return err
-		}
-		r.PausedFrom, r.PauseReason, r.DueNotifiedUntil = nil, nil, &today
-		autoFrom := today
-		if cur := r.currentSlot(today); cur != nil && cur.Before(today) {
-			autoFrom = *cur
-		}
-		until := autoFrom.AddDate(0, 0, -1)
-		r.AutoCreatedUntil = &until
-		return nil
+		return r.resume(today)
 	})
+}
+
+// resume — active again from the current period (the gap since the pause is skipped, R8).
+func (r *Rule) resume(today time.Time) error {
+	r.Status = "active"
+	r.resumeGap(today)
+	if err := r.limits(today); err != nil {
+		return err
+	}
+	r.PausedFrom, r.PauseReason, r.DueNotifiedUntil, r.ZeroRounds = nil, nil, &today, 0
+	autoFrom := today
+	if cur := r.currentSlot(today); cur != nil && cur.Before(today) {
+		autoFrom = *cur
+	}
+	until := autoFrom.AddDate(0, 0, -1)
+	r.AutoCreatedUntil = &until
+	return nil
 }
 
 func ptrIDs(p *uuid.UUID) []uuid.UUID {
@@ -692,7 +726,7 @@ func (s *Service) UpdateItem(ctx context.Context, userID, id uuid.UUID, req Item
 // open (or paid) occurrence takes an edit: a filled one reads its transaction /
 // saving entry, which is edited instead (0.4.1-1 R1).
 func (s *Service) applyItemEdit(ctx context.Context, tx pgx.Tx, it *itemRow, f *Fields) error {
-	if it.TransactionID != nil || it.SavingEntryID != nil {
+	if it.filled() {
 		return ErrAlreadyRecorded
 	}
 	before := it.Draft
@@ -858,7 +892,8 @@ func collectUUIDs(ctx context.Context, tx pgx.Tx, sql string, args ...any) ([]uu
 // added by hand stays without the transaction.
 func (s *Service) release(ctx context.Context, tx pgx.Tx, it *itemRow) (*uuid.UUID, error) {
 	it.TransactionID, it.AutoCreatedAt = nil, nil
-	if it.ClearedAt == nil && !it.Edited && !it.Manual && !it.Archived && it.PendingID == nil && it.SavingEntryID == nil {
+	if it.ClearedAt == nil && !it.Edited && !it.Manual && !it.Archived && it.PendingID == nil && it.SavingEntryID == nil &&
+		it.DebtEntryID == nil {
 		_, err := tx.Exec(ctx, `DELETE FROM recurring_items WHERE id = $1`, it.ID)
 		return nil, err
 	}

@@ -31,9 +31,10 @@ type EventCounts struct {
 func fillMyNumbers(ctx context.Context, q shared.Querier, callerID uuid.UUID, events map[uuid.UUID]Event, ids []uuid.UUID) error {
 	rows, err := q.Query(ctx, `
 		SELECT p.id,
-		  COALESCE((SELECT SUM(x.amount) FROM project_transactions x
+		  COALESCE((SELECT SUM(COALESCE(y.amount, x.amount)) FROM project_transactions x
+		            LEFT JOIN project_transaction_payers y ON y.project_transaction_id = x.id -- multi-payer (105)
 		            WHERE x.project_id = p.id AND x.parent_project_transaction_id IS NULL
-		              AND x.type = 'expense' AND x.transaction_member_id = me.id), 0)::float8,
+		              AND x.type = 'expense' AND COALESCE(y.member_id, x.transaction_member_id) = me.id), 0)::float8,
 		  COALESCE((SELECT SUM(CASE WHEN x.transaction_member_id = me.id
 		              THEN x.amount - COALESCE((SELECT SUM(c.amount) FROM project_transactions c
 		                                        WHERE c.parent_project_transaction_id = x.id), 0)
@@ -83,7 +84,7 @@ func (s *Service) listSummary(ctx context.Context, userID uuid.UUID) (EventListS
 	var out EventListSummary
 	rows, err := s.store.db.Query(ctx, `SELECT p.id FROM projects p
 		JOIN project_members m ON m.project_id = p.id AND m.user_id = $1 AND m.status = 'active'
-		WHERE p.status <> 'archived'`, userID)
+		WHERE p.status <> 'archived' AND p.kind = 'event'`, userID)
 	if err != nil {
 		return out, fmt.Errorf("event summary ids: %w", err)
 	}

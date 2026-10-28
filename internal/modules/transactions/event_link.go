@@ -25,6 +25,10 @@ type EventLinks interface {
 	JoinTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, row *Transaction, projectID uuid.UUID, people shared.BillPeople) error
 	LeaveTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) error
 	PushTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, row *Transaction) error
+	// CopyDeletingTx (0.4.1-2 rule f) — my copy of a shared bill is about to be deleted: that
+	// disconnects it (the bill and the others are unchanged; my debts of it stay, plain; the bill no
+	// longer reaches me).
+	CopyDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) error
 }
 
 func (s *Service) WithEventLinks(l EventLinks) { s.eventLinks = l }

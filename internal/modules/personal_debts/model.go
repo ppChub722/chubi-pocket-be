@@ -94,6 +94,7 @@ type DebtEntry struct {
 	Date        string      `json:"date"`
 	Description *string     `json:"description"`
 	Note        *string     `json:"note"`
+	PrivateNote *string     `json:"private_note"` // 0.4.1-2 S11: mine only, on a debt of a shared bill
 	Paid        bool        `json:"paid"`
 	DueDate     *string     `json:"due_date"`
 	Source      *DebtSource `json:"source"`
@@ -106,6 +107,19 @@ type DebtEntry struct {
 	InCurrentCycle *bool       `json:"in_current_cycle"`
 	UpdatedAt      time.Time   `json:"updated_at"`
 	Origin         *DebtOrigin `json:"origin"`
+	// Bills (0.4.1-2 V5) — the shared bills this debt books (one = per-bill, several = a lump).
+	Bills []DebtBillPart `json:"bills"`
+}
+
+// DebtBillPart — one bill's part of a debt, as my book holds it, against the bill now.
+type DebtBillPart struct {
+	PtID        uuid.UUID               `json:"pt_id"`
+	Event       shared.EventRef         `json:"event"`
+	Description *string                 `json:"description"`
+	Amount      float64                 `json:"amount"`
+	InSync      bool                    `json:"in_sync"`
+	Differences []shared.BillDifference `json:"differences"`
+	EditInBill  bool                    `json:"edit_in_bill"`
 }
 
 type DebtPerson struct {
@@ -269,6 +283,12 @@ type PersonPage struct {
 	Days           []StatementDay  `json:"days"`
 	SummaryMessage *SummaryMessage `json:"summary_message"`
 	Pagination     shared.Page     `json:"pagination"`
+	// AutoSyncDebts — my debts auto-sync switch (0.4.1-2 S4), shown on the person page.
+	AutoSyncDebts bool `json:"auto_sync_debts"`
+	// AutoAcceptDebts — my debts auto-accept switch (0.4.1-2, owner 2026-10-28).
+	AutoAcceptDebts bool `json:"auto_accept_debts"`
+	// Recurring — the person's "หนี้" recurring settings (0.4.1-2 K13), newest first.
+	Recurring []shared.PersonRecurring `json:"recurring"`
 }
 
 type EntryList struct {
@@ -306,13 +326,6 @@ type DeleteResult struct {
 	Effects         shared.Effects         `json:"effects"`
 }
 
-type SplitChangeResult struct {
-	Result        string         `json:"result"` // updated | deleted
-	Entry         *DebtEntry     `json:"entry"`
-	PersonBalance DebtPerson     `json:"person_balance"`
-	Effects       shared.Effects `json:"effects"`
-}
-
 type CreateEntryRequest struct {
 	Direction         string      `json:"direction"    binding:"required,oneof=paid received"`
 	Amount            float64     `json:"amount"       binding:"omitempty,gt=0"` // required unless link_transaction_id
@@ -348,6 +361,8 @@ type UpdateEntryRequest struct {
 	PersonName        *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
 	// DueDate — null clears it (has("due_date")); absent leaves it.
 	DueDate *string `json:"due_date" binding:"omitempty,datetime=2006-01-02"`
+	// PrivateNote (0.4.1-2 S11) — only on a debt of a shared bill; null / "" clears.
+	PrivateNote *string `json:"private_note"`
 
 	present map[string]bool
 }

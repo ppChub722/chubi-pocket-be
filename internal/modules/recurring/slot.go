@@ -28,6 +28,8 @@ type MarkPaidRequest struct {
 
 type LinkSlotRequest struct {
 	TransactionID uuid.UUID `json:"transaction_id"`
+	// DebtEntryID — kind debt: link a person-book entry of the setting's person (0.4.1-2 K3).
+	DebtEntryID *uuid.UUID `json:"debt_entry_id"`
 	// Replace — swap: the occurrence's current transaction (or the other occurrence the
 	// transaction is linked to) lets go first.
 	Replace bool `json:"replace"`
@@ -113,7 +115,7 @@ func truncRunes(s *string, n int) *string {
 // and auto-create all come through here. A skipped or paid occurrence is filled
 // straight away (0.4.1-1 R4): the mark goes.
 func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, row *itemRow, date *time.Time, auto bool, lang string) ([]uuid.UUID, any, error) {
-	if row.TransactionID != nil || row.SavingEntryID != nil {
+	if row.filled() {
 		return nil, nil, ErrAlreadyRecorded
 	}
 	if row.PendingID != nil { // a legacy draft of this occurrence: the transaction replaces it
@@ -125,6 +127,9 @@ func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, ro
 	d := row.Draft
 	if d.Type == nil {
 		return nil, nil, ErrValidation
+	}
+	if *d.Type == typeDebt { // K4: a person-book entry (+ its transaction when the setting has a wallet)
+		return s.recordDebtTx(ctx, tx, r, row, date, auto, true, lang)
 	}
 	if auto { // never waits, never fails (0.4.1-1 R12): 0 is recorded as 0, a gone wallet / category is left out
 		if d.Amount == nil {
@@ -337,7 +342,7 @@ func (s *Service) SkipOcc(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 	if err != nil {
 		return nil, err
 	}
-	if row.TransactionID != nil || row.SavingEntryID != nil {
+	if row.filled() {
 		return nil, ErrAlreadyRecorded
 	}
 	if row.PendingID != nil { // a legacy draft must not outlive the skip
@@ -378,6 +383,15 @@ func (s *Service) MarkPaid(ctx context.Context, userID, ruleID uuid.UUID, slot t
 	if amount != nil && *amount <= 0 {
 		return nil, ErrValidation
 	}
+	if _, r, o, err := s.occCtx(ctx, s.db, userID, ruleID, slot, tz); err != nil {
+		return nil, err
+	} else if r.isDebt() { // Q-K2: the entry without a transaction
+		touched, err := s.markPaidDebt(ctx, userID, r, o, amount)
+		if err != nil {
+			return nil, err
+		}
+		return s.slotResult(ctx, userID, ruleID, slot, nil, touched)
+	}
 	return s.flip(ctx, userID, ruleID, slot, tz, func(row *itemRow) error {
 		return markPaid(row, amount)
 	})
@@ -385,7 +399,7 @@ func (s *Service) MarkPaid(ctx context.Context, userID, ruleID uuid.UUID, slot t
 
 // markPaid puts the paid mark and its amount on a row.
 func markPaid(row *itemRow, amount *float64) error {
-	if row.TransactionID != nil || row.SavingEntryID != nil {
+	if row.filled() {
 		return ErrAlreadyRecorded
 	}
 	if amount != nil {
@@ -518,7 +532,11 @@ func (s *Service) ConfirmReady(ctx context.Context, userID, ruleID uuid.UUID, tz
 		}
 		if err != nil {
 			sp.Rollback(ctx)
-			out.LeftOut = append(out.LeftOut, LeftOut{Slot: o.slot.Format(dateLayout), Reason: "refused"})
+			reason := "refused"
+			if errors.Is(err, ErrNothingOwed) { // a จ่ายหนี้ occurrence with nothing owed (K5)
+				reason = "needs_amount"
+			}
+			out.LeftOut = append(out.LeftOut, LeftOut{Slot: o.slot.Format(dateLayout), Reason: reason})
 			return nil
 		}
 		if err := sp.Commit(ctx); err != nil {
@@ -542,6 +560,27 @@ func (s *Service) MarkPaidReady(ctx context.Context, userID, ruleID uuid.UUID, t
 		if o.draft.Amount == nil || *o.draft.Amount <= 0 {
 			out.LeftOut = append(out.LeftOut, LeftOut{Slot: o.slot.Format(dateLayout), Reason: "needs_amount"})
 			return nil
+		}
+		if r.isDebt() { // Q-K2: each entry without a transaction, one savepoint per occurrence
+			sp, err := tx.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			row, err := s.store(ctx, sp, o)
+			if err == nil {
+				_, _, err = s.recordDebtTx(ctx, sp, r, row, nil, false, false, s.lang(ctx, userID))
+			}
+			if err != nil {
+				sp.Rollback(ctx)
+				reason := "refused"
+				if errors.Is(err, ErrNothingOwed) || errors.Is(err, ErrAmountRequired) {
+					reason = "needs_amount"
+				}
+				out.LeftOut = append(out.LeftOut, LeftOut{Slot: o.slot.Format(dateLayout), Reason: reason})
+				return nil
+			}
+			slots = append(slots, o.slot)
+			return sp.Commit(ctx)
 		}
 		row, err := s.store(ctx, tx, o)
 		if err != nil {

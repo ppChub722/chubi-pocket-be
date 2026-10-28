@@ -36,10 +36,22 @@ type DeleteResult struct {
 }
 
 type SettingsView struct {
-	MutedTypes     []string           `json:"muted_types"`
-	AutoTypes      []string           `json:"auto_types"`
-	DefaultAccount *shared.AccountRef `json:"default_account"`
-	UpdatedAt      time.Time          `json:"updated_at"`
+	MutedTypes       []string           `json:"muted_types"`
+	Types            []TypeSetting      `json:"types"`
+	AutoSyncEvents   bool               `json:"auto_sync_events"`
+	AutoSyncDebts    bool               `json:"auto_sync_debts"`
+	AutoAcceptEvents bool               `json:"auto_accept_events"`
+	AutoAcceptDebts  bool               `json:"auto_accept_debts"`
+	DefaultAccount   *shared.AccountRef `json:"default_account"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+}
+
+// TypeSetting — one row of the notification settings page (0.4.1-2 P7).
+type TypeSetting struct {
+	Type    string `json:"type"`
+	Group   string `json:"group"`
+	On      bool   `json:"on"`
+	Mutable bool   `json:"mutable"`
 }
 
 func (s *Service) Badges(ctx context.Context, userID uuid.UUID) (shared.Badges, error) {
@@ -117,15 +129,23 @@ func (s *Service) MarkDismissedResult(ctx context.Context, userID, id uuid.UUID)
 
 func (s *Service) settingsView(ctx context.Context, st *Settings) (*SettingsView, error) {
 	v := &SettingsView{
-		MutedTypes: st.MutedTypes,
-		AutoTypes:  st.AutoTypes,
-		UpdatedAt:  st.UpdatedAt,
+		MutedTypes:       st.MutedTypes,
+		Types:            make([]TypeSetting, 0, len(pageTypes)),
+		AutoSyncEvents:   st.AutoSyncEvents,
+		AutoSyncDebts:    st.AutoSyncDebts,
+		AutoAcceptEvents: st.AutoAcceptEvents,
+		AutoAcceptDebts:  st.AutoAcceptDebts,
+		UpdatedAt:        st.UpdatedAt,
 	}
 	if v.MutedTypes == nil {
 		v.MutedTypes = []string{}
 	}
-	if v.AutoTypes == nil {
-		v.AutoTypes = []string{}
+	for _, t := range pageTypes {
+		mutable := t.Group != GroupRequest
+		v.Types = append(v.Types, TypeSetting{
+			Type: t.Type, Group: t.Group, Mutable: mutable,
+			On: !mutable || st.Deliver(t.Type),
+		})
 	}
 	if st.DefaultAccountID != nil {
 		refs, err := shared.LoadAccountRefs(ctx, s.store.db, []uuid.UUID{*st.DefaultAccountID})

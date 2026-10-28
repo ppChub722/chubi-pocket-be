@@ -21,6 +21,13 @@ type UserPrefsValue struct {
 	Timezone string
 	Language string
 	Currency string
+	// AutoSyncEvents / AutoSyncDebts — the two auto-sync switches (0.4.1-2 S4; no settings row = on),
+	// read in the same query so a page shows them for free.
+	AutoSyncEvents bool
+	AutoSyncDebts  bool
+	// AutoAcceptEvents / AutoAcceptDebts — the auto-accept switches (0.4.1-2; no row = on / off).
+	AutoAcceptEvents bool
+	AutoAcceptDebts  bool
 }
 
 type prefsHolder struct {
@@ -45,16 +52,20 @@ func UserPrefs(ctx context.Context, q Querier, userID uuid.UUID) (UserPrefsValue
 			return v, nil
 		}
 	}
-	v := UserPrefsValue{Language: DefaultLanguage, Currency: DefaultCurrency}
+	v := UserPrefsValue{Language: DefaultLanguage, Currency: DefaultCurrency, AutoSyncEvents: true, AutoSyncDebts: true,
+		AutoAcceptEvents: true}
 	rows, err := q.Query(ctx, `SELECT COALESCE(p.preferences->>'timezone', ''), COALESCE(p.preferences->>'language', ''),
-			COALESCE(u.currency, '')
-		FROM users u LEFT JOIN user_preferences p ON p.user_id = u.id WHERE u.id = $1`, userID)
+			COALESCE(u.currency, ''), COALESCE(ns.auto_sync_events, TRUE), COALESCE(ns.auto_sync_debts, TRUE),
+			COALESCE(ns.auto_accept_events, TRUE), COALESCE(ns.auto_accept_debts, FALSE)
+		FROM users u LEFT JOIN user_preferences p ON p.user_id = u.id
+		LEFT JOIN user_notification_settings ns ON ns.user_id = u.id
+		WHERE u.id = $1`, userID)
 	if err != nil {
 		return v, err
 	}
 	if rows.Next() {
 		var tz, lang, cur string
-		if err := rows.Scan(&tz, &lang, &cur); err != nil {
+		if err := rows.Scan(&tz, &lang, &cur, &v.AutoSyncEvents, &v.AutoSyncDebts, &v.AutoAcceptEvents, &v.AutoAcceptDebts); err != nil {
 			rows.Close()
 			return v, err
 		}

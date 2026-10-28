@@ -16,6 +16,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
@@ -35,6 +36,7 @@ type recFix struct {
 	pending *pending.Service
 	txs     *transactions.Service
 	savings *saving_goals.Service
+	debts   *personal_debts.Service
 	r       http.Handler
 }
 
@@ -60,6 +62,8 @@ func newRecFix(t *testing.T) *recFix {
 	f.savings = saving_goals.NewService(saving_goals.NewStore(pool))
 	f.pending.WithSavings(f.savings)
 	f.svc.WithSavings(f.savings)
+	f.debts = personal_debts.NewService(personal_debts.NewStore(pool), f.txs)
+	f.svc.WithDebts(f.debts)
 
 	h := NewHandler(f.svc)
 	th := transactions.NewHandler(f.txs)
@@ -105,6 +109,7 @@ func newRecFix(t *testing.T) *recFix {
 	t.Cleanup(func() {
 		_, _ = pool.Exec(ctx, `DELETE FROM recurring_items WHERE user_id = $1`, f.me)
 		_, _ = pool.Exec(ctx, `DELETE FROM recurring_rules WHERE user_id = $1`, f.me)
+		_, _ = pool.Exec(ctx, `DELETE FROM personal_debts WHERE user_id = $1`, f.me)
 		_, _ = pool.Exec(ctx, `DELETE FROM pending_transactions WHERE user_id = $1`, f.me)
 		_, _ = pool.Exec(ctx, `DELETE FROM notifications WHERE recipient_user_id = $1`, f.me)
 		_, _ = pool.Exec(ctx, `DELETE FROM recurring_due_checks WHERE user_id = $1`, f.me)

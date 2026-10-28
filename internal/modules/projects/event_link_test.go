@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -52,10 +51,17 @@ func TestLinkModeEventSwitches(t *testing.T) {
 		t.Fatalf("into the event: mode %s bill %+v share %v wallet %v", u.Rows[0].LinkMode, eb, u.Rows[0].MyShare, f.accountBalance(t, f.acctPersonal))
 	}
 
-	// event → personal: the bill made from it goes; the transaction is loose again.
-	u = update(transactions.UpdateRequest{LinkMode: modeP("personal")})
-	if u.Rows[0].LinkMode != transactions.LinkPersonal || u.Rows[0].EventBill != nil {
-		t.Fatalf("out of the event: %s %+v", u.Rows[0].LinkMode, u.Rows[0].EventBill)
+	// 0.4.1-2 S9 / SA9: a transaction in a shared bill doesn't switch off its event here (the bill form).
+	if _, err := f.txs.UpdateWrite(ctx, f.owner, id, transactions.UpdateRequest{LinkMode: modeP("personal")}); !errors.As(err,
+		new(*transactions.SharedBillFieldError)) {
+		t.Fatalf("link_mode off an event: %v, want SHARED_BILL_FIELD", err)
+	}
+	// Deleting the bill, my transaction kept: it is loose again.
+	if _, err := f.svc.DeleteBill(ctx, f.owner, eb.BillID, true); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := f.txs.Get(ctx, f.owner, id); err != nil || d.LinkMode != transactions.LinkPersonal || d.EventBill != nil {
+		t.Fatalf("out of the event: %+v (%v)", d, err)
 	}
 	if n := f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE project_id = $1`, pid); n != 0 {
 		t.Errorf("board rows left = %d", n)
@@ -75,9 +81,25 @@ func TestLinkModeEventSwitches(t *testing.T) {
 	}
 	billID := row.EventBill.BillID
 
-	// My copy → the bill: my share is now 150 (Bee's rest 150).
-	u = update(transactions.UpdateRequest{Amount: f64p(150), ApplyToEvent: true})
-	eb = u.Rows[0].EventBill
+	// My copy refuses the bill's amount here (S9); the bill form sets my share to 150 (Bee's rest 150)
+	// and my copy follows.
+	if _, err := f.txs.UpdateWrite(ctx, f.owner, id, transactions.UpdateRequest{Amount: f64p(150), ApplyToEvent: true}); !errors.As(err,
+		new(*transactions.SharedBillFieldError)) {
+		t.Fatalf("amount on a copy: %v, want SHARED_BILL_FIELD", err)
+	}
+	bill := EventBillInput{Kind: PTTypeExpense, Amount: 300, Date: "2026-09-20", Payer: &BillPerson{ContactID: &f.contactB},
+		Members: []EventBillPerson{{BillMember: BillMember{BillPerson: BillPerson{Me: true}, Share: 150}}}}
+	if _, err := f.svc.RebookBill(ctx, f.owner, billID, EventBillRebookRequest{Bill: &bill, MyBooks: EventBillBooks{On: true, Tx: true}}, false); err != nil {
+		t.Fatal(err)
+	}
+	d, err := f.txs.Get(ctx, f.owner, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Amount != 150 {
+		t.Errorf("my copy after the bill edit = %v, want 150", d.Amount)
+	}
+	eb = d.EventBill
 	mine := 0.0
 	for _, m := range eb.Members {
 		if m.Member.IsMe {
@@ -119,23 +141,8 @@ func TestLinkModeEventSwitches(t *testing.T) {
 		t.Errorf("apply_to_my_tx: %+v", patch.MyTransaction)
 	}
 
-	// The resolve sheet's "as debt" keeps its bill (source event, editable money).
-	pd := personal_debts.NewService(personal_debts.NewStore(f.pool), f.txs)
-	debt, err := pd.CreateEntry(ctx, f.owner, "n:Dan", personal_debts.CreateEntryRequest{Direction: "received", Amount: 50, BillID: &billID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s := debt.Entry.Source; s == nil || s.Kind != "event" || s.ID == nil || *s.ID != pid {
-		t.Errorf("as-debt source = %+v, want event %v", s, pid)
-	}
-	amount := 60.0
-	if _, err := pd.UpdateEntry(ctx, f.owner, debt.Entry.ID, personal_debts.UpdateEntryRequest{Amount: &amount}); err != nil {
-		t.Errorf("an event debt's amount stays editable: %v", err)
-	}
-	if _, err := pd.CreateEntry(ctx, f.owner, "n:Dan", personal_debts.CreateEntryRequest{Direction: "received", Amount: 5,
-		BillID: &f.cat}); !errors.Is(err, personal_debts.ErrBillNotFound) {
-		t.Errorf("unknown bill: err = %v", err)
-	}
+	// (0.4.1-2: the resolve sheet's "as debt" with bill_id is retired, claims go through
+	// POST /projects/{id}/claim — BE-2's claim tests.)
 
 	// Members carry my contact for them (Bee = my contact, linked).
 	members, err := f.svc.ListMembers(ctx, f.owner, pid)

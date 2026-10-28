@@ -101,6 +101,12 @@ func unlinkMineTx(ctx context.Context, tx pgx.Tx, userID, ptID uuid.UUID, kind s
 	switch kind {
 	case BookDebt, BookRepay:
 		// 0.4.1-1 D3: debts and repayments are person-book rows; the bill link sits on the row.
+		// V5: the debts' parts of this bill go too (the debt keeps its amount, unlinked).
+		if kind == BookDebt {
+			if _, err := tx.Exec(ctx, `DELETE FROM personal_debt_bills WHERE user_id = $1 AND pt_id = $2`, userID, ptID); err != nil {
+				return fmt.Errorf("unlink bill parts: %w", err)
+			}
+		}
 		_, err := tx.Exec(ctx, `UPDATE personal_debts
 			SET unlinked_project_transaction_id = $1, source_kind = NULL, source_project_transaction_id = NULL,
 			    project_id = NULL, updated_by_user_id = $2

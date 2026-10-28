@@ -103,7 +103,7 @@ func (s *Service) Archived(ctx context.Context, userID uuid.UUID) (*ArchivedHub,
 	}
 	if out.Events, err = s.archivedGroup(ctx, `SELECT p.id, p.name, p.icon_code, p.updated_at, p.owner_user_id = $1, 'planned', p.planned_amount::float8 FROM projects p
 		JOIN project_members m ON m.project_id = p.id AND m.user_id = $1 AND m.status = 'active'
-		WHERE p.status = 'archived' ORDER BY p.updated_at DESC, p.id`, userID); err != nil {
+		WHERE p.status = 'archived' AND p.kind = 'event' ORDER BY p.updated_at DESC, p.id`, userID); err != nil {
 		return nil, err
 	}
 	if out.Contacts, err = s.archivedGroup(ctx, `SELECT id, display_name, icon_code, updated_at, TRUE, NULL::text, NULL::float8 FROM contacts

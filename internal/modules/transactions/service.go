@@ -619,6 +619,10 @@ func (s *Service) updateOrPreview(ctx context.Context, userID, id uuid.UUID, req
 		if err := s.checkLinkedEdit(ctx, userID, current, req, false); err != nil {
 			return nil, nil, err
 		}
+		// 0.4.1-2 S9 / S11: a connected copy of a shared bill edits only my own fields here.
+		if err := sharedCopyGuardTx(ctx, tx, userID, current, &req); err != nil {
+			return nil, nil, err
+		}
 		if out.personKeys, err = personKeysTx(ctx, tx, userID, current.ID); err != nil {
 			return nil, nil, err
 		}
@@ -977,6 +981,7 @@ type deleted struct {
 	debtKey   string
 	item      *uuid.UUID
 	bill      *uuid.UUID
+	debts     debtsTouched // split / paid-by debts the delete took along or unlinked (X4)
 }
 
 // DeleteWrite deletes a transaction. alsoDeleteLink also deletes the event bill made from it. The
@@ -997,13 +1002,15 @@ func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID, alsoDel
 			return nil, err
 		}
 	}
-	var debtIDs []uuid.UUID
+	debtIDs := append([]uuid.UUID{}, d.debts.changed...) // a partner's paid-by mirror, unlinked
 	if d.debtEntry != nil {
 		debtIDs = append(debtIDs, *d.debtEntry) // kept, ledger-only (D1)
 	}
-	if out.Effects, err = s.rowEffects(ctx, userID, nil, []uuid.UUID{id}, debtIDs, []string{d.debtKey}, out.AccountBalances); err != nil {
+	keys := append([]string{d.debtKey}, d.debts.keys...)
+	if out.Effects, err = s.rowEffects(ctx, userID, nil, []uuid.UUID{id}, debtIDs, unionKeys(keys, nil), out.AccountBalances); err != nil {
 		return nil, err
 	}
+	out.Effects.RemovedDebtIDs = append(out.Effects.RemovedDebtIDs, d.debts.removed...) // X4
 	if d.item != nil && s.recurring != nil { // the occurrence it filled, now skipped (R2)
 		if slot, err := s.recurring.SlotView(ctx, *d.item); err == nil {
 			out.Effects.Slots = append(out.Effects.Slots, slot)
@@ -1030,6 +1037,14 @@ func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLi
 	if out.item, err = s.recurringDeletingTx(ctx, tx, current.ID); err != nil {
 		return nil, err
 	}
+	// 0.4.1-2 rule f: deleting my copy of a shared bill disconnects it; the bill stays (it is deleted in
+	// the bill form), so also_delete_link no longer reaches it.
+	if current.SourceProjectTransactionID != nil && current.UserID == userID && s.eventLinks != nil {
+		if err := s.eventLinks.CopyDeletingTx(ctx, tx, userID, current.ID); err != nil {
+			return nil, err
+		}
+		alsoDeleteLink = false
+	}
 	if alsoDeleteLink && current.UserID == userID {
 		if s.billDeleter != nil && current.Type != TypeTransfer {
 			if out.bill, err = s.billDeleter(ctx, tx, userID, current.ID); err != nil {
@@ -1052,15 +1067,18 @@ func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLi
 		if err := s.checkLinkedEdit(ctx, userID, current, UpdateRequest{}, true); err != nil {
 			return nil, err
 		}
-		paidByKey, err := s.paidByDeletingTx(ctx, tx, userID, current)
+		paidBy, err := s.paidByDeletingTx(ctx, tx, userID, current)
 		if err != nil {
 			return nil, err
 		}
-		if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
+		splits, err := s.deleteSingleInTx(ctx, tx, userID, current)
+		if err != nil {
 			return nil, err
 		}
-		if paidByKey != "" {
-			out.debtKey = paidByKey
+		out.debts.add(paidBy)
+		out.debts.add(splits)
+		if len(paidBy.keys) > 0 {
+			out.debtKey = paidBy.keys[0]
 		}
 		if current.SourcePersonalDebtID != nil && s.debtLinks != nil {
 			key, err := s.debtLinks.TxDeletedTx(ctx, tx, userID, *current.SourcePersonalDebtID)
@@ -1127,26 +1145,29 @@ func (s *Service) checkNotSystemRow(ctx context.Context, current *Transaction) e
 	return nil
 }
 
-func (s *Service) deleteSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) error {
+func (s *Service) deleteSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) (debtsTouched, error) {
+	var out debtsTouched
 	if current.AccountID != nil {
 		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*current.AccountID}); err != nil {
-			return err
+			return out, err
 		}
 		delta := signedDelta(current.Type, current.Cash(), false)
 		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *current.AccountID, -delta); err != nil {
-			return err
+			return out, err
 		}
 	}
 	if _, err := s.recurringDeletingTx(ctx, tx, current.ID); err != nil {
-		return err
+		return out, err
 	}
 	// 0.4.1-1 D8: a split bill takes its split debts along (linked partners get split_changed removed).
 	if s.debtLinks != nil {
-		if err := s.debtLinks.SplitsDeletingTx(ctx, tx, userID, current.ID); err != nil {
-			return err
+		removed, keys, err := s.debtLinks.SplitsDeletingTx(ctx, tx, userID, current.ID)
+		if err != nil {
+			return out, err
 		}
+		out.removed, out.keys = removed, keys
 	}
-	return s.store.DeleteRowTx(ctx, tx, current.ID)
+	return out, s.store.DeleteRowTx(ctx, tx, current.ID)
 }
 
 func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) ([]uuid.UUID, error) {

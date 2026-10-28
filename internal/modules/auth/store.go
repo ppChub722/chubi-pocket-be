@@ -74,7 +74,8 @@ func (s *Store) InsertUserTx(ctx context.Context, tx pgx.Tx, u *User) (*User, er
 }
 
 func (s *Store) InsertPreferencesTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
-	const defaults = `{"timezone":"Asia/Bangkok","theme":"system","language":"th","money_style":"color_only"}`
+	// 0.4.1-2 P2: no theme / language: the app sends the device's values once after login.
+	const defaults = `{"timezone":"Asia/Bangkok","money_style":"color_only"}`
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO user_preferences (user_id, preferences) VALUES ($1, $2::jsonb)`,
 		userID, defaults); err != nil {

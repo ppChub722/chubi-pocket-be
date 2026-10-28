@@ -198,7 +198,7 @@ func (s *Service) settleRow(ctx context.Context, sp pgx.Tx, r *Rule, o *occ, act
 	if err != nil {
 		return nil, "refused"
 	}
-	if row.TransactionID != nil || row.SavingEntryID != nil {
+	if row.filled() {
 		return nil, "already_recorded"
 	}
 	switch action {
@@ -225,6 +225,19 @@ func (s *Service) settleRow(ctx context.Context, sp pgx.Tx, r *Rule, o *occ, act
 		}
 		row.AutoCreatedAt, row.Archived, row.ClearedAt = nil, true, nil
 	default: // BulkMarkPaid
+		if r.isDebt() { // Q-K2: the entry without a transaction (saves the row itself)
+			if amount != nil {
+				row.Draft.Amount, row.Edited = amount, true
+			}
+			_, _, err := s.recordDebtTx(ctx, sp, r, row, nil, false, false, lang)
+			switch {
+			case errors.Is(err, ErrAmountRequired), errors.Is(err, ErrNothingOwed):
+				return nil, "needs_amount"
+			case err != nil:
+				return nil, "refused"
+			}
+			return nil, ""
+		}
 		if err := markPaid(row, amount); err != nil {
 			return nil, "needs_amount"
 		}

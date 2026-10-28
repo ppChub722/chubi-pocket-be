@@ -437,8 +437,14 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "LINK_MODE_CONFLICT", err.Error(), nil)
 	case errors.Is(err, ErrLinkModeInput):
 		response.BadRequest(c, "LINK_MODE_INPUT", err.Error(), nil)
-	case errors.Is(err, ErrPaidByLocked):
-		response.Fail(c, http.StatusConflict, "PAID_BY_LOCKED", err.Error(), nil)
+	case errors.As(err, new(*SharedBillFieldError)):
+		var f *SharedBillFieldError
+		errors.As(err, &f)
+		response.Fail(c, http.StatusConflict, "SHARED_BILL_FIELD", err.Error(), map[string]any{"fields": f.Fields})
+	case errors.Is(err, ErrPrivateNoteNotShared):
+		response.BadRequest(c, "PRIVATE_NOTE_NOT_SHARED", err.Error(), nil)
+	case errors.Is(err, ErrPrivateNoteTooLong):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	default:
 		response.InternalError(c, "Transaction operation failed", err.Error())
 	}

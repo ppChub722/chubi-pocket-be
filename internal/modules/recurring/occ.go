@@ -69,6 +69,8 @@ func ruleBaseDraft(r *Rule) pending.Draft {
 		d.CategoryID = nil
 	case typeSaving:
 		d.GoalID, d.CategoryID, d.TagIDs = r.GoalID, nil, nil
+	case typeDebt: // the entry's transaction takes the system debt category
+		d.CategoryID, d.TagIDs = nil, nil
 	}
 	return d
 }
@@ -85,7 +87,7 @@ func occName(r *Rule, slot time.Time, seq *int, lang string) string {
 // statusOfRow is the status of a stored row as of today.
 func statusOfRow(it *itemRow, today time.Time) string {
 	switch {
-	case it.TransactionID != nil || it.SavingEntryID != nil:
+	case it.filled():
 		return StatusDone
 	case it.Archived:
 		return StatusSkipped
@@ -661,6 +663,9 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 			}
 		}
 		out = append(out, it)
+	}
+	if err := debtItemViews(ctx, q, userID, occs, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

@@ -59,13 +59,13 @@ func (s *Store) LookupSourcePTTx(
 const txColumns = `id, user_id, account_id, type, amount, category_id,
 	to_char(date, 'YYYY-MM-DD') AS date, description, note, transfer_group_id,
 	source_personal_debt_id, source_project_transaction_id, project_id,
-	debt_connected, debt_prev_category_id, paid_by_amount,
+	debt_connected, debt_prev_category_id, paid_by_amount, private_note,
 	created_at, updated_at`
 
 const txColumnsT = `t.id, t.user_id, t.account_id, t.type, t.amount, t.category_id,
 	to_char(t.date, 'YYYY-MM-DD') AS date, t.description, t.note, t.transfer_group_id,
 	t.source_personal_debt_id, t.source_project_transaction_id, t.project_id,
-	t.debt_connected, t.debt_prev_category_id, t.paid_by_amount,
+	t.debt_connected, t.debt_prev_category_id, t.paid_by_amount, t.private_note,
 	t.created_at, t.updated_at`
 
 func scanTx(row pgx.Row) (*Transaction, error) {
@@ -74,7 +74,7 @@ func scanTx(row pgx.Row) (*Transaction, error) {
 		&t.ID, &t.UserID, &t.AccountID, &t.Type, &t.Amount, &t.CategoryID,
 		&t.Date, &t.Description, &t.Note, &t.TransferGroupID,
 		&t.SourcePersonalDebtID, &t.SourceProjectTransactionID, &t.ProjectID,
-		&t.DebtConnected, &t.DebtPrevCategoryID, &t.PaidByAmount,
+		&t.DebtConnected, &t.DebtPrevCategoryID, &t.PaidByAmount, &t.PrivateNote,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
 	return &t, err

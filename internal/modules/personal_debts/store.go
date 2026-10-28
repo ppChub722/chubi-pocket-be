@@ -344,7 +344,7 @@ func (s *Store) personBalance(ctx context.Context, q shared.Querier, userID uuid
 }
 
 const entryViewSQL = `SELECT pd.id, pd.kind, pd.direction, pd.counterparty_contact_id, pd.counterparty_person_name,
-		pd.amount, to_char(pd.date, 'YYYY-MM-DD'), pd.description, pd.note, pd.paid, pd.source_kind,
+		pd.amount, to_char(pd.date, 'YYYY-MM-DD'), pd.description, pd.note, pd.private_note, pd.paid, pd.source_kind,
 		CASE pd.source_kind WHEN 'transaction' THEN pd.source_transaction_id
 		                    WHEN 'event' THEN pd.project_id
 		                    WHEN 'paid_by' THEN pd.paid_for_transaction_id
@@ -420,7 +420,7 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 			oAccount  *uuid.UUID
 			connected bool
 		)
-		if err := rows.Scan(&v.ID, &v.Kind, &v.Direction, &cid, &name, &v.Amount, &v.Date, &v.Description, &v.Note,
+		if err := rows.Scan(&v.ID, &v.Kind, &v.Direction, &cid, &name, &v.Amount, &v.Date, &v.Description, &v.Note, &v.PrivateNote,
 			&v.Paid, &kind, &sourceID, &title, &txID, &accID, &connected, &v.CreatedAt, &v.UpdatedAt, &v.DueDate, &v.PartnerLinked, &v.DisconnectedAt,
 			&oKind, &o.TransactionID, &o.BillID, &o.EventID, &o.Title, &o.Amount, &o.Date, &oAccount); err != nil {
 			rows.Close()
@@ -467,7 +467,79 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 			out[a.i].Transaction.Account = &r
 		}
 	}
-	return out, nil
+	return out, loadBillParts(ctx, q, out)
+}
+
+// loadBillParts fills DebtEntry.bills (0.4.1-2 V5): each part with its bill's event, and whether it
+// still matches the bill (my pair with that member on it now; a completed event no longer syncs).
+func loadBillParts(ctx context.Context, q shared.Querier, out []DebtEntry) error {
+	at := map[uuid.UUID]int{}
+	ids := make([]uuid.UUID, 0, len(out))
+	for i := range out {
+		out[i].Bills = []DebtBillPart{}
+		at[out[i].ID] = i
+		ids = append(ids, out[i].ID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := q.Query(ctx, `
+		SELECT b.debt_id, b.pt_id, p.project_id, p.description, b.amount::float8, pr.status, pr.completed_at IS NOT NULL,
+		       COALESCE((SELECT SUM(c.amount) FROM project_transactions c WHERE c.parent_project_transaction_id = p.id
+		           AND c.transaction_member_id = CASE WHEN p.transaction_member_id = me.id THEN b.member_id ELSE me.id END
+		           AND p.transaction_member_id IN (me.id, b.member_id)), 0)::float8
+		FROM personal_debt_bills b
+		JOIN project_transactions p ON p.id = b.pt_id
+		JOIN projects pr ON pr.id = p.project_id
+		LEFT JOIN project_members me ON me.project_id = p.project_id AND me.user_id = b.user_id
+		WHERE b.debt_id = ANY($1)
+		ORDER BY b.created_at, b.id`, ids)
+	if err != nil {
+		return fmt.Errorf("bill parts: %w", err)
+	}
+	var events []uuid.UUID
+	type link struct {
+		i     int
+		event uuid.UUID
+	}
+	var links []link
+	for rows.Next() {
+		var (
+			debtID, eventID uuid.UUID
+			p               DebtBillPart
+			status          string
+			completed       bool
+			live            float64
+		)
+		if err := rows.Scan(&debtID, &p.PtID, &eventID, &p.Description, &p.Amount, &status, &completed, &live); err != nil {
+			rows.Close()
+			return err
+		}
+		p.Differences = []shared.BillDifference{}
+		p.InSync = completed || math.Abs(live-p.Amount) <= 0.005
+		if !p.InSync {
+			p.Differences = append(p.Differences, shared.BillDifference{Field: "amount", Mine: p.Amount, Event: round2(live)})
+		}
+		p.EditInBill = !completed && status == "active"
+		i := at[debtID]
+		out[i].Bills = append(out[i].Bills, p)
+		links = append(links, link{i, eventID})
+		events = append(events, eventID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	refs, err := shared.LoadEventRefs(ctx, q, events)
+	if err != nil {
+		return err
+	}
+	n := map[int]int{}
+	for _, l := range links {
+		out[l.i].Bills[n[l.i]].Event = refs[l.event]
+		n[l.i]++
+	}
+	return nil
 }
 
 func entryView(ctx context.Context, q shared.Querier, userID, id uuid.UUID) (*DebtEntry, error) {
@@ -674,6 +746,12 @@ func (s *Store) AbsorbForContact(ctx context.Context, userID, contactID uuid.UUI
 	if err != nil {
 		return 0, fmt.Errorf("absorb: %w", err)
 	}
+	// 0.4.1-2 K7 (Q-K1): the typed names' "หนี้" recurring settings merge into the contact too.
+	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET contact_id = $1, person_name = $2
+		WHERE user_id = $3 AND type = 'debt' AND contact_id IS NULL
+		  AND LOWER(TRIM(person_name)) = ANY($4::text[])`, contactID, displayName, userID, lowered); err != nil {
+		return 0, fmt.Errorf("absorb rules: %w", err)
+	}
 	if tag.RowsAffected() > 0 {
 		_, _ = tx.Exec(ctx, `UPDATE contacts SET last_used_at = NOW() WHERE id = $1 AND user_id = $2`,
 			contactID, userID)
@@ -702,6 +780,11 @@ func (s *Store) RestoreOnContactDeleteTx(ctx context.Context, tx pgx.Tx, userID,
 		displayName, userID, contactID)
 	if err != nil {
 		return 0, fmt.Errorf("restore on delete: %w", err)
+	}
+	// 0.4.1-2 K7: a "หนี้" recurring setting keeps the name (the FK then drops the contact).
+	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET person_name = $1
+		WHERE user_id = $2 AND contact_id = $3`, displayName, userID, contactID); err != nil {
+		return 0, fmt.Errorf("restore rules on delete: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
 }

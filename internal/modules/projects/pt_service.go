@@ -51,20 +51,19 @@ func (s *Service) CreateProjectTransaction(
 	if pt, err = s.store.GetPTTx(ctx, tx, pt.ID); err != nil {
 		return nil, err
 	}
-	if s.notifs != nil && member.UserID != nil {
-		if *member.UserID == callerUserID {
-			if s.txs != nil && !payback {
-				st, err := s.notifs.SettingsTx(ctx, tx, callerUserID)
-				if err == nil && st.AutoResolveOwnInProjects {
-					if _, err := s.copyToPersonalTx(ctx, tx, callerUserID, member.ID, pt); err != nil &&
-						!errors.Is(err, ErrNoShareToCopy) {
-						return nil, err
-					}
-				}
+	if s.notifs != nil && member.UserID != nil && *member.UserID == callerUserID && s.txs != nil && !payback {
+		st, err := s.notifs.SettingsTx(ctx, tx, callerUserID)
+		if err == nil && st.AutoSyncEvents {
+			if _, err := s.copyToPersonalTx(ctx, tx, callerUserID, member.ID, pt); err != nil &&
+				!errors.Is(err, ErrNoShareToCopy) {
+				return nil, err
 			}
-		} else if err := s.notifyRecordedTx(ctx, tx, *member.UserID, member.ID, callerUserID, pt); err != nil {
-			return nil, err
 		}
+	}
+	// 0.4.1-2 S6: every other member with a part gets the bill by their switch (a payback = their
+	// repayment row; never copied as an expense).
+	if err := s.fanOutTx(ctx, tx, callerUserID, pt.ID, true, nil); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
@@ -194,27 +193,17 @@ func (s *Service) UpdateProjectTransaction(
 	return p, nil
 }
 
+// applyBillEditTx edits a bill and sends it to every other member (0.4.1-2 S5: by their switch).
 func (s *Service) applyBillEditTx(
 	ctx context.Context, tx pgx.Tx, editorUserID, projectID uuid.UUID, current *ProjectTransaction,
 	req UpdateProjectTransactionRequest,
 ) (*ProjectTransaction, error) {
-	beforeShares := splitSharesTx(ctx, tx, current.ID)
 	updated, err := s.store.UpdatePTTx(ctx, tx, projectID, current.ID, editorUserID, req)
 	if err != nil {
 		return nil, err
 	}
-	if s.notifs != nil {
-		recipients, err := s.store.PTRecipientsForChange(ctx, current.ID, editorUserID)
-		if err == nil && len(recipients) > 0 {
-			afterShares := splitSharesTx(ctx, tx, current.ID)
-			diff := buildDiff(current, updated)
-			for _, recipient := range recipients {
-				if err := s.notifyChangedTx(ctx, tx, recipient, editorUserID,
-					current, updated, beforeShares, afterShares, diff); err != nil {
-					return nil, err
-				}
-			}
-		}
+	if err := s.fanOutTx(ctx, tx, editorUserID, current.ID, false, buildDiff(current, updated)); err != nil {
+		return nil, err
 	}
 	return updated, nil
 }
@@ -338,7 +327,7 @@ func (s *Service) ListPT(ctx context.Context, callerUserID, projectID uuid.UUID,
 func (s *Service) ToggleMark(
 	ctx context.Context, callerUserID, projectID, ptID uuid.UUID, marked bool,
 ) (*EventPatch, error) {
-	if err := s.store.AssertWritable(ctx, projectID, "resolve"); err != nil {
+	if err := s.store.AssertWritable(ctx, projectID, "mark"); err != nil {
 		return nil, err
 	}
 	member, err := s.store.AssertCanWrite(ctx, projectID, callerUserID)

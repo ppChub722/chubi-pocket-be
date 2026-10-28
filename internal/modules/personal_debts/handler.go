@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
@@ -349,8 +348,20 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, "ENTRY_NOT_FOUND", err.Error(), nil)
 	case errors.Is(err, ErrManagedBySource):
 		response.Fail(c, http.StatusConflict, "ENTRY_MANAGED_BY_SOURCE", err.Error(), nil)
+	case errors.As(err, new(*transactions.SharedBillFieldError)):
+		var f *transactions.SharedBillFieldError
+		errors.As(err, &f)
+		response.Fail(c, http.StatusConflict, "SHARED_BILL_FIELD", err.Error(), map[string]any{"fields": f.Fields})
+	case errors.Is(err, transactions.ErrPrivateNoteNotShared):
+		response.BadRequest(c, "PRIVATE_NOTE_NOT_SHARED", err.Error(), nil)
+	case errors.Is(err, transactions.ErrPrivateNoteTooLong):
+		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
 	case errors.Is(err, ErrBillNotFound):
 		response.BadRequest(c, "BILL_NOT_FOUND", err.Error(), nil)
+	case errors.Is(err, ErrUseClaim):
+		response.BadRequest(c, "USE_CLAIM", err.Error(), nil)
+	case errors.Is(err, ErrBillAlreadyBooked):
+		response.Fail(c, http.StatusConflict, "BILL_ALREADY_BOOKED", err.Error(), nil)
 	case errors.Is(err, ErrManagedByTx):
 		response.Fail(c, http.StatusConflict, "DEBT_MANAGED_BY_TX", err.Error(), nil)
 	case errors.Is(err, transactions.ErrTxNotFound):
@@ -387,64 +398,4 @@ func atoiOr(s string, dflt int) int {
 		return dflt
 	}
 	return n
-}
-
-func (h *Handler) AcceptSplitRequest(c *gin.Context) {
-	userID, ok := caller(c)
-	if !ok {
-		return
-	}
-	nid, err := uuid.Parse(c.Param("notification_id"))
-	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
-		return
-	}
-	out, err := h.service.AcceptSplitRequest(c.Request.Context(), userID, nid)
-	switch {
-	case errors.Is(err, ErrSplitChangeStale):
-		response.Fail(c, http.StatusConflict, "SPLIT_CHANGE_STALE", err.Error(), nil)
-	case errors.Is(err, ErrNotSplitRequest):
-		response.BadRequest(c, "NOT_SPLIT_REQUEST", err.Error(), nil)
-	case errors.Is(err, notifications.ErrNotificationNotFound):
-		response.NotFound(c, "NOT_FOUND", "Notification not found")
-	case errors.Is(err, notifications.ErrNotForYou):
-		response.Fail(c, http.StatusForbidden, "NOT_FOR_YOU", "Notification is not addressed to caller", nil)
-	case errors.Is(err, notifications.ErrStateConflict):
-		response.Fail(c, http.StatusConflict, "NOTIFICATION_STATE_CONFLICT", err.Error(), nil)
-	case err != nil:
-		mapServiceError(c, err)
-	default:
-		c.JSON(http.StatusCreated, out)
-	}
-}
-
-func (h *Handler) ApplySplitChange(c *gin.Context) {
-	userID, ok := caller(c)
-	if !ok {
-		return
-	}
-	nid, err := uuid.Parse(c.Param("notification_id"))
-	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
-		return
-	}
-	out, err := h.service.ApplySplitChange(c.Request.Context(), userID, nid)
-	switch {
-	case errors.Is(err, ErrNotSplitChange):
-		response.BadRequest(c, "NOT_SPLIT_CHANGE", err.Error(), nil)
-	case errors.Is(err, ErrNotificationActioned):
-		response.Fail(c, http.StatusConflict, "NOTIFICATION_ACTIONED", err.Error(), nil)
-	case errors.Is(err, ErrSplitChangeStale):
-		response.Fail(c, http.StatusConflict, "SPLIT_CHANGE_STALE", err.Error(), nil)
-	case errors.Is(err, notifications.ErrNotificationNotFound):
-		response.NotFound(c, "NOT_FOUND", "Notification not found")
-	case errors.Is(err, notifications.ErrNotForYou):
-		response.Fail(c, http.StatusForbidden, "NOT_FOR_YOU", "Notification is not addressed to caller", nil)
-	case errors.Is(err, notifications.ErrStateConflict):
-		response.Fail(c, http.StatusConflict, "NOTIFICATION_STATE_CONFLICT", err.Error(), nil)
-	case err != nil:
-		mapServiceError(c, err)
-	default:
-		c.JSON(http.StatusOK, out)
-	}
 }

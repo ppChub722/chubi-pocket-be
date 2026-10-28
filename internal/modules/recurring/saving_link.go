@@ -10,6 +10,7 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 const typeSaving = "saving"
@@ -92,6 +93,42 @@ func checkRuleRefsTx(ctx context.Context, q rowQuerier, userID uuid.UUID, r *Rul
 	}
 	if r.Type == typeSaving {
 		return checkSavingTx(ctx, q, userID, r.AccountID, r.GoalID)
+	}
+	if r.Type == typeDebt {
+		return checkDebtPersonTx(ctx, q, userID, r)
+	}
+	return nil
+}
+
+// checkDebtPersonTx — a debt setting's contact must be an active contact of mine; its live name
+// becomes the kept name (a deleted contact leaves it, Q-K1 / default 4).
+func checkDebtPersonTx(ctx context.Context, q rowQuerier, userID uuid.UUID, r *Rule) error {
+	if r.ContactID == nil {
+		if r.PersonName == nil {
+			return ErrValidation
+		}
+		return nil
+	}
+	var (
+		name   *string
+		status string
+	)
+	err := q.QueryRow(ctx, `SELECT `+shared.PersonNameSQL("c", "lu")+`, c.status
+		FROM contacts c LEFT JOIN users lu ON lu.id = c.linked_user_id
+		WHERE c.id = $1 AND c.user_id = $2`, *r.ContactID, userID).Scan(&name, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrContactNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if status != "active" {
+		return ErrContactArchived
+	}
+	if name != nil {
+		r.PersonName = name
+	} else if r.PersonName == nil {
+		return ErrValidation
 	}
 	return nil
 }

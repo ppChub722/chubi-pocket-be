@@ -40,20 +40,30 @@ var (
 	ErrSplitsExceedParent   = errors.New("sum of splits exceeds parent amount")
 	ErrMemberNotInProject   = errors.New("member does not belong to this project")
 	ErrLinkRequestNotForYou = errors.New("link request is not addressed to caller")
-	ErrCannotChangeOwner = errors.New("the owner's role can't be changed here; use transfer-ownership")
-	ErrViewerReadOnly    = errors.New("viewers can't change project transactions")
-	ErrInvalidDateRange = errors.New("end_date must not be before start_date")
-	ErrBadMemberRequest = errors.New("add a member with ad_hoc + display_name, or email + display_name")
-	ErrBadPayback       = errors.New("a payback has exactly one split: the receiver, for the whole amount")
-	ErrPayerFixed       = errors.New("a bill's payer can't change")
+	ErrCannotChangeOwner    = errors.New("the owner's role can't be changed here; use transfer-ownership")
+	ErrViewerReadOnly       = errors.New("viewers can't change project transactions")
+	ErrInvalidDateRange     = errors.New("end_date must not be before start_date")
+	ErrBadMemberRequest     = errors.New("add a member with ad_hoc + display_name, or email + display_name")
+	ErrBadPayback           = errors.New("a payback has exactly one split: the receiver, for the whole amount")
+	ErrPayerFixed           = errors.New("a bill's payer can't change")
 	// ErrPaybackNotCopyable — a payback goes to my books as a repayment, not a copied expense.
 	ErrPaybackNotCopyable = errors.New("a payback can't be copied as an expense")
+	// 0.4.1-2 V1 / V2: a completed event is locked for good.
+	ErrEventCompleted      = errors.New("the event is completed: it can't be changed any more")
+	ErrUseCompleteEndpoint = errors.New("complete an event with POST /projects/{id}/complete")
+	ErrCompleteNotActive   = errors.New("only an active event can be completed")
 )
+
+// EmptyPersonError — an event can't be completed while a bill still has an empty "( ) ____" person
+// (a removed member's spot, default 3).
+type EmptyPersonError struct{ BillIDs []uuid.UUID }
+
+func (e *EmptyPersonError) Error() string { return "a bill still has an empty person to assign" }
 
 const projectColumns = `id, owner_user_id, name, description, note,
 	to_char(start_date, 'YYYY-MM-DD') AS start_date,
 	to_char(end_date, 'YYYY-MM-DD')   AS end_date,
-	status, icon_code, planned_amount, created_at, updated_at`
+	status, icon_code, planned_amount, created_at, updated_at, completed_at`
 
 func scanProject(row pgx.Row) (*Project, error) {
 	var p Project
@@ -61,7 +71,7 @@ func scanProject(row pgx.Row) (*Project, error) {
 	err := row.Scan(
 		&p.ID, &p.OwnerUserID, &p.Name, &p.Description, &p.Note,
 		&p.StartDate, &p.EndDate, &p.Status, &iconBytes, &p.PlannedAmount,
-		&p.CreatedAt, &p.UpdatedAt,
+		&p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -117,24 +127,24 @@ func (s *Store) GetByIDForCaller(ctx context.Context, userID, projectID uuid.UUI
 	if err != nil {
 		return nil, err
 	}
-	if p.OwnerUserID == userID {
-		return p, nil
-	}
-	var n int
-	if err := s.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM project_members
-		WHERE project_id = $1 AND user_id = $2 AND status = 'active'`,
-		projectID, userID).Scan(&n); err != nil {
+	// 0.4.1-2 S1: a split bill's hidden "event" never opens as an event (only via /event-bills).
+	var (
+		kind string
+		n    int
+	)
+	if err := s.db.QueryRow(ctx, `SELECT p.kind, (SELECT COUNT(*) FROM project_members
+			WHERE project_id = p.id AND user_id = $2 AND status = 'active')
+		FROM projects p WHERE p.id = $1`, projectID, userID).Scan(&kind, &n); err != nil {
 		return nil, fmt.Errorf("member check: %w", err)
 	}
-	if n == 0 {
+	if kind != "event" || (p.OwnerUserID != userID && n == 0) {
 		return nil, ErrProjectNotFound
 	}
 	return p, nil
 }
 
 func (s *Store) ListIDs(ctx context.Context, userID uuid.UUID, f ListFilter) ([]uuid.UUID, int, error) {
-	where := []string{`(p.owner_user_id = $1 OR EXISTS (
+	where := []string{`p.kind = 'event'`, `(p.owner_user_id = $1 OR EXISTS (
 		SELECT 1 FROM project_members m
 		WHERE m.project_id = p.id AND m.user_id = $1 AND m.status = 'active'))`}
 	args := []any{userID}
@@ -305,16 +315,28 @@ func writable(status, op string) error {
 	case "create_pt":
 		if status != StatusActive {
 			if status == StatusCompleted {
-				return ErrProjectNotActive
+				return ErrEventCompleted
 			}
 			return ErrProjectLocked
 		}
-	case "edit_pt":
-		if status == StatusCancelled || status == StatusArchived {
+	case "edit_pt", "member_crud": // V1: completed = locked for good
+		switch status {
+		case StatusCompleted:
+			return ErrEventCompleted
+		case StatusCancelled, StatusArchived:
+			if op == "edit_pt" || status == StatusArchived {
+				return ErrProjectLocked
+			}
+		}
+	case "resolve": // my books of a bill: still allowed after completion (a one-time copy, no sync)
+		if status == StatusArchived {
 			return ErrProjectLocked
 		}
-	case "resolve", "member_crud":
-		if status == StatusArchived {
+	case "mark": // a board tick changes the bill row
+		switch status {
+		case StatusCompleted:
+			return ErrEventCompleted
+		case StatusArchived:
 			return ErrProjectLocked
 		}
 	}

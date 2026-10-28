@@ -39,7 +39,7 @@ type TagOption struct {
 }
 
 type FormOptions struct {
-	Accounts []AccountOption `json:"accounts"`
+	Accounts         []AccountOption   `json:"accounts"`
 	DefaultAccountID *uuid.UUID        `json:"default_account_id"`
 	Categories       []CategoryOption  `json:"categories"`
 	Tags             []TagOption       `json:"tags"`   // most used first, then by name
@@ -114,10 +114,17 @@ func formDefaultAccount(ctx context.Context, q shared.Querier, userID uuid.UUID,
 	for i := range accounts {
 		ids[i] = accounts[i].ID
 	}
+	// 0.4.1-2 X10: the main wallet (กระเป๋าหลัก) while it is still in the list, else the last one used.
 	rows, err := q.Query(ctx, `
-		SELECT t.account_id FROM transactions t
-		WHERE t.user_id = $1 AND t.account_id = ANY($2) AND t.type IN ('expense', 'income')
-		ORDER BY t.created_at DESC, t.id DESC
+		SELECT id FROM (
+			SELECT ns.default_account_id AS id, 0 AS pick FROM user_notification_settings ns
+			WHERE ns.user_id = $1 AND ns.default_account_id = ANY($2)
+			UNION ALL
+			(SELECT t.account_id, 1 FROM transactions t
+			 WHERE t.user_id = $1 AND t.account_id = ANY($2) AND t.type IN ('expense', 'income')
+			 ORDER BY t.created_at DESC, t.id DESC
+			 LIMIT 1)) d
+		ORDER BY pick
 		LIMIT 1`, userID, ids)
 	if err != nil {
 		return nil, fmt.Errorf("form default account: %w", err)
@@ -232,9 +239,9 @@ func formTags(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]TagOpt
 
 func formEvents(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]shared.EventRef, error) {
 	rows, err := q.Query(ctx, `
-		SELECT p.id, p.name, p.icon_code, p.status
+		SELECT p.id, p.name, p.icon_code, p.status, p.kind
 		FROM projects p
-		WHERE p.status = 'active'
+		WHERE p.status = 'active' AND p.kind = 'event'
 		  AND EXISTS (SELECT 1 FROM project_members m
 		              WHERE m.project_id = p.id AND m.user_id = $1
 		                AND m.status = 'active' AND m.role <> 'viewer')
@@ -249,7 +256,7 @@ func formEvents(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]shar
 			e    shared.EventRef
 			icon []byte
 		)
-		if err := rows.Scan(&e.ID, &e.Name, &icon, &e.Status); err != nil {
+		if err := rows.Scan(&e.ID, &e.Name, &icon, &e.Status, &e.Kind); err != nil {
 			return nil, fmt.Errorf("form events scan: %w", err)
 		}
 		e.IconCode = shared.IconFromJSON(icon)

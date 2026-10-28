@@ -9,11 +9,23 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// Delivery — how a notice reaches its recipient: Deliver = insert it (not muted); Auto = apply it
+// at once by the type's auto-sync switch, muted or not (0.4.1-2 S4: a muted auto type is applied
+// silently). SyncEvents / SyncDebts are the recipient's two switches, for types whose switch
+// depends on the bill kind (shared bills).
 type Delivery struct {
-	Deliver bool
-	Auto    bool
+	Deliver    bool
+	Auto       bool
+	SyncEvents bool
+	SyncDebts  bool
+	// AcceptEvents / AcceptDebts — the recipient's auto-accept switches for a NEW shared bill
+	// (pick by the bill kind, like SyncEvents / SyncDebts).
+	AcceptEvents bool
+	AcceptDebts  bool
 }
 
+// DeliveryFor — one settings read per recipient (call it once per member inside the write's DB tx).
+// Yourself as the recipient: nothing.
 func (s *Service) DeliveryFor(
 	ctx context.Context, tx pgx.Tx, recipientUserID uuid.UUID, actorUserID *uuid.UUID, notifType string,
 ) (Delivery, error) {
@@ -27,7 +39,11 @@ func (s *Service) DeliveryFor(
 	if err != nil {
 		return Delivery{}, err
 	}
-	return Delivery{Deliver: st.Deliver(notifType), Auto: st.Auto(notifType)}, nil
+	return Delivery{
+		Deliver: st.Deliver(notifType), Auto: st.Auto(notifType),
+		SyncEvents: st.AutoSyncEvents, SyncDebts: st.AutoSyncDebts,
+		AcceptEvents: st.AutoAcceptEvents, AcceptDebts: st.AutoAcceptDebts,
+	}, nil
 }
 
 func (s *Service) SettingsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) (*Settings, error) {
@@ -51,21 +67,8 @@ func (s *Service) dispatchTx(
 	return err
 }
 
-func (s *Service) DispatchSplitCreated(
-	ctx context.Context, tx pgx.Tx,
-	recipientUserID uuid.UUID, actorUserID uuid.UUID, p SplitCreatedPayload, actioned bool,
-) error {
-	deepLink := splitDeepLink(p.RecipientDebtID)
-	return s.dispatchTx(ctx, tx, TypeSplitCreated, recipientUserID, &actorUserID, p, &deepLink, actioned)
-}
-
-func (s *Service) DispatchProjectTxRecorded(
-	ctx context.Context, tx pgx.Tx,
-	recipientUserID uuid.UUID, actorUserID uuid.UUID, p ProjectTxRecordedPayload, actioned bool,
-) error {
-	deepLink := fmt.Sprintf("/projects/%s", p.ProjectID) // the app has no per-bill route: open the event
-	return s.dispatchTx(ctx, tx, TypeProjectTxRecordedForYou, recipientUserID, &actorUserID, p, &deepLink, actioned)
-}
+// (DispatchSplitCreated / DispatchSplitChanged / DispatchProjectTxRecorded, the one-way mirror's
+// notices, were retired in 0.4.1-2 S16: shared bills notify through shared_bill.go.)
 
 func (s *Service) DispatchProjectTxChanged(
 	ctx context.Context, tx pgx.Tx,
@@ -110,32 +113,9 @@ func (s *Service) DispatchAccountInvite(
 	return s.dispatchTx(ctx, tx, TypeAccountInvite, recipientUserID, &actorUserID, p, &deepLink, false)
 }
 
-// splitDeepLink opens the recipient's own debt row when they have one; otherwise (split_created
-// awaiting "add to my debts") the debts list.
-func splitDeepLink(recipientDebtID *uuid.UUID) string {
-	if recipientDebtID != nil {
-		return fmt.Sprintf("/personal-debts/%s", *recipientDebtID)
-	}
-	return "/personal-debts"
-}
-
-func (s *Service) DispatchSplitChanged(
-	ctx context.Context, tx pgx.Tx,
-	recipientUserID uuid.UUID, actorUserID uuid.UUID, p SplitChangedPayload, actioned bool,
-) error {
-	if err := s.store.SupersedeSplitNoticesTx(ctx, tx, recipientUserID, TypeSplitChanged, p.SplitID); err != nil {
-		return err
-	}
-	deepLink := splitDeepLink(&p.RecipientDebtID)
-	return s.dispatchTx(ctx, tx, TypeSplitChanged, recipientUserID, &actorUserID, p, &deepLink, actioned)
-}
-
-func (s *Service) SupersedeSplitNoticesTx(ctx context.Context, tx pgx.Tx, recipientUserID uuid.UUID, notifType string, splitID uuid.UUID) error {
-	return s.store.SupersedeSplitNoticesTx(ctx, tx, recipientUserID, notifType, splitID)
-}
-
-func (s *Service) RefreshSplitCreatedTx(ctx context.Context, tx pgx.Tx, recipientUserID, splitID uuid.UUID, amount float64) (bool, error) {
-	return s.store.RefreshSplitCreatedTx(ctx, tx, recipientUserID, splitID, amount)
+// debtDeepLink opens the recipient's own debt row.
+func debtDeepLink(debtID uuid.UUID) string {
+	return fmt.Sprintf("/personal-debts/%s", debtID)
 }
 
 // DebtDisconnectedPayload (0.4.1-1 D9 / B3) — "X ตัดการเชื่อมหนี้ ฿300 แล้ว": the other user
@@ -149,15 +129,10 @@ type DebtDisconnectedPayload struct {
 	Description *string   `json:"description"`
 }
 
-// DispatchDebtDisconnected — info only (no action); pending split notices about the pair are
-// superseded first.
+// DispatchDebtDisconnected — info only (no action). splitID is the other side's entry (kept for the
+// callers; the split notices it once superseded are gone since 0.4.1-2 S16).
 func (s *Service) DispatchDebtDisconnected(ctx context.Context, tx pgx.Tx, recipientUserID, actorUserID uuid.UUID,
 	splitID uuid.UUID, p DebtDisconnectedPayload) error {
-	for _, t := range []string{TypeSplitCreated, TypeSplitChanged} {
-		if err := s.store.SupersedeSplitNoticesTx(ctx, tx, recipientUserID, t, splitID); err != nil {
-			return err
-		}
-	}
-	deepLink := splitDeepLink(&p.DebtID)
+	deepLink := debtDeepLink(p.DebtID)
 	return s.dispatchTx(ctx, tx, TypeDebtDisconnected, recipientUserID, &actorUserID, p, &deepLink, false)
 }

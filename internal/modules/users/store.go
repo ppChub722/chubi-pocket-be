@@ -129,12 +129,24 @@ func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfi
 	if err != nil {
 		return err
 	}
-	if err := saveSettingsTx(ctx, tx, id, acc, accSet, req.AutoCopyOwnEventBills); err != nil {
+	if err := saveSettingsTx(ctx, tx, id, acc, accSet, req.settingSwitches()); err != nil {
 		return err
 	}
 
-	if len(req.Preferences) > 0 {
-		patch, err := json.Marshal(req.Preferences)
+	prefs := req.Preferences
+	if pages, ok := prefs[PrefPagePrefs]; ok {
+		if err := savePagePrefsTx(ctx, tx, id, pages); err != nil {
+			return err
+		}
+		prefs = make(map[string]any, len(req.Preferences))
+		for k, v := range req.Preferences {
+			if k != PrefPagePrefs {
+				prefs[k] = v
+			}
+		}
+	}
+	if len(prefs) > 0 {
+		patch, err := json.Marshal(prefs)
 		if err != nil {
 			return fmt.Errorf("encode preferences patch: %w", err)
 		}
@@ -150,6 +162,40 @@ func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfi
 	}
 
 	return tx.Commit(ctx)
+}
+
+// savePagePrefsTx — page_prefs merged per page (P6): a page's object replaces its entry, a null
+// entry removes it, a null page_prefs removes every page.
+func savePagePrefsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, pages any) error {
+	if pages == nil {
+		_, err := tx.Exec(ctx, `UPDATE user_preferences SET preferences = preferences - 'page_prefs',
+			updated_by_user_id = $1 WHERE user_id = $1`, userID)
+		return err
+	}
+	set := map[string]any{}
+	reset := []string{}
+	for page, entry := range pages.(map[string]any) {
+		if entry == nil {
+			reset = append(reset, page)
+		} else {
+			set[page] = entry
+		}
+	}
+	patch, err := json.Marshal(set)
+	if err != nil {
+		return fmt.Errorf("encode page_prefs: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE user_preferences
+		SET preferences = jsonb_set(preferences, '{page_prefs}',
+		        (CASE WHEN jsonb_typeof(preferences->'page_prefs') = 'object' THEN preferences->'page_prefs'
+		              ELSE '{}'::jsonb END || $2::jsonb) - $3::text[]),
+		    updated_by_user_id = $1
+		WHERE user_id = $1`, userID, patch, reset)
+	if err != nil {
+		return fmt.Errorf("merge page_prefs: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) SetStatus(ctx context.Context, id uuid.UUID, status string) error {

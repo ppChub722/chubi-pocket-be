@@ -59,7 +59,7 @@ func LoadMemberRefs(ctx context.Context, q Querier, callerUserID uuid.UUID, ids 
 		return out, nil
 	}
 	rows, err := q.Query(ctx, `SELECT pm.id, pm.user_id,
-			COALESCE(u.display_name, pm.display_name), COALESCE(u.icon_code, pm.icon_code)
+			COALESCE(u.display_name, pm.display_name), COALESCE(u.icon_code, pm.icon_code), pm.removed_at IS NOT NULL
 		FROM project_members pm LEFT JOIN users u ON u.id = pm.user_id
 		WHERE pm.id = ANY($1::uuid[])`, missing)
 	if err != nil {
@@ -72,7 +72,7 @@ func LoadMemberRefs(ctx context.Context, q Querier, callerUserID uuid.UUID, ids 
 			r    MemberRef
 			icon []byte
 		)
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Name, &icon); err != nil {
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Name, &icon, &r.Removed); err != nil {
 			return nil, err
 		}
 		r.Icon = IconFromJSON(icon)

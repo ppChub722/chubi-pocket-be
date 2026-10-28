@@ -219,33 +219,37 @@ func (s *Service) applyBillToTxTx(ctx context.Context, tx pgx.Tx, userID, txID u
 	return touched, nil
 }
 
-// ApplyEventToTx — POST /transactions/{id}/apply-event: "อัปเดตตามอีเวนต์" whenever I choose,
-// computed from the bill as it is now.
+// ApplyEventToTx — POST /transactions/{id}/apply-event: "อัปเดตตามอีเวนต์" whenever I choose. 0.4.1-2
+// S7: the same as POST /event-bills/{bill}/apply for this transaction's bill (my debts of it too,
+// effects); the row answers as it is now (none when my copy went: I have no part any more).
 func (s *Service) ApplyEventToTx(ctx context.Context, userID, txID uuid.UUID) (*transactions.WriteResult, error) {
 	if s.txs == nil {
 		return nil, errors.New("transactions module not wired")
 	}
-	tx, err := s.store.Pool().Begin(ctx)
+	var source *uuid.UUID
+	err := s.store.db.QueryRow(ctx, `SELECT source_project_transaction_id FROM transactions WHERE id = $1 AND user_id = $2`,
+		txID, userID).Scan(&source)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, transactions.ErrTxNotFound
+	}
 	if err != nil {
-		return nil, fmt.Errorf("begin: %w", err)
+		return nil, fmt.Errorf("my tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
-	touched, err := s.applyBillToTxTx(ctx, tx, userID, txID)
-	if err != nil {
-		return nil, err
+	if source == nil {
+		return nil, ErrBillNotInProject
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-	d, err := s.txs.Get(ctx, userID, txID)
-	if err != nil {
-		return nil, err
-	}
-	balances, err := shared.LoadWalletBalances(ctx, s.store.Pool(), touched)
+	res, err := s.ApplyBill(ctx, userID, *source)
 	if err != nil {
 		return nil, err
 	}
-	return &transactions.WriteResult{Rows: []transactions.TransactionDetail{*d}, AccountBalances: balances}, nil
+	out := &transactions.WriteResult{Rows: []transactions.TransactionDetail{}, AccountBalances: res.Effects.AccountBalances,
+		Effects: res.Effects}
+	if d, err := s.txs.Get(ctx, userID, txID); err == nil {
+		out.Rows = append(out.Rows, *d)
+	} else if !errors.Is(err, transactions.ErrTxNotFound) {
+		return nil, err
+	}
+	return out, nil
 }
 
 // myLinkedTxTx — my transaction linked to a bill: the one it was made from, or my copy (a copy may

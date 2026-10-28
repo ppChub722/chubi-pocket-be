@@ -197,21 +197,9 @@ func (s *Service) addPeopleBillTx(
 			mine = &d.ID
 		}
 	}
-	// A linked payer hears that a bill was recorded for them (as with any bill recorded for someone).
-	if s.notifs != nil {
-		var payerUser *uuid.UUID
-		if err := tx.QueryRow(ctx, `SELECT user_id FROM project_members WHERE id = $1`, payerID).Scan(&payerUser); err != nil {
-			return uuid.Nil, nil, fmt.Errorf("payer: %w", err)
-		}
-		if payerUser != nil && *payerUser != callerUserID {
-			full, err := s.store.GetPTTx(ctx, tx, row.ID)
-			if err != nil {
-				return uuid.Nil, nil, err
-			}
-			if err := s.notifyRecordedTx(ctx, tx, *payerUser, payerID, callerUserID, full); err != nil {
-				return uuid.Nil, nil, err
-			}
-		}
+	// 0.4.1-2 S6: every other member with a part gets the bill by their switch (shared_bill_created).
+	if err := s.fanOutTx(ctx, tx, callerUserID, row.ID, true, nil); err != nil {
+		return uuid.Nil, nil, err
 	}
 	return row.ID, mine, nil
 }

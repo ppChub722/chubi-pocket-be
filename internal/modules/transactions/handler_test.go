@@ -619,6 +619,21 @@ func TestFormOptionsHandler(t *testing.T) {
 	if opts.FeeCategoryID != nil {
 		t.Errorf("fee_category_id on an income category = %v, want null", opts.FeeCategoryID)
 	}
+
+	// X10: the main wallet wins over the last one used; an archived main wallet falls back.
+	f.exec(`INSERT INTO user_notification_settings (user_id, default_account_id) VALUES ($1, $2)
+		ON CONFLICT (user_id) DO UPDATE SET default_account_id = EXCLUDED.default_account_id`, f.me, f.walletB)
+	opts = decode[transactions.FormOptions](t,
+		f.call("getTransactionFormOptions", "GET", "/api/v1/transactions/form-options", nil, http.StatusOK))
+	if opts.DefaultAccountID == nil || *opts.DefaultAccountID != f.walletB || !opts.Accounts[0].IsDefault {
+		t.Errorf("default with a main wallet = %v, want B", opts.DefaultAccountID)
+	}
+	f.exec(`UPDATE user_notification_settings SET default_account_id = $2 WHERE user_id = $1`, f.me, archived)
+	opts = decode[transactions.FormOptions](t,
+		f.call("getTransactionFormOptions", "GET", "/api/v1/transactions/form-options", nil, http.StatusOK))
+	if opts.DefaultAccountID == nil || *opts.DefaultAccountID != f.walletA {
+		t.Errorf("default with an archived main wallet = %v, want the last used (A)", opts.DefaultAccountID)
+	}
 }
 
 func TestSummaryHandler(t *testing.T) {

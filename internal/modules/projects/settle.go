@@ -5,15 +5,16 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// SettleLine — From owes To Amount. Recorded (a line with me in it): I already have a debt
-// for exactly this line (POST /personal-debts/…/entries with event_id).
+// SettleLine — From owes To Amount. Recorded (0.4.1-2 V8, a line with me in it): a real pair whose
+// bills are all claimed into my book (listClaimableBills), or — any line — I booked the event's
+// fewest-transfers settle (bookEventSettle). The 0.4.0-4 "{event_id}" debt per line is retired.
 type SettleLine struct {
 	From     shared.MemberRef `json:"from"`
 	To       shared.MemberRef `json:"to"`
@@ -21,61 +22,10 @@ type SettleLine struct {
 	Recorded bool             `json:"recorded"`
 }
 
-// eventDebt — one of my debts recording an event's จัดการ line (source event, no bill).
-type eventDebt struct {
-	direction    string
-	amount       float64
-	personName   string
-	linkedUserID *uuid.UUID
-	contactName  *string
-}
-
-func loadEventDebts(ctx context.Context, q shared.Querier, userID, eventID uuid.UUID) ([]eventDebt, error) {
-	rows, err := q.Query(ctx, `SELECT d.direction, d.amount::float8, d.counterparty_person_name,
-			c.linked_user_id, c.display_name
-		FROM personal_debts d
-		LEFT JOIN contacts c ON c.id = d.counterparty_contact_id
-		WHERE d.user_id = $1 AND d.project_id = $2 AND d.source_kind = 'event'
-		  AND d.source_project_transaction_id IS NULL`, userID, eventID)
-	if err != nil {
-		return nil, fmt.Errorf("settle debts: %w", err)
-	}
-	defer rows.Close()
-	var out []eventDebt
-	for rows.Next() {
-		var d eventDebt
-		if err := rows.Scan(&d.direction, &d.amount, &d.personName, &d.linkedUserID, &d.contactName); err != nil {
-			return nil, err
-		}
-		out = append(out, d)
-	}
-	return out, rows.Err()
-}
-
-// recorded: the line has me in it and one of debts records it (my side, the other member,
-// the same amount).
-func (l SettleLine) recorded(debts []eventDebt) bool {
-	var other shared.MemberRef
-	dir := ""
-	switch {
-	case l.From.IsMe:
-		other, dir = l.To, "received" // I owe them
-	case l.To.IsMe:
-		other, dir = l.From, "paid" // they owe me
-	default:
-		return false
-	}
-	for _, d := range debts {
-		if d.direction != dir || math.Abs(d.amount-l.Amount) > 0.005 {
-			continue
-		}
-		if (d.linkedUserID != nil && other.UserID != nil && *d.linkedUserID == *other.UserID) ||
-			strings.EqualFold(strings.TrimSpace(d.personName), strings.TrimSpace(other.Name)) ||
-			(d.contactName != nil && strings.EqualFold(strings.TrimSpace(*d.contactName), strings.TrimSpace(other.Name))) {
-			return true
-		}
-	}
-	return false
+// settleQ — the pool or a DB transaction.
+type settleQ interface {
+	shared.Querier
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 // EventSettle — who pays whom to clear the event: Pairs nets each two members' own bills and
@@ -83,6 +33,9 @@ func (l SettleLine) recorded(debts []eventDebt) bool {
 type EventSettle struct {
 	Pairs      []SettleLine `json:"pairs"`
 	Simplified []SettleLine `json:"simplified"`
+	// V12: the simplified lines may be booked only after completion; my one-time booking, if done.
+	SimplifiedAvailable bool             `json:"simplified_available"`
+	MySettleBooking     *MySettleBooking `json:"my_settle_booking"`
 }
 
 type memberPair struct{ a, b uuid.UUID }
@@ -93,19 +46,34 @@ type settleMove struct {
 }
 
 func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID) (*EventSettle, error) {
-	if _, err := s.store.GetByIDForCaller(ctx, userID, id); err != nil {
+	p, err := s.store.GetByIDForCaller(ctx, userID, id)
+	if err != nil {
 		return nil, err
 	}
-	// Every split child owes its parent's member (bills and paybacks alike).
-	rows, err := s.store.db.Query(ctx, `
-		SELECT c.transaction_member_id, p.transaction_member_id, SUM(c.amount)::float8
-		FROM project_transactions c
-		JOIN project_transactions p ON p.id = c.parent_project_transaction_id
-		WHERE p.project_id = $1 AND p.type IN ('expense', 'payback')
-		  AND c.transaction_member_id <> p.transaction_member_id
-		GROUP BY 1, 2`, id)
+	pairs, simplified, err := settleMoves(ctx, s.store.db, id)
 	if err != nil {
-		return nil, fmt.Errorf("settle: %w", err)
+		return nil, err
+	}
+	out, err := s.settleView(ctx, s.store.db, userID, id, pairs, simplified)
+	if err != nil {
+		return nil, err
+	}
+	out.SimplifiedAvailable = p.CompletedAt != nil
+	if out.MySettleBooking, err = mySettleBooking(ctx, s.store.db, id, userID); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// settleMoves — the real pairs and the fewest-transfer lines of an event.
+func settleMoves(ctx context.Context, q shared.Querier, id uuid.UUID) ([]settleMove, []settleMove, error) {
+	// Every split child owes its parent's member (bills and paybacks alike); on an income bill the
+	// member who received owes each split their share (V14, Q-E3: the mirror of an expense).
+	// Multi-payer (migration 105): the view splits each share over the payers by what they paid.
+	rows, err := q.Query(ctx, `SELECT debtor, creditor, SUM(amount)::float8 FROM project_bill_pairs
+		WHERE project_id = $1 GROUP BY 1, 2`, id)
+	if err != nil {
+		return nil, nil, fmt.Errorf("settle: %w", err)
 	}
 	// owes[{a,b}] > 0: a owes b (a < b by string order).
 	owes := map[memberPair]float64{}
@@ -115,7 +83,7 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID) (*EventSettl
 		var amount float64
 		if err := rows.Scan(&debtor, &creditor, &amount); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		if debtor.String() < creditor.String() {
 			owes[memberPair{debtor, creditor}] += amount
@@ -127,7 +95,7 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID) (*EventSettl
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var pairs []settleMove
@@ -139,8 +107,10 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID) (*EventSettl
 			pairs = append(pairs, settleMove{k.b, k.a, round2(-v)})
 		}
 	}
-	simplified := simplifyNets(net)
+	return pairs, simplifyNets(net), nil
+}
 
+func (s *Service) settleView(ctx context.Context, q settleQ, userID, id uuid.UUID, pairs, simplified []settleMove) (*EventSettle, error) {
 	ids := map[uuid.UUID]bool{}
 	for _, l := range pairs {
 		ids[l.from], ids[l.to] = true, true
@@ -149,25 +119,45 @@ func (s *Service) Settle(ctx context.Context, userID, id uuid.UUID) (*EventSettl
 	for m := range ids {
 		memberIDs = append(memberIDs, m)
 	}
-	refs, err := LoadMemberRefs(ctx, s.store.db, userID, memberIDs)
+	refs, err := LoadMemberRefs(ctx, q, userID, memberIDs)
 	if err != nil {
 		return nil, err
 	}
-	debts, err := loadEventDebts(ctx, s.store.db, userID, id)
+	// V8: recorded = claimed (every bill of that pair in my book), or my settle booking
+	booked, err := mySettleBooking(ctx, q, id, userID)
 	if err != nil {
 		return nil, err
 	}
-	line := func(m settleMove) SettleLine {
+	var me uuid.UUID
+	if err := q.QueryRow(ctx, `SELECT id FROM project_members WHERE project_id = $1 AND user_id = $2`, id, userID).Scan(&me); err != nil {
+		return nil, ErrNotMember
+	}
+	bills, err := claimablePairsTx(ctx, q, userID, id, me, nil)
+	if err != nil {
+		return nil, err
+	}
+	open := map[uuid.UUID]bool{}
+	for _, b := range bills {
+		if !b.Claimed {
+			open[b.other] = true
+		}
+	}
+	line := func(m settleMove, simplified bool) SettleLine {
 		l := SettleLine{From: refs[m.from], To: refs[m.to], Amount: m.amount}
-		l.Recorded = l.recorded(debts)
+		other := m.to
+		if m.to == me {
+			other = m.from
+		}
+		mine := m.from == me || m.to == me
+		l.Recorded = mine && (booked != nil || (!simplified && !open[other]))
 		return l
 	}
 	out := &EventSettle{Pairs: []SettleLine{}, Simplified: []SettleLine{}}
 	for _, l := range pairs {
-		out.Pairs = append(out.Pairs, line(l))
+		out.Pairs = append(out.Pairs, line(l, false))
 	}
 	for _, l := range simplified {
-		out.Simplified = append(out.Simplified, line(l))
+		out.Simplified = append(out.Simplified, line(l, true))
 	}
 	sortSettle(out.Pairs)
 	sortSettle(out.Simplified)

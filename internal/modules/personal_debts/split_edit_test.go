@@ -2,9 +2,7 @@ package personal_debts
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -90,6 +88,19 @@ func newSplitEditFixture(t *testing.T) *splitEditFixture {
 	return f
 }
 
+// partnerBook — what the partner's own book holds (0.4.1-2 S16: a split with a linked contact makes
+// no copy there): their debt rows and split notices.
+func (f *splitEditFixture) partnerBook(t *testing.T, user uuid.UUID) (debts, notices int) {
+	t.Helper()
+	if err := f.pool.QueryRow(f.ctx, `SELECT
+			(SELECT COUNT(*) FROM personal_debts WHERE user_id = $1),
+			(SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1 AND type IN ('split_created', 'split_changed'))`,
+		user).Scan(&debts, &notices); err != nil {
+		t.Fatalf("partner book: %v", err)
+	}
+	return debts, notices
+}
+
 func (f *splitEditFixture) splits(t *testing.T) map[string]transactions.SplitRef {
 	t.Helper()
 	d, err := f.txs.Get(f.ctx, f.me, f.billID)
@@ -114,83 +125,28 @@ func keep(s transactions.SplitRef, amount float64) transactions.SplitEdit {
 	return transactions.SplitEdit{DebtID: &id, OwedAmount: amount}
 }
 
-func (f *splitEditFixture) changes(t *testing.T) []notifications.Notification {
-	t.Helper()
-	rows, err := f.pool.Query(f.ctx, `SELECT id, payload, actioned_at IS NOT NULL FROM notifications
-		WHERE recipient_user_id = $1 AND type = 'split_changed' ORDER BY created_at, id`, f.partner)
-	if err != nil {
-		t.Fatalf("query notifications: %v", err)
-	}
-	defer rows.Close()
-	var out []notifications.Notification
-	for rows.Next() {
-		var (
-			n        notifications.Notification
-			actioned bool
-		)
-		if err := rows.Scan(&n.ID, &n.Payload, &actioned); err != nil {
-			t.Fatal(err)
-		}
-		if actioned {
-			n.ActionedAt = &n.CreatedAt
-		}
-		out = append(out, n)
-	}
-	return out
-}
-
-func (f *splitEditFixture) mirror(t *testing.T) *Entry {
-	t.Helper()
-	d, err := scanEntry(f.pool.QueryRow(f.ctx, `SELECT `+entryColumns+` FROM personal_debts
-		WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, f.partner))
-	if err != nil {
-		return nil
-	}
-	return d
-}
-
 func TestEditSplits(t *testing.T) {
 	f := newSplitEditFixture(t)
 	s := f.splits(t)
-	if m := f.mirror(t); m == nil || m.Amount != 100 {
-		t.Fatalf("partner mirror after create = %+v, want 100 (split_created auto)", m)
-	}
+	partnerID := s["Partner"].DebtID
 
 	if err := f.edit(t, keep(s["Partner"], 120),
 		transactions.SplitEdit{PersonName: "Cee", OwedAmount: 50}); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
 	s = f.splits(t)
-	if len(s) != 2 || s["Partner"].Amount != 120 || s["Cee"].Amount != 50 {
+	if len(s) != 2 || s["Partner"].Amount != 120 || s["Cee"].Amount != 50 || s["Partner"].DebtID != partnerID {
 		t.Fatalf("after edit: %+v", s)
-	}
-	ch := f.changes(t)
-	if len(ch) != 1 {
-		t.Fatalf("partner got %d split_changed, want 1 (Beam/Cee aren't linked)", len(ch))
-	}
-	if m := f.mirror(t); m.Amount != 100 {
-		t.Errorf("mirror changed without the partner's tap: %v", m.Amount)
 	}
 
 	if err := f.edit(t, keep(s["Partner"], 130), keep(s["Cee"], 50)); err != nil {
 		t.Fatalf("edit 2: %v", err)
 	}
-	ch = f.changes(t)
-	if len(ch) != 2 {
-		t.Fatalf("want 2 split_changed, got %d", len(ch))
+	if p := f.splits(t)["Partner"]; p.Amount != 130 || p.DebtID != partnerID {
+		t.Errorf("Partner after edit 2 = %+v, want 130 on the same debt", p)
 	}
-	if _, err := f.debts.ApplySplitChange(f.ctx, f.partner, ch[0].ID); !errors.Is(err, ErrSplitChangeStale) {
-		t.Errorf("apply superseded: err = %v, want stale", err)
-	}
-	res, err := f.debts.ApplySplitChange(f.ctx, f.partner, ch[1].ID)
-	if err != nil || res.Result != "updated" || res.Entry == nil || res.Entry.Amount != 130 || res.PersonBalance.Net != -130 {
-		t.Fatalf("apply newest: %+v, %v", res, err)
-	}
-	if _, err := f.debts.ApplySplitChange(f.ctx, f.partner, ch[1].ID); !errors.Is(err, ErrNotificationActioned) {
-		t.Errorf("apply twice: err = %v, want actioned", err)
-	}
-	if _, err := f.debts.ApplySplitChange(f.ctx, f.me, ch[1].ID); !errors.Is(err, notifications.ErrNotForYou) {
-		t.Errorf("apply someone else's: err = %v", err)
+	if debts, notices := f.partnerBook(t, f.partner); debts != 0 || notices != 0 {
+		t.Errorf("partner's book = %d debts / %d split notices, want none (no mirror)", debts, notices)
 	}
 
 	if err := f.edit(t, keep(s["Partner"], 200), keep(s["Cee"], 150)); !errors.Is(err, transactions.ErrSplitsExceedAmount) {
@@ -210,84 +166,19 @@ func TestEditSplits(t *testing.T) {
 	if err := f.edit(t, transactions.SplitEdit{DebtID: &other, OwedAmount: 10}); !errors.Is(err, transactions.ErrSplitUnknownDebt) {
 		t.Errorf("foreign debt id: err = %v", err)
 	}
-	// A pending change whose split was deleted since → stale.
-	if err := f.edit(t, keep(s["Partner"], 140), keep(s["Cee"], 50)); err != nil {
-		t.Fatalf("edit 3: %v", err)
-	}
-	ch = f.changes(t)
-	pending := ch[len(ch)-1]
-	if _, err := f.debts.DeleteEntry(f.ctx, f.me, s["Partner"].DebtID); err != nil {
-		t.Fatalf("delete split debt: %v", err)
-	}
-	if _, err := f.debts.ApplySplitChange(f.ctx, f.partner, pending.ID); !errors.Is(err, ErrSplitChangeStale) {
-		t.Errorf("apply after the split was deleted: err = %v, want stale", err)
-	}
-}
-
-func TestEditSplitsRemovePartner(t *testing.T) {
-	f := newSplitEditFixture(t)
-	s := f.splits(t)
-	if err := f.edit(t, keep(s["Beam"], 100)); err != nil {
+	// Removing the linked split deletes my debt row only.
+	if err := f.edit(t, keep(s["Cee"], 50)); err != nil {
 		t.Fatalf("remove partner: %v", err)
 	}
-	ch := f.changes(t)
-	if len(ch) != 1 {
-		t.Fatalf("want 1 split_changed, got %d", len(ch))
+	if _, ok := f.splits(t)["Partner"]; ok {
+		t.Errorf("Partner's split still on the bill")
 	}
-	var p notifications.SplitChangedPayload
-	_ = json.Unmarshal(ch[0].Payload, &p)
-	if p.Change != notifications.SplitChangeRemoved || p.OldAmount != 100 || p.Description == nil || *p.Description != "Dinner" {
-		t.Errorf("payload = %+v", p)
+	var left int
+	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM personal_debts WHERE id = $1`, partnerID).Scan(&left); err != nil || left != 0 {
+		t.Errorf("removed split's debt left = %d (%v)", left, err)
 	}
-	res, err := f.debts.ApplySplitChange(f.ctx, f.partner, ch[0].ID)
-	if err != nil || res.Result != "deleted" {
-		t.Fatalf("apply removed: %+v, %v", res, err)
-	}
-	if m := f.mirror(t); m != nil {
-		t.Errorf("partner mirror still there: %+v", m)
-	}
-}
-
-func TestEditSplitsBeforePartnerAdded(t *testing.T) {
-	f := newSplitEditFixture(t)
-	if _, err := f.pool.Exec(f.ctx, `UPDATE user_notification_settings SET auto_types = '{}' WHERE user_id = $1`, f.partner); err != nil {
-		t.Fatal(err)
-	}
-	s := f.splits(t)
-	if err := f.edit(t, keep(s["Beam"], 100),
-		transactions.SplitEdit{PersonName: "Partner", ContactID: &f.partnerContact, OwedAmount: 60}); err != nil {
-		t.Fatalf("re-add partner: %v", err)
-	}
-	s = f.splits(t)
-	var nID uuid.UUID
-	var payload []byte
-	if err := f.pool.QueryRow(f.ctx, `SELECT id, payload FROM notifications
-		WHERE recipient_user_id = $1 AND type = 'split_created' AND actioned_at IS NULL`, f.partner).Scan(&nID, &payload); err != nil {
-		t.Fatalf("pending split_created: %v", err)
-	}
-	if err := f.edit(t, keep(s["Beam"], 100), keep(s["Partner"], 80)); err != nil {
-		t.Fatalf("re-amount: %v", err)
-	}
-	var p notifications.SplitCreatedPayload
-	_ = f.pool.QueryRow(f.ctx, `SELECT payload FROM notifications WHERE id = $1`, nID).Scan(&payload)
-	_ = json.Unmarshal(payload, &p)
-	if p.Amount != 80 {
-		t.Errorf("pending split_created amount = %v, want 80", p.Amount)
-	}
-	if err := f.edit(t, keep(s["Beam"], 100)); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-	if _, err := f.debts.AcceptSplitRequest(f.ctx, f.partner, nID); !errors.Is(err, ErrSplitChangeStale) {
-		t.Errorf("accept after removal: err = %v, want stale", err)
-	}
-	// The first (auto-added) mirror's change notices exist from removing the original partner split;
-	// no notice for the never-added one.
-	for _, n := range f.changes(t) {
-		var cp notifications.SplitChangedPayload
-		_ = json.Unmarshal(n.Payload, &cp)
-		if cp.SplitID == s["Partner"].DebtID {
-			t.Errorf("split_changed sent for a split the partner never added")
-		}
+	if debts, notices := f.partnerBook(t, f.partner); debts != 0 || notices != 0 {
+		t.Errorf("partner's book after the removal = %d debts / %d split notices, want none", debts, notices)
 	}
 }
 
@@ -303,16 +194,6 @@ func TestEditSplitsIdentity(t *testing.T) {
 		e.PersonName, e.ContactID = name, contact
 		return e
 	}
-	countNotifs := func(user uuid.UUID, typ string) int {
-		t.Helper()
-		var n int
-		if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM notifications
-			WHERE recipient_user_id = $1 AND type = $2`, user, typ).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		return n
-	}
-	partnerNotifs := countNotifs(f.partner, "split_created") + countNotifs(f.partner, "split_changed")
 
 	if err := f.edit(t, ident(s["Beam"], "Bam", nil), keep(s["Partner"], 100)); err != nil {
 		t.Fatalf("rename: %v", err)
@@ -320,9 +201,6 @@ func TestEditSplitsIdentity(t *testing.T) {
 	s = f.splits(t)
 	if r, ok := s["Bam"]; !ok || r.DebtID != beamID || !r.Paid || r.ContactID != nil {
 		t.Fatalf("renamed split = %+v, want same debt, still paid, no contact", s["Bam"])
-	}
-	if n := countNotifs(f.partner, "split_created") + countNotifs(f.partner, "split_changed"); n != partnerNotifs {
-		t.Errorf("rename notified the partner: %d -> %d", partnerNotifs, n)
 	}
 
 	bee := testdb.User(t, f.pool)
@@ -359,16 +237,10 @@ func TestEditSplitsIdentity(t *testing.T) {
 	if !ok || r.DebtID != beamID || !r.Paid || r.ContactID == nil || *r.ContactID != beeContact {
 		t.Fatalf("linked split = %+v, want same debt, still paid, Bee's contact", r)
 	}
-	if n := countNotifs(bee, "split_created"); n != 1 {
-		t.Errorf("split_created to Bee = %d, want 1", n)
-	}
-	var mirrorAmount float64
-	if err := f.pool.QueryRow(f.ctx, `SELECT amount FROM personal_debts WHERE user_id = $1 AND direction = 'received'`,
-		bee).Scan(&mirrorAmount); err != nil || mirrorAmount != 100 {
-		t.Errorf("Bee's mirror amount = %v (err %v), want 100", mirrorAmount, err)
+	if debts, notices := f.partnerBook(t, bee); debts != 0 || notices != 0 {
+		t.Errorf("Bee's book after the link = %d debts / %d split notices, want none (no mirror)", debts, notices)
 	}
 
-	beeNotifs := countNotifs(bee, "split_created") + countNotifs(bee, "split_changed")
 	if err := f.edit(t, ident(s["Bee"], "Beatrice", nil), keep(s["Partner"], 100)); err != nil {
 		t.Fatalf("rename a contact split: %v", err)
 	}
@@ -379,61 +251,43 @@ func TestEditSplitsIdentity(t *testing.T) {
 	if r, ok := s["Bee"]; !ok || r.DebtID != beamID || r.ContactID == nil || *r.ContactID != beeContact {
 		t.Fatalf("contact split after a name-only edit = %+v, want unchanged (Bee, same debt and contact)", s["Bee"])
 	}
-	if n := countNotifs(bee, "split_created") + countNotifs(bee, "split_changed"); n != beeNotifs {
-		t.Errorf("a name-only edit notified Bee: %d -> %d", beeNotifs, n)
-	}
 	if err := f.edit(t, ident(s["Bee"], "Bee", &beeContact), keep(s["Partner"], 100)); err != nil {
 		t.Errorf("unchanged identity sent back: %v", err)
 	}
 
-	partnerBefore := countNotifs(f.partner, "split_created") + countNotifs(f.partner, "split_changed")
+	// 0.4.1-2 S16: a linked split's contact change relinks in place (same debt id, no remove + add).
+	partnerID := s["Partner"].DebtID
 	partnerRow := keep(s["Partner"], 100)
 	partnerRow.PersonName, partnerRow.ContactIDSet = "Cousin", true
 	if err := f.edit(t, partnerRow, keep(s["Bee"], 100)); err != nil {
-		t.Fatalf("swap a linked split to a free name: %v", err)
+		t.Fatalf("change a linked split to a free name: %v", err)
 	}
 	s = f.splits(t)
 	if _, ok := s["Partner"]; ok {
-		t.Errorf("the old linked split should be gone (nothing repaid)")
+		t.Errorf("the split should no longer show Partner: %+v", s)
 	}
 	cousin, ok := s["Cousin"]
-	if !ok || cousin.Amount != 100 || cousin.ContactID != nil || cousin.DebtID == s["Bee"].DebtID {
-		t.Fatalf("new split = %+v, want a new free-name row of 100", cousin)
-	}
-	if n := countNotifs(f.partner, "split_created") + countNotifs(f.partner, "split_changed"); n < partnerBefore {
-		t.Errorf("old partner notifications vanished: %d -> %d", partnerBefore, n)
-	}
-	if ch := f.changes(t); len(ch) != 1 || !strings.Contains(string(ch[0].Payload), `"removed"`) {
-		t.Errorf("old Partner should hear one split_changed (removed), got %d", len(ch))
+	if !ok || cousin.Amount != 100 || cousin.ContactID != nil || cousin.DebtID != partnerID {
+		t.Fatalf("Cousin split = %+v, want the same debt (%s) as a free-name row of 100", cousin, partnerID)
 	}
 
-	beeChanged := countNotifs(bee, "split_changed")
-	partnerCreated := countNotifs(f.partner, "split_created")
 	beeRow := keep(s["Bee"], 100)
 	beeRow.ContactID, beeRow.ContactIDSet = &f.partnerContact, true
 	if err := f.edit(t, beeRow, keep(s["Cousin"], 100)); err != nil {
-		t.Fatalf("swap a linked split to another linked contact: %v", err)
+		t.Fatalf("change a linked split to another linked contact: %v", err)
 	}
 	s = f.splits(t)
-	var old *transactions.SplitRef
-	for _, r := range f.splits(t) {
-		if r.DebtID == beamID {
-			r := r
-			old = &r
-		}
-	}
-	if old != nil {
-		t.Errorf("old Bee split = %+v, want it gone (remove + add)", old)
+	if _, ok := s["Bee"]; ok {
+		t.Errorf("the split should no longer show Bee: %+v", s)
 	}
 	np, ok := s["Partner"]
-	if !ok || np.Amount != 100 || np.Paid || np.ContactID == nil || *np.ContactID != f.partnerContact {
-		t.Fatalf("new Partner split = %+v, want a fresh row of 100", np)
+	if !ok || np.DebtID != beamID || np.Amount != 100 || !np.Paid || np.ContactID == nil || *np.ContactID != f.partnerContact {
+		t.Fatalf("Partner split = %+v, want the same debt (%s), 100, still labelled paid", np, beamID)
 	}
-	if n := countNotifs(bee, "split_changed"); n != beeChanged+1 {
-		t.Errorf("Bee's split_changed = %d, want %d", n, beeChanged+1)
-	}
-	if n := countNotifs(f.partner, "split_created"); n != partnerCreated+1 {
-		t.Errorf("Partner's split_created = %d, want %d", n, partnerCreated+1)
+	for _, u := range []uuid.UUID{f.partner, bee} {
+		if debts, notices := f.partnerBook(t, u); debts != 0 || notices != 0 {
+			t.Errorf("%s's book = %d debts / %d split notices, want none", u, debts, notices)
+		}
 	}
 }
 
@@ -517,21 +371,5 @@ func TestEditSplitsIdentityUnlinkedContact(t *testing.T) {
 	})
 	beeContact := newContact("Bee", &bee)
 	check("link to Bee (app user)", edit(kept(&beeContact, true, "")), "Bee", &beeContact)
-	var n int
-	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM notifications
-		WHERE recipient_user_id = $1 AND type = 'split_created'`, bee).Scan(&n); err != nil || n != 1 {
-		t.Errorf("split_created to Bee = %d (err %v), want 1", n, err)
-	}
-
-	if err := f.edit(t, kept(nil, true, "Beam"), keep(f.splits(t)["Partner"], 100)); err != nil {
-		t.Fatalf("drop a linked contact: %v", err)
-	}
-	var gone bool
-	if err := f.pool.QueryRow(f.ctx, `SELECT NOT EXISTS (SELECT 1 FROM personal_debts WHERE id = $1)`,
-		beamID).Scan(&gone); err != nil || !gone {
-		t.Errorf("old Bee row should be gone (err %v)", err)
-	}
-	if r, ok := f.splits(t)["Beam"]; !ok || r.DebtID == beamID || r.Amount != 100 || r.ContactID != nil {
-		t.Errorf("new split = %+v, want a fresh free-name row of 100", r)
-	}
+	check("drop a linked contact (in place)", edit(kept(nil, true, "Beam")), "Beam", nil)
 }

@@ -3,6 +3,7 @@ package projects
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -18,7 +19,7 @@ func eventsEngine(f *qcFixture, as uuid.UUID) http.Handler {
 	return apitest.CountedEngine(as, func(g *gin.RouterGroup) {
 		g.POST("/projects", h.Create)
 		g.GET("/projects", h.List)
-		g.POST("/projects/quick", h.QuickCreate)
+		legacyRoutes(g, f.svc) // V16: retired routes, test setup only
 		g.POST("/projects/link-requests/:notification_id/accept", h.AcceptLinkRequest)
 		g.POST("/projects/link-requests/:notification_id/reject", h.RejectLinkRequest)
 		g.GET("/projects/:id", h.Get)
@@ -27,22 +28,20 @@ func eventsEngine(f *qcFixture, as uuid.UUID) http.Handler {
 		g.DELETE("/projects/:id", h.Delete)
 		g.POST("/projects/:id/archive", h.Archive)
 		g.POST("/projects/:id/restore", h.Restore)
+		g.POST("/projects/:id/complete", h.Complete)
 		g.GET("/projects/:id/members", h.ListMembers)
 		g.POST("/projects/:id/members", h.AddMember)
 		g.PUT("/projects/:id/members/:member_id", h.UpdateMember)
 		g.DELETE("/projects/:id/members/:member_id", h.RemoveMember)
+		g.POST("/projects/:id/members/:member_id/assign", h.AssignRemoved)
 		g.POST("/projects/:id/members/:member_id/request-link", h.RequestLink)
 		g.POST("/projects/:id/transfer-ownership", h.TransferOwnership)
 		g.POST("/projects/:id/leave", h.Leave)
 		g.GET("/projects/:id/transactions", h.ListPT)
 		g.POST("/projects/:id/project-transactions", h.CreatePT)
-		g.POST("/projects/:id/bills", h.AddBills)
-		g.DELETE("/projects/:id/bills/:transaction_id", h.RemoveBill)
 		g.PUT("/projects/:id/project-transactions/:pt_id", h.UpdatePT)
 		g.DELETE("/projects/:id/project-transactions/:pt_id", h.DeletePT)
 		g.PUT("/projects/:id/project-transactions/:pt_id/mark", h.ToggleMark)
-		g.POST("/projects/:id/project-transactions/:pt_id/copy", h.CopyToPersonal)
-		g.PUT("/projects/:id/project-transactions/:pt_id/my-books", h.SetMyBooks)
 		g.GET("/projects/:id/summary", h.Summary)
 		g.GET("/projects/:id/settle", h.Settle)
 		g.POST("/projects/:id/people", h.ResolvePeople)
@@ -240,7 +239,7 @@ func TestEventsAPI(t *testing.T) {
 	}
 	billTxID := billTx.(*transactions.TransactionDetail).ID
 	pulled := me.do("POST", "/projects/"+id+"/bills", map[string]any{"transaction_ids": []uuid.UUID{billTxID}},
-		"addBillsToEvent", http.StatusOK)
+		"", http.StatusOK) // retired route (V16), no spec op
 	prow := list(pulled, "rows")[0].(map[string]any)
 	pulledID := prow["id"].(string)
 	if prow["linked"] != true || m(prow, "source_tx")["id"] != billTxID.String() ||
@@ -256,10 +255,15 @@ func TestEventsAPI(t *testing.T) {
 	if rows := list(beeBoard, "data"); len(rows) != 1 || rows[0].(map[string]any)["source_tx"] != nil || rows[0].(map[string]any)["linked"] != true {
 		t.Errorf("Bee's board = %v", rows)
 	}
+	// 0.4.1-2 rule b: another member's edit reaches my copy by MY switch; off → only the notice asks.
+	if _, err := f.pool.Exec(ctx, `INSERT INTO user_notification_settings (user_id, auto_sync_events) VALUES ($1, FALSE)
+		ON CONFLICT (user_id) DO UPDATE SET auto_sync_events = FALSE`, f.owner); err != nil {
+		t.Fatal(err)
+	}
 	bee.do("PUT", "/projects/"+id+"/project-transactions/"+pulledID, map[string]any{"amount": 210, "description": "Taxi home", "also_update_link": true},
 		"updateProjectTransaction", http.StatusOK)
 	if got := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE id = $1 AND amount = 200`, billTxID); got != 1 {
-		t.Errorf("another member's edit must not change my transaction")
+		t.Errorf("another member's edit must not change my transaction while my switch is off")
 	}
 	if got := f.countRows(t, `SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1 AND type = 'project_tx_changed'
 		AND payload->>'personal_transaction_id' = $2`, f.owner, billTxID.String()); got != 1 {
@@ -281,19 +285,14 @@ func TestEventsAPI(t *testing.T) {
 	if len(list(up, "account_balances")) != 1 || f.accountBalance(t, f.acctPersonal) != before-50 {
 		t.Errorf("linked edit: balances %v, wallet %v → %v", up["account_balances"], before, f.accountBalance(t, f.acctPersonal))
 	}
+	// 0.4.1-2 S9: the bill's values are edited in the bill form; the copy refuses them here.
 	amt := 230.0
-	if _, err := f.txs.UpdateWrite(ctx, f.owner, billTxID, transactions.UpdateRequest{Amount: &amt}); err != nil {
-		t.Fatalf("edit the source tx: %v", err)
+	if _, err := f.txs.UpdateWrite(ctx, f.owner, billTxID, transactions.UpdateRequest{Amount: &amt, AlsoUpdateLink: true}); !errors.As(err,
+		new(*transactions.SharedBillFieldError)) {
+		t.Fatalf("edit the source tx's amount: %v, want SHARED_BILL_FIELD", err)
 	}
 	if got := f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE id = $1 AND amount = 250`, uuid.MustParse(pulledID)); got != 1 {
-		t.Errorf("the bill changed without also_update_link")
-	}
-	amt = 220.0
-	if _, err := f.txs.UpdateWrite(ctx, f.owner, billTxID, transactions.UpdateRequest{Amount: &amt, AlsoUpdateLink: true}); err != nil {
-		t.Fatalf("edit the source tx: %v", err)
-	}
-	if got := f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE id = $1 AND amount = 220`, uuid.MustParse(pulledID)); got != 1 {
-		t.Errorf("the bill didn't follow its transaction")
+		t.Errorf("the bill changed from a refused edit")
 	}
 
 	imp := me.do("POST", "/projects/"+id+"/tags/import", map[string]any{}, "importProjectTags", http.StatusOK)
@@ -309,9 +308,10 @@ func TestEventsAPI(t *testing.T) {
 
 	detail := me.do("GET", "/projects/"+id+"/detail", nil, "getProjectDetail", http.StatusOK)
 	// the event page reads each section once: members first, the summary and the board reuse them
-	// (the budget excludes the auth middleware's one user lookup)
-	if status, _, n := apitest.DoCounted(t, me.r, "GET", "/api/v1/projects/"+id+"/detail", nil); status != http.StatusOK || n > 9 {
-		t.Errorf("the event detail: status %d, %d queries, budget 9", status, n)
+	// (the budget excludes the auth middleware's one user lookup; +1 in 0.4.1-2 for the caller's
+	// prefs / auto-sync switch read)
+	if status, _, n := apitest.DoCounted(t, me.r, "GET", "/api/v1/projects/"+id+"/detail", nil); status != http.StatusOK || n > 10 {
+		t.Errorf("the event detail: status %d, %d queries, budget 10", status, n)
 	} else {
 		t.Logf("event detail: %d queries", n)
 	}
@@ -321,7 +321,7 @@ func TestEventsAPI(t *testing.T) {
 	me.do("GET", "/projects/"+id+"/members", nil, "listProjectMembers", http.StatusOK)
 	me.do("GET", "/projects/"+id+"/summary", nil, "getProjectSummary", http.StatusOK)
 
-	cp := bee.do("POST", "/projects/"+id+"/project-transactions/"+pulledID+"/copy", nil, "copyProjectTransactionToPersonal", http.StatusCreated)
+	cp := bee.do("POST", "/projects/"+id+"/project-transactions/"+pulledID+"/copy", nil, "", http.StatusCreated) // retired route (V16)
 	if n(m(cp, "transaction"), "amount") != 50 {
 		t.Errorf("Bee's copy = %v", m(cp, "transaction"))
 	}
@@ -343,7 +343,7 @@ func TestEventsAPI(t *testing.T) {
 	if gone["removed_row_id"] != ptID {
 		t.Errorf("removed_row_id = %v", gone["removed_row_id"])
 	}
-	out := me.do("DELETE", "/projects/"+id+"/bills/"+billTxID.String(), nil, "removeBillFromProject", http.StatusOK)
+	out := me.do("DELETE", "/projects/"+id+"/bills/"+billTxID.String(), nil, "", http.StatusOK) // retired route (V16)
 	if out["removed_row_id"] != pulledID {
 		t.Errorf("remove bill: removed_row_id = %v", out["removed_row_id"])
 	}
@@ -399,7 +399,7 @@ func TestQuickCreateAndAddBillsAccountBalances(t *testing.T) {
 			"type": "expense", "account_id": f.acctPersonal, "amount": 150, "category_id": f.cat, "date": "2026-09-15",
 		},
 		"transaction_ids": []uuid.UUID{f.bill1},
-	}, "quickCreateEvent", http.StatusCreated)
+	}, "", http.StatusCreated) // retired route (V16), no spec op
 	bs := list(q, "account_balances")
 	if len(bs) != 1 || n(bs[0].(map[string]any), "balance") != 850 || q["new_transaction_id"] == nil {
 		t.Errorf("quick create account_balances = %v", bs)
@@ -410,7 +410,7 @@ func TestQuickCreateAndAddBillsAccountBalances(t *testing.T) {
 	}
 
 	pullOnly := me.do("POST", "/projects/quick", map[string]any{"name": "Second", "transaction_ids": []uuid.UUID{f.bill2}},
-		"quickCreateEvent", http.StatusCreated)
+		"", http.StatusCreated) // retired route (V16), no spec op
 	if bs := list(pullOnly, "account_balances"); bs == nil || len(bs) != 0 {
 		t.Errorf("pull-only account_balances = %v, want []", pullOnly["account_balances"])
 	}
@@ -419,7 +419,7 @@ func TestQuickCreateAndAddBillsAccountBalances(t *testing.T) {
 		"new_transaction": map[string]any{
 			"type": "expense", "account_id": f.acctPersonal, "amount": 50, "category_id": f.cat, "date": "2026-09-16",
 		},
-	}, "addBillsToEvent", http.StatusOK)
+	}, "", http.StatusOK) // retired route (V16), no spec op
 	if bs := list(a, "account_balances"); len(bs) != 1 || n(bs[0].(map[string]any), "balance") != 800 {
 		t.Errorf("add bills account_balances = %v, want the wallet at 800", a["account_balances"])
 	}
@@ -429,7 +429,7 @@ func TestBoardRowsCarryTransactionMember(t *testing.T) {
 	f := newQCFixture(t)
 	me := evClient{t, eventsEngine(f, f.owner)}
 	q := me.do("POST", "/projects/quick", map[string]any{"name": "Trip", "transaction_ids": []uuid.UUID{f.bill1}},
-		"quickCreateEvent", http.StatusCreated)
+		"", http.StatusCreated) // retired route (V16), no spec op
 	id := m(q, "detail", "event")["id"].(string)
 	if _, err := f.pool.Exec(context.Background(), `UPDATE users SET display_name = 'Bee Live' WHERE id = $1`, f.friend); err != nil {
 		t.Fatal(err)
@@ -463,7 +463,7 @@ func TestDeleteEventWithLinkedTxs(t *testing.T) {
 			"new_transaction": map[string]any{
 				"type": "expense", "account_id": f.acctPersonal, "amount": 100, "category_id": f.cat, "date": "2026-09-15",
 			},
-		}, "quickCreateEvent", http.StatusCreated)
+		}, "", http.StatusCreated) // retired route (V16), no spec op
 		ev := m(q, "detail", "event")
 		return ev["id"].(string), n(ev, "linked_tx_count")
 	}
@@ -471,17 +471,17 @@ func TestDeleteEventWithLinkedTxs(t *testing.T) {
 	if count != 1 {
 		t.Errorf("linked_tx_count = %v, want 1", count)
 	}
+	// owner 2026-10-28: the bill stays as a standalone split bill, my tx still connected to it
 	out := me.do("DELETE", "/projects/"+keep, nil, "deleteProject", http.StatusOK)
-	if n(out, "deleted_transaction_count") != 0 || f.accountBalance(t, f.acctPersonal) != start-100 {
-		t.Errorf("plain delete removed my tx: %v", out)
+	if n(out, "split_bill_count") != 1 || f.accountBalance(t, f.acctPersonal) != start-100 {
+		t.Errorf("delete: %v (wallet %v)", out, f.accountBalance(t, f.acctPersonal))
 	}
-	if got := f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE user_id = $1 AND amount = 100 AND project_id IS NULL`, f.owner); got != 1 {
-		t.Errorf("my tx should stay, unlinked (%d)", got)
+	if got := f.countRows(t, `SELECT COUNT(*) FROM transactions t JOIN projects p ON p.id = t.project_id
+		WHERE t.user_id = $1 AND t.amount = 100 AND p.kind = 'split'`, f.owner); got != 1 {
+		t.Errorf("my tx should stay, connected to the split bill (%d)", got)
 	}
-	drop, _ := mk("Drop")
-	out = me.do("DELETE", "/projects/"+drop+"?delete_linked_txs=true", nil, "deleteProject", http.StatusOK)
-	if n(out, "deleted_transaction_count") != 1 || len(list(out, "account_balances")) != 1 || f.accountBalance(t, f.acctPersonal) != start-100 {
-		t.Errorf("delete with linked txs: %v (wallet %v)", out, f.accountBalance(t, f.acctPersonal))
+	if got := f.countRows(t, `SELECT COUNT(*) FROM projects WHERE id = $1`, keep); got != 0 {
+		t.Errorf("the event is still there")
 	}
 }
 
@@ -497,7 +497,7 @@ func TestDeleteTxWithLinkedBill(t *testing.T) {
 			"new_transaction": map[string]any{
 				"type": "expense", "account_id": f.acctPersonal, "amount": 100, "category_id": f.cat, "date": "2026-09-15",
 			},
-		}, "quickCreateEvent", http.StatusCreated)
+		}, "", http.StatusCreated) // retired route (V16), no spec op
 		evID := m(q, "detail", "event")["id"].(string)
 		var txID uuid.UUID
 		if err := f.pool.QueryRow(context.Background(), `SELECT id FROM transactions WHERE user_id = $1 AND project_id = $2`,
@@ -514,10 +514,16 @@ func TestDeleteTxWithLinkedBill(t *testing.T) {
 	if err != nil || res.BillID != nil || bills(keep) != 1 {
 		t.Fatalf("plain delete: %v %+v bills %d", err, res, bills(keep))
 	}
+	// 0.4.1-2 rule f: deleting my copy only disconnects it; also_delete_link no longer reaches a
+	// shared bill (DELETE /event-bills/{pt_id} does).
 	drop, tx := mk("Drop")
 	res, err = f.txs.DeleteWrite(context.Background(), f.owner, tx, true)
-	if err != nil || res.BillID == nil || bills(drop) != 0 {
+	if err != nil || res.BillID != nil || bills(drop) != 1 {
 		t.Fatalf("also_delete_link: %v %+v bills %d", err, res, bills(drop))
+	}
+	if n := f.countRows(t, `SELECT COUNT(*) FROM shared_bill_opt_outs o JOIN project_transactions b ON b.id = o.project_transaction_id
+		WHERE b.project_id = $1 AND o.user_id = $2`, drop, f.owner); n != 1 {
+		t.Errorf("deleting my copy must disconnect it (opt-outs %d)", n)
 	}
 }
 
