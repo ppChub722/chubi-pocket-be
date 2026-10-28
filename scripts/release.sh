@@ -31,7 +31,9 @@ KEY="$HOME/.ssh/ppforge_vps"
 API="https://chubipocket-api.ppforge.dev"
 SSH_OPTS=(-i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 -o ConnectionAttempts=3
   -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
-TEST_DB="postgres://chubadmin:admin1234@localhost:5433/chubi_pocket_db?sslmode=disable"
+# BE checks run on a throwaway DB built from the tag's migrations in the local
+# postgres container (:5433); the dev DB (chubi_pocket_db) is never touched.
+PG_CONTAINER="chubi_pocket_db"
 
 BE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT="$(cd "$BE_DIR/.." && pwd)"
@@ -78,6 +80,18 @@ warn() { printf '  \033[1;33m⚠ %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ssh_vps() { ssh "${SSH_OPTS[@]}" "$VPS" "$@"; }
+
+# Throwaway test DB: drop + create, then every migrations/*.up.sql of the BE
+# worktree in order (zero-padded names sort right).
+pg() { MSYS_NO_PATHCONV=1 docker exec -i -e PGOPTIONS='-c client_min_messages=warning' "$PG_CONTAINER" psql -U chubadmin -q -v ON_ERROR_STOP=1 "$@"; }
+make_test_db() {
+  pg -d postgres -c "DROP DATABASE IF EXISTS $TEST_DB_NAME" -c "CREATE DATABASE $TEST_DB_NAME" >/dev/null || return 1
+  local f
+  for f in "$BE_WT"/migrations/*.up.sql; do
+    pg -d "$TEST_DB_NAME" < "$f" >/dev/null || { echo "  migration failed: $(basename "$f")" >&2; return 1; }
+  done
+}
+drop_test_db() { pg -d postgres -c "DROP DATABASE IF EXISTS $TEST_DB_NAME" >/dev/null 2>&1 || true; }
 # -c core.safecrlf=false: no "LF will be replaced by CRLF" line per file.
 g() { local d="$1"; shift; git -c core.safecrlf=false -C "$d" "$@"; }
 
@@ -134,6 +148,8 @@ done < "$BRIEF/brief.env"
 HAS_BE=true;  [[ "$SKIP_BE" == y ]] && HAS_BE=false
 HAS_APP=true; [[ "$SKIP_APP" == y ]] && HAS_APP=false
 TAG="v$VERSION"
+TEST_DB_NAME="chubi_rel_${VERSION//[.-]/_}"
+TEST_DB="postgres://chubadmin:admin1234@localhost:5433/$TEST_DB_NAME?sslmode=disable"
 ok "version $VERSION (tag $TAG) · migrations $EXPECT_MIGRATIONS · MIN $MIN_APP_BUILD · QA $QA$($HAS_BE || echo ' · BE skipped')$($HAS_APP || echo ' · app skipped')"
 $SKIP_CHECKS && warn "--skip-checks: the tags are deployed without running the checks"
 
@@ -252,12 +268,15 @@ elif ! $need_be_checks && ! $need_app_checks; then
     && skip "BE $(state_get checks_be) · app $(state_get checks_app)"
 else
   if $need_be_checks; then
-    # DB tests SKIP (not fail) when the DB is down or behind, so check it first.
-    local_ver="$(MSYS_NO_PATHCONV=1 docker exec chubi_pocket_db psql -U chubadmin -d chubi_pocket_db -Atc \
-      "SELECT version FROM schema_migrations WHERE NOT dirty" 2>/dev/null || true)"
-    [[ "$local_ver" == "$tag_newest" ]] \
-      || die "local test DB (:5433) is at '${local_ver:-unreachable}', the tag's newest migration is $tag_newest — migrate the local DB first (Lead: ask for a local deploy), or use --skip-checks for a rollback"
-    ok "local test DB at migration $local_ver"
+    # DB tests SKIP (not fail) without a DB, so the container must be up.
+    pg -d postgres -c "SELECT 1" >/dev/null 2>&1 \
+      || die "local postgres container '$PG_CONTAINER' (:5433) is not reachable — start Docker Desktop / the container"
+    if $DRY; then
+      plan "build a throwaway test DB $TEST_DB_NAME on :5433 from the tag's migrations (head $tag_newest; the dev DB is not used), dropped after the checks"
+    else
+      make_test_db || die "could not build the test DB $TEST_DB_NAME from the tag's migrations"
+      ok "test DB $TEST_DB_NAME built from the tag's migrations (head $tag_newest)"
+    fi
   fi
   if $DRY; then
     $need_be_checks  && plan "run BE in the worktree: go vet ./... + go test -count=1 -v ./... (TEST_DATABASE_URL :5433), require 0 failed / 0 skipped"
@@ -273,7 +292,8 @@ else
       pass="$(grep -c -- '--- PASS' "$l" || true)"; fail="$(grep -c -- '--- FAIL' "$l" || true)"
       skp="$(grep -c -- '--- SKIP' "$l" || true)"
       [[ "$fail" == 0 && "$skp" == 0 && " $failed " != *" be "* ]] \
-        || die "BE checks: $pass passed / $fail failed / $skp skipped (see $l)"
+        || die "BE checks: $pass passed / $fail failed / $skp skipped (see $l; test DB $TEST_DB_NAME kept for a look)"
+      drop_test_db
       state_set checks_be "go vet clean, go test $pass passed / 0 failed / 0 skipped"
       state_set checks_be_for "$BE_COMMIT"
       ok "BE: $(state_get checks_be)"
