@@ -16,6 +16,15 @@ type Config struct {
 	Server   ServerConfig
 	OCR      OCRConfig
 	Version  AppVersionConfig
+	Telegram TelegramConfig
+}
+
+// TelegramConfig: the bot (0.4.2, modules/telegram). Webhook only; empty token = off.
+type TelegramConfig struct {
+	BotToken       string // TELEGRAM_BOT_TOKEN — from @BotFather; never logged
+	WebhookSecret  string // TELEGRAM_WEBHOOK_SECRET — 1-256 chars A-Za-z0-9_-, checked on every call
+	WebhookURL     string // TELEGRAM_WEBHOOK_URL — set with setWebhook on start (empty = not set)
+	AllowedChatIDs string // TELEGRAM_ALLOWED_CHAT_IDS — comma list; empty = nobody
 }
 
 type AppConfig struct {
@@ -40,9 +49,9 @@ type DatabaseConfig struct {
 }
 
 type JWTConfig struct {
-	Secret           string
-	ExpirationHours  int
-	ExpirationTime   time.Duration
+	Secret          string
+	ExpirationHours int
+	ExpirationTime  time.Duration
 }
 
 type OCRConfig struct {
@@ -50,7 +59,7 @@ type OCRConfig struct {
 	Lang        string        // OCR_LANG (default "tha+eng")
 	Timeout     time.Duration // OCR_TIMEOUT seconds per slip (default 30)
 	Concurrency int           // OCR_CONCURRENCY reads at once (default 1)
-	Dump bool
+	Dump        bool
 }
 
 type AppVersionConfig struct {
@@ -110,6 +119,12 @@ func Load() (*Config, error) {
 			MessageTH:   getEnv("APP_UPDATE_MESSAGE_TH", ""),
 			MessageEN:   getEnv("APP_UPDATE_MESSAGE_EN", ""),
 		},
+		Telegram: TelegramConfig{
+			BotToken:       getEnv("TELEGRAM_BOT_TOKEN", ""),
+			WebhookSecret:  getEnv("TELEGRAM_WEBHOOK_SECRET", ""),
+			WebhookURL:     getEnv("TELEGRAM_WEBHOOK_URL", ""),
+			AllowedChatIDs: getEnv("TELEGRAM_ALLOWED_CHAT_IDS", ""),
+		},
 	}
 
 	config.JWT.ExpirationTime = time.Duration(config.JWT.ExpirationHours) * time.Hour
@@ -168,4 +183,3 @@ func getEnvAsInt(key string, defaultValue int) int {
 	}
 	return defaultValue
 }
-

@@ -40,6 +40,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
 	datasync "github.com/ppChub722/chubi-pocket-be/internal/modules/sync"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/telegram"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/user_pack_permissions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/users"
@@ -232,12 +233,15 @@ func main() {
 	packPermsStore := user_pack_permissions.NewStore(dbPool)
 	packPermsHandler := user_pack_permissions.NewHandler(packPermsStore)
 
+	// 0.4.2 Telegram bot, webhook only; nil (no route) when TELEGRAM_BOT_TOKEN is empty.
+	telegramWebhook := telegram.New(cfg.Telegram, dbPool, log)
+
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	r := gin.New()
 	r.Use(logger.RequestIDMiddleware())
-	r.Use(logger.GinLoggerMiddleware(log, cfg.App.LogBodies))
+	r.Use(logger.GinLoggerMiddleware(log, cfg.App.LogBodies, telegram.Path))
 	// Same semantics as gin.Recovery() (500 + abort), but the panic is logged through slog with the
 	// request_id instead of gin's raw writer.
 	r.Use(gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, err any) {
@@ -285,6 +289,10 @@ func main() {
 	api := r.Group("/api/v1")
 	{
 		api.GET("/health", health) // before the build check: an outdated build still learns it is online
+		if telegramWebhook != nil {
+			// Telegram's calls: the secret header instead of a JWT; no build check, no sync middleware
+			api.POST("/telegram/webhook", telegramWebhook.Serve)
+		}
 		api.Use(versionHandler.Middleware("/api/v1/app/version"))
 		api.GET("/app/version", versionHandler.Version)
 
@@ -543,6 +551,9 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+	if telegramWebhook != nil {
+		telegramWebhook.Start() // getMe + setWebhook in the background; failures are logged only
+	}
 
 	<-shutdownCtx.Done()
 	log.Info("Shutting down")

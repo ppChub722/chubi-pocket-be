@@ -48,6 +48,8 @@ tags:
     description: 'Shared datasets kept on the device, fetched in one call (migration 66).'
   - name: Touch-point
     description: 'Pages not redesigned yet; only the shared-shape change is listed.'
+  - name: Internal
+    description: 'Called by outside services (the Telegram bot webhook), never by the app; `x-internal: true`.'
 security:
   - bearerAuth: []
 
@@ -2696,6 +2698,32 @@ paths:
                   status: { type: string, enum: [ok] }
       security: []
       x-breaking: 'New (0.4.1-0): it was only at /health, and /api/v1/health answered 404.'
+
+  /telegram/webhook:
+    post:
+      tags: [Internal]
+      summary: Telegram bot webhook (Telegram calls it, never the app)
+      operationId: telegramWebhook
+      x-internal: true
+      description: |
+        0.4.2 1a. Registered only when `TELEGRAM_BOT_TOKEN` is set (otherwise 404). Public: no JWT, no app build check, no sync middleware; the request log never holds its body.
+        Telegram sends `X-Telegram-Bot-Api-Secret-Token` = `TELEGRAM_WEBHOOK_SECRET` (set by `setWebhook` on start, `allowed_updates: ["message"]`); a missing / wrong one → 401.
+        Anything else → 200 with an empty body (Telegram retries non-200, and a JSON body would be run as a Bot API method), also for a body that is not an update.
+        The bot answers in the chat (`sendMessage`, as a reply), private chats only, each `update_id` once:
+        allowed chat + text → kept in `telegram_messages`, "ได้รับข้อความแล้ว ✓" · allowed + not text (photo, voice, sticker …) → "ตอนนี้รับแค่ข้อความตัวอักษรนะครับ" · `/start` → a one-line hello · chat not in `TELEGRAM_ALLOWED_CHAT_IDS` → "ยังไม่เปิดให้ใช้ (chat id: N)" · group / channel / edited message / other updates → no reply.
+      parameters:
+        - { name: X-Telegram-Bot-Api-Secret-Token, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TelegramUpdate' }
+      responses:
+        '200':
+          description: Handled, ignored or unreadable; empty body.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+      security: []
+      x-breaking: 'New (0.4.2 1a).'
 
   # ───────────────────────────── v2: reached pages (target shapes) ─────────────────────────────
   /pending-transactions/scan-slip:
@@ -5650,6 +5678,39 @@ components:
       schema: { type: string }
 
   schemas:
+    # ───────── Telegram (0.4.2, sent BY Telegram; only the fields the bot reads) ─────────
+    TelegramUpdate:
+      type: object
+      description: 'https://core.telegram.org/bots/api#update. Other keys are ignored.'
+      required: [update_id]
+      properties:
+        update_id: { type: integer, format: int64 }
+        message: { $ref: '#/components/schemas/TelegramMessage' }
+        edited_message: { $ref: '#/components/schemas/TelegramMessage' }
+    TelegramMessage:
+      type: object
+      required: [message_id, chat, date]
+      properties:
+        message_id: { type: integer, format: int64 }
+        chat:
+          type: object
+          required: [id, type]
+          properties:
+            id: { type: integer, format: int64 }
+            type: { type: string, enum: [private, group, supergroup, channel] }
+        from:
+          type: object
+          properties:
+            id: { type: integer, format: int64 }
+            is_bot: { type: boolean }
+            username: { type: string }
+            first_name: { type: string }
+        date: { type: integer, format: int64, description: 'Unix seconds.' }
+        text: { type: string }
+        photo: { type: array, items: { type: object } }
+        document: { type: object }
+        voice: { type: object }
+        sticker: { type: object }
     # ───────── primitives ─────────
     Uuid:
       type: string

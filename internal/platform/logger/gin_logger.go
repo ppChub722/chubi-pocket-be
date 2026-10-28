@@ -13,18 +13,27 @@ import (
 )
 
 const (
-	maxBodyLog = 4 * 1024
+	maxBodyLog     = 4 * 1024
 	maxBodyCapture = 64 * 1024
 
 	bodyTooLarge = "[BODY TOO LARGE — SKIPPED]"
 	truncMark    = "…[TRUNCATED]"
 )
 
-func GinLoggerMiddleware(log *slog.Logger, logBodies bool) gin.HandlerFunc {
+// noBodyPaths: routes whose bodies are never logged, even with logBodies on (the Telegram webhook
+// carries the user's message text).
+func GinLoggerMiddleware(log *slog.Logger, logBodies bool, noBodyPaths ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
 		query := c.Request.URL.RawQuery
+
+		logBodies := logBodies
+		for _, p := range noBodyPaths {
+			if path == p {
+				logBodies = false
+			}
+		}
 
 		var reqBody []byte
 		reqIsJSON := isJSONContent(c.ContentType())
