@@ -9384,7 +9384,7 @@ components:
               },
               "page_prefs": {
                 "type": "object",
-                "description": "0.4.1-2 P6: the last choice per page (sort / filter / collapsed ...), remembered across devices. Keys = page ids (wallets, budgets, goals, recurring, events, categories, tags, contacts, debts, pending); each value is the app's own small object (inner keys are not checked). Always an object ({} = every page at its default).",
+                "description": "0.4.1-2 P6: the last choice per page (sort / filter / collapsed ...), remembered across devices. Keys = page ids (wallets, budgets, goals, recurring, events, categories, tags, contacts, debts, pending; 0.4.2-1: transactions = the list's sort + filters, never its period; notifications = the inbox filter); an unknown page id is a 400; each value is the app's own small object (inner keys are not checked). Always an object ({} = every page at its default).",
                 "additionalProperties": { "type": "object" }
               },
               "fee_category_id": {

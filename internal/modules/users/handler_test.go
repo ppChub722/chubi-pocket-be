@@ -258,12 +258,24 @@ func TestPagePrefs(t *testing.T) {
 	if out["preferences"].(map[string]any)["theme_mode"] != "light" {
 		t.Errorf("reset all touched theme_mode: %v", out["preferences"])
 	}
+	// 0.4.2-1: the transactions list (sort + filters) and the notification inbox (filter).
+	out = f.do(t, "PUT", "/api/v1/users/me", map[string]any{"preferences": map[string]any{"page_prefs": map[string]any{
+		"transactions":  map[string]any{"sort": "amount_desc", "types": []string{"expense"}, "wallets": []string{uuid.NewString(), "none"}},
+		"notifications": map[string]any{"filter": "unread"},
+	}}}, "updateMe", http.StatusOK)
+	if p := pages(out); len(p) != 2 || p["transactions"].(map[string]any)["sort"] != "amount_desc" ||
+		p["notifications"].(map[string]any)["filter"] != "unread" {
+		t.Errorf("transactions / notifications page_prefs = %v", p)
+	}
 	big := make([]string, 300)
 	for i := range big {
 		big[i] = uuid.NewString()
 	}
 	for _, bad := range []any{
 		map[string]any{"home": map[string]any{"sort": "x"}},
+		map[string]any{"dashboard": map[string]any{"sort": "x"}},
+		map[string]any{"transactions": "date_desc"},
+		map[string]any{"transactions": map[string]any{"wallets": big}},
 		map[string]any{"budgets": "name"},
 		map[string]any{"budgets": map[string]any{"collapsed": big}},
 		"all",

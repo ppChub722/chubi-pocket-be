@@ -71,10 +71,13 @@ var allowedPreferenceKeys = map[string]bool{
 var (
 	ThemeModes = map[string]bool{"light": true, "dark": true, "system": true}
 	Languages  = map[string]bool{"th": true, "en": true}
-	// PageIDs — the pages whose last choice (sort / filter / ...) page_prefs remembers.
+	// PageIDs — the pages whose last choice (sort / filter / ...) page_prefs remembers
+	// (0.4.2-1: transactions = the list's sort + filters, never its period; notifications = the
+	// inbox filter).
 	PageIDs = map[string]bool{
 		"wallets": true, "budgets": true, "goals": true, "recurring": true, "events": true,
 		"categories": true, "tags": true, "contacts": true, "debts": true, "pending": true,
+		"transactions": true, "notifications": true,
 	}
 )
 
