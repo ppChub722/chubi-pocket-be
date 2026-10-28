@@ -9,7 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Delivery — how a notice reaches its recipient: Deliver = insert it (not muted); Auto = apply it
+// Delivery — how a notice reaches its recipient: Deliver = not muted (Insert says whether it is
+// written: a notice that still asks comes even when muted); Auto = apply it
 // at once by the type's auto-sync switch, muted or not (0.4.1-2 S4: a muted auto type is applied
 // silently). SyncEvents / SyncDebts are the recipient's two switches, for types whose switch
 // depends on the bill kind (shared bills).
@@ -22,6 +23,27 @@ type Delivery struct {
 	// (pick by the bill kind, like SyncEvents / SyncDebts).
 	AcceptEvents bool
 	AcceptDebts  bool
+	// self — the recipient made the change: never a notice.
+	self bool
+}
+
+// askTypes — the notices an auto switch answers by itself (owner 2026-10-28, "auto lives in
+// notifications"): a new shared bill (auto-accept, "เพิ่มในสมุด"), an edit (auto-update,
+// "อัปเดตตาม"), a delete (auto-update removes my copy). With the switch on, the notice comes
+// already applied; with it off, the notice asks.
+var askTypes = map[string]bool{
+	TypeSharedBillCreated: true, TypeProjectTxChanged: true, TypeSharedBillDeleted: true,
+}
+
+// Insert — whether the notice is written. A notice that still asks (an ask type the recipient's
+// auto switch did NOT apply) always comes, muted or not: someone must answer it, so muting only
+// silences the ones auto already did (the app locks แจ้ง on while auto is off). Existing mutes are
+// kept as they are (no migration): they count again once auto is back on.
+func (d Delivery) Insert(notifType string, applied bool) bool {
+	if d.self {
+		return false
+	}
+	return d.Deliver || (askTypes[notifType] && !applied)
 }
 
 // DeliveryFor — one settings read per recipient (call it once per member inside the write's DB tx).
@@ -30,7 +52,7 @@ func (s *Service) DeliveryFor(
 	ctx context.Context, tx pgx.Tx, recipientUserID uuid.UUID, actorUserID *uuid.UUID, notifType string,
 ) (Delivery, error) {
 	if actorUserID != nil && *actorUserID == recipientUserID {
-		return Delivery{}, nil
+		return Delivery{self: true}, nil
 	}
 	if actionTypes[notifType] {
 		return Delivery{Deliver: true}, nil // requests: never muted, never auto
@@ -56,7 +78,8 @@ func (s *Service) dispatchTx(
 	payload any, deepLink *string, actioned bool,
 ) error {
 	d, err := s.DeliveryFor(ctx, tx, recipientUserID, actorUserID, notifType)
-	if err != nil || !d.Deliver {
+	// actioned = my auto switch already applied it (ask types pass their payload's Applied).
+	if err != nil || !d.Insert(notifType, actioned) {
 		return err
 	}
 	bytes, err := json.Marshal(payload)

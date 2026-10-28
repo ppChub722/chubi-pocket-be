@@ -486,3 +486,55 @@ func TestRecurringDueDeepLink(t *testing.T) {
 		t.Errorf("due(0) changed it: %+v", got)
 	}
 }
+
+// Owner 2026-10-28 (DB): with shared_bill_created muted, an unapplied new bill (auto-accept off)
+// still writes its asking notice; an applied one (auto-accept on) stays silent; my own: nothing.
+func TestMutedAskingNoticeStillComes(t *testing.T) {
+	f := newFix(t)
+	svc := NewService(NewStore(f.pool))
+	actor := testdb.User(t, f.pool)
+	if _, err := f.pool.Exec(context.Background(), `UPDATE user_notification_settings
+		SET muted_types = ARRAY[$2, $3] WHERE user_id = $1`,
+		f.uid, TypeSharedBillCreated, TypeDebtDisconnected); err != nil {
+		t.Fatal(err)
+	}
+	count := func(typ string) int {
+		t.Helper()
+		var n int
+		if err := f.pool.QueryRow(context.Background(),
+			`SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1 AND type = $2`,
+			f.uid, typ).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	created := func(from uuid.UUID, applied bool) {
+		t.Helper()
+		pt, _ := uuid.NewV7()
+		f.inTx(t, func(ctx context.Context, tx pgx.Tx) error {
+			return svc.DispatchSharedBillCreated(ctx, tx, f.uid, from, SharedBillCreatedPayload{
+				ProjectTransactionID: pt, ProjectID: pt, ProjectKind: "split", Amount: 100,
+				MyRole: "debtor", MyAmount: 50, PayerName: "A", Applied: applied,
+			})
+		})
+	}
+	created(actor, false)
+	if n := count(TypeSharedBillCreated); n != 1 {
+		t.Fatalf("muted + not applied wrote %d rows, want 1 (it asks)", n)
+	}
+	created(actor, true)
+	if n := count(TypeSharedBillCreated); n != 1 {
+		t.Errorf("muted + applied wrote a row (want silent): %d", n)
+	}
+	created(f.uid, false)
+	if n := count(TypeSharedBillCreated); n != 1 {
+		t.Errorf("my own change notified me: %d", n)
+	}
+	// An info type keeps its mute.
+	f.inTx(t, func(ctx context.Context, tx pgx.Tx) error {
+		return svc.dispatchTx(ctx, tx, TypeDebtDisconnected, f.uid, &actor, map[string]any{}, nil, false)
+	})
+	if n := count(TypeDebtDisconnected); n != 0 {
+		t.Errorf("muted info notice written: %d", n)
+	}
+}
