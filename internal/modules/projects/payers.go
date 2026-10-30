@@ -41,11 +41,8 @@ func billPayersOf(ctx context.Context, q shared.Querier, ptIDs []uuid.UUID) (map
 		return out, nil
 	}
 	rows, err := q.Query(ctx, `
-		SELECT x.project_transaction_id, x.member_id, x.amount::float8 FROM project_transaction_payers x
-		WHERE x.project_transaction_id = ANY($1)
-		UNION ALL
-		SELECT p.id, p.transaction_member_id, p.amount::float8 FROM project_transactions p
-		WHERE p.id = ANY($1) AND NOT EXISTS (SELECT 1 FROM project_transaction_payers x WHERE x.project_transaction_id = p.id)`,
+		SELECT sp.split_transaction_id, sp.event_member_id, sp.paid::float8 FROM split_transaction_people sp
+		WHERE sp.split_transaction_id = ANY($1) AND sp.paid > 0 AND sp.event_member_id IS NOT NULL`,
 		ptIDs)
 	if err != nil {
 		return nil, fmt.Errorf("bill payers: %w", err)
