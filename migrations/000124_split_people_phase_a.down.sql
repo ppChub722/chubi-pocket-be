@@ -1,5 +1,14 @@
 -- Undo the EXPAND step (nothing was deleted by 124, so this is lossless for the old tables).
 -- Not valid once migration 125 (CONTRACT) has run.
+DROP TRIGGER IF EXISTS links_debt_bills ON personal_debt_bills;
+DROP TRIGGER IF EXISTS links_debts ON personal_debts;
+DROP TRIGGER IF EXISTS links_origin ON project_transactions;
+DROP TRIGGER IF EXISTS links_transactions ON transactions;
+DROP FUNCTION IF EXISTS trg_links_debt_bills();
+DROP FUNCTION IF EXISTS trg_links_debts();
+DROP FUNCTION IF EXISTS trg_links_origin();
+DROP FUNCTION IF EXISTS trg_links_transactions();
+DROP FUNCTION IF EXISTS split_bill_of(UUID);
 DROP TRIGGER IF EXISTS sync_split_people_member ON project_members;
 DROP TRIGGER IF EXISTS sync_split_people_opt_outs ON shared_bill_opt_outs;
 DROP TRIGGER IF EXISTS sync_split_people_payers ON project_transaction_payers;

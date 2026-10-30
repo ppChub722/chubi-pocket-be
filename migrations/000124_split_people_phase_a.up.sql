@@ -57,7 +57,9 @@ CREATE INDEX idx_personal_debts_split_tx ON personal_debts (split_transaction_id
 
 ALTER TABLE personal_debt_bills
     ADD COLUMN split_transaction_id UUID REFERENCES project_transactions(id) ON DELETE CASCADE,
-    ADD COLUMN split_person_id      UUID REFERENCES split_transaction_people(id) ON DELETE CASCADE;
+    -- SET NULL, not CASCADE: while the sync rewrites a bill's people (a member moved), the line must survive
+    -- and find its new person when member_id follows
+    ADD COLUMN split_person_id      UUID REFERENCES split_transaction_people(id) ON DELETE SET NULL;
 
 -- A bill may have no event and no single main payer any more (the payers are in the people rows).
 ALTER TABLE project_transactions
@@ -123,6 +125,10 @@ BEGIN
                                    ELSE COALESCE(split_transaction_people.marked_at, EXCLUDED.marked_at) END,
                   disconnected_at = EXCLUDED.disconnected_at, sort = EXCLUDED.sort;
 
+    -- a copy made before its person existed finds the person now
+    UPDATE transactions t SET split_person_id = (SELECT p.id FROM split_transaction_people p
+                                                  WHERE p.split_transaction_id = b.id AND p.user_id = t.user_id)
+     WHERE t.split_transaction_id = b.id AND t.split_person_id IS NULL;
 END $$;
 
 -- While the old tables are still written, the people follow them (dropped by migration 125).
@@ -165,6 +171,66 @@ END $$;
 CREATE TRIGGER sync_split_people_member
     AFTER UPDATE OF user_id, display_name ON project_members
     FOR EACH ROW EXECUTE FUNCTION trg_sync_split_people_member();
+
+-- The books' links follow the old pointers (source / unlinked project-transaction id, a lump line's
+-- pt_id + member_id) so a reader can already use split_transaction_id / split_person_id.
+CREATE FUNCTION split_bill_of(p_pt UUID) RETURNS UUID LANGUAGE sql STABLE AS $$
+    SELECT COALESCE(parent_project_transaction_id, id) FROM project_transactions WHERE id = p_pt $$;
+
+CREATE FUNCTION trg_links_transactions() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    -- the bill a copy belongs to, else the bill this transaction was made from
+    NEW.split_transaction_id := COALESCE(split_bill_of(NEW.source_project_transaction_id),
+        (SELECT id FROM project_transactions WHERE linked_transaction_id = NEW.id));
+    NEW.split_person_id := (SELECT p.id FROM split_transaction_people p
+                             WHERE p.split_transaction_id = NEW.split_transaction_id AND p.user_id = NEW.user_id);
+    NEW.unlinked_split_transaction_id := split_bill_of(NEW.unlinked_project_transaction_id);
+    RETURN NEW;
+END $$;
+CREATE TRIGGER links_transactions
+    BEFORE INSERT OR UPDATE OF source_project_transaction_id, unlinked_project_transaction_id, user_id
+    ON transactions FOR EACH ROW EXECUTE FUNCTION trg_links_transactions();
+
+-- making a bill from a transaction (or unlinking it) sets / clears its origin link
+CREATE FUNCTION trg_links_origin() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND OLD.linked_transaction_id IS NOT NULL THEN
+        UPDATE transactions t SET split_transaction_id = split_bill_of(t.source_project_transaction_id)
+         WHERE t.id = OLD.linked_transaction_id AND t.split_transaction_id = OLD.id AND t.source_project_transaction_id IS NULL;
+    END IF;
+    IF NEW.linked_transaction_id IS NOT NULL THEN
+        UPDATE transactions t SET split_transaction_id = NEW.id,
+               split_person_id = (SELECT p.id FROM split_transaction_people p
+                                   WHERE p.split_transaction_id = NEW.id AND p.user_id = t.user_id)
+         WHERE t.id = NEW.linked_transaction_id AND t.split_transaction_id IS DISTINCT FROM NEW.id;
+    END IF;
+    RETURN NULL;
+END $$;
+CREATE TRIGGER links_origin
+    AFTER INSERT OR UPDATE OF linked_transaction_id ON project_transactions
+    FOR EACH ROW
+    EXECUTE FUNCTION trg_links_origin();
+
+CREATE FUNCTION trg_links_debts() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.split_transaction_id := split_bill_of(NEW.source_project_transaction_id);
+    NEW.unlinked_split_transaction_id := split_bill_of(NEW.unlinked_project_transaction_id);
+    RETURN NEW;
+END $$;
+CREATE TRIGGER links_debts
+    BEFORE INSERT OR UPDATE OF source_project_transaction_id, unlinked_project_transaction_id
+    ON personal_debts FOR EACH ROW EXECUTE FUNCTION trg_links_debts();
+
+CREATE FUNCTION trg_links_debt_bills() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.split_transaction_id := split_bill_of(NEW.pt_id);
+    NEW.split_person_id := (SELECT p.id FROM split_transaction_people p
+                             WHERE p.split_transaction_id = NEW.split_transaction_id AND p.event_member_id = NEW.member_id);
+    RETURN NEW;
+END $$;
+CREATE TRIGGER links_debt_bills
+    BEFORE INSERT OR UPDATE OF pt_id, member_id
+    ON personal_debt_bills FOR EACH ROW EXECUTE FUNCTION trg_links_debt_bills();
 
 -- ── 4. build the people of every existing bill ─────────────────────────────
 SELECT sync_split_people(id) FROM project_transactions WHERE parent_project_transaction_id IS NULL;
