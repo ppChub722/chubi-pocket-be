@@ -223,6 +223,9 @@ func (s *Service) billWriterTx(
 		return nil, nil, nil, fmt.Errorf("event kind: %w", err)
 	}
 	mb.invite = kind == KindEvent
+	if err := mb.seedMyContactsTx(ctx); err != nil {
+		return nil, nil, nil, err
+	}
 	// Invited, not accepted yet (F2): the same person is never invited twice, also after a reject.
 	invited, err := tx.Query(ctx, `SELECT invited_user_id, id FROM project_members
 		WHERE project_id = $1 AND user_id IS NULL AND invited_user_id IS NOT NULL AND status <> 'left'`, projectID)
@@ -586,11 +589,15 @@ func (b *quickMemberBuilder) memberForDebt(ctx context.Context, d quickDebt) (uu
 		return b.ensureLinked(ctx, *d.LinkedUserID, d.PersonName)
 	}
 	if d.ContactID != nil {
+		// F3: one of my contacts is a member through MY binding, never by name.
 		if id, ok := b.byContact[*d.ContactID]; ok {
 			return id, nil
 		}
-		id, err := b.ensureAdHoc(ctx, d.PersonName)
+		id, err := b.newPlain(ctx, d.PersonName)
 		if err != nil {
+			return uuid.Nil, err
+		}
+		if err := bindContactTx(ctx, b.tx, id, b.callerUserID, *d.ContactID); err != nil {
 			return uuid.Nil, err
 		}
 		b.byContact[*d.ContactID] = id
@@ -653,6 +660,20 @@ func (b *quickMemberBuilder) ensureAdHoc(ctx context.Context, name string) (uuid
 	if id, ok := b.byName[key]; ok {
 		return id, nil
 	}
+	id, err := b.newPlain(ctx, name)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	b.byName[key] = id
+	return id, nil
+}
+
+// newPlain — a new member with no account (a typed name or one of my unlinked contacts).
+func (b *quickMemberBuilder) newPlain(ctx context.Context, name string) (uuid.UUID, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "Member"
+	}
 	m, err := b.svc.store.InsertMemberTx(ctx, b.tx,
 		b.projectID, nil, name, RoleContributor, MemberStatusActive,
 		b.callerUserID, nil,
@@ -660,7 +681,6 @@ func (b *quickMemberBuilder) ensureAdHoc(ctx context.Context, name string) (uuid
 	if err != nil {
 		return uuid.Nil, err
 	}
-	b.byName[key] = m.ID
 	return m.ID, nil
 }
 

@@ -398,11 +398,7 @@ func (b *booking) person(ctx context.Context, memberID uuid.UUID) (*uuid.UUID, s
 	)
 	err := b.tx.QueryRow(ctx, `SELECT mc.id, COALESCE(u.display_name, pm.display_name)
 		FROM project_members pm LEFT JOIN users u ON u.id = pm.user_id
-		LEFT JOIN LATERAL (
-			SELECT c.id FROM contacts c
-			WHERE c.user_id = $2 AND ((pm.user_id IS NOT NULL AND c.linked_user_id = pm.user_id)
-			   OR (pm.user_id IS NULL AND LOWER(BTRIM(c.display_name)) = LOWER(BTRIM(pm.display_name))))
-			ORDER BY (c.status = 'active') DESC, c.created_at, c.id LIMIT 1) mc ON TRUE
+		`+myContactJoin("$2")+` ON TRUE
 		WHERE pm.id = $1`, memberID, b.me).Scan(&cid, &name)
 	if err != nil {
 		return nil, "", fmt.Errorf("bill person: %w", err)

@@ -469,6 +469,8 @@ func main() {
 			protected.PUT("/projects/:id/members/:member_id", projectsHandler.UpdateMember)
 			protected.DELETE("/projects/:id/members/:member_id", projectsHandler.RemoveMember)
 			protected.POST("/projects/:id/members/:member_id/request-link", projectsHandler.RequestLink)
+			protected.PUT("/projects/:id/members/:member_id/my-contact", projectsHandler.BindMyContact)      // 0.4.2-3 F3
+			protected.DELETE("/projects/:id/members/:member_id/my-contact", projectsHandler.UnbindMyContact) // 0.4.2-3 F3
 			protected.POST("/projects/:id/transfer-ownership", projectsHandler.TransferOwnership)
 			protected.POST("/projects/:id/leave", projectsHandler.Leave)
 			protected.GET("/projects/:id/transactions", projectsHandler.ListPT)

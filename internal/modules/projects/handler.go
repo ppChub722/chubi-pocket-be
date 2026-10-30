@@ -236,6 +236,38 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
+// BindMyContact — PUT /projects/:id/members/:member_id/my-contact (0.4.2-3 F3).
+func (h *Handler) BindMyContact(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	memberID, ok := pathID(c, "member_id", "member id")
+	if !ok {
+		return
+	}
+	var req BindMyContactRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	out, err := h.service.BindMyContact(c.Request.Context(), userID, id, memberID, &req.ContactID)
+	reply(c, http.StatusOK, out, err)
+}
+
+// UnbindMyContact — DELETE /projects/:id/members/:member_id/my-contact (0.4.2-3 F3).
+func (h *Handler) UnbindMyContact(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	memberID, ok := pathID(c, "member_id", "member id")
+	if !ok {
+		return
+	}
+	out, err := h.service.BindMyContact(c.Request.Context(), userID, id, memberID, nil)
+	reply(c, http.StatusOK, out, err)
+}
+
 func (h *Handler) RemoveMember(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -543,7 +575,7 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, apierr.TagNotFound, "Tag not found", nil)
 	case errors.Is(err, ErrTagNameTaken):
 		response.Fail(c, http.StatusConflict, apierr.TagNameTaken, err.Error(), nil)
-	case errors.Is(err, ErrTagNameRequired), errors.Is(err, ErrBadMemberRequest):
+	case errors.Is(err, ErrTagNameRequired), errors.Is(err, ErrBadMemberRequest), errors.Is(err, ErrMemberIsMe):
 		response.ValidationErr(c, err)
 	case errors.Is(err, ErrInvalidDateRange):
 		response.BadRequest(c, apierr.InvalidDateRange, err.Error(), nil)

@@ -4340,6 +4340,53 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
       x-used-by:
         - { page: event-members, calls: 1 }
+  /projects/{id}/members/{member_id}/my-contact:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+      - { name: member_id, in: path, required: true, schema: { $ref: '#/components/schemas/Uuid' } }
+    put:
+      tags: [Events]
+      summary: This member is one of my contacts (for me only)
+      operationId: bindProjectMemberContact
+      description: '0.4.2-3 F3: "ผูกกับผู้ติดต่อของฉัน". Any active member; a member is never matched to a contact by name any more (except members from before 0.4.2-3), so each viewer binds their own. Replaces my earlier binding of the same member. 400 VALIDATION_ERROR when the member is me; 400 CONTACT_NOT_FOUND when the contact is not mine.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contact_id]
+              properties:
+                contact_id: { $ref: '#/components/schemas/Uuid' }
+      responses:
+        '200':
+          description: The patch (members carry my contact_id).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventPatch' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-used-by:
+        - { page: event-members, calls: 1 }
+    delete:
+      tags: [Events]
+      summary: Drop my contact binding of this member
+      operationId: unbindProjectMemberContact
+      description: '0.4.2-3 F3: the member reads as a plain name for me again (a linked member still finds my contact linked to them).'
+      responses:
+        '200':
+          description: The patch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventPatch' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-used-by:
+        - { page: event-members, calls: 1 }
   /projects/{id}/transfer-ownership:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
