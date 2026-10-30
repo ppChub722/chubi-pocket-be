@@ -7136,7 +7136,7 @@ components:
     # ───────── notifications ─────────
     NotificationSettings:
       type: object
-      description: 'The notification page (0.4.1-2 S4 / P7): on / off per type, plus the two auto-sync switches (one DB value each, the same values `/users/me`, the event page and the person page show). A muted type is not inserted when it is info only; auto still applies it silently (Q-B10). A notice that still ASKS (`shared_bill_created` / `project_tx_changed` / `shared_bill_deleted` with `applied` false, i.e. the auto switch was off) is inserted even when its type is muted: someone must answer it (owner 2026-10-28; the app locks the on / off switch on while auto is off).'
+      description: 'The notification page (0.4.1-2 S4 / P7): on / off per type, plus the two auto-sync switches (one DB value each, the same values `/users/me`, the event page and the person page show). A muted type is never inserted; auto still applies it silently (Q-B10). On / off and auto are independent (owner 2026-10-30, F1): muted with auto off = no notice and nothing applied.'
       required: [muted_types, types, auto_sync_events, auto_sync_debts, auto_accept_events, auto_accept_debts, default_account, updated_at]
       properties:
         muted_types: { type: array, items: { type: string } }

@@ -27,23 +27,10 @@ type Delivery struct {
 	self bool
 }
 
-// askTypes — the notices an auto switch answers by itself (owner 2026-10-28, "auto lives in
-// notifications"): a new shared bill (auto-accept, "เพิ่มในสมุด"), an edit (auto-update,
-// "อัปเดตตาม"), a delete (auto-update removes my copy). With the switch on, the notice comes
-// already applied; with it off, the notice asks.
-var askTypes = map[string]bool{
-	TypeSharedBillCreated: true, TypeProjectTxChanged: true, TypeSharedBillDeleted: true,
-}
-
-// Insert — whether the notice is written. A notice that still asks (an ask type the recipient's
-// auto switch did NOT apply) always comes, muted or not: someone must answer it, so muting only
-// silences the ones auto already did (the app locks แจ้ง on while auto is off). Existing mutes are
-// kept as they are (no migration): they count again once auto is back on.
-func (d Delivery) Insert(notifType string, applied bool) bool {
-	if d.self {
-		return false
-	}
-	return d.Deliver || (askTypes[notifType] && !applied)
+// Insert — whether the notice is written: แจ้ง and อัตโนมัติ are independent (owner 2026-10-30,
+// F1). Muted = no notice, applied or not; muted with auto off = nothing happens at all.
+func (d Delivery) Insert(string, bool) bool {
+	return !d.self && d.Deliver
 }
 
 // DeliveryFor — one settings read per recipient (call it once per member inside the write's DB tx).

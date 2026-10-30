@@ -42,21 +42,21 @@ func TestSettingsCounts(t *testing.T) {
 	}
 }
 
-// Owner 2026-10-28: a notice that still asks (auto off → not applied) always comes, muted or not;
-// muting silences only what auto already did. Other types follow the mute; yourself: never.
-func TestInsertAskingNoticeIgnoresMute(t *testing.T) {
+// Owner 2026-10-30 (F1): แจ้ง and อัตโนมัติ are independent: muted = no notice, applied or not.
+// Yourself: never.
+func TestInsertFollowsTheMute(t *testing.T) {
 	muted := Delivery{Deliver: false}
 	cases := []struct {
 		typ     string
 		applied bool
 		want    bool
 	}{
-		{TypeSharedBillCreated, false, true}, // asks "เพิ่มในสมุด"
-		{TypeSharedBillCreated, true, false}, // auto-accepted: silent
-		{TypeProjectTxChanged, false, true},  // asks "อัปเดตตาม"
-		{TypeProjectTxChanged, true, false},  // auto-updated: silent
-		{TypeSharedBillDeleted, false, true}, // asks to remove my copy
-		{TypeSharedBillDeleted, true, false}, // removed: silent
+		{TypeSharedBillCreated, false, false},
+		{TypeSharedBillCreated, true, false},
+		{TypeProjectTxChanged, false, false},
+		{TypeProjectTxChanged, true, false},
+		{TypeSharedBillDeleted, false, false},
+		{TypeSharedBillDeleted, true, false},
 		{TypeDebtDisconnected, false, false}, // info only: the mute wins
 		{TypeRecurringDue, false, false},     // no auto switch
 		{TypeSharedBillDisconnected, true, false},

@@ -487,9 +487,9 @@ func TestRecurringDueDeepLink(t *testing.T) {
 	}
 }
 
-// Owner 2026-10-28 (DB): with shared_bill_created muted, an unapplied new bill (auto-accept off)
-// still writes its asking notice; an applied one (auto-accept on) stays silent; my own: nothing.
-func TestMutedAskingNoticeStillComes(t *testing.T) {
+// Owner 2026-10-30 F1 (DB): with shared_bill_created muted, no notice is written, applied or not;
+// my own: nothing; an info type keeps its mute.
+func TestMutedNoticeIsNeverWritten(t *testing.T) {
 	f := newFix(t)
 	svc := NewService(NewStore(f.pool))
 	actor := testdb.User(t, f.pool)
@@ -519,15 +519,15 @@ func TestMutedAskingNoticeStillComes(t *testing.T) {
 		})
 	}
 	created(actor, false)
-	if n := count(TypeSharedBillCreated); n != 1 {
-		t.Fatalf("muted + not applied wrote %d rows, want 1 (it asks)", n)
+	if n := count(TypeSharedBillCreated); n != 0 {
+		t.Fatalf("muted + not applied wrote %d rows, want 0 (F1: the mute wins)", n)
 	}
 	created(actor, true)
-	if n := count(TypeSharedBillCreated); n != 1 {
+	if n := count(TypeSharedBillCreated); n != 0 {
 		t.Errorf("muted + applied wrote a row (want silent): %d", n)
 	}
 	created(f.uid, false)
-	if n := count(TypeSharedBillCreated); n != 1 {
+	if n := count(TypeSharedBillCreated); n != 0 {
 		t.Errorf("my own change notified me: %d", n)
 	}
 	// An info type keeps its mute.
