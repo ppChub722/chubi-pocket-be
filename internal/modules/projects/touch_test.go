@@ -477,8 +477,8 @@ func TestDeleteEventWithLinkedTxs(t *testing.T) {
 	if n(out, "split_bill_count") != 1 || f.accountBalance(t, f.acctPersonal) != start-100 {
 		t.Errorf("delete: %v (wallet %v)", out, f.accountBalance(t, f.acctPersonal))
 	}
-	if got := f.countRows(t, `SELECT COUNT(*) FROM transactions t JOIN projects p ON p.id = t.project_id
-		WHERE t.user_id = $1 AND t.amount = 100 AND p.kind = 'split'`, f.owner); got != 1 {
+	if got := f.countRows(t, `SELECT COUNT(*) FROM transactions t JOIN project_transactions b ON b.id = t.split_transaction_id
+		WHERE t.user_id = $1 AND t.amount = 100 AND t.project_id IS NULL AND b.project_id IS NULL`, f.owner); got != 1 {
 		t.Errorf("my tx should stay, connected to the split bill (%d)", got)
 	}
 	if got := f.countRows(t, `SELECT COUNT(*) FROM projects WHERE id = $1`, keep); got != 0 {

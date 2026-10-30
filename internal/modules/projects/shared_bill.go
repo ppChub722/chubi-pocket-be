@@ -111,7 +111,7 @@ func (s *Service) loadBillTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) (*b
 	st := &billState{pt: pt, shares: map[uuid.UUID]float64{}, payers: map[uuid.UUID]float64{},
 		backRows: map[uuid.UUID]map[uuid.UUID]uuid.UUID{}}
 	if err := tx.QueryRow(ctx, `SELECT p.kind, p.status, p.name, b.paid_back_for_id
-		FROM projects p JOIN project_transactions b ON b.project_id = p.id WHERE b.id = $1`, pt.ID).
+		FROM scopes p JOIN project_transactions b ON b.scope_id = p.id WHERE b.id = $1`, pt.ID).
 		Scan(&st.kind, &st.status, &st.name, &st.backFor); err != nil {
 		return nil, fmt.Errorf("bill event: %w", err)
 	}
@@ -222,7 +222,7 @@ func (r *copyResult) key(k string, p shared.PersonRef) {
 // activeMemberTx — the user's active member row in the event.
 func activeMemberTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UUID) (uuid.UUID, bool, error) {
 	var id uuid.UUID
-	err := tx.QueryRow(ctx, `SELECT id FROM project_members WHERE project_id = $1 AND user_id = $2 AND status = 'active'`,
+	err := tx.QueryRow(ctx, `SELECT id FROM project_members WHERE scope_id = $1 AND user_id = $2 AND status = 'active'`,
 		projectID, userID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, false, nil
@@ -409,8 +409,8 @@ func (s *Service) copyTxTx(ctx context.Context, tx pgx.Tx, st *billState, userID
 		WHERE id = $1 AND linked_transaction_id = $2`, st.pt.ID, *copyID); err != nil {
 		return nil, fmt.Errorf("bill origin: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE transactions SET source_project_transaction_id = $2, project_id = $3
-		WHERE id = $1 AND (source_project_transaction_id IS DISTINCT FROM $2 OR project_id IS DISTINCT FROM $3)`,
+	if _, err := tx.Exec(ctx, `UPDATE transactions SET source_project_transaction_id = $2, project_id = event_or_null($3)
+		WHERE id = $1 AND (source_project_transaction_id IS DISTINCT FROM $2 OR project_id IS DISTINCT FROM event_or_null($3))`,
 		*copyID, st.pt.ID, st.pt.ProjectID); err != nil {
 		return nil, fmt.Errorf("copy link: %w", err)
 	}
@@ -821,7 +821,7 @@ func (s *Service) fanOutTx(ctx context.Context, tx pgx.Tx, editor, ptID uuid.UUI
 		return nil
 	}
 	users, err := collectIDs(ctx, tx, `SELECT DISTINCT pm.user_id FROM project_members pm
-		WHERE pm.project_id = $1 AND pm.user_id IS NOT NULL AND pm.user_id <> $2 AND pm.status = 'active'
+		WHERE pm.scope_id = $1 AND pm.user_id IS NOT NULL AND pm.user_id <> $2 AND pm.status = 'active'
 		  AND NOT EXISTS (SELECT 1 FROM split_transaction_people o WHERE o.split_transaction_id = $3
 		                   AND o.user_id = pm.user_id AND o.disconnected_at IS NOT NULL)`,
 		st.pt.ProjectID, editor, st.pt.ID)

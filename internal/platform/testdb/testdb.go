@@ -62,6 +62,7 @@ func User(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 			`DELETE FROM saving_entries WHERE user_id = $1`,
 			`DELETE FROM saving_goals WHERE user_id = $1`,
 			`DELETE FROM budgets WHERE user_id = $1`,
+			`DELETE FROM project_transactions WHERE project_id IS NULL AND record_user_id = $1`, // split bills
 			`DELETE FROM projects WHERE owner_user_id = $1`,
 			`DELETE FROM account_members WHERE user_id = $1`,
 			`DELETE FROM accounts WHERE user_id = $1`,

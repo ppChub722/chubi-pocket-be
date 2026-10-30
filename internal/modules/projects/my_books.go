@@ -140,7 +140,7 @@ func relinkMineTx(ctx context.Context, tx pgx.Tx, userID, projectID, ptID uuid.U
 	switch kind {
 	case BookDebt, BookRepay:
 		tag, err := tx.Exec(ctx, `UPDATE personal_debts
-			SET source_kind = 'event', source_project_transaction_id = $1, project_id = $3,
+			SET source_kind = 'event', source_project_transaction_id = $1, project_id = event_or_null($3),
 			    unlinked_project_transaction_id = NULL, updated_by_user_id = $2
 			WHERE user_id = $2 AND unlinked_project_transaction_id = $1
 			  AND source_kind IS NULL AND source_project_transaction_id IS NULL AND kind = $4`,
@@ -169,7 +169,7 @@ func relinkMineTx(ctx context.Context, tx pgx.Tx, userID, projectID, ptID uuid.U
 		}
 		if _, err := tx.Exec(ctx, `UPDATE transactions
 			SET source_project_transaction_id = $1,
-			    project_id = $3, unlinked_project_transaction_id = NULL, updated_by_user_id = $2
+			    project_id = event_or_null($3), unlinked_project_transaction_id = NULL, updated_by_user_id = $2
 			WHERE id = ANY($4)`, ptID, userID, projectID, ids); err != nil {
 			return false, fmt.Errorf("relink %s: %w", kind, err)
 		}

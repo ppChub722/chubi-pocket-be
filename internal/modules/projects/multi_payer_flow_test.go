@@ -154,10 +154,12 @@ func TestMultiPayerLumpThenDeleteEvent(t *testing.T) {
 	if c := e.f.countRows(t, `SELECT COUNT(*) FROM projects WHERE id = $1`, e.id); c != 0 {
 		t.Errorf("the event is still there")
 	}
-	// each bill now sits in its own split "event", payers kept
-	if c := e.f.countRows(t, `SELECT COUNT(DISTINCT p.id) FROM project_transactions x JOIN projects p ON p.id = x.project_id
-		WHERE x.id IN ($1::uuid, $2::uuid) AND p.kind = 'split'`, b1, b2); c != 2 {
-		t.Errorf("bills in split projects = %d, want 2", c)
+	// each bill is now a split bill (no event, its own members), payers kept
+	if c := e.f.countRows(t, `SELECT COUNT(*) FROM project_transactions x WHERE x.id IN ($1::uuid, $2::uuid)
+		AND x.project_id IS NULL AND x.scope_id = x.id
+		AND NOT EXISTS (SELECT 1 FROM split_transaction_people sp JOIN project_members pm ON pm.id = sp.event_member_id
+		                 WHERE sp.split_transaction_id = x.id AND pm.split_transaction_id IS DISTINCT FROM x.id)`, b1, b2); c != 2 {
+		t.Errorf("split bills = %d, want 2", c)
 	}
 	if c := e.f.countRows(t, `SELECT COUNT(*) FROM split_transaction_people WHERE split_transaction_id IN ($1::uuid, $2::uuid) AND paid > 0`, b1, b2); c != 4 {
 		t.Errorf("payers rows kept = %d, want 4", c)
@@ -166,8 +168,9 @@ func TestMultiPayerLumpThenDeleteEvent(t *testing.T) {
 	if c := e.f.countRows(t, `SELECT COUNT(*) FROM personal_debt_bills WHERE debt_id = $1`, debtID); c != 2 {
 		t.Errorf("lump parts = %d, want 2", c)
 	}
-	if c := e.f.countRows(t, `SELECT COUNT(*) FROM transactions t JOIN projects p ON p.id = t.project_id
-		WHERE t.user_id = $1 AND t.source_project_transaction_id IN ($2::uuid, $3::uuid) AND p.kind = 'split'`, e.f.owner, b1, b2); c != 2 {
+	if c := e.f.countRows(t, `SELECT COUNT(*) FROM transactions t
+		WHERE t.user_id = $1 AND t.source_project_transaction_id IN ($2::uuid, $3::uuid) AND t.project_id IS NULL
+		  AND t.split_transaction_id = t.source_project_transaction_id`, e.f.owner, b1, b2); c != 2 {
 		t.Errorf("copies connected to the split bills = %d, want 2", c)
 	}
 	var amount float64

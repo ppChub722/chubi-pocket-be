@@ -244,7 +244,7 @@ func LoadEventRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UU
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := q.Query(ctx, `SELECT id, name, icon_code, status, kind FROM projects WHERE id = ANY($1)`, ids)
+	rows, err := q.Query(ctx, `SELECT id, name, icon_code, status, kind FROM scopes WHERE id = ANY($1)`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("event refs: %w", err)
 	}

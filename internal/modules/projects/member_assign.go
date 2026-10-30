@@ -49,7 +49,7 @@ func (s *Service) AssignRemoved(ctx context.Context, userID, projectID, memberID
 		return nil, ErrMemberNotRemoved
 	}
 	var meID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT id FROM project_members WHERE project_id = $1 AND user_id = $2`,
+	if err := tx.QueryRow(ctx, `SELECT id FROM project_members WHERE scope_id = $1 AND user_id = $2`,
 		projectID, userID).Scan(&meID); err != nil {
 		return nil, fmt.Errorf("my member: %w", err)
 	}
@@ -62,8 +62,8 @@ func (s *Service) AssignRemoved(ctx context.Context, userID, projectID, memberID
 	}
 	all, err := collectIDs(ctx, tx, `SELECT DISTINCT sp.split_transaction_id FROM split_transaction_people sp
 		JOIN project_transactions b ON b.id = sp.split_transaction_id
-		WHERE b.project_id = $1 AND sp.event_member_id = $2
-		UNION SELECT id FROM project_transactions WHERE project_id = $1 AND transaction_member_id = $2`,
+		WHERE b.scope_id = $1 AND sp.event_member_id = $2
+		UNION SELECT id FROM project_transactions WHERE scope_id = $1 AND transaction_member_id = $2`,
 		projectID, memberID)
 	if err != nil {
 		return nil, err

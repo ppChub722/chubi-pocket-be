@@ -26,7 +26,7 @@ func (s *Service) deleteEventBillTx(ctx context.Context, tx pgx.Tx, editor uuid.
 		return nil, err
 	}
 	users, err := collectIDs(ctx, tx, `SELECT DISTINCT pm.user_id FROM project_members pm
-		WHERE pm.project_id = $1 AND pm.user_id IS NOT NULL AND pm.status = 'active'
+		WHERE pm.scope_id = $1 AND pm.user_id IS NOT NULL AND pm.status = 'active'
 		  AND NOT EXISTS (SELECT 1 FROM split_transaction_people o WHERE o.split_transaction_id = $2
 		                   AND o.user_id = pm.user_id AND o.disconnected_at IS NOT NULL)`,
 		pt.ProjectID, pt.ID)

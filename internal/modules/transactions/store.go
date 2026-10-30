@@ -29,29 +29,34 @@ var (
 	ErrSourcePTNotForUser = errors.New("caller is not a member of the source project")
 )
 
+// LookupSourcePTTx — the event of a bill a new transaction copies (nil: a split bill), when the user
+// is one of its active members.
 func (s *Store) LookupSourcePTTx(
 	ctx context.Context, tx pgx.Tx, ptID, userID uuid.UUID,
-) (uuid.UUID, error) {
-	var projectID uuid.UUID
+) (*uuid.UUID, error) {
+	var (
+		scope     uuid.UUID
+		projectID *uuid.UUID
+	)
 	err := tx.QueryRow(ctx,
-		`SELECT project_id FROM project_transactions WHERE id = $1`, ptID,
-	).Scan(&projectID)
+		`SELECT scope_id, project_id FROM project_transactions WHERE id = $1`, ptID,
+	).Scan(&scope, &projectID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, ErrSourcePTNotFound
+		return nil, ErrSourcePTNotFound
 	}
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("source PT lookup: %w", err)
+		return nil, fmt.Errorf("source PT lookup: %w", err)
 	}
 	var n int
 	if err := tx.QueryRow(ctx,
 		`SELECT COUNT(*) FROM project_members
-		WHERE project_id = $1 AND user_id = $2 AND status = 'active'`,
-		projectID, userID,
+		WHERE scope_id = $1 AND user_id = $2 AND status = 'active'`,
+		scope, userID,
 	).Scan(&n); err != nil {
-		return uuid.Nil, fmt.Errorf("source PT membership: %w", err)
+		return nil, fmt.Errorf("source PT membership: %w", err)
 	}
 	if n == 0 {
-		return uuid.Nil, ErrSourcePTNotForUser
+		return nil, ErrSourcePTNotForUser
 	}
 	return projectID, nil
 }

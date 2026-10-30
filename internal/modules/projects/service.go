@@ -116,7 +116,7 @@ func (s *Service) Detail(ctx context.Context, userID, id uuid.UUID, page, perPag
 		return d, err
 	}
 	p := &DeletePreview{Members: d.Event.MembersCount, LinkedTxCount: d.Event.LinkedTxCount}
-	if err := s.store.db.QueryRow(ctx, `SELECT COUNT(*) FROM project_transactions WHERE project_id = $1 AND parent_project_transaction_id IS NULL`, id).Scan(&p.Bills); err != nil {
+	if err := s.store.db.QueryRow(ctx, `SELECT COUNT(*) FROM project_transactions WHERE scope_id = $1 AND parent_project_transaction_id IS NULL`, id).Scan(&p.Bills); err != nil {
 		return nil, err
 	}
 	d.DeletePreview = p
@@ -210,7 +210,7 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked
 		return nil, fmt.Errorf("unlock: %w", err)
 	}
 	others, err := collectIDs(ctx, tx, `SELECT user_id FROM project_members
-		WHERE project_id = $1 AND user_id IS NOT NULL AND user_id <> $2 AND status = 'active'`, id, userID)
+		WHERE scope_id = $1 AND user_id IS NOT NULL AND user_id <> $2 AND status = 'active'`, id, userID)
 	if err != nil {
 		return nil, fmt.Errorf("members: %w", err)
 	}
@@ -218,7 +218,7 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked
 	var splits []uuid.UUID
 	for guard := 0; ; guard++ {
 		var ptID uuid.UUID
-		err := tx.QueryRow(ctx, `SELECT id FROM project_transactions WHERE project_id = $1 AND parent_project_transaction_id IS NULL
+		err := tx.QueryRow(ctx, `SELECT id FROM project_transactions WHERE scope_id = $1 AND parent_project_transaction_id IS NULL
 			ORDER BY date, created_at, id LIMIT 1`, id).Scan(&ptID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			break
@@ -252,8 +252,8 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	// effects: my records, now pointing at the split bills
-	myTxs, err := collectPoolIDs(ctx, s.store.db, `SELECT t.id FROM transactions t WHERE t.user_id = $2 AND (t.project_id = ANY($1)
-		OR t.source_project_transaction_id IN (SELECT x.id FROM project_transactions x WHERE x.project_id = ANY($1)))`, splits, userID)
+	myTxs, err := collectPoolIDs(ctx, s.store.db, `SELECT t.id FROM transactions t WHERE t.user_id = $2 AND (t.split_transaction_id = ANY($1)
+		OR t.source_project_transaction_id IN (SELECT x.id FROM project_transactions x WHERE x.scope_id = ANY($1)))`, splits, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -263,9 +263,9 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked
 		}
 	}
 	if s.debts != nil {
-		myDebts, err := collectPoolIDs(ctx, s.store.db, `SELECT d.id FROM personal_debts d WHERE d.user_id = $2 AND (d.project_id = ANY($1)
+		myDebts, err := collectPoolIDs(ctx, s.store.db, `SELECT d.id FROM personal_debts d WHERE d.user_id = $2 AND (d.split_transaction_id = ANY($1)
 			OR d.id IN (SELECT b.debt_id FROM personal_debt_bills b JOIN project_transactions x ON x.id = b.pt_id
-				WHERE b.user_id = $2 AND x.project_id = ANY($1)))`, splits, userID)
+				WHERE b.user_id = $2 AND x.scope_id = ANY($1)))`, splits, userID)
 		if err != nil {
 			return nil, err
 		}
@@ -306,7 +306,7 @@ func (s *Service) Leave(ctx context.Context, userID, projectID uuid.UUID) (*Dele
 	}
 	var memberID uuid.UUID
 	if err := s.store.db.QueryRow(ctx,
-		`SELECT id FROM project_members WHERE project_id = $1 AND user_id = $2 AND status = 'active'`,
+		`SELECT id FROM project_members WHERE scope_id = $1 AND user_id = $2 AND status = 'active'`,
 		projectID, userID).Scan(&memberID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotMember
@@ -632,7 +632,7 @@ func (s *Service) IsActiveMember(ctx context.Context, projectID, userID uuid.UUI
 
 func projectNameOrEmpty(ctx context.Context, tx pgx.Tx, projectID uuid.UUID) string {
 	var name string
-	_ = tx.QueryRow(ctx, `SELECT name FROM projects WHERE id = $1`, projectID).Scan(&name)
+	_ = tx.QueryRow(ctx, `SELECT name FROM scopes WHERE id = $1`, projectID).Scan(&name)
 	return name
 }
 

@@ -29,27 +29,27 @@ func loadEvents(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids [
 	}
 	rows, err := q.Query(ctx, `
 		WITH me AS (
-			SELECT pm.project_id, pm.id, pm.role, pm.status FROM project_members pm
-			WHERE pm.project_id = ANY($1) AND pm.user_id = $2
+			SELECT pm.scope_id AS project_id, pm.id, pm.role, pm.status FROM project_members pm
+			WHERE pm.scope_id = ANY($1) AND pm.user_id = $2
 		)
 		SELECT p.id, p.owner_user_id, p.name, p.description, p.note,
 		       to_char(p.start_date, 'YYYY-MM-DD'), to_char(p.end_date, 'YYYY-MM-DD'),
 		       p.status, p.icon_code, p.planned_amount, p.created_at, p.updated_at, p.completed_at, p.kind,
-		       (SELECT COUNT(*) FROM project_members m WHERE m.project_id = p.id AND m.status = 'active'),
+		       (SELECT COUNT(*) FROM project_members m WHERE m.scope_id = p.id AND m.status = 'active'),
 		       COALESCE((SELECT SUM(amount) FROM project_transactions x
-		                 WHERE x.project_id = p.id AND x.parent_project_transaction_id IS NULL AND x.type = 'expense'), 0),
+		                 WHERE x.scope_id = p.id AND x.parent_project_transaction_id IS NULL AND x.type = 'expense'), 0),
 		       COALESCE((SELECT SUM(amount) FROM project_transactions x
-		                 WHERE x.project_id = p.id AND x.parent_project_transaction_id IS NULL AND x.type = 'income'), 0),
+		                 WHERE x.scope_id = p.id AND x.parent_project_transaction_id IS NULL AND x.type = 'income'), 0),
 		       me.id, me.role, me.status,
-		       (SELECT COUNT(*) FROM transactions lt WHERE lt.project_id = p.id AND lt.user_id = $2),
+		       (SELECT COUNT(*) FROM transactions lt WHERE (lt.project_id = p.id OR lt.split_transaction_id = p.id) AND lt.user_id = $2),
 		       -- my real pairs (bill_pairs: income flipped, multi-payer proportional)
 		       COALESCE((SELECT SUM(CASE WHEN v.creditor = me.id THEN v.amount ELSE -v.amount END)
 		                 FROM bill_pairs v WHERE v.project_id = p.id AND me.id IN (v.debtor, v.creditor)), 0),
 		       (SELECT COUNT(DISTINCT sp.split_transaction_id) FROM project_transactions x
 		         JOIN split_transaction_people sp ON sp.split_transaction_id = x.id
 		         JOIN project_members rm ON rm.id = sp.event_member_id
-		         WHERE x.project_id = p.id AND rm.removed_at IS NOT NULL)
-		FROM projects p
+		         WHERE x.scope_id = p.id AND rm.removed_at IS NOT NULL)
+		FROM scopes p
 		LEFT JOIN me ON me.project_id = p.id
 		WHERE p.id = ANY($1)`, ids, callerID)
 	if err != nil {
@@ -140,7 +140,7 @@ func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid
 			mc.id, pm.removed_at
 		FROM project_members pm LEFT JOIN users u ON u.id = pm.user_id
 		`+myContactJoin("$2")+` ON pm.user_id IS DISTINCT FROM $2
-		WHERE pm.project_id = $1
+		WHERE pm.scope_id = $1
 		ORDER BY pm.status = 'left', pm.role <> 'owner', pm.created_at, pm.id`, projectID, callerID)
 	if err != nil {
 		return nil, fmt.Errorf("members: %w", err)
@@ -223,7 +223,7 @@ func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid
 		WITH pp AS (
 			SELECT p.event_member_id AS m, b.type, p.paid, p.share, b.id AS bid
 			FROM project_transactions b JOIN split_transaction_people p ON p.split_transaction_id = b.id
-			WHERE b.project_id = $1 AND b.parent_project_transaction_id IS NULL AND p.event_member_id IS NOT NULL
+			WHERE b.scope_id = $1 AND b.parent_project_transaction_id IS NULL AND p.event_member_id IS NOT NULL
 		),
 		paid AS (SELECT m, SUM(paid) AS v FROM pp WHERE type = 'expense' AND paid > 0 GROUP BY m),
 		share AS (SELECT m, SUM(share) AS v FROM pp WHERE type = 'expense' GROUP BY m),
@@ -245,7 +245,7 @@ func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid
 		LEFT JOIN share ON share.m = pm.id
 		LEFT JOIN sent ON sent.m = pm.id
 		LEFT JOIN received ON received.m = pm.id
-		WHERE pm.project_id = $1 AND (pm.status = 'active' OR paid.v IS NOT NULL OR share.v IS NOT NULL
+		WHERE pm.scope_id = $1 AND (pm.status = 'active' OR paid.v IS NOT NULL OR share.v IS NOT NULL
 		      OR sent.v IS NOT NULL OR received.v IS NOT NULL OR incnet.v IS NOT NULL)
 		ORDER BY COALESCE(paid.v, 0) DESC, pm.created_at`, projectID)
 	if err != nil {
@@ -407,7 +407,7 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 	if e.MyMemberID != nil {
 		me = *e.MyMemberID
 	}
-	where := []string{"pt.project_id = $1", "pt.parent_project_transaction_id IS NULL"}
+	where := []string{"pt.scope_id = $1", "pt.parent_project_transaction_id IS NULL"}
 	args := []any{projectID}
 	add := func(cond string, v any) {
 		args = append(args, v)

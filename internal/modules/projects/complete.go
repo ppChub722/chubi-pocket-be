@@ -50,7 +50,7 @@ func (s *Service) Complete(ctx context.Context, userID, id uuid.UUID) (*EventCom
 	empty, err := collectIDs(ctx, tx, `SELECT DISTINCT pt.id
 		FROM project_transactions pt JOIN split_transaction_people sp ON sp.split_transaction_id = pt.id
 		JOIN project_members pm ON pm.id = sp.event_member_id
-		WHERE pt.project_id = $1 AND pm.removed_at IS NOT NULL`, id)
+		WHERE pt.scope_id = $1 AND pm.removed_at IS NOT NULL`, id)
 	if err != nil {
 		return nil, fmt.Errorf("empty persons: %w", err)
 	}
@@ -62,13 +62,13 @@ func (s *Service) Complete(ctx context.Context, userID, id uuid.UUID) (*EventCom
 		return nil, fmt.Errorf("complete: %w", err)
 	}
 	myTxs, err := collectIDs(ctx, tx, `SELECT t.id FROM transactions t WHERE t.user_id = $2 AND (t.project_id = $1
-		OR t.source_project_transaction_id IN (SELECT x.id FROM project_transactions x WHERE x.project_id = $1))`, id, userID)
+		OR t.source_project_transaction_id IN (SELECT x.id FROM project_transactions x WHERE x.scope_id = $1))`, id, userID)
 	if err != nil {
 		return nil, fmt.Errorf("my txs: %w", err)
 	}
 	myDebts, err := collectIDs(ctx, tx, `SELECT d.id FROM personal_debts d WHERE d.user_id = $2 AND (d.project_id = $1
 		OR d.id IN (SELECT b.debt_id FROM personal_debt_bills b JOIN project_transactions x ON x.id = b.pt_id
-			WHERE b.user_id = $2 AND x.project_id = $1))`, id, userID)
+			WHERE b.user_id = $2 AND x.scope_id = $1))`, id, userID)
 	if err != nil {
 		return nil, fmt.Errorf("my debts: %w", err)
 	}
@@ -79,7 +79,7 @@ func (s *Service) Complete(ctx context.Context, userID, id uuid.UUID) (*EventCom
 			return nil, err
 		}
 		others, err := collectIDs(ctx, tx, `SELECT user_id FROM project_members
-			WHERE project_id = $1 AND user_id IS NOT NULL AND user_id <> $2 AND status = 'active'`, id, userID)
+			WHERE scope_id = $1 AND user_id IS NOT NULL AND user_id <> $2 AND status = 'active'`, id, userID)
 		if err != nil {
 			return nil, fmt.Errorf("members: %w", err)
 		}

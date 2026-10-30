@@ -211,7 +211,7 @@ func (s *Service) BookBill(ctx context.Context, userID uuid.UUID, req EventBillB
 	return s.runBooking(ctx, userID, preview, func(b *booking) error {
 		switch {
 		case req.Split:
-			if err := b.newSplit(ctx, req.Bill); err != nil {
+			if err := b.newSplit(ctx, req.Bill, uuid.Nil); err != nil {
 				return err
 			}
 			req.Bill.TagIDs = nil // a split bill has no event tags
@@ -347,16 +347,23 @@ func (b *booking) open(ctx context.Context, projectID uuid.UUID, op string) erro
 		return err
 	}
 	b.project, b.meMem, b.mb = p, me.ID, mb
-	if err := b.tx.QueryRow(ctx, `SELECT kind FROM projects WHERE id = $1`, projectID).Scan(&b.kind); err != nil {
+	if err := b.tx.QueryRow(ctx, `SELECT kind FROM scopes WHERE id = $1`, projectID).Scan(&b.kind); err != nil {
 		return fmt.Errorf("event kind: %w", err)
 	}
 	b.mb.invite = b.kind == KindEvent
 	return nil
 }
 
-// newSplit — a split bill (0.4.1-2 S1 / S2): its hidden one-bill "event" (kind split, never listed),
-// owned by me; its people join as members as the bill resolves them (linked ones active at once).
-func (b *booking) newSplit(ctx context.Context, in EventBillInput) error {
+// newSplit — a split bill (0.4.1-2 S1 / S2; A2: no event): the bill is its own scope, its people
+// are the bill's own members (me first), linked ones active at once. billID = the bill (a new one, or
+// the bill moving out of its event).
+func (b *booking) newSplit(ctx context.Context, in EventBillInput, billID uuid.UUID) error {
+	if billID == uuid.Nil {
+		var err error
+		if billID, err = uuid.NewV7(); err != nil {
+			return fmt.Errorf("uuid: %w", err)
+		}
+	}
 	name := ""
 	if d := shared.CleanText(in.Description); d != nil {
 		name = *d
@@ -364,14 +371,18 @@ func (b *booking) newSplit(ctx context.Context, in EventBillInput) error {
 			name = string([]rune(name)[:100])
 		}
 	}
-	if err := b.newEvent(ctx, NewEventInput{Name: name}); err != nil {
+	myName := userDisplayOrEmpty(ctx, b.tx, b.me)
+	if myName == "" {
+		myName = "Member"
+	}
+	me, err := b.s.store.InsertMemberTx(ctx, b.tx, billID, &b.me, myName, RoleOwner, MemberStatusActive, b.me, nil)
+	if err != nil {
 		return err
 	}
-	if _, err := b.tx.Exec(ctx, `UPDATE projects SET kind = $2 WHERE id = $1`, b.project.ID, KindSplit); err != nil {
-		return fmt.Errorf("split bill: %w", err)
-	}
-	b.kind = KindSplit
-	b.mb.invite = false
+	b.project = &Project{ID: billID, OwnerUserID: b.me, Name: name, Status: "active"}
+	b.meMem, b.kind = me.ID, KindSplit
+	b.mb = &quickMemberBuilder{svc: b.s, tx: b.tx, projectID: billID, callerUserID: b.me,
+		byUser: map[uuid.UUID]uuid.UUID{b.me: me.ID}, byContact: map[uuid.UUID]uuid.UUID{}, byName: map[string]uuid.UUID{}}
 	return nil
 }
 
@@ -466,7 +477,7 @@ func (b *booking) asOrigin(ctx context.Context, billID, txID uuid.UUID) error {
 		WHERE id = $1`, billID, txID); err != nil {
 		return fmt.Errorf("bill origin: %w", err)
 	}
-	_, err := b.tx.Exec(ctx, `UPDATE transactions SET project_id = $2, source_project_transaction_id = $3 WHERE id = $1`,
+	_, err := b.tx.Exec(ctx, `UPDATE transactions SET project_id = event_or_null($2), source_project_transaction_id = $3 WHERE id = $1`,
 		txID, b.project.ID, billID)
 	return err
 }
@@ -617,6 +628,9 @@ func (b *booking) writeNew(ctx context.Context, in EventBillInput, books EventBi
 	}
 	req := CreateProjectTransactionRequest{TransactionMemberID: payer, Type: in.Kind, Amount: in.Amount, Date: in.Date,
 		Description: in.Description, Note: in.Note, Splits: r.splits}
+	if b.kind == KindSplit {
+		req.ID = b.project.ID // a split bill is its own scope
+	}
 	if in.TagIDs != nil && in.Kind != PTTypePayback {
 		req.TagIDs = *in.TagIDs
 	} else if in.Kind != PTTypePayback && payer == b.meMem && books.On && books.Tx {

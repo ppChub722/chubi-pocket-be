@@ -46,7 +46,7 @@ var keyNames = append(append([]string{}, DatasetNames...), Transactions, Budgets
 const (
 	visAcc = `(SELECT am.account_id FROM account_members am
 		WHERE am.user_id = $1 AND am.joined_at IS NOT NULL AND am.left_at IS NULL)`
-	visProj    = `(SELECT pm.project_id FROM project_members pm WHERE pm.user_id = $1)`
+	visProj    = `(SELECT pm.scope_id FROM project_members pm WHERE pm.user_id = $1)`
 	visTx      = `(SELECT vt.id FROM transactions vt WHERE vt.user_id = $1 OR vt.account_id IN ` + visAcc + `)`
 	linkedUser = `(SELECT lc.linked_user_id FROM contacts lc WHERE lc.user_id = $1 AND lc.linked_user_id IS NOT NULL)`
 	// prefKeys — only the named preference keys of the caller (P4: a page_prefs or theme write
@@ -98,7 +98,7 @@ var sources = map[string][]source{
 		ts(`account_members x WHERE x.user_id = $1`),
 		ts(`accounts x WHERE x.id IN ` + visAcc),
 		ts(`personal_debts x WHERE x.user_id = $1`),
-		ts(`project_transactions x WHERE x.project_id IN ` + visProj),
+		ts(`project_transactions x WHERE x.scope_id IN ` + visProj),
 	},
 	Tags: {
 		ts(`tags x WHERE x.user_id = $1`),
@@ -115,9 +115,9 @@ var sources = map[string][]source{
 	},
 	Projects: {
 		ts(`projects x WHERE x.id IN ` + visProj),
-		ts(`project_members x WHERE x.project_id IN ` + visProj),
-		ts(`project_transactions x WHERE x.project_id IN ` + visProj),
-		ts(`transactions x WHERE x.user_id = $1 AND x.project_id IN ` + visProj),
+		ts(`project_members x WHERE x.scope_id IN ` + visProj),
+		ts(`project_transactions x WHERE x.scope_id IN ` + visProj),
+		ts(`transactions x WHERE x.user_id = $1 AND (x.project_id IN ` + visProj + ` OR x.split_transaction_id IN ` + visProj + `)`),
 		content(`project_my_tags x WHERE x.user_id = $1`),
 		ts(`tags x WHERE x.user_id = $1`),
 	},

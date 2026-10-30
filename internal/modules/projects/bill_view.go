@@ -105,7 +105,7 @@ func (s *Service) billView(ctx context.Context, userID uuid.UUID, pt *ProjectTra
 		project struct{ kind, status string }
 	)
 	m := &myMember{}
-	err := q.QueryRow(ctx, `SELECT id, role, status FROM project_members WHERE project_id = $1 AND user_id = $2`,
+	err := q.QueryRow(ctx, `SELECT id, role, status FROM project_members WHERE scope_id = $1 AND user_id = $2`,
 		pt.ProjectID, userID).Scan(&m.id, &m.role, &m.status)
 	switch {
 	case err == nil:
@@ -115,7 +115,7 @@ func (s *Service) billView(ctx context.Context, userID uuid.UUID, pt *ProjectTra
 	}
 	if err := q.QueryRow(ctx, `SELECT p.kind, p.status, EXISTS (SELECT 1 FROM transactions t WHERE t.user_id = $2
 			AND (t.source_project_transaction_id = $3 OR t.unlinked_project_transaction_id = $3))
-		FROM projects p WHERE p.id = $1`, pt.ProjectID, userID, pt.ID).Scan(&project.kind, &project.status, &holder); err != nil {
+		FROM scopes p WHERE p.id = $1`, pt.ProjectID, userID, pt.ID).Scan(&project.kind, &project.status, &holder); err != nil {
 		return nil, fmt.Errorf("bill event: %w", err)
 	}
 	if mem == nil && !holder {
@@ -379,7 +379,7 @@ func (s *Service) applyResult(ctx context.Context, userID, ptID uuid.UUID, res *
 	}
 	var mem *myMember
 	m := &myMember{}
-	if err := s.store.db.QueryRow(ctx, `SELECT id, role, status FROM project_members WHERE project_id = $1 AND user_id = $2`,
+	if err := s.store.db.QueryRow(ctx, `SELECT id, role, status FROM project_members WHERE scope_id = $1 AND user_id = $2`,
 		pt.ProjectID, userID).Scan(&m.id, &m.role, &m.status); err == nil {
 		mem = m
 	}
@@ -497,7 +497,7 @@ func (s *Service) DisconnectBill(ctx context.Context, userID, ptID uuid.UUID) (*
 	}
 	if st.kind == KindSplit && s.notifs != nil {
 		users, err := collectIDs(ctx, tx, `SELECT DISTINCT user_id FROM project_members
-			WHERE project_id = $1 AND user_id IS NOT NULL AND user_id <> $2 AND status = 'active'`, pt.ProjectID, userID)
+			WHERE scope_id = $1 AND user_id IS NOT NULL AND user_id <> $2 AND status = 'active'`, pt.ProjectID, userID)
 		if err != nil {
 			return nil, err
 		}
@@ -561,13 +561,10 @@ func (s *Service) DeleteBill(ctx context.Context, userID, ptID uuid.UUID, keepMi
 			return nil, err
 		}
 		var left int
-		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM project_transactions WHERE project_id = $1`, pt.ProjectID).Scan(&left); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM project_transactions WHERE scope_id = $1`, pt.ProjectID).Scan(&left); err != nil {
 			return nil, fmt.Errorf("bills left: %w", err)
 		}
-		if left == 0 {
-			if _, err := tx.Exec(ctx, `DELETE FROM projects WHERE id = $1 AND kind = 'split'`, pt.ProjectID); err != nil {
-				return nil, fmt.Errorf("delete split: %w", err)
-			}
+		if left == 0 { // its members went with it
 			removedProject = true
 		}
 	}
@@ -592,7 +589,7 @@ func (s *Service) DeleteBill(ctx context.Context, userID, ptID uuid.UUID, keepMi
 func (s *Service) deleteSplitBillTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, st *billState, keepMine bool) (*copyResult, error) {
 	pt := st.pt
 	users, err := collectIDs(ctx, tx, `SELECT DISTINCT user_id FROM project_members
-		WHERE project_id = $1 AND user_id IS NOT NULL AND status = 'active'`, pt.ProjectID)
+		WHERE scope_id = $1 AND user_id IS NOT NULL AND status = 'active'`, pt.ProjectID)
 	if err != nil {
 		return nil, err
 	}

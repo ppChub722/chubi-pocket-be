@@ -30,6 +30,7 @@ type rowFacts struct {
 	debtPaid      *bool
 	debtKind      *string
 	billID        *uuid.UUID
+	billScope     *uuid.UUID // the bill's event, or the split bill itself
 	recItemID     *uuid.UUID
 	recItemUser   *uuid.UUID
 	recItemSeq    *int
@@ -92,8 +93,8 @@ func buildDetails(
 		if r.CategoryID != nil {
 			catIDs = append(catIDs, *r.CategoryID)
 		}
-		if r.ProjectID != nil {
-			eventIDs = append(eventIDs, *r.ProjectID)
+		if e := eventOf(r, facts[r.ID]); e != nil {
+			eventIDs = append(eventIDs, *e)
 		}
 		if f, ok := facts[r.ID]; ok && f.peerAccountID != nil {
 			accIDs = append(accIDs, *f.peerAccountID)
@@ -154,8 +155,8 @@ func buildDetails(
 				d.Category = &c
 			}
 		}
-		if r.ProjectID != nil {
-			if e, ok := events[*r.ProjectID]; ok {
+		if id := eventOf(&r, facts[r.ID]); id != nil {
+			if e, ok := events[*id]; ok {
 				d.Project = &e
 			}
 		}
@@ -275,6 +276,17 @@ func transferDirection(f rowFacts) string {
 	return "in"
 }
 
+// eventOf — the event a row shows: its own, else (a copy of a split bill) the bill's scope.
+func eventOf(r *Transaction, f rowFacts) *uuid.UUID {
+	if r.ProjectID != nil {
+		return r.ProjectID
+	}
+	if f.billID != nil {
+		return f.billScope
+	}
+	return nil
+}
+
 func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]rowFacts, error) {
 	rows, err := q.Query(ctx, `
 		SELECT t.id,
@@ -294,6 +306,7 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		       peer.id, peer.account_id, c.system_kind, pc.system_kind,
 		       de.counterparty_contact_id, de.counterparty_person_name, de.direction, de.paid, de.kind,
 		       CASE WHEN t.source_project_transaction_id IS NOT NULL THEN t.split_transaction_id END,
+		       (SELECT b.scope_id FROM project_transactions b WHERE b.id = t.split_transaction_id),
 		       ri.id, ri.user_id, ri.seq, rr.id, rr.name, rr.icon_code, rr.total_count,
 		       pb.id, pb.source_kind, pb.counterparty_contact_id, pb.counterparty_person_name, pb.paid
 		FROM transactions t
@@ -324,7 +337,7 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		if err := rows.Scan(&id, &f.currency, &f.myShare, &f.splitCount, &f.billable, &f.eventBill,
 			&f.closed, &f.activeMembers, &f.callerActive, &f.authorName, &f.authorIcon,
 			&f.peerID, &f.peerAccountID, &f.kind, &f.peerKind,
-			&f.debtContactID, &f.debtName, &f.debtDirection, &f.debtPaid, &f.debtKind, &f.billID,
+			&f.debtContactID, &f.debtName, &f.debtDirection, &f.debtPaid, &f.debtKind, &f.billID, &f.billScope,
 			&f.recItemID, &f.recItemUser, &f.recItemSeq, &f.recID, &f.recName, &f.recIcon, &f.recTotal,
 			&f.pbID, &f.pbKind, &f.pbContactID, &f.pbName, &f.pbPaid); err != nil {
 			return nil, fmt.Errorf("row facts scan: %w", err)

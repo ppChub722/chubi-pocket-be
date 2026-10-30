@@ -11,7 +11,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-const ptColumns = `id, project_id, parent_project_transaction_id,
+const ptColumns = `id, scope_id AS project_id, parent_project_transaction_id,
 	transaction_member_id, record_user_id,
 	type, amount, currency,
 	to_char(date, 'YYYY-MM-DD') AS date,
@@ -46,14 +46,17 @@ func (s *Store) InsertPTTx(
 	if err := tx.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, recordUserID).Scan(&currency); err != nil {
 		return nil, fmt.Errorf("currency: %w", err)
 	}
-	id, err := uuid.NewV7()
-	if err != nil {
-		return nil, fmt.Errorf("uuid: %w", err)
+	id := req.ID
+	if id == uuid.Nil {
+		var err error
+		if id, err = uuid.NewV7(); err != nil {
+			return nil, fmt.Errorf("uuid: %w", err)
+		}
 	}
 	parent, err := scanPT(tx.QueryRow(ctx, `INSERT INTO project_transactions
 		(id, project_id, transaction_member_id, record_user_id, type, amount, currency,
 		 date, note, description, linked_transaction_id, created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9, $10, $11, $4, $4)
+		VALUES ($1, event_or_null($2), $3, $4, $5, $6, $7, $8::date, $9, $10, $11, $4, $4)
 		RETURNING `+ptColumns,
 		id, projectID, req.TransactionMemberID, recordUserID,
 		req.Type, req.Amount, currency, req.Date, shared.CleanText(req.Note), shared.CleanText(req.Description),
@@ -109,9 +112,9 @@ func validateSplits(parentMemberID uuid.UUID, parentAmount float64, splits []Pro
 	return nil
 }
 
-// assertMembersInProject — every memberID must exist in project_members for the given projectID.
+// assertMembersInProject — every memberID must be a member of scope (an event, or a split bill).
 func (s *Store) assertMembersInProject(
-	ctx context.Context, tx pgx.Tx, projectID uuid.UUID, memberIDs []uuid.UUID,
+	ctx context.Context, tx pgx.Tx, scope uuid.UUID, memberIDs []uuid.UUID,
 ) error {
 	if len(memberIDs) == 0 {
 		return nil
@@ -119,8 +122,8 @@ func (s *Store) assertMembersInProject(
 	var n int
 	err := tx.QueryRow(ctx,
 		`SELECT COUNT(*) FROM project_members
-		WHERE project_id = $1 AND id = ANY($2::uuid[])`,
-		projectID, memberIDs).Scan(&n)
+		WHERE scope_id = $1 AND id = ANY($2::uuid[])`,
+		scope, memberIDs).Scan(&n)
 	if err != nil {
 		return fmt.Errorf("member check: %w", err)
 	}
@@ -219,7 +222,7 @@ func (s *Store) UpdatePTTx(
 		q += fmt.Sprintf(", note = $%d", len(args))
 	}
 	args = append(args, ptID, projectID)
-	q += fmt.Sprintf(" WHERE id = $%d AND project_id = $%d AND parent_project_transaction_id IS NULL RETURNING %s",
+	q += fmt.Sprintf(" WHERE id = $%d AND scope_id = $%d AND parent_project_transaction_id IS NULL RETURNING %s",
 		len(args)-1, len(args), ptColumns)
 	parent, err := scanPT(tx.QueryRow(ctx, q, args...))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -267,11 +270,11 @@ func (s *Store) ToggleMark(
 ) error {
 	q := `UPDATE split_transaction_people sp SET marked_at = NULL
 		FROM project_transactions b WHERE sp.split_transaction_id = b.id
-		  AND sp.event_member_id = $1 AND b.id = $2 AND b.project_id = $3 AND sp.marked_at IS NOT NULL`
+		  AND sp.event_member_id = $1 AND b.id = $2 AND b.scope_id = $3 AND sp.marked_at IS NOT NULL`
 	if marked {
 		q = `UPDATE split_transaction_people sp SET marked_at = NOW()
 			FROM project_transactions b WHERE sp.split_transaction_id = b.id
-			  AND sp.event_member_id = $1 AND b.id = $2 AND b.project_id = $3 AND sp.marked_at IS NULL`
+			  AND sp.event_member_id = $1 AND b.id = $2 AND b.scope_id = $3 AND sp.marked_at IS NULL`
 	}
 	if _, err := s.db.Exec(ctx, q, projectMemberID, ptID, projectID); err != nil {
 		return fmt.Errorf("toggle mark: %w", err)
@@ -293,7 +296,8 @@ func (s *Store) PTRecipientsForChange(
 			WHERE t.split_transaction_id = $1 AND t.source_project_transaction_id IS NOT NULL
 		) x
 		WHERE u IS NOT NULL AND u <> $2
-		  AND EXISTS (SELECT 1 FROM project_members am JOIN project_transactions b ON b.project_id = am.project_id
+		  AND EXISTS (SELECT 1 FROM project_members am JOIN project_transactions b
+		                ON am.scope_id = b.scope_id
 		              WHERE b.id = $1 AND am.user_id = x.u AND am.status = 'active')
 		  AND NOT EXISTS (SELECT 1 FROM split_transaction_people o WHERE o.split_transaction_id = $1
 		                   AND o.user_id = x.u AND o.disconnected_at IS NOT NULL)`,
@@ -315,7 +319,7 @@ func (s *Store) PTRecipientsForChange(
 
 func (s *Store) MemberByUserID(ctx context.Context, projectID, userID uuid.UUID) (*ProjectMember, error) {
 	q := `SELECT ` + memberColumns + ` FROM project_members
-		WHERE project_id = $1 AND user_id = $2`
+		WHERE scope_id = $1 AND user_id = $2`
 	m, err := scanMember(s.db.QueryRow(ctx, q, projectID, userID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotMember

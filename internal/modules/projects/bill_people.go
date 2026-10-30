@@ -33,7 +33,7 @@ func (b *quickMemberBuilder) memberForPerson(ctx context.Context, p BillPerson, 
 	case p.MemberID != nil:
 		var ok bool
 		if err := b.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM project_members
-			WHERE id = $1 AND project_id = $2 AND status <> $3)`, *p.MemberID, b.projectID, MemberStatusLeft).Scan(&ok); err != nil {
+			WHERE id = $1 AND scope_id = $2 AND status <> $3)`, *p.MemberID, b.projectID, MemberStatusLeft).Scan(&ok); err != nil {
 			return uuid.Nil, fmt.Errorf("bill member: %w", err)
 		}
 		if !ok {
@@ -147,7 +147,7 @@ func (s *Service) addPeopleBillTx(
 			return uuid.Nil, nil, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE transactions
-			SET project_id = $1, source_project_transaction_id = $2, updated_by_user_id = $3
+			SET project_id = event_or_null($1), source_project_transaction_id = $2, updated_by_user_id = $3
 			WHERE id = $4`, p.ID, row.ID, callerUserID, d.ID); err != nil {
 			return uuid.Nil, nil, fmt.Errorf("link bill %s: %w", d.ID, err)
 		}
@@ -179,7 +179,7 @@ func (s *Service) addPeopleBillTx(
 			return uuid.Nil, nil, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE transactions
-			SET project_id = $1, source_project_transaction_id = $2, updated_by_user_id = $3
+			SET project_id = event_or_null($1), source_project_transaction_id = $2, updated_by_user_id = $3
 			WHERE id = $4`, p.ID, row.ID, callerUserID, existing.ID); err != nil {
 			return uuid.Nil, nil, fmt.Errorf("link copy %s: %w", existing.ID, err)
 		}

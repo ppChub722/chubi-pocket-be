@@ -219,7 +219,7 @@ func (s *Service) billWriterTx(
 		}
 	}
 	var kind string
-	if err := tx.QueryRow(ctx, `SELECT kind FROM projects WHERE id = $1`, projectID).Scan(&kind); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT kind FROM scopes WHERE id = $1`, projectID).Scan(&kind); err != nil {
 		return nil, nil, nil, fmt.Errorf("event kind: %w", err)
 	}
 	mb.invite = kind == KindEvent
@@ -228,7 +228,7 @@ func (s *Service) billWriterTx(
 	}
 	// Invited, not accepted yet (F2): the same person is never invited twice, also after a reject.
 	invited, err := tx.Query(ctx, `SELECT invited_user_id, id FROM project_members
-		WHERE project_id = $1 AND user_id IS NULL AND invited_user_id IS NOT NULL AND status <> 'left'`, projectID)
+		WHERE scope_id = $1 AND user_id IS NULL AND invited_user_id IS NOT NULL AND status <> 'left'`, projectID)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("invited members: %w", err)
 	}
@@ -398,7 +398,7 @@ func (s *Service) pullBillsTx(
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE transactions
-			SET project_id = $1, source_project_transaction_id = $2, updated_by_user_id = $3
+			SET project_id = event_or_null($1), source_project_transaction_id = $2, updated_by_user_id = $3
 			WHERE id = $4`,
 			p.ID, pt.ID, callerUserID, bill.TxID); err != nil {
 			return nil, fmt.Errorf("link bill %s: %w", bill.TxID, err)
@@ -566,7 +566,7 @@ func (s *Service) loadQuickDebtsTx(
 type quickMemberBuilder struct {
 	svc          *Service
 	tx           pgx.Tx
-	projectID    uuid.UUID
+	projectID    uuid.UUID // the scope: an event, or a split bill (its own members)
 	callerUserID uuid.UUID
 
 	byUser    map[uuid.UUID]uuid.UUID // user_id    -> member id
@@ -577,6 +577,12 @@ type quickMemberBuilder struct {
 	// bill links them at once.
 	invite  bool
 	invites []pendingInvite
+}
+
+// insert adds a member to the scope.
+func (b *quickMemberBuilder) insert(ctx context.Context, userID *uuid.UUID, name string) (*ProjectMember, error) {
+	return b.svc.store.InsertMemberTx(ctx, b.tx, b.projectID, userID, name, RoleContributor, MemberStatusActive,
+		b.callerUserID, nil)
 }
 
 type pendingInvite struct {
@@ -625,10 +631,7 @@ func (b *quickMemberBuilder) ensureLinked(
 			linked = nil
 		}
 	}
-	m, err := b.svc.store.InsertMemberTx(ctx, b.tx,
-		b.projectID, linked, displayName, RoleContributor, MemberStatusActive,
-		b.callerUserID, nil,
-	)
+	m, err := b.insert(ctx, linked, displayName)
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -674,10 +677,7 @@ func (b *quickMemberBuilder) newPlain(ctx context.Context, name string) (uuid.UU
 	if name == "" {
 		name = "Member"
 	}
-	m, err := b.svc.store.InsertMemberTx(ctx, b.tx,
-		b.projectID, nil, name, RoleContributor, MemberStatusActive,
-		b.callerUserID, nil,
-	)
+	m, err := b.insert(ctx, nil, name)
 	if err != nil {
 		return uuid.Nil, err
 	}

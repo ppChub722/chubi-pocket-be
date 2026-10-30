@@ -74,7 +74,7 @@ func (s *Service) BookSettle(ctx context.Context, userID, id uuid.UUID, req Sett
 		completed *time.Time
 	)
 	err = tx.QueryRow(ctx, `SELECT pm.id, p.name, p.completed_at FROM project_members pm JOIN projects p ON p.id = pm.project_id
-		WHERE pm.project_id = $1 AND pm.user_id = $2 AND pm.status = 'active' FOR SHARE OF p`, id, userID).Scan(&me, &name, &completed)
+		WHERE pm.scope_id = $1 AND pm.user_id = $2 AND pm.status = 'active' FOR SHARE OF p`, id, userID).Scan(&me, &name, &completed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrProjectNotFound
 	}

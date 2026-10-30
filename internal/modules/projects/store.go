@@ -112,7 +112,7 @@ func (s *Store) CreateInTx(ctx context.Context, tx pgx.Tx, ownerUserID uuid.UUID
 }
 
 func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (*Project, error) {
-	p, err := scanProject(s.db.QueryRow(ctx, `SELECT `+projectColumns+` FROM projects WHERE id = $1`, id))
+	p, err := scanProject(s.db.QueryRow(ctx, `SELECT `+projectColumns+` FROM scopes WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrProjectNotFound
 	}
@@ -133,8 +133,8 @@ func (s *Store) GetByIDForCaller(ctx context.Context, userID, projectID uuid.UUI
 		n    int
 	)
 	if err := s.db.QueryRow(ctx, `SELECT p.kind, (SELECT COUNT(*) FROM project_members
-			WHERE project_id = p.id AND user_id = $2 AND status = 'active')
-		FROM projects p WHERE p.id = $1`, projectID, userID).Scan(&kind, &n); err != nil {
+			WHERE scope_id = p.id AND user_id = $2 AND status = 'active')
+		FROM scopes p WHERE p.id = $1`, projectID, userID).Scan(&kind, &n); err != nil {
 		return nil, fmt.Errorf("member check: %w", err)
 	}
 	if kind != "event" || (p.OwnerUserID != userID && n == 0) {
@@ -255,7 +255,7 @@ func (s *Store) UpdateTx(ctx context.Context, tx pgx.Tx, actorID, id uuid.UUID, 
 
 func (s *Store) DeleteTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
 	if _, err := tx.Exec(ctx, `UPDATE transactions SET project_id = NULL, source_project_transaction_id = NULL
-		WHERE project_id = $1 OR source_project_transaction_id IN (SELECT id FROM project_transactions WHERE project_id = $1)`, id); err != nil {
+		WHERE project_id = $1 OR source_project_transaction_id IN (SELECT id FROM project_transactions WHERE scope_id = $1)`, id); err != nil {
 		return fmt.Errorf("unlink transactions: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE personal_debts SET project_id = NULL WHERE project_id = $1`, id); err != nil {
@@ -301,7 +301,7 @@ func (s *Store) TransferOwnershipTx(
 func (s *Store) AssertWritable(ctx context.Context, projectID uuid.UUID, op string) error {
 	var status string
 	if err := s.db.QueryRow(ctx,
-		`SELECT status FROM projects WHERE id = $1`, projectID).Scan(&status); err != nil {
+		`SELECT status FROM scopes WHERE id = $1`, projectID).Scan(&status); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrProjectNotFound
 		}

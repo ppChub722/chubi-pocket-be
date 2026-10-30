@@ -47,12 +47,12 @@ func (b *quickMemberBuilder) seedMyContactsTx(ctx context.Context) error {
 	rows, err := b.tx.Query(ctx, `
 		SELECT pmc.contact_id, pm.id, 0 FROM project_member_contacts pmc
 		JOIN project_members pm ON pm.id = pmc.project_member_id
-		WHERE pm.project_id = $1 AND pmc.user_id = $2 AND pm.status <> 'left'
+		WHERE pm.scope_id = $1 AND pmc.user_id = $2 AND pm.status <> 'left'
 		UNION ALL
 		SELECT c.id, pm.id, 1 FROM project_members pm
 		JOIN contacts c ON c.user_id = $2 AND c.linked_user_id IS NULL
 		 AND LOWER(BTRIM(c.display_name)) = LOWER(BTRIM(pm.display_name))
-		WHERE pm.project_id = $1 AND pm.name_match AND pm.user_id IS NULL AND pm.status <> 'left'
+		WHERE pm.scope_id = $1 AND pm.name_match AND pm.user_id IS NULL AND pm.status <> 'left'
 		ORDER BY 3`, b.projectID, b.callerUserID)
 	if err != nil {
 		return fmt.Errorf("my contacts in the event: %w", err)

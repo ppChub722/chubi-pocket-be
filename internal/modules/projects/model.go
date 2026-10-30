@@ -396,6 +396,7 @@ type CreateProjectTransactionRequest struct {
 
 	TagNames            []string   `json:"-"`
 	LinkedTransactionID *uuid.UUID `json:"-"`
+	ID                  uuid.UUID  `json:"-"` // set: the new bill's id (a split bill's members point at it first)
 }
 
 type UpdateProjectTransactionRequest struct {

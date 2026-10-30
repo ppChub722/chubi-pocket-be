@@ -352,11 +352,10 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 
 	var projectID *uuid.UUID
 	if req.SourceProjectTransactionID != nil {
-		pid, err := s.store.LookupSourcePTTx(ctx, tx, *req.SourceProjectTransactionID, userID)
-		if err != nil {
+		var err error
+		if projectID, err = s.store.LookupSourcePTTx(ctx, tx, *req.SourceProjectTransactionID, userID); err != nil {
 			return nil, err
 		}
-		projectID = &pid
 	}
 
 	row := &Transaction{

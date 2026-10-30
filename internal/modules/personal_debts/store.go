@@ -381,8 +381,8 @@ const entryViewSQL = `SELECT pd.id, pd.kind, pd.direction, pd.counterparty_conta
 	LEFT JOIN categories sc ON sc.id = st.category_id
 	LEFT JOIN transactions ft ON ft.id = pd.paid_for_transaction_id
 	LEFT JOIN categories fc ON fc.id = ft.category_id
-	LEFT JOIN projects sp ON sp.id = pd.project_id
 	LEFT JOIN project_transactions bp ON bp.id = pd.source_project_transaction_id
+	LEFT JOIN scopes sp ON sp.id = COALESCE(pd.project_id, bp.scope_id)
 	LEFT JOIN personal_debts op ON op.id = pd.counterpart_debt_id
 	LEFT JOIN users ou ON ou.id = op.user_id`
 
@@ -483,15 +483,15 @@ func loadBillParts(ctx context.Context, q shared.Querier, out []DebtEntry) error
 		return nil
 	}
 	rows, err := q.Query(ctx, `
-		SELECT b.debt_id, b.pt_id, p.project_id, p.description, b.amount::float8, pr.status, pr.completed_at IS NOT NULL,
+		SELECT b.debt_id, b.pt_id, p.scope_id, p.description, b.amount::float8, pr.status, pr.completed_at IS NOT NULL,
 		       COALESCE((SELECT SUM(c.share) FROM split_transaction_people c WHERE c.split_transaction_id = p.id
 		           AND c.event_member_id = CASE WHEN p.transaction_member_id = me.id THEN b.member_id ELSE me.id END
 		           AND c.event_member_id IS DISTINCT FROM p.transaction_member_id
 		           AND p.transaction_member_id IN (me.id, b.member_id)), 0)::float8
 		FROM personal_debt_bills b
 		JOIN project_transactions p ON p.id = b.pt_id
-		JOIN projects pr ON pr.id = p.project_id
-		LEFT JOIN project_members me ON me.project_id = p.project_id AND me.user_id = b.user_id
+		JOIN scopes pr ON pr.id = p.scope_id
+		LEFT JOIN project_members me ON me.scope_id = p.scope_id AND me.user_id = b.user_id
 		WHERE b.debt_id = ANY($1)
 		ORDER BY b.created_at, b.id`, ids)
 	if err != nil {

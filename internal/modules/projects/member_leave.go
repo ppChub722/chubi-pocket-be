@@ -49,7 +49,7 @@ func (s *Service) leaveTx(ctx context.Context, tx pgx.Tx, projectID, memberID, a
 // unlinked_transaction_id.
 func disconnectBookTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UUID) (int, int, error) {
 	txIDs, err := collectIDs(ctx, tx, `SELECT t.id FROM transactions t WHERE t.user_id = $2 AND (t.project_id = $1
-		OR t.source_project_transaction_id IN (SELECT x.id FROM project_transactions x WHERE x.project_id = $1))`,
+		OR t.source_project_transaction_id IN (SELECT x.id FROM project_transactions x WHERE x.scope_id = $1))`,
 		projectID, userID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("member txs: %w", err)
@@ -70,13 +70,13 @@ func disconnectBookTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UUI
 		}
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM personal_debt_bills WHERE user_id = $2
-		AND pt_id IN (SELECT x.id FROM project_transactions x WHERE x.project_id = $1)`, projectID, userID); err != nil {
+		AND pt_id IN (SELECT x.id FROM project_transactions x WHERE x.scope_id = $1)`, projectID, userID); err != nil {
 		return 0, 0, fmt.Errorf("disconnect parts: %w", err)
 	}
 	tag, err := tx.Exec(ctx, `UPDATE personal_debts SET project_id = NULL, source_project_transaction_id = NULL,
 		source_kind = CASE WHEN source_kind = 'event' THEN NULL ELSE source_kind END, updated_by_user_id = $2
 		WHERE user_id = $2 AND (project_id = $1
-		   OR source_project_transaction_id IN (SELECT x.id FROM project_transactions x WHERE x.project_id = $1))`,
+		   OR source_project_transaction_id IN (SELECT x.id FROM project_transactions x WHERE x.scope_id = $1))`,
 		projectID, userID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("disconnect debts: %w", err)

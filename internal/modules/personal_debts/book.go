@@ -139,9 +139,9 @@ func eventSourceTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, e *Entry, b
 	kind := SourceEvent
 	switch {
 	case billID != nil:
-		var projectID uuid.UUID
+		var projectID *uuid.UUID // nil: a split bill (no event)
 		err := tx.QueryRow(ctx, `SELECT pt.project_id FROM project_transactions pt
-			JOIN project_members pm ON pm.project_id = pt.project_id AND pm.user_id = $2 AND pm.status = 'active'
+			JOIN project_members pm ON pm.scope_id = pt.scope_id AND pm.user_id = $2 AND pm.status = 'active'
 			WHERE pt.id = $1`, *billID, userID).Scan(&projectID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrBillNotFound
@@ -149,17 +149,20 @@ func eventSourceTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, e *Entry, b
 		if err != nil {
 			return fmt.Errorf("entry bill: %w", err)
 		}
-		e.SourceKind, e.SourceProjectTransactionID, e.ProjectID = &kind, billID, &projectID
+		e.SourceKind, e.SourceProjectTransactionID, e.ProjectID = &kind, billID, projectID
 	case eventID != nil:
 		var ok bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM project_members
-			WHERE project_id = $1 AND user_id = $2 AND status = 'active')`, *eventID, userID).Scan(&ok); err != nil {
+			WHERE scope_id = $1 AND user_id = $2 AND status = 'active')`, *eventID, userID).Scan(&ok); err != nil {
 			return fmt.Errorf("entry event: %w", err)
 		}
 		if !ok {
 			return ErrBillNotFound
 		}
-		e.SourceKind, e.ProjectID = &kind, eventID
+		e.SourceKind = &kind
+		if err := tx.QueryRow(ctx, `SELECT event_or_null($1)`, *eventID).Scan(&e.ProjectID); err != nil {
+			return fmt.Errorf("entry event: %w", err)
+		}
 	}
 	return nil
 }

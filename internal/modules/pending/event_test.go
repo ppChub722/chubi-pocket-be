@@ -95,6 +95,7 @@ func newEvFixture(t *testing.T) *evFixture {
 			`DELETE FROM pending_transactions WHERE user_id = ANY($1)`,
 			`DELETE FROM personal_debts WHERE user_id = ANY($1)`,
 			`DELETE FROM transactions WHERE user_id = ANY($1)`,
+			`DELETE FROM project_transactions WHERE project_id IS NULL AND record_user_id = ANY($1)`,
 			`DELETE FROM projects WHERE owner_user_id = ANY($1)`,
 			`DELETE FROM notifications WHERE recipient_user_id = ANY($1) OR actor_user_id = ANY($1)`,
 			`DELETE FROM account_members WHERE user_id = ANY($1)`,

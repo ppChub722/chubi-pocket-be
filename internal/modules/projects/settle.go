@@ -129,7 +129,7 @@ func (s *Service) settleView(ctx context.Context, q settleQ, userID, id uuid.UUI
 		return nil, err
 	}
 	var me uuid.UUID
-	if err := q.QueryRow(ctx, `SELECT id FROM project_members WHERE project_id = $1 AND user_id = $2`, id, userID).Scan(&me); err != nil {
+	if err := q.QueryRow(ctx, `SELECT id FROM project_members WHERE scope_id = $1 AND user_id = $2`, id, userID).Scan(&me); err != nil {
 		return nil, ErrNotMember
 	}
 	bills, err := claimablePairsTx(ctx, q, userID, id, me, nil)

@@ -203,7 +203,7 @@ func (s *Service) ListClaimable(ctx context.Context, userID, projectID uuid.UUID
 		return nil, err
 	}
 	var me uuid.UUID
-	if err := s.store.db.QueryRow(ctx, `SELECT id FROM project_members WHERE project_id = $1 AND user_id = $2`,
+	if err := s.store.db.QueryRow(ctx, `SELECT id FROM project_members WHERE scope_id = $1 AND user_id = $2`,
 		projectID, userID).Scan(&me); err != nil {
 		return nil, ErrNotMember
 	}
@@ -213,7 +213,7 @@ func (s *Service) ListClaimable(ctx context.Context, userID, projectID uuid.UUID
 		err := s.store.db.QueryRow(ctx, `SELECT pm.id FROM project_members pm
 			LEFT JOIN users u ON u.id = pm.user_id
 			LEFT JOIN contacts c ON c.id = $3 AND c.user_id = $4
-			WHERE pm.project_id = $1 AND pm.id <> $5 AND (
+			WHERE pm.scope_id = $1 AND pm.id <> $5 AND (
 			      (c.linked_user_id IS NOT NULL AND pm.user_id = c.linked_user_id)
 			   OR LOWER(BTRIM(COALESCE(u.display_name, pm.display_name))) = LOWER(BTRIM(COALESCE(c.display_name, $2)))
 			   OR LOWER(BTRIM(pm.display_name)) = LOWER(BTRIM(COALESCE(c.display_name, $2))))
@@ -298,7 +298,7 @@ func (s *Service) Claim(ctx context.Context, userID, projectID uuid.UUID, req Cl
 		name string
 	)
 	err = tx.QueryRow(ctx, `SELECT pm.id, p.name FROM project_members pm JOIN projects p ON p.id = pm.project_id
-		WHERE pm.project_id = $1 AND pm.user_id = $2 AND pm.status = 'active' FOR SHARE OF p`, projectID, userID).Scan(&me, &name)
+		WHERE pm.scope_id = $1 AND pm.user_id = $2 AND pm.status = 'active' FOR SHARE OF p`, projectID, userID).Scan(&me, &name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrProjectNotFound
 	}
@@ -508,7 +508,7 @@ func linkClaimTxTx(ctx context.Context, tx pgx.Tx, userID, projectID, me uuid.UU
 			return fmt.Errorf("claim origin: %w", err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE transactions SET project_id = $2, source_project_transaction_id = $3,
+	if _, err := tx.Exec(ctx, `UPDATE transactions SET project_id = event_or_null($2), source_project_transaction_id = $3,
 		unlinked_project_transaction_id = NULL WHERE id = $1`, txID, projectID, b.PtID); err != nil {
 		return fmt.Errorf("claim tx link: %w", err)
 	}

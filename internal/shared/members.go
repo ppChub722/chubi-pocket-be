@@ -167,7 +167,7 @@ func LoadEventBillPeople(ctx context.Context, q Querier, callerUserID uuid.UUID,
 	}
 	rows, err := q.Query(ctx, `
 		SELECT p.id, p.transaction_member_id, p.amount::float8, NULL::uuid, 0::float8,
-		       p.project_id, to_char(p.date, 'YYYY-MM-DD'), p.description, p.note, p.linked_transaction_id
+		       p.scope_id, to_char(p.date, 'YYYY-MM-DD'), p.description, p.note, p.linked_transaction_id
 		FROM project_transactions p WHERE p.id = ANY($1::uuid[])
 		UNION ALL
 		SELECT sp.split_transaction_id, sp.event_member_id, 0, sp.event_member_id, sp.share::float8,

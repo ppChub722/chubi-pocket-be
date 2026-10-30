@@ -53,14 +53,14 @@ func (b *booking) moveBill(ctx context.Context, current *ProjectTransaction, mv 
 			return err
 		}
 	default:
-		if err := b.newSplit(ctx, EventBillInput{Description: current.Description}); err != nil {
+		if err := b.newSplit(ctx, EventBillInput{Description: current.Description}, current.ID); err != nil {
 			return err
 		}
 	}
 	target := b.project.ID
 	// the people: each member of the moved rows → the same person in the target
 	// The rows move first (the completed-event lock reads the new project_id), then their people.
-	if _, err := b.tx.Exec(ctx, `UPDATE project_transactions SET project_id = $2, updated_by_user_id = $3
+	if _, err := b.tx.Exec(ctx, `UPDATE project_transactions SET project_id = event_or_null($2), updated_by_user_id = $3
 		WHERE id = ANY($1)`, rows, target, b.me); err != nil {
 		return fmt.Errorf("move bill: %w", err)
 	}
@@ -121,19 +121,18 @@ func (b *booking) moveBill(ctx context.Context, current *ProjectTransaction, mv 
 		}
 	}
 	// every copy and debt follows the bill to its new event
-	if _, err := b.tx.Exec(ctx, `UPDATE transactions SET project_id = $2 WHERE source_project_transaction_id = ANY($1)`,
+	if _, err := b.tx.Exec(ctx, `UPDATE transactions SET project_id = event_or_null($2) WHERE source_project_transaction_id = ANY($1)`,
 		rows, target); err != nil {
 		return fmt.Errorf("move copies: %w", err)
 	}
-	if _, err := b.tx.Exec(ctx, `UPDATE personal_debts SET project_id = $2
+	if _, err := b.tx.Exec(ctx, `UPDATE personal_debts SET project_id = event_or_null($2)
 		WHERE source_project_transaction_id = ANY($1) OR id IN (SELECT debt_id FROM personal_debt_bills WHERE pt_id = $3)`,
 		rows, target, current.ID); err != nil {
 		return fmt.Errorf("move debts: %w", err)
 	}
-	if sourceKind == KindSplit {
-		if _, err := b.tx.Exec(ctx, `DELETE FROM projects p WHERE p.id = $1 AND p.kind = 'split'
-			AND NOT EXISTS (SELECT 1 FROM project_transactions x WHERE x.project_id = p.id)`, source); err != nil {
-			return fmt.Errorf("drop empty split: %w", err)
+	if sourceKind == KindSplit { // the split bill's own members are not needed any more
+		if _, err := b.tx.Exec(ctx, `DELETE FROM project_members WHERE split_transaction_id = $1`, source); err != nil {
+			return fmt.Errorf("drop split members: %w", err)
 		}
 	}
 	current.ProjectID = target
@@ -151,7 +150,7 @@ func (s *Service) billToSplitTx(ctx context.Context, tx pgx.Tx, editor, ptID uui
 	}
 	b := &booking{s: s, tx: tx, me: editor, keys: map[string]shared.PersonRef{}, effects: shared.NewEffects(),
 		beforeKey: func(string) error { return nil }, beforeWallet: func(uuid.UUID) error { return nil }}
-	if err := tx.QueryRow(ctx, `SELECT kind FROM projects WHERE id = $1`, current.ProjectID).Scan(&b.kind); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT kind FROM scopes WHERE id = $1`, current.ProjectID).Scan(&b.kind); err != nil {
 		return uuid.Nil, fmt.Errorf("bill event: %w", err)
 	}
 	if b.kind == KindSplit {

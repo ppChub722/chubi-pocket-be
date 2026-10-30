@@ -74,15 +74,15 @@ func countSQL(expected bool) string {
 
 var countSQLHead = `
 WITH ev AS (
-	SELECT pt.id, pt.project_id, pt.date, pt.description,
+	SELECT pt.id, pt.scope_id AS project_id, pt.date, pt.description,
 		COALESCE((SELECT SUM(sp.share) FROM split_transaction_people sp
 			WHERE sp.split_transaction_id = pt.id AND sp.event_member_id = pm.id), 0) AS share,
 		(SELECT t2.id FROM transactions t2 WHERE t2.user_id = $1
 			AND (t2.id = pt.linked_transaction_id OR t2.source_project_transaction_id = pt.id)
 			ORDER BY (t2.id = pt.linked_transaction_id) DESC LIMIT 1) AS my_tx
 	FROM project_transactions pt
-	JOIN project_members pm ON pm.project_id = pt.project_id AND pm.user_id = $1 AND pm.status = 'active'
-	JOIN projects p ON p.id = pt.project_id AND p.status <> 'cancelled'
+	JOIN project_members pm ON pm.scope_id = pt.scope_id AND pm.user_id = $1 AND pm.status = 'active'
+	JOIN scopes p ON p.id = pt.scope_id AND p.status <> 'cancelled'
 	WHERE pt.parent_project_transaction_id IS NULL AND pt.type = 'expense' AND pt.date BETWEEN $2 AND $3
 	  -- V4 / X5: a bill counts once. My tx unlinked from it ("ลงบัญชีของฉัน" off, a tx-detail
 	  -- disconnect) counts as a plain tx in the first branch, so the bill's share doesn't.

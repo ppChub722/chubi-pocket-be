@@ -113,9 +113,9 @@ func billRowGuardTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, req *U
 			OR EXISTS (SELECT 1 FROM personal_debts d JOIN project_transactions pb ON pb.id = d.source_project_transaction_id
 				WHERE d.id = $1 AND d.kind = 'repayment' AND pb.paid_back_for_id IS NOT NULL),
 			EXISTS (SELECT 1 FROM personal_debt_bills b JOIN project_transactions pt ON pt.id = b.pt_id
-				JOIN projects p ON p.id = pt.project_id WHERE b.debt_id = $1 AND p.status = 'active')
+				JOIN scopes p ON p.id = pt.scope_id WHERE b.debt_id = $1 AND p.status = 'active')
 			OR EXISTS (SELECT 1 FROM personal_debts d JOIN project_transactions pb ON pb.id = d.source_project_transaction_id
-				JOIN projects p ON p.id = pb.project_id
+				JOIN scopes p ON p.id = pb.scope_id
 				WHERE d.id = $1 AND d.kind = 'repayment' AND pb.paid_back_for_id IS NOT NULL AND p.status = 'active')`,
 		id).Scan(&onBill, &active)
 	if err != nil {
