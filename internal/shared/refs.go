@@ -62,22 +62,53 @@ type TagRef struct {
 type UserRef struct {
 	UserID      uuid.UUID `json:"user_id"`
 	DisplayName string    `json:"display_name"`
-	IconCode    *IconCode `json:"icon_code"`
+	Avatar      Avatar    `json:"avatar"`
 }
 
 type PersonRef struct {
 	Name         string     `json:"name"`
 	ContactID    *uuid.UUID `json:"contact_id"`
-	IconCode     *IconCode  `json:"icon_code"`
+	Avatar       Avatar     `json:"avatar"`
 	Linked       bool       `json:"linked"`
 	LinkedUserID *uuid.UUID `json:"linked_user_id"`
+}
+
+// NamePerson is a typed name with no contact (initials).
+func NamePerson(name string) PersonRef {
+	return PersonRef{Name: name, Avatar: AvatarFromIcon(name, nil)}
+}
+
+// MarshalJSON: a ref built from a bare name (no avatar loaded) still answers a valid avatar
+// (initials on the name colour), so `avatar` is never empty.
+func (p PersonRef) MarshalJSON() ([]byte, error) {
+	type plain PersonRef
+	if p.Avatar.Kind == "" {
+		p.Avatar = AvatarFromIcon(p.Name, nil)
+	}
+	return json.Marshal(plain(p))
+}
+
+func (u UserRef) MarshalJSON() ([]byte, error) {
+	type plain UserRef
+	if u.Avatar.Kind == "" {
+		u.Avatar = AvatarFromIcon(u.DisplayName, nil)
+	}
+	return json.Marshal(plain(u))
+}
+
+func (m MemberRef) MarshalJSON() ([]byte, error) {
+	type plain MemberRef
+	if m.Avatar.Kind == "" {
+		m.Avatar = AvatarFromIcon(m.Name, nil)
+	}
+	return json.Marshal(plain(m))
 }
 
 type MemberRef struct {
 	ID     uuid.UUID  `json:"id"`
 	UserID *uuid.UUID `json:"user_id"`
 	Name   string     `json:"name"`
-	Icon   *IconCode  `json:"icon_code"`
+	Avatar Avatar     `json:"avatar"`
 	IsMe   bool       `json:"is_me"`
 	// Removed (0.4.1-2 V15) — the owner removed this person: their spot on a bill is an empty
 	// person "( ) ____" to assign.
@@ -126,10 +157,6 @@ func PersonNameSQL(contactAlias, linkedUserAlias string) string {
 		WHEN %[1]s.nickname IS NOT NULL AND %[1]s.nickname <> '' AND %[1]s.show_nickname THEN %[1]s.nickname
 		WHEN %[2]s.id IS NOT NULL THEN %[2]s.display_name
 		ELSE %[1]s.display_name END)`, contactAlias, linkedUserAlias)
-}
-
-func PersonIconSQL(contactAlias, linkedUserAlias string) string {
-	return fmt.Sprintf(`COALESCE(%[2]s.icon_code, %[1]s.icon_code)`, contactAlias, linkedUserAlias)
 }
 
 func LoadAccountRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]AccountRef, error) {
@@ -272,7 +299,7 @@ func LoadPersons(ctx context.Context, q Querier, userID uuid.UUID, contactIDs []
 	if len(contactIDs) == 0 {
 		return out, nil
 	}
-	rows, err := q.Query(ctx, `SELECT c.id, `+PersonNameSQL("c", "lu")+`, `+PersonIconSQL("c", "lu")+`, lu.id
+	rows, err := q.Query(ctx, `SELECT c.id, `+PersonNameSQL("c", "lu")+`, `+PersonAvatarSQL("c", "lu")+`, lu.id
 		FROM contacts c LEFT JOIN users lu ON lu.id = c.linked_user_id
 		WHERE c.id = ANY($1) AND c.user_id = $2`, contactIDs, userID)
 	if err != nil {
@@ -289,10 +316,11 @@ func LoadPersons(ctx context.Context, q Querier, userID uuid.UUID, contactIDs []
 		if err := rows.Scan(&id, &name, &icon, &linked); err != nil {
 			return nil, err
 		}
-		p := PersonRef{ContactID: &id, IconCode: IconFromJSON(icon), Linked: linked != nil, LinkedUserID: linked}
+		p := PersonRef{ContactID: &id, Linked: linked != nil, LinkedUserID: linked}
 		if name != nil {
 			p.Name = *name
 		}
+		p.Avatar = AvatarFromSrc(p.Name, icon)
 		out[id] = p
 	}
 	return out, rows.Err()
@@ -304,7 +332,7 @@ func ResolvePerson(persons map[uuid.UUID]PersonRef, k PersonKey) PersonRef {
 			return p
 		}
 	}
-	return PersonRef{Name: k.Snapshot}
+	return NamePerson(k.Snapshot)
 }
 
 func uniqueIDs(ids []uuid.UUID) []uuid.UUID {

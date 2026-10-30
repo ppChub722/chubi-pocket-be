@@ -1,0 +1,3 @@
+DROP FUNCTION IF EXISTS avatar_src(UUID, JSONB);
+ALTER TABLE users DROP COLUMN IF EXISTS avatar_settings;
+DROP TABLE IF EXISTS user_avatars;

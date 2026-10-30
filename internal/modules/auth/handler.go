@@ -44,13 +44,13 @@ func (h *Handler) Register(c *gin.Context) {
 }
 
 func (h *Handler) Login(c *gin.Context) {
+	// 0.4.2 1b-2 (owner): every login failure is one answer, a bad / empty body included.
 	var req LoginRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
-		return
+	err := c.ShouldBindJSON(&req)
+	var resp *AuthResponse
+	if err == nil {
+		resp, err = h.service.Login(c.Request.Context(), req)
 	}
-
-	resp, err := h.service.Login(c.Request.Context(), req)
 	if err != nil {
 		// Never log the identifier verbatim (could be an email — PII).
 		logger.FromCtx(c, h.log).Warn("auth login failed")

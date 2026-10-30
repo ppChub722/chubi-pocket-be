@@ -26,6 +26,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/budgets"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/connections"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/contacts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/dashboard"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports"
@@ -235,13 +236,27 @@ func main() {
 
 	// 0.4.2 Telegram bot, webhook only; nil (no route) when TELEGRAM_BOT_TOKEN is empty.
 	telegramWebhook := telegram.New(cfg.Telegram, dbPool, log)
+	// 0.4.2 1b: linked apps + profile pictures; the bot answers linked chats only.
+	var bot connections.Bot // stays a nil interface while the bot is off (Telegram unavailable)
+	if telegramWebhook != nil {
+		bot = telegramWebhook.Client()
+	}
+	connectionsService := connections.NewService(connections.NewStore(dbPool), bot)
+	connectionsService.WithAuth(authService) // 1b-2: sign up / log in with Telegram
+	connectionsHandler := connections.NewHandler(connectionsService)
+	if telegramWebhook != nil {
+		telegramWebhook.WithAccounts(connectionsService)
+	}
 
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	r := gin.New()
 	r.Use(logger.RequestIDMiddleware())
-	r.Use(logger.GinLoggerMiddleware(log, cfg.App.LogBodies, telegram.Path))
+	// bodies never logged: message texts (webhook), link / login codes and PKCE verifiers
+	r.Use(logger.GinLoggerMiddleware(log, cfg.App.LogBodies, telegram.Path,
+		"/api/v1/connections/telegram/link", "/api/v1/auth/telegram/start",
+		"/api/v1/auth/telegram/exchange", "/api/v1/auth/telegram/signup"))
 	// Same semantics as gin.Recovery() (500 + abort), but the panic is logged through slog with the
 	// request_id instead of gin's raw writer.
 	r.Use(gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, err any) {
@@ -293,11 +308,16 @@ func main() {
 			// Telegram's calls: the secret header instead of a JWT; no build check, no sync middleware
 			api.POST("/telegram/webhook", telegramWebhook.Serve)
 		}
+		api.GET("/brand-logos/:file", connections.BrandLogo) // 0.4.2 1b: public, embedded PNGs
 		api.Use(versionHandler.Middleware("/api/v1/app/version"))
 		api.GET("/app/version", versionHandler.Version)
 
 		api.POST("/auth/register", authHandler.Register)
 		api.POST("/auth/login", authHandler.Login)
+		// 0.4.2 1b-2: sign up / log in with Telegram (public, PKCE, rate-limited per IP)
+		api.POST("/auth/telegram/start", connectionsHandler.LoginStart)
+		api.POST("/auth/telegram/exchange", connectionsHandler.LoginExchange)
+		api.POST("/auth/telegram/signup", connectionsHandler.LoginSignup)
 
 		protected := api.Group("/")
 		protected.Use(auth.Middleware(cfg, authStore))
@@ -323,6 +343,17 @@ func main() {
 			protected.GET("/me/archived", meHandler.Archived)
 			protected.GET("/users/me", usersHandler.GetMe)
 			protected.PUT("/users/me", usersHandler.UpdateMe)
+
+			// 0.4.2 1b: connections + profile pictures (GET /avatars/:id = a picture by id,
+			// DELETE /avatars/:id = my picture of that source)
+			protected.GET("/connections", connectionsHandler.List)
+			protected.GET("/connections/:provider", connectionsHandler.Get)
+			protected.DELETE("/connections/:provider", connectionsHandler.Unlink)
+			protected.POST("/connections/:provider/link", connectionsHandler.StartLink)
+			protected.PATCH("/connections/:provider/permissions", connectionsHandler.UpdatePermissions)
+			protected.POST("/connections/:provider/photo", connectionsHandler.ImportPhoto)
+			protected.GET("/avatars/:id", connectionsHandler.Image)
+			protected.DELETE("/avatars/:id", usersHandler.DeleteAvatar)
 			protected.POST("/users/me/deactivate", usersHandler.Deactivate)
 			protected.POST("/users/me/reactivate", usersHandler.Reactivate)
 			protected.GET("/users/me/packs", packPermsHandler.ListMyPacks)

@@ -358,20 +358,15 @@ func (s *Service) GetSenderProfile(
 	}
 
 	var p SenderProfile
-	var iconBytes []byte
+	var avatarSrc []byte
 	err = s.store.Pool().QueryRow(ctx,
-		`SELECT id, display_name, email, icon_code FROM users WHERE id = $1`,
+		`SELECT id, display_name, email, `+shared.AvatarSQL("id", "NULL")+` FROM users WHERE id = $1`,
 		*n.ActorUserID,
-	).Scan(&p.ID, &p.DisplayName, &p.Email, &iconBytes)
+	).Scan(&p.ID, &p.DisplayName, &p.Email, &avatarSrc)
 	if err != nil {
 		return nil, fmt.Errorf("sender lookup: %w", err)
 	}
-	if iconBytes != nil {
-		p.IconCode = new(shared.IconCode)
-		if err := json.Unmarshal(iconBytes, p.IconCode); err != nil {
-			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
-		}
-	}
+	p.Avatar = shared.AvatarFromSrc(p.DisplayName, avatarSrc)
 	if p.ContactID, err = s.store.ContactLinkedTo(ctx, userID, p.ID); err != nil {
 		return nil, err
 	}

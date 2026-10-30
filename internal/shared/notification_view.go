@@ -65,7 +65,7 @@ func LoadNotificationViews(ctx context.Context, q Querier, userID uuid.UUID, ids
 		return out, nil
 	}
 	rows, err := q.Query(ctx, `SELECT n.id, n.type, n.payload, n.deep_link, n.read_at, n.actioned_at, n.dismissed_at, n.created_at,
-			u.id, u.display_name, u.icon_code
+			u.id, u.display_name, `+AvatarSQL("u.id", "NULL")+`
 		FROM notifications n LEFT JOIN users u ON u.id = n.actor_user_id
 		WHERE n.id = ANY($1) AND n.recipient_user_id = $2`, ids, userID)
 	if err != nil {
@@ -88,7 +88,7 @@ func LoadNotificationViews(ctx context.Context, q Querier, userID uuid.UUID, ids
 			v.Payload = json.RawMessage(`{}`)
 		}
 		if actorID != nil && actorName != nil {
-			v.Actor = &UserRef{UserID: *actorID, DisplayName: *actorName, IconCode: IconFromJSON(actorIcon)}
+			v.Actor = &UserRef{UserID: *actorID, DisplayName: *actorName, Avatar: AvatarFromSrc(*actorName, actorIcon)}
 		}
 		v.State = NotificationState(v.ReadAt, v.ActionedAt, v.DismissedAt)
 		v.AwaitsAnswer = AwaitsAnswer(v.Type, v.ActionedAt, v.DismissedAt, v.Payload)

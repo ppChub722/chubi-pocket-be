@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -30,24 +29,19 @@ var (
 )
 
 const userColumns = `id, username, email, email_verified_at, display_name,
-	password_hash, currency, icon_code, status, created_at, updated_at`
+	COALESCE(password_hash, ''), currency, avatar_src(id, NULL), status, created_at, updated_at`
 
 func scanUser(row pgx.Row) (*User, error) {
 	var u User
-	var iconBytes []byte
+	var avatarSrc []byte
 	err := row.Scan(
 		&u.ID, &u.Username, &u.Email, &u.EmailVerifiedAt, &u.DisplayName,
-		&u.PasswordHash, &u.Currency, &iconBytes, &u.Status, &u.CreatedAt, &u.UpdatedAt,
+		&u.PasswordHash, &u.Currency, &avatarSrc, &u.Status, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if iconBytes != nil {
-		u.IconCode = new(shared.IconCode)
-		if err := json.Unmarshal(iconBytes, u.IconCode); err != nil {
-			return nil, fmt.Errorf("unmarshal icon_code: %w", err)
-		}
-	}
+	u.Avatar = shared.AvatarFromSrc(u.DisplayName, avatarSrc)
 	return &u, nil
 }
 
@@ -60,12 +54,17 @@ func (s *Store) InsertUserTx(ctx context.Context, tx pgx.Tx, u *User) (*User, er
 	}
 	u.ID = id
 
+	createdVia := u.CreatedVia
+	if createdVia == "" {
+		createdVia = CreatedViaPassword
+	}
+	// "" hash = no password: only allowed for an account made through an outside app (DB check).
 	q := `
-		INSERT INTO users (id, username, email, display_name, password_hash, currency, status)
-		VALUES ($1, $2, $3, $4, $5, $6, 'active')
+		INSERT INTO users (id, username, email, display_name, password_hash, currency, status, created_via)
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, 'active', $7)
 		RETURNING ` + userColumns
 	created, err := scanUser(tx.QueryRow(ctx, q,
-		u.ID, u.Username, u.Email, u.DisplayName, u.PasswordHash, u.Currency,
+		u.ID, u.Username, u.Email, u.DisplayName, u.PasswordHash, u.Currency, createdVia,
 	))
 	if err != nil {
 		return nil, mapInsertError(err)

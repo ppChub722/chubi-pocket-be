@@ -90,11 +90,15 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthRespo
 }
 
 func (s *Service) Login(ctx context.Context, req LoginRequest) (*AuthResponse, error) {
+	if req.Identifier == "" || req.Password == "" {
+		return nil, ErrUserNotFound
+	}
 	user, err := s.store.GetByIdentifier(ctx, req.Identifier)
 	if err != nil {
 		return nil, err
 	}
-	if !utils.CheckPasswordHash(req.Password, user.PasswordHash) {
+	// no password (made through Telegram) = refused like a wrong password (0.4.2 1b-2)
+	if user.PasswordHash == "" || !utils.CheckPasswordHash(req.Password, user.PasswordHash) {
 		return nil, ErrUserNotFound
 	}
 	return s.issueAuthResponse(user)
@@ -105,11 +109,14 @@ func (s *Service) ChangePassword(ctx context.Context, userID uuid.UUID, req Chan
 	if err != nil {
 		return err
 	}
-	if !utils.CheckPasswordHash(req.CurrentPassword, user.PasswordHash) {
-		return ErrWrongPassword
-	}
-	if utils.CheckPasswordHash(req.NewPassword, user.PasswordHash) {
-		return ErrSamePassword
+	// a passwordless account sets its first password without a current one (0.4.2 1b-2)
+	if user.PasswordHash != "" {
+		if req.CurrentPassword == "" || !utils.CheckPasswordHash(req.CurrentPassword, user.PasswordHash) {
+			return ErrWrongPassword
+		}
+		if utils.CheckPasswordHash(req.NewPassword, user.PasswordHash) {
+			return ErrSamePassword
+		}
 	}
 
 	newHash, err := utils.HashPassword(req.NewPassword)
@@ -117,6 +124,67 @@ func (s *Service) ChangePassword(ctx context.Context, userID uuid.UUID, req Chan
 		return err
 	}
 	return s.store.UpdatePassword(ctx, userID, newHash)
+}
+
+// Where an account came from (users.created_via, migration 123).
+const (
+	CreatedViaPassword = "password"
+	CreatedViaTelegram = "telegram"
+)
+
+// ExternalSignup — an account made through an outside app (0.4.2 1b-2): no password.
+type ExternalSignup struct {
+	Username    string
+	DisplayName string
+	Currency    string // "" = THB
+	CreatedVia  string // telegram | line | google
+}
+
+// RegistrationOpen — REGISTRATION_OPEN (the outside-app sign-up refuses when closed).
+func (s *Service) RegistrationOpen() bool { return s.cfg.App.RegistrationOpen }
+
+// CreateExternalUserTx makes a passwordless account inside the caller's transaction, with the same
+// preferences and registration hooks as POST /auth/register. ErrUsernameExists on a taken username.
+func (s *Service) CreateExternalUserTx(ctx context.Context, tx pgx.Tx, in ExternalSignup) (uuid.UUID, error) {
+	if in.CreatedVia == "" || in.CreatedVia == CreatedViaPassword {
+		return uuid.Nil, errors.New("an external account needs created_via")
+	}
+	currency := strings.ToUpper(in.Currency)
+	if currency == "" {
+		currency = "THB"
+	}
+	user, err := s.store.InsertUserTx(ctx, tx, &User{
+		Username: in.Username, DisplayName: in.DisplayName, Currency: currency, CreatedVia: in.CreatedVia,
+	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := s.store.InsertPreferencesTx(ctx, tx, user.ID); err != nil {
+		return uuid.Nil, err
+	}
+	for _, hook := range s.hooks {
+		if err := hook(ctx, tx, user.ID); err != nil {
+			return uuid.Nil, fmt.Errorf("registration hook: %w", err)
+		}
+	}
+	return user.ID, nil
+}
+
+// UsernameTaken — for the sign-up suggestion.
+func (s *Service) UsernameTaken(ctx context.Context, username string) (bool, error) {
+	var taken bool
+	err := s.store.Pool().QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE LOWER(username) = LOWER($1))`,
+		username).Scan(&taken)
+	return taken, err
+}
+
+// IssueFor — the signed-in answer (same as login) for a user found another way (Telegram).
+func (s *Service) IssueFor(ctx context.Context, userID uuid.UUID) (*AuthResponse, error) {
+	user, err := s.store.GetByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return s.issueAuthResponse(user)
 }
 
 func (s *Service) issueAuthResponse(user *User) (*AuthResponse, error) {

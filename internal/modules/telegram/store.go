@@ -4,14 +4,16 @@ import (
 	"context"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Received is one kept text (migration 120): the real sentences the LLM eval set (1b) is built from.
+// Received is one kept text (migration 120): the real sentences the LLM eval set is built from.
 type Received struct {
 	UpdateID     int64
 	ChatID       int64
-	FromUsername string // "" = none
+	UserID       *uuid.UUID // the linked user (migration 121)
+	FromUsername string     // "" = none
 	Text         string
 	ReceivedAt   time.Time // the message's Telegram date
 }
@@ -23,10 +25,10 @@ func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 // Save keeps a text once per update_id; false = Telegram sent this update before.
 func (s *Store) Save(ctx context.Context, r Received) (bool, error) {
 	tag, err := s.db.Exec(ctx, `
-		INSERT INTO telegram_messages (update_id, chat_id, from_username, text, received_at)
-		VALUES ($1, $2, NULLIF($3, ''), $4, $5)
+		INSERT INTO telegram_messages (update_id, chat_id, from_username, text, received_at, user_id)
+		VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6)
 		ON CONFLICT (update_id) DO NOTHING`,
-		r.UpdateID, r.ChatID, r.FromUsername, r.Text, r.ReceivedAt)
+		r.UpdateID, r.ChatID, r.FromUsername, r.Text, r.ReceivedAt, r.UserID)
 	if err != nil {
 		return false, err
 	}

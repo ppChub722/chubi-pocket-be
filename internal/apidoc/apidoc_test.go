@@ -163,6 +163,36 @@ func TestRequiredKeysAreDeclared(t *testing.T) {
 	}
 }
 
+// 0.4.2 1b (owner: "ลบออกเลย"): a person is drawn from `avatar` only; no person payload carries a
+// top-level icon_code any more. A new person schema goes on this list.
+func TestPersonSchemasCarryAvatar(t *testing.T) {
+	schemas := mustDoc(t)["components"].(map[string]any)["schemas"].(map[string]any)
+	for _, name := range []string{"UserRef", "PersonRef", "MemberRef", "EventMember", "LinkedUser", "Contact",
+		"Profile", "AuthUser", "SenderProfile", "AccountMember", "AccountMemberHistory"} {
+		s, ok := schemas[name].(map[string]any)
+		if !ok {
+			t.Errorf("%s: missing schema", name)
+			continue
+		}
+		props, _ := s["properties"].(map[string]any)
+		if _, has := props["icon_code"]; has {
+			t.Errorf("%s: still has a top-level icon_code", name)
+		}
+		av, _ := props["avatar"].(map[string]any)
+		if av["$ref"] != "#/components/schemas/Avatar" {
+			t.Errorf("%s: avatar is not an Avatar ($ref %v)", name, av["$ref"])
+		}
+		req, _ := s["required"].([]any)
+		found := false
+		for _, r := range req {
+			found = found || r == "avatar"
+		}
+		if !found {
+			t.Errorf("%s: avatar is not required", name)
+		}
+	}
+}
+
 var routeLine = regexp.MustCompile(`(?:api|protected)\.(GET|POST|PUT|PATCH|DELETE)\("([^"]+)"`)
 
 func TestCoverage(t *testing.T) {

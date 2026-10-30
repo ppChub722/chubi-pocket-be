@@ -8,8 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -41,7 +39,6 @@ type Webhook struct {
 
 	client     *Client // set by New; used by Start
 	webhookURL string
-	allowedN   int
 }
 
 func NewWebhook(secret string, h *Handler, log *slog.Logger) *Webhook {
@@ -81,11 +78,16 @@ func New(cfg config.TelegramConfig, db *pgxpool.Pool, log *slog.Logger) *Webhook
 		return nil
 	}
 	client := NewClient(cfg.BotToken, DefaultAPIBase, nil)
-	allowed := ParseChatIDs(cfg.AllowedChatIDs, log)
-	w := NewWebhook(cfg.WebhookSecret, NewHandler(client, NewStore(db), allowed, log), log)
-	w.client, w.webhookURL, w.allowedN = client, cfg.WebhookURL, len(allowed)
+	w := NewWebhook(cfg.WebhookSecret, NewHandler(client, NewStore(db), nil, log), log)
+	w.client, w.webhookURL = client, cfg.WebhookURL
 	return w
 }
+
+// Client — the Bot API client (the connections module links chats and imports photos with it).
+func (w *Webhook) Client() *Client { return w.client }
+
+// WithAccounts hands the bot the linking (connections.Service); wired after both exist.
+func (w *Webhook) WithAccounts(a Accounts) { w.h.accounts = a }
 
 // Start checks the token (getMe) and points Telegram at TELEGRAM_WEBHOOK_URL, in the background:
 // a bad token or Telegram being down is logged, the API runs on.
@@ -101,7 +103,7 @@ func (w *Webhook) Start() {
 			w.log.Error("telegram: getMe failed — check TELEGRAM_BOT_TOKEN", "error", err)
 			return
 		}
-		w.log.Info("telegram: on", "mode", "webhook", "bot", "@"+me.Username, "allowed_chats", w.allowedN)
+		w.log.Info("telegram: on", "mode", "webhook", "bot", "@"+me.Username)
 		if w.webhookURL == "" {
 			w.log.Warn("telegram: TELEGRAM_WEBHOOK_URL is empty — setWebhook skipped, Telegram keeps its last URL")
 		} else if err := w.client.SetWebhook(ctx, w.webhookURL, string(w.secret)); err != nil {
@@ -116,22 +118,4 @@ func (w *Webhook) Start() {
 		w.log.Info("telegram: webhook", "url", info.URL, "pending", info.PendingUpdateCount,
 			"last_error", info.LastErrorMessage)
 	}()
-}
-
-// ParseChatIDs reads TELEGRAM_ALLOWED_CHAT_IDS ("123, -456"); a bad entry is logged and skipped.
-func ParseChatIDs(raw string, log *slog.Logger) []int64 {
-	var ids []int64
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		id, err := strconv.ParseInt(part, 10, 64)
-		if err != nil {
-			log.Warn("telegram: skipping a bad TELEGRAM_ALLOWED_CHAT_IDS entry", "entry", part)
-			continue
-		}
-		ids = append(ids, id)
-	}
-	return ids
 }

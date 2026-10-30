@@ -37,39 +37,39 @@ const (
 )
 
 type Account struct {
-	ID     uuid.UUID `json:"id"`
-	UserID uuid.UUID `json:"-"`
-	Name   string    `json:"name"`
-	Type   string    `json:"type"`
-	Group          string           `json:"group"`
-	Balance        float64          `json:"balance"`
-	Currency       string           `json:"currency"`
-	IconCode       *shared.IconCode `json:"icon_code"`
-	LogoURL        *string          `json:"logo_url"`
-	Description    *string          `json:"description"`
-	Note           *string          `json:"note"`
-	Status         string           `json:"status"`
-	CreditLimit    *float64         `json:"credit_limit"`
-	StatementDate  *int             `json:"statement_date"`
-	PaymentDueDate *int             `json:"payment_due_date"`
-	MinimumPayment *float64         `json:"minimum_payment"`
-	SortOrder      int              `json:"sort_order"`
-	CreatedAt      time.Time        `json:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at"`
-	Identifiers []Identifier `json:"identifiers"`
-	Members       []MemberView `json:"members"`
-	MyReportScope string       `json:"my_report_scope"`
-	IsShared      bool         `json:"is_shared"`
-	MyRole  string `json:"my_role"`
-	CanEdit bool   `json:"can_edit"`
-	TrackBalance bool `json:"track_balance"`
-	Savings shared.WalletSavings `json:"savings"`
-	MonthIn      float64 `json:"month_in"`
-	MonthOut     float64 `json:"month_out"`
-	DueDateNext  *string `json:"due_date_next"`
-	DaysUntilDue *int    `json:"days_until_due"`
-	CreditUsedPct   *int     `json:"credit_used_pct"`
-	CreditAvailable *float64 `json:"credit_available"`
+	ID              uuid.UUID            `json:"id"`
+	UserID          uuid.UUID            `json:"-"`
+	Name            string               `json:"name"`
+	Type            string               `json:"type"`
+	Group           string               `json:"group"`
+	Balance         float64              `json:"balance"`
+	Currency        string               `json:"currency"`
+	IconCode        *shared.IconCode     `json:"icon_code"`
+	LogoURL         *string              `json:"logo_url"`
+	Description     *string              `json:"description"`
+	Note            *string              `json:"note"`
+	Status          string               `json:"status"`
+	CreditLimit     *float64             `json:"credit_limit"`
+	StatementDate   *int                 `json:"statement_date"`
+	PaymentDueDate  *int                 `json:"payment_due_date"`
+	MinimumPayment  *float64             `json:"minimum_payment"`
+	SortOrder       int                  `json:"sort_order"`
+	CreatedAt       time.Time            `json:"created_at"`
+	UpdatedAt       time.Time            `json:"updated_at"`
+	Identifiers     []Identifier         `json:"identifiers"`
+	Members         []MemberView         `json:"members"`
+	MyReportScope   string               `json:"my_report_scope"`
+	IsShared        bool                 `json:"is_shared"`
+	MyRole          string               `json:"my_role"`
+	CanEdit         bool                 `json:"can_edit"`
+	TrackBalance    bool                 `json:"track_balance"`
+	Savings         shared.WalletSavings `json:"savings"`
+	MonthIn         float64              `json:"month_in"`
+	MonthOut        float64              `json:"month_out"`
+	DueDateNext     *string              `json:"due_date_next"`
+	DaysUntilDue    *int                 `json:"days_until_due"`
+	CreditUsedPct   *int                 `json:"credit_used_pct"`
+	CreditAvailable *float64             `json:"credit_available"`
 }
 
 type AccountMember struct {
@@ -85,25 +85,25 @@ type AccountMember struct {
 }
 
 type MemberView struct {
-	ID       uuid.UUID        `json:"id"`
-	UserID   uuid.UUID        `json:"user_id"`
-	Name     string           `json:"name"`
-	IconCode *shared.IconCode `json:"icon_code"`
-	Role     string           `json:"role"`
-	JoinedAt time.Time        `json:"joined_at"`
-	IsMe     bool             `json:"is_me"`
+	ID       uuid.UUID     `json:"id"`
+	UserID   uuid.UUID     `json:"user_id"`
+	Name     string        `json:"name"`
+	Avatar   shared.Avatar `json:"avatar"`
+	Role     string        `json:"role"`
+	JoinedAt time.Time     `json:"joined_at"`
+	IsMe     bool          `json:"is_me"`
 }
 
 type MemberHistoryView struct {
-	ID       uuid.UUID        `json:"id"`
-	UserID   uuid.UUID        `json:"user_id"`
-	Name     string           `json:"name"`
-	IconCode *shared.IconCode `json:"icon_code"`
-	Role     string           `json:"role"`
-	Status   string           `json:"status"` // pending | active | left
-	JoinedAt *time.Time       `json:"joined_at"`
-	LeftAt   *time.Time       `json:"left_at"`
-	IsMe     bool             `json:"is_me"`
+	ID       uuid.UUID     `json:"id"`
+	UserID   uuid.UUID     `json:"user_id"`
+	Name     string        `json:"name"`
+	Avatar   shared.Avatar `json:"avatar"`
+	Role     string        `json:"role"`
+	Status   string        `json:"status"` // pending | active | left
+	JoinedAt *time.Time    `json:"joined_at"`
+	LeftAt   *time.Time    `json:"left_at"`
+	IsMe     bool          `json:"is_me"`
 }
 
 type InviteMemberRequest struct {
@@ -132,7 +132,7 @@ type CreateRequest struct {
 	PaymentDueDate *int             `json:"payment_due_date" binding:"omitempty,min=1,max=31"`
 	MinimumPayment *float64         `json:"minimum_payment"  binding:"omitempty,gte=0"`
 	Identifiers    []Identifier     `json:"identifiers"`
-	TrackBalance *bool `json:"track_balance"`
+	TrackBalance   *bool            `json:"track_balance"`
 }
 
 type UpdateRequest struct {
@@ -147,9 +147,9 @@ type UpdateRequest struct {
 	PaymentDueDate *int             `json:"payment_due_date" binding:"omitempty,min=1,max=31"`
 	MinimumPayment *float64         `json:"minimum_payment"  binding:"omitempty,gte=0"`
 	SortOrder      *int             `json:"sort_order"       binding:"omitempty"`
-	Identifiers *[]Identifier `json:"identifiers"`
-	TrackBalance   *bool    `json:"track_balance"`
-	CurrentBalance *float64 `json:"current_balance"`
+	Identifiers    *[]Identifier    `json:"identifiers"`
+	TrackBalance   *bool            `json:"track_balance"`
+	CurrentBalance *float64         `json:"current_balance"`
 
 	iconCodePresent    bool
 	logoURLPresent     bool
@@ -215,7 +215,7 @@ type AccountDetail struct {
 	Account
 	Summary        *AccountSummary     `json:"summary"`
 	MembersHistory []MemberHistoryView `json:"members_history"`
-	DeletePreview *DeletePreview `json:"delete_preview"`
+	DeletePreview  *DeletePreview      `json:"delete_preview"`
 }
 
 type TypeTotal struct {
@@ -237,14 +237,14 @@ type AccountTotals struct {
 	// UntrackedCount — wallets with track_balance false (never summed).
 	UntrackedCount int `json:"untracked_count"`
 
-	Total          float64 `json:"total"`
-	CashTotal      float64 `json:"cash_total"`
-	CardDebt       float64 `json:"card_debt"`
-	CardUsedPct    int     `json:"card_used_pct"`
-	SavedTotal     float64 `json:"saved_total"`
-	AvailableTotal float64 `json:"available_total"`
-	CashSplit     []CashShare `json:"cash_split"`
-	CardRemaining float64     `json:"card_remaining"`
+	Total          float64     `json:"total"`
+	CashTotal      float64     `json:"cash_total"`
+	CardDebt       float64     `json:"card_debt"`
+	CardUsedPct    int         `json:"card_used_pct"`
+	SavedTotal     float64     `json:"saved_total"`
+	AvailableTotal float64     `json:"available_total"`
+	CashSplit      []CashShare `json:"cash_split"`
+	CardRemaining  float64     `json:"card_remaining"`
 }
 
 type AccountList struct {

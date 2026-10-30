@@ -44,9 +44,9 @@ var contactSelect = `SELECT c.id, c.user_id,
 	COALESCE(` + shared.PersonNameSQL("c", "lu") + `, c.display_name),
 	c.nickname, c.show_nickname, c.display_name,
 	CASE WHEN lu.id IS NOT NULL THEN lu.email ELSE c.email END,
-	c.phone, c.description, c.note, ` + shared.PersonIconSQL("c", "lu") + `,
+	c.phone, c.description, c.note, ` + shared.PersonAvatarSQL("c", "lu") + `,
 	c.linked_user_id, c.status, c.last_used_at, c.created_at, c.updated_at,
-	lu.id, lu.display_name, lu.email, lu.icon_code, lu.username
+	lu.id, lu.display_name, lu.email, ` + shared.AvatarSQL("lu.id", "NULL") + `, lu.username
 	FROM contacts c LEFT JOIN users lu ON lu.id = c.linked_user_id`
 
 func scanContact(row pgx.Row) (*Contact, error) {
@@ -68,12 +68,13 @@ func scanContact(row pgx.Row) (*Contact, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.IconCode = shared.IconFromJSON(iconBytes)
+	c.Avatar = shared.AvatarFromSrc(c.Name, iconBytes)
 	if luID != nil {
-		lu := &LinkedUser{ID: *luID, Email: luEmail, IconCode: shared.IconFromJSON(luIcon)}
+		lu := &LinkedUser{ID: *luID, Email: luEmail}
 		if luName != nil {
 			lu.DisplayName = *luName
 		}
+		lu.Avatar = shared.AvatarFromSrc(lu.DisplayName, luIcon)
 		if luUser != nil {
 			lu.Username = *luUser
 		}

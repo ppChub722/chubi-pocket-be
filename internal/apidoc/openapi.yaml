@@ -50,6 +50,8 @@ tags:
     description: 'Pages not redesigned yet; only the shared-shape change is listed.'
   - name: Internal
     description: 'Called by outside services (the Telegram bot webhook), never by the app; `x-internal: true`.'
+  - name: Connections
+    description: 'Outside apps (Telegram, LINE, Google) and profile pictures (0.4.2 1b).'
 security:
   - bearerAuth: []
 
@@ -2420,7 +2422,8 @@ paths:
         ],
         "summary": "Sign in",
         "operationId": "login",
-        "description": "Public. `identifier` = username or email.",
+        "description": "Public. `identifier` = username or email. 0.4.2 1b-2 (owner 2026-10-28): EVERY failure is the same 401 INVALID_CREDENTIALS: unknown user, wrong password, a bad or empty body, and an account with no password (created through Telegram: log in with Telegram, or set a password first). No 400 on this route.",
+        "x-breaking": "0.4.2 1b-2: a bad / empty body answers 401 INVALID_CREDENTIALS (was 400 VALIDATION_ERROR).",
         "requestBody": {
           "required": true,
           "content": {
@@ -2442,11 +2445,15 @@ paths:
               }
             }
           },
-          "400": {
-            "$ref": "#/components/responses/ValidationError"
-          },
           "401": {
-            "$ref": "#/components/responses/Unauthorized"
+            "description": "401 INVALID_CREDENTIALS, for every failure (see the description).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "security": []
@@ -2479,8 +2486,10 @@ paths:
         "tags": [
           "Auth"
         ],
-        "summary": "Change my password",
+        "summary": "Change my password (or set one: ตั้งรหัสผ่าน)",
         "operationId": "changePassword",
+        "description": "0.4.2 1b-2: an account with no password yet (`Profile.has_password` false, created through Telegram) sets one with `new_password` only; `current_password` is ignored then. With a password, `current_password` is required (missing / wrong → 401 WRONG_PASSWORD).",
+        "x-breaking": "0.4.2 1b-2: `current_password` is optional in the schema (still required when a password exists).",
         "requestBody": {
           "required": true,
           "content": {
@@ -2724,6 +2733,312 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
       security: []
       x-breaking: 'New (0.4.2 1a).'
+
+  # ───────────────────────────── Connections + avatars (0.4.2 1b) ─────────────────────────────
+  /connections:
+    get:
+      tags: [Connections]
+      summary: Every outside app (profile → การเชื่อมต่อ)
+      operationId: listConnections
+      description: 'One row per provider, in order telegram, line, google (LINE and Google available false for now).'
+      responses:
+        '200':
+          description: The rows.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConnectionList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+      x-breaking: 'New (0.4.2 1b).'
+  /connections/{provider}:
+    parameters: [{ $ref: '#/components/parameters/ProviderPath' }]
+    get:
+      tags: [Connections]
+      summary: One outside app (the connection page; re-read on app resume after linking)
+      operationId: getConnection
+      responses:
+        '200':
+          description: The row.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Connection' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-breaking: 'New (0.4.2 1b).'
+    delete:
+      tags: [Connections]
+      summary: Unlink (ยกเลิกการเชื่อม)
+      operationId: unlinkConnection
+      description: 'The imported picture is kept (the row''s `photo`), but while unlinked it is not used: an avatar whose source is this app falls back to the icon. Idempotent: not linked → the same 200. Telegram: the chat gets no message; from then on it gets "เชื่อมบัญชีก่อนนะครับ: แอป → โปรไฟล์ → Telegram". 0.4.2 1b-2: an account with no password can''t unlink its last linked app → 409 LAST_LOGIN_METHOD (app: "ตั้งรหัสผ่านก่อน ไม่งั้นจะเข้าบัญชีไม่ได้"); changing the account (POST …/link) stays allowed.'
+      responses:
+        '200':
+          description: The row, now unlinked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Connection' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'LAST_LOGIN_METHOD.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: 'New (0.4.2 1b).'
+  /connections/{provider}/link:
+    parameters: [{ $ref: '#/components/parameters/ProviderPath' }]
+    post:
+      tags: [Connections]
+      summary: Start linking (เชื่อม / เปลี่ยนบัญชี)
+      operationId: startConnectionLink
+      description: |
+        Returns the URL to open in the outside app; the user types nothing. Telegram: `https://t.me/<bot>?start=<code>`; the bot's `/start <code>` binds the chat to me ("เชื่อมกับบัญชี <ชื่อที่แสดง> แล้ว ✓"). A chat linked to another user moves to me; my old Telegram is replaced (เปลี่ยนบัญชี uses this same call). The app re-reads GET /connections/{provider} on resume.
+        Errors: 409 CONNECTION_UNAVAILABLE (LINE / Google, or the bot is off on the server).
+      responses:
+        '200':
+          description: The link.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConnectionLinkStart' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'CONNECTION_UNAVAILABLE.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: 'New (0.4.2 1b).'
+  /connections/{provider}/permissions:
+    parameters: [{ $ref: '#/components/parameters/ProviderPath' }]
+    patch:
+      tags: [Connections]
+      summary: Turn permissions on / off (one switch = one call)
+      operationId: updateConnectionPermissions
+      description: 'Body: `{<key>: bool}` (one or more). Telegram `chat` off → the bot answers texts with "ปิดการจดรายการไว้ เปิดได้ในแอป" and keeps nothing. Errors: 400 VALIDATION_ERROR (unknown key / not a bool), 409 NOT_LINKED, 409 PERMISSION_UNAVAILABLE (a "เร็วๆ นี้" key).'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: { type: boolean }
+              example: { chat: false }
+      responses:
+        '200':
+          description: The row.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Connection' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'NOT_LINKED / PERMISSION_UNAVAILABLE.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: 'New (0.4.2 1b).'
+  /connections/{provider}/photo:
+    parameters: [{ $ref: '#/components/parameters/ProviderPath' }]
+    post:
+      tags: [Connections]
+      summary: Import / update my picture from the app (นำเข้า / อัปเดต)
+      operationId: importConnectionPhoto
+      description: |
+        Manual, no background refresh. Telegram: the BE reads the newest profile photo (getUserProfilePhotos → the smallest size ≥ 160 px → getFile) and stores it (JPEG); the Bot API URL never leaves the server. A new import bumps the version (`?v=`). It does NOT pick it as the profile picture (PUT /users/me `avatar_settings.source` does).
+        Errors: 409 NOT_LINKED, 404 NO_PHOTO ("Telegram ไม่ส่งรูปให้": no photo, or the user's privacy hides it), 502 PROVIDER_ERROR (Telegram failed; try again).
+      responses:
+        '200':
+          description: The row with `photo`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Connection' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: 'NO_PHOTO (or an unknown provider: NOT_FOUND).'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: 'NOT_LINKED / CONNECTION_UNAVAILABLE.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502':
+          description: 'PROVIDER_ERROR.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: 'New (0.4.2 1b).'
+  /avatars/{id}:
+    parameters:
+      - { name: id, in: path, required: true, description: 'GET: the picture id (from photo_url). DELETE: the source name (upload / telegram / line / google), i.e. DELETE /avatars/telegram.', schema: { type: string } }
+    delete:
+      tags: [Connections]
+      summary: Delete one of my stored pictures by source (ลบ)
+      operationId: deleteAvatarPhoto
+      description: 'DELETE /avatars/{source}. When it was the picked source, `avatar_settings.source` becomes icon. Idempotent (no picture → the same 200). An unknown source → 400 VALIDATION_ERROR.'
+      responses:
+        '200':
+          description: My profile, final state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Profile' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+      x-breaking: 'New (0.4.2 1b).'
+    get:
+      tags: [Connections]
+      summary: A stored profile picture (the `photo_url` of an avatar)
+      operationId: getAvatarImage
+      description: 'JPEG bytes. Bearer auth (any signed-in user: others see my picture like they see my icon). `?v=` = the version in photo_url; the answer is `Cache-Control: private, max-age=31536000, immutable`. 404 when the picture is gone.'
+      parameters:
+        - { name: v, in: query, schema: { type: integer } }
+      responses:
+        '200':
+          description: The picture.
+          content:
+            image/jpeg:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-breaking: 'New (0.4.2 1b).'
+  /brand-logos/{file}:
+    parameters:
+      - { name: file, in: path, required: true, description: '`<provider>.png`: telegram.png, line.png, google.png.', schema: { type: string, enum: [telegram.png, line.png, google.png] } }
+    get:
+      tags: [Connections]
+      summary: An outside app's logo (the `logo_url` of a connection)
+      operationId: getBrandLogo
+      description: 'Public (no token), 96 px PNG embedded in the server. `?v=` changes when the file does; `Cache-Control: public, max-age=31536000, immutable`.'
+      parameters:
+        - { name: v, in: query, schema: { type: integer } }
+      responses:
+        '200':
+          description: The logo.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/NotFound' }
+      security: []
+      x-breaking: 'New (0.4.2 1b).'
+
+  # ───────────────────────────── Sign up / log in with Telegram (0.4.2 1b-2) ─────────────────────────────
+  /auth/telegram/start:
+    post:
+      tags: [Auth]
+      summary: Start "เข้าสู่ระบบด้วย Telegram" (PKCE)
+      operationId: startTelegramLogin
+      description: |
+        Public. The app makes a random `code_verifier` (43–128 chars of `A-Z a-z 0-9 - . _ ~`), keeps it, and sends `code_challenge` = base64url(SHA-256(verifier)) without padding (S256). The answer's `url` (`https://t.me/<bot>?start=login_<code>`) opens Telegram; the user confirms in the chat:
+        - a chat linked to an account → "เข้าสู่ระบบ chubi-pocket เป็น <ชื่อที่แสดง> ไหมครับ?" [✓ ยืนยัน];
+        - an unlinked chat → "Telegram นี้ยังไม่มีบัญชี chubi-pocket" [สร้างบัญชีใหม่].
+        Then the app calls POST /auth/telegram/exchange (on resume, and again while it answers 202). Codes: single use, 5 minutes. Rate-limited per IP (429 RATE_LIMITED). Errors: 400 VALIDATION_ERROR (bad challenge), 409 CONNECTION_UNAVAILABLE (the bot is off).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TelegramLoginStartRequest' }
+      responses:
+        '200':
+          description: The link.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TelegramLoginStart' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '409':
+          description: 'CONNECTION_UNAVAILABLE.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: 'RATE_LIMITED.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      security: []
+      x-breaking: 'New (0.4.2 1b-2).'
+  /auth/telegram/exchange:
+    post:
+      tags: [Auth]
+      summary: Finish "เข้าสู่ระบบด้วย Telegram" (poll until confirmed)
+      operationId: exchangeTelegramLogin
+      description: |
+        Public. `{code, code_verifier}`; the verifier must match the start's challenge.
+        - 202 `status: pending`: not confirmed in Telegram yet (app: "รอยืนยันใน Telegram" + retry).
+        - 200 `status: login`: confirmed by a linked chat → `auth` = the same answer as POST /auth/login. The code is used up.
+        - 200 `status: signup`: the chat has no account and the user tapped [สร้างบัญชีใหม่] → `signup` prefills the sign-up page; the code stays valid (until it expires) for POST /auth/telegram/signup.
+        Errors: 401 LOGIN_CODE_INVALID (unknown, used, expired, or a wrong verifier: one answer), 400 VALIDATION_ERROR, 429 RATE_LIMITED.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TelegramLoginCodeRequest' }
+      responses:
+        '200':
+          description: login or signup.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TelegramExchange' }
+        '202':
+          description: pending.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TelegramExchange' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401':
+          description: 'LOGIN_CODE_INVALID.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: 'RATE_LIMITED.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      security: []
+      x-breaking: 'New (0.4.2 1b-2).'
+  /auth/telegram/signup:
+    post:
+      tags: [Auth]
+      summary: Create an account from Telegram (no password)
+      operationId: signupWithTelegram
+      description: |
+        Public. After exchange answered `signup`. Creates the account WITHOUT a password (only accounts made through an outside app may have none; password login is refused for them until PUT /auth/password sets one), links that Telegram chat at once (permissions {chat: true}), and imports the Telegram photo and picks it as the avatar when there is one (best effort: a failed import leaves the icon / initials). Returns the same answer as POST /auth/register. The code is used up.
+        Errors: 401 LOGIN_CODE_INVALID, 400 VALIDATION_ERROR (display_name 1–100, username 3–50, currency 3 letters), 409 USERNAME_EXISTS (`details.username_suggestion` = a free one), 409 TELEGRAM_ALREADY_LINKED (that chat was linked to an account meanwhile: start again to log in), 403 REGISTRATION_CLOSED, 429 RATE_LIMITED.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TelegramSignupRequest' }
+      responses:
+        '201':
+          description: The new account, signed in.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401':
+          description: 'LOGIN_CODE_INVALID.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: 'REGISTRATION_CLOSED.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: 'USERNAME_EXISTS (details.username_suggestion) / TELEGRAM_ALREADY_LINKED.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: 'RATE_LIMITED.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      security: []
+      x-breaking: 'New (0.4.2 1b-2).'
 
   # ───────────────────────────── v2: reached pages (target shapes) ─────────────────────────────
   /pending-transactions/scan-slip:
@@ -5632,6 +5947,11 @@ components:
       name: per_page
       in: query
       schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    ProviderPath:
+      name: provider
+      in: path
+      required: true
+      schema: { type: string, enum: [telegram, line, google] }
     IdPath:
       name: id
       in: path
@@ -5678,6 +5998,165 @@ components:
       schema: { type: string }
 
   schemas:
+    # ───────── Avatars + connections (0.4.2 1b) ─────────
+    Avatar:
+      type: object
+      description: |
+        0.4.2 1b: how to draw a person, resolved by the BE (one builder, every person payload). The app never picks the source.
+        - `kind` photo: draw `photo_url` (GET it with the Bearer token; the `?v=` changes when the picture does, so cache by URL). On a load error fall back to `icon_code`, then `initials`.
+        - `kind` icon: draw `icon_code` (its own colours / border).
+        - `kind` initials: `initials` on `colors[0]`.
+        Resolution: the picked source (`avatar_settings.source`) when it is available (a photo exists; for an app source the app is still linked) → the icon (`icon_code` set) → initials. A typed name (no contact) and a contact with no icon get initials.
+      required: [kind, photo_url, icon_code, initials, colors, border]
+      properties:
+        kind: { type: string, enum: [photo, icon, initials] }
+        photo_url: { type: [string, 'null'], description: 'Set only when kind = photo: `/api/v1/avatars/{id}?v={version}` (a path from the server root).' }
+        icon_code:
+          description: 'The person''s icon when they have one (also when kind = photo: the load-error fallback), else null.'
+          oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }]
+        initials: { type: string, description: 'Up to two first letters (first grapheme of the first two words), upper-cased; "" for an empty name. Always set: the last fallback.' }
+        colors:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: 'The person''s profile colours, in order (colour 1 = the main one; the UI shows 1–3). Same values as inside icon_code (a theme token or `#rrggbb`), resolved by the viewer''s app. Icon: its background colours, then icon colours, then border colours, duplicates removed. Photo: `avatar_settings.colors`, then the border colours (none set → the icon''s colours when there is an icon). Nothing set: the name-hash colour (`#rrggbb` from the 12-colour palette). Only SET colours: never `""` / null entries; an unset slot is simply missing (a photo with a main colour only → [main]; with border colours → [main, border1, …]). Never empty.'
+        border:
+          description: 'kind = photo only: the ring around the picture (from avatar_settings.border); null otherwise (an icon carries its border in icon_code).'
+          oneOf: [{ $ref: '#/components/schemas/AvatarBorder' }, { type: 'null' }]
+      example:
+        kind: photo
+        photo_url: /api/v1/avatars/0191c2a0-0000-7000-8000-0000000000cc?v=2
+        icon_code: { icon: face, bgColors: ['#5AA9F0'] }
+        initials: P
+        colors: ['#E8A33D', '#F06292']
+        border: { style: thick, colors: ['#F06292'] }
+    AvatarBorder:
+      type: object
+      description: 'A photo ring. No border = the border itself is null (there is no "none" style).'
+      required: [style, colors]
+      properties:
+        style: { type: string, enum: [thin, thick, dashed], description: 'An icon-maker border id. PUT /users/me with any other value → 400 VALIDATION_ERROR.' }
+        colors: { type: array, items: { type: string }, description: 'Only set colours, in order (empty / null entries are dropped on save).' }
+    AvatarSettings:
+      type: object
+      description: 'users.avatar_settings (0.4.2 1b): the profile picture the user picked. Only the owner sees it (GET /users/me); everyone else gets the resolved `avatar`.'
+      required: [source, colors, border]
+      properties:
+        source: { type: string, enum: [icon, upload, telegram, line, google], description: 'icon (default) = the icon maker''s icon_code. Picking a photo source needs that photo (409 AVATAR_SOURCE_UNAVAILABLE).' }
+        colors: { type: array, maxItems: 8, items: { type: string }, description: 'Profile colours for a photo source, in order (the colour-only icon-maker mode edits 1–3). Only set colours: PUT drops empty / null entries before saving (an unset slot is simply missing; at most 8 after that). Ignored while source = icon (an icon''s colours come from icon_code).' }
+        border:
+          description: 'The ring for a photo source; null = none.'
+          oneOf: [{ $ref: '#/components/schemas/AvatarBorder' }, { type: 'null' }]
+    AvatarPhoto:
+      type: object
+      description: 'One stored picture of mine (0.4.2 1b).'
+      required: [source, url, imported_at]
+      properties:
+        source: { type: string, enum: [upload, telegram, line, google] }
+        url: { type: string, description: '`/api/v1/avatars/{id}?v={version}`.' }
+        imported_at: { $ref: '#/components/schemas/DateTime' }
+    Connection:
+      type: object
+      description: |
+        0.4.2 1b: one outside app (profile → การเชื่อมต่อ, and the connection page). Logos, brand colours and availability come from here.
+        `available` false = "เร็วๆ นี้" (LINE, Google; Telegram while the bot is off on the server).
+      required: [provider, name, brand_color, logo_url, available, linked, account, linked_at, photo, permissions]
+      properties:
+        provider: { type: string, enum: [telegram, line, google] }
+        name: { type: string, description: 'Telegram / LINE / Google.' }
+        brand_color: { type: string, description: '`#rrggbb`: Telegram #26A5E4, LINE #06C755, Google #4285F4.' }
+        logo_url: { type: string, description: '`/api/v1/brand-logos/{provider}.png?v={n}` (public, 96 px PNG; cache by URL).' }
+        available: { type: boolean }
+        linked: { type: boolean }
+        account: { type: [string, 'null'], description: 'Linked: who it is in that app (Telegram "@username", else the first name). Null when not linked.' }
+        linked_at: { oneOf: [{ $ref: '#/components/schemas/DateTime' }, { type: 'null' }] }
+        photo:
+          description: 'The picture imported from this app (kept after unlink), else null.'
+          oneOf: [{ $ref: '#/components/schemas/AvatarPhoto' }, { type: 'null' }]
+        permissions:
+          type: array
+          items: { $ref: '#/components/schemas/ConnectionPermission' }
+          description: 'In display order. Telegram: chat (live), ask, slip, notify (available false). LINE: the same keys. Google: login, sheets, calendar.'
+      example:
+        provider: telegram
+        name: Telegram
+        brand_color: '#26A5E4'
+        logo_url: /api/v1/brand-logos/telegram.png?v=1
+        available: true
+        linked: true
+        account: '@nong'
+        linked_at: '2026-10-28T09:00:00Z'
+        photo: { source: telegram, url: /api/v1/avatars/0191c2a0-0000-7000-8000-0000000000cc?v=2, imported_at: '2026-10-28T09:01:00Z' }
+        permissions:
+          - { key: chat, available: true, on: true }
+          - { key: ask, available: false, on: false }
+          - { key: slip, available: false, on: false }
+          - { key: notify, available: false, on: false }
+    ConnectionPermission:
+      type: object
+      required: [key, available, on]
+      properties:
+        key: { type: string, enum: [chat, ask, slip, notify, login, sheets, calendar], description: 'The app words it (จดรายการผ่านแชต / ถามยอดเงิน / ส่งสลิป / แจ้งเตือน / เข้าสู่ระบบด้วย Google / ส่งรายการไป Sheets / ลงวันครบกำหนดใน Calendar).' }
+        available: { type: boolean, description: 'false = "เร็วๆ นี้" (no switch).' }
+        on: { type: boolean, description: 'Always false while unavailable or not linked.' }
+    ConnectionList:
+      type: object
+      required: [data, count]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/Connection' } }
+        count: { type: integer }
+    ConnectionLinkStart:
+      type: object
+      required: [url, expires_at]
+      properties:
+        url: { type: string, description: 'Open it in the outside app, e.g. `https://t.me/chubiPocket_bot?start=<code>` (code: 128-bit random, URL-safe, single use).' }
+        expires_at: { $ref: '#/components/schemas/DateTime', description: '10 minutes from now. A newer link call cancels older unused codes.' }
+    # ───────── Sign up / log in with Telegram (0.4.2 1b-2) ─────────
+    TelegramLoginStartRequest:
+      type: object
+      required: [code_challenge]
+      properties:
+        code_challenge: { type: string, pattern: '^[A-Za-z0-9_-]{43}$', description: 'base64url(SHA-256(code_verifier)), no padding (PKCE S256).' }
+    TelegramLoginStart:
+      type: object
+      required: [code, url, expires_at]
+      properties:
+        code: { type: string, description: 'Send it back to exchange / signup (with the verifier). 22 chars, single use.' }
+        url: { type: string, description: '`https://t.me/<bot>?start=login_<code>`: open it in Telegram.' }
+        expires_at: { $ref: '#/components/schemas/DateTime', description: '5 minutes from now.' }
+    TelegramLoginCodeRequest:
+      type: object
+      required: [code, code_verifier]
+      properties:
+        code: { type: string }
+        code_verifier: { type: string, minLength: 43, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' }
+    TelegramExchange:
+      type: object
+      required: [status, auth, signup]
+      properties:
+        status: { type: string, enum: [pending, login, signup] }
+        auth:
+          description: 'status login: the signed-in answer (as POST /auth/login); else null.'
+          oneOf: [{ $ref: '#/components/schemas/AuthResponse' }, { type: 'null' }]
+        signup:
+          description: 'status signup: the sign-up page prefill; else null.'
+          oneOf: [{ $ref: '#/components/schemas/TelegramSignupInfo' }, { type: 'null' }]
+    TelegramSignupInfo:
+      type: object
+      required: [display_name, username_suggestion, has_photo]
+      properties:
+        display_name: { type: string, description: 'The Telegram name (first + last).' }
+        username_suggestion: { type: string, description: 'The Telegram @username (lower case) when free, else a free variant (name + digits).' }
+        has_photo: { type: boolean, description: 'Telegram gives a profile photo: it becomes the avatar on sign-up.' }
+    TelegramSignupRequest:
+      type: object
+      required: [code, code_verifier, display_name, username]
+      properties:
+        code: { type: string }
+        code_verifier: { type: string, minLength: 43, maxLength: 128 }
+        display_name: { type: string, minLength: 1, maxLength: 100 }
+        username: { type: string, minLength: 3, maxLength: 50 }
+        currency: { type: string, minLength: 3, maxLength: 3, description: 'Default THB.' }
     # ───────── Telegram (0.4.2, sent BY Telegram; only the fields the bot reads) ─────────
     TelegramUpdate:
       type: object
@@ -5908,40 +6387,41 @@ components:
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
     UserRef:
       type: object
-      description: 'An app user (a shared-wallet author, a linked partner).'
-      required: [user_id, display_name, icon_code]
+      description: 'An app user (a shared-wallet author, a linked partner, a notification actor).'
+      required: [user_id, display_name, avatar]
       properties:
         user_id: { $ref: '#/components/schemas/Uuid' }
         display_name: { type: string }
-        icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
+        avatar: { $ref: '#/components/schemas/Avatar' }
+      x-breaking: '0.4.2 1b: icon_code → avatar.'
     PersonRef:
       type: object
       description: |
         A person shown on a split, a debt or a draft. `name` follows the single name rule (nickname when set and shown → linked user's profile name → contact display_name → snapshot when there is no contact). The FE draws 👤 when `contact_id` is null.
-      required: [name, contact_id, icon_code, linked, linked_user_id]
+      required: [name, contact_id, avatar, linked, linked_user_id]
       properties:
         name: { type: string, description: 'Resolved display name. '}
         contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
-        icon_code:
-          description: 'The linked user''s icon, else the contact''s, else null (free name).'
-          oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }]
+        avatar: { $ref: '#/components/schemas/Avatar', description: '0.4.2 1b (replaces icon_code): the linked user''s avatar, else the contact''s icon, else initials (a free name).' }
         linked: { type: boolean, description: 'The contact is linked to an app user (draw the 🔗 mark). '}
         linked_user_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+      x-breaking: '0.4.2 1b: icon_code → avatar.'
       example:
         name: Beam
         contact_id: 0191c2a0-0000-7000-8000-0000000000aa
-        icon_code: null
+        avatar: { kind: initials, photo_url: null, icon_code: null, initials: B, colors: ['#64B5F6'], border: null }
         linked: true
         linked_user_id: 0191c2a0-0000-7000-8000-0000000000bb
     MemberRef:
       type: object
       description: 'A member of an event.'
-      required: [id, user_id, name, icon_code, is_me, removed]
+      required: [id, user_id, name, avatar, is_me, removed]
+      x-breaking: '0.4.2 1b: icon_code → avatar.'
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         user_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         name: { type: string }
-        icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
+        avatar: { $ref: '#/components/schemas/Avatar', description: 'The linked user''s avatar, else the member''s own icon, else initials.' }
         is_me: { type: boolean }
         removed: { type: boolean, description: '0.4.1-2 V15: the owner removed this person; on a bill this spot shows as an empty person "( ) ____" to assign (POST /projects/{id}/members/{member_id}/assign).' }
     TransferPeer:
@@ -6062,7 +6542,7 @@ components:
         source_project_transaction_id: null
         my_share: 200
         split_count: 1
-        splits: [{ debt_id: 0191c2a0-0000-7000-8000-0000000000d1, person: { name: Beam, contact_id: null, icon_code: null, linked: false, linked_user_id: null }, person_name: Beam, key: n:beam, direction: paid, amount: 100, paid: false }]
+        splits: [{ debt_id: 0191c2a0-0000-7000-8000-0000000000d1, person: { name: Beam, contact_id: null, avatar: { kind: initials, photo_url: null, icon_code: null, initials: B, colors: ['#64B5F6'], border: null }, linked: false, linked_user_id: null }, person_name: Beam, key: n:beam, direction: paid, amount: 100, paid: false }]
         link_mode: split
         paid_by: null
         wallet_amount: 300
@@ -6799,13 +7279,14 @@ components:
     # ───────── contacts ─────────
     LinkedUser:
       type: object
-      required: [id, username, display_name, email, icon_code]
+      required: [id, username, display_name, email, avatar]
+      x-breaking: '0.4.2 1b: icon_code → avatar.'
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         username: { type: string, description: 'The user''s @username.' }
         display_name: { type: string, description: 'The user''s profile name (live). '}
         email: { type: [string, 'null'] }
-        icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
+        avatar: { $ref: '#/components/schemas/Avatar' }
     Contact: {
         "type": "object",
         "description": "name is the resolved display name (nickname when set and show_nickname, else the linked user's live profile name, else display_name). display_name is the contact's own stored name; nickname is my own label for them; show_nickname switches it on / off per contact without deleting it.",
@@ -6819,7 +7300,7 @@ components:
           "phone",
           "description",
           "note",
-          "icon_code",
+          "avatar",
           "linked_user",
           "status",
           "last_used_at",
@@ -6876,16 +7357,9 @@ components:
             ],
             "maxLength": 500
           },
-          "icon_code": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/IconCode"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Resolved: the linked user's icon when linked, else the contact's own."
+          "avatar": {
+            "$ref": "#/components/schemas/Avatar",
+            "description": "0.4.2 1b (replaces icon_code): the linked user's avatar when linked, else the contact's own icon, else initials. An unlinked contact's own icon = avatar.icon_code (create / update still take icon_code)."
           },
           "linked_user": {
             "oneOf": [
@@ -7442,15 +7916,8 @@ components:
           "name": {
             "type": "string"
           },
-          "icon_code": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/IconCode"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "avatar": {
+            "$ref": "#/components/schemas/Avatar"
           },
           "role": {
             "type": "string",
@@ -7471,7 +7938,7 @@ components:
           "id",
           "user_id",
           "name",
-          "icon_code",
+          "avatar",
           "role",
           "joined_at",
           "is_me"
@@ -7489,15 +7956,8 @@ components:
           "name": {
             "type": "string"
           },
-          "icon_code": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/IconCode"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "avatar": {
+            "$ref": "#/components/schemas/Avatar"
           },
           "role": {
             "type": "string",
@@ -7543,7 +8003,7 @@ components:
           "id",
           "user_id",
           "name",
-          "icon_code",
+          "avatar",
           "role",
           "status",
           "joined_at",
@@ -8855,15 +9315,8 @@ components:
               "null"
             ]
           },
-          "icon_code": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/IconCode"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "avatar": {
+            "$ref": "#/components/schemas/Avatar"
           },
           "contact_id": {
             "oneOf": [
@@ -8881,7 +9334,7 @@ components:
           "id",
           "display_name",
           "email",
-          "icon_code",
+          "avatar",
           "contact_id"
         ]
       }
@@ -9131,15 +9584,8 @@ components:
           "currency": {
             "$ref": "#/components/schemas/CurrencyCode"
           },
-          "icon_code": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/IconCode"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "avatar": {
+            "$ref": "#/components/schemas/Avatar"
           },
           "status": {
             "type": "string",
@@ -9162,7 +9608,7 @@ components:
           "email_verified_at",
           "display_name",
           "currency",
-          "icon_code",
+          "avatar",
           "status",
           "created_at",
           "updated_at"
@@ -9256,7 +9702,8 @@ components:
         "type": "object",
         "properties": {
           "current_password": {
-            "type": "string"
+            "type": "string",
+            "description": "Required when the account has a password; ignored when it has none (0.4.2 1b-2)."
           },
           "new_password": {
             "type": "string",
@@ -9265,7 +9712,6 @@ components:
           }
         },
         "required": [
-          "current_password",
           "new_password"
         ]
       }
@@ -9301,15 +9747,16 @@ components:
             "$ref": "#/components/schemas/CurrencyCode",
             "description": "The user's currency, picked at registration (default THB), changeable with PUT /users/me (relabel only, no conversion). Every record takes it; calculations ignore it."
           },
-          "icon_code": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/IconCode"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "avatar": {
+            "$ref": "#/components/schemas/Avatar",
+            "description": "0.4.2 1b (replaces icon_code): my resolved avatar, as others see it. My icon = avatar.icon_code (PUT /users/me still takes icon_code)."
+          },
+          "avatar_settings": {
+            "$ref": "#/components/schemas/AvatarSettings"
+          },
+          "has_password": {
+            "type": "boolean",
+            "description": "0.4.2 1b-2: false = an account created through Telegram with no password yet: the profile shows \"ตั้งรหัสผ่าน\" (PUT /auth/password with new_password only) and the nudge \"ตั้งรหัสผ่านไว้สำรอง\"; its last linked app can't be unlinked (409 LAST_LOGIN_METHOD)."
           },
           "status": {
             "type": "string",
@@ -9426,7 +9873,9 @@ components:
           "email_verified_at",
           "display_name",
           "currency",
-          "icon_code",
+          "avatar",
+          "avatar_settings",
+          "has_password",
           "status",
           "preferences",
           "default_account",
@@ -9454,7 +9903,12 @@ components:
             "maxLength": 100
           },
           "icon_code": {
-            "$ref": "#/components/schemas/IconCode"
+            "$ref": "#/components/schemas/IconCode",
+            "description": "My icon (the icon maker). The answer carries it as avatar.icon_code."
+          },
+          "avatar_settings": {
+            "$ref": "#/components/schemas/AvatarSettings",
+            "description": "0.4.2 1b: the whole object (source + colors + border). A photo source I have no picture for (or an app no longer linked) → 409 AVATAR_SOURCE_UNAVAILABLE; a bad value → 400 VALIDATION_ERROR."
           },
           "email": {
             "type": "string",
@@ -10395,7 +10849,7 @@ components:
         next_due_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: '0.4.0-3 "กำหนดจ่าย": the earliest due_date among the unpaid debts on the person''s CURRENT side (net > 0 → direction paid; net < 0 → received). Null when net is 0 or no such entry has one. Days overdue = today (user timezone) − this.' }
       example:
         key: n:mom
-        person: { name: Mom, contact_id: null, icon_code: null, linked: false, linked_user_id: null }
+        person: { name: Mom, contact_id: null, avatar: { kind: initials, photo_url: null, icon_code: null, initials: M, colors: ['#F06292'], border: null }, linked: false, linked_user_id: null }
         net: 200
         open_count: 1
         entry_count: 3
@@ -10859,12 +11313,13 @@ components:
         pagination: { $ref: '#/components/schemas/Page' }
     EventMember:
       type: object
-      required: [id, user_id, name, icon_code, is_me, linked, contact_id, role, status, invited_at, joined_at, left_at, removed_at]
+      required: [id, user_id, name, avatar, is_me, linked, contact_id, role, status, invited_at, joined_at, left_at, removed_at]
+      x-breaking: '0.4.2 1b: icon_code → avatar.'
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         user_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The linked user (an app account), else null.' }
         name: { type: string, description: 'Live profile name for an app user, else the typed name.' }
-        icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
+        avatar: { $ref: '#/components/schemas/Avatar', description: 'The app user''s avatar, else the member''s own icon, else initials.' }
         is_me: { type: boolean }
         linked: { type: boolean, description: 'An app user (user_id set).' }
         contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.0-3: MY contact for this member (linked member → my contact linked to that user; typed member → my contact with the same name, case-insensitive). Lets the bill form tell a picked contact that is already a member from a new person (ใหม่ · เพิ่มเข้าอีเวนต์). Null when none (and on my own row).' }

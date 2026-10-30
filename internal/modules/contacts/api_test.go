@@ -25,9 +25,12 @@ type cJSON struct {
 	DisplayName  string    `json:"display_name"`
 	Email        *string   `json:"email"`
 	Status       string    `json:"status"`
-	IconCode     *struct {
-		Icon *string `json:"icon"`
-	} `json:"icon_code"`
+	Avatar       struct {
+		Kind     string `json:"kind"`
+		IconCode *struct {
+			Icon *string `json:"icon"`
+		} `json:"icon_code"`
+	} `json:"avatar"`
 	LinkedUser *struct {
 		ID          uuid.UUID `json:"id"`
 		DisplayName string    `json:"display_name"`
@@ -176,7 +179,8 @@ func TestContactAPI(t *testing.T) {
 	apitest.Conform(t, "getContact", status, raw)
 	linked := decode[cJSON](t, raw)
 	if linked.Name != "Friend Profile" || linked.LinkedUser == nil || linked.LinkedUser.ID != friend ||
-		linked.IconCode == nil || linked.IconCode.Icon == nil || *linked.IconCode.Icon != "star" ||
+		linked.Avatar.Kind != "icon" || linked.Avatar.IconCode == nil || linked.Avatar.IconCode.Icon == nil ||
+		*linked.Avatar.IconCode.Icon != "star" ||
 		linked.Email == nil || *linked.Email == "stored@example.com" {
 		t.Errorf("linked = %+v, want profile name, linked user's icon + email", linked)
 	}

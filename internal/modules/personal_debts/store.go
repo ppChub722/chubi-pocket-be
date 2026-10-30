@@ -177,7 +177,7 @@ func peopleSQL(keyFilter string) string {
 			FROM e3 GROUP BY key
 		)
 		SELECT g.key, g.cid, COALESCE(` + shared.PersonNameSQL("c", "lu") + `, g.snap) AS name,
-		       CASE WHEN c.id IS NOT NULL THEN ` + shared.PersonIconSQL("c", "lu") + ` END AS icon,
+		       CASE WHEN c.id IS NOT NULL THEN ` + shared.PersonAvatarSQL("c", "lu") + ` END AS icon,
 		       lu.id AS linked, g.net, g.open_count, g.entry_count, g.last,
 		       to_char(g.cleared, 'YYYY-MM-DD') AS cleared_at,
 		       (` + todayInUserTZ + ` - g.oldest_open) AS days_out,
@@ -220,10 +220,8 @@ func scanPerson(rows pgx.Rows) (DebtPerson, error) {
 	}
 	p.Net = round2(p.Net)
 	p.Side = shared.DebtSide(p.Net)
-	p.Person = shared.PersonRef{Name: name, ContactID: cid, Linked: linked != nil, LinkedUserID: linked}
-	if cid != nil {
-		p.Person.IconCode = shared.IconFromJSON(icon)
-	}
+	p.Person = shared.PersonRef{Name: name, ContactID: cid, Linked: linked != nil, LinkedUserID: linked,
+		Avatar: shared.AvatarFromSrc(name, icon)}
 	p.LastActivityAt = last
 	if lkind != nil && lid != nil && signed != nil && last != nil {
 		la.Kind, la.ID, la.SignedAmount, la.Date = *lkind, *lid, round2(*signed), *last

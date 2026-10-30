@@ -27,7 +27,7 @@ func newTestRouter(t *testing.T) (*gin.Engine, *fakeSender, *bytes.Buffer) {
 	var logs bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&logs, nil))
 	s := &fakeSender{}
-	w := NewWebhook(testSecret, NewHandler(s, nil, []int64{allowedChat}, log), log)
+	w := NewWebhook(testSecret, NewHandler(s, nil, newAccounts(), log), log)
 	r := gin.New()
 	r.Use(logger.GinLoggerMiddleware(log, true, Path)) // bodies on, as on the closed-beta VPS
 	r.POST(Path, w.Serve)
@@ -69,7 +69,7 @@ func TestWebhookGoodUpdate(t *testing.T) {
 	if rec.Body.Len() != 0 {
 		t.Errorf("body %q, want empty (Telegram would run a method from it)", rec.Body.String())
 	}
-	if len(s.sent) != 1 || s.sent[0].text != TextReceived || s.sent[0].chatID != allowedChat || s.sent[0].replyTo != 3 {
+	if len(s.sent) != 1 || s.sent[0].text != TextReceived || s.sent[0].chatID != linkedChat || s.sent[0].replyTo != 3 {
 		t.Errorf("sent = %+v", s.sent)
 	}
 	if strings.Contains(logs.String(), "ข้าวมันไก่") {
@@ -107,9 +107,81 @@ func TestNewIsOffWithoutTokenOrGoodSecret(t *testing.T) {
 	if strings.Contains(logs.String(), testToken) {
 		t.Errorf("token in the log")
 	}
-	w := New(config.TelegramConfig{BotToken: testToken, WebhookSecret: testSecret, AllowedChatIDs: "1,2"}, nil, log)
-	if w == nil || w.allowedN != 2 || w.client == nil {
+	w := New(config.TelegramConfig{BotToken: testToken, WebhookSecret: testSecret}, nil, log)
+	if w == nil || w.Client() == nil {
 		t.Errorf("good config: %+v", w)
+	}
+	acc := newAccounts()
+	w.WithAccounts(acc)
+	if w.h.accounts != acc {
+		t.Errorf("accounts not wired")
+	}
+}
+
+func TestUsernameIsCached(t *testing.T) {
+	srv, calls := fakeBotAPI(t, 200, `{"ok":true,"result":{"id":1,"is_bot":true,"username":"chubiPocket_bot"}}`)
+	c := NewClient(testToken, srv.URL, srv.Client())
+	for i := 0; i < 2; i++ {
+		if u, err := c.Username(context.Background()); err != nil || u != "chubiPocket_bot" {
+			t.Fatalf("username = %q, %v", u, err)
+		}
+	}
+	if len(*calls) != 1 {
+		t.Errorf("getMe calls = %d, want 1 (cached)", len(*calls))
+	}
+}
+
+func TestProfilePhoto(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		raw, _ := io.ReadAll(r.Body)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getUserProfilePhotos"):
+			if !strings.Contains(string(raw), `"user_id":1001`) || !strings.Contains(string(raw), `"limit":1`) {
+				t.Errorf("getUserProfilePhotos body = %s", raw)
+			}
+			_, _ = io.WriteString(w, `{"ok":true,"result":{"total_count":1,"photos":[[
+				{"file_id":"small","width":160,"height":160},{"file_id":"big","width":640,"height":640}]]}}`)
+		case strings.HasSuffix(r.URL.Path, "/getFile"):
+			if !strings.Contains(string(raw), `"file_id":"small"`) {
+				t.Errorf("getFile body = %s", raw)
+			}
+			_, _ = io.WriteString(w, `{"ok":true,"result":{"file_id":"small","file_path":"photos/file_1.jpg"}}`)
+		case r.URL.Path == "/file/bot"+testToken+"/photos/file_1.jpg":
+			_, _ = w.Write([]byte{0xFF, 0xD8, 0xFF, 0xE0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	img, err := NewClient(testToken, srv.URL, srv.Client()).ProfilePhoto(context.Background(), 1001)
+	if err != nil || len(img) != 4 || img[0] != 0xFF {
+		t.Fatalf("photo = %v, %v (calls %v)", img, err, paths)
+	}
+
+	// no photo → nil, nil
+	srv2, _ := fakeBotAPI(t, 200, `{"ok":true,"result":{"total_count":0,"photos":[]}}`)
+	if img, err := NewClient(testToken, srv2.URL, srv2.Client()).ProfilePhoto(context.Background(), 1); img != nil || err != nil {
+		t.Errorf("no photo = %v, %v", img, err)
+	}
+
+	// a failed download never carries the token
+	srv3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getUserProfilePhotos") {
+			_, _ = io.WriteString(w, `{"ok":true,"result":{"photos":[[{"file_id":"a","width":160,"height":160}]]}}`)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/getFile") {
+			_, _ = io.WriteString(w, `{"ok":true,"result":{"file_path":"p.jpg"}}`)
+			return
+		}
+		http.Error(w, "gone", http.StatusNotFound)
+	}))
+	defer srv3.Close()
+	_, err = NewClient(testToken, srv3.URL, srv3.Client()).ProfilePhoto(context.Background(), 1)
+	if err == nil || strings.Contains(err.Error(), testToken) {
+		t.Errorf("download error = %v", err)
 	}
 }
 
@@ -155,6 +227,8 @@ func TestStoreSave(t *testing.T) {
 	id := rand.Int64N(1<<62) + 1<<40
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM telegram_messages WHERE update_id = $1`, id) })
 
+	// user_id (migration 121): a missing user would break the FK, so NULL here; the link path is
+	// covered by the connections DB test
 	r := Received{UpdateID: id, ChatID: -1001, FromUsername: "", Text: "ข้าว 60",
 		ReceivedAt: time.Unix(1761631200, 0).UTC()}
 	kept, err := st.Save(ctx, r)

@@ -135,12 +135,12 @@ type EventList struct {
 }
 
 type EventMember struct {
-	ID       uuid.UUID        `json:"id"`
-	UserID   *uuid.UUID       `json:"user_id"`
-	Name     string           `json:"name"`
-	IconCode *shared.IconCode `json:"icon_code"`
-	IsMe     bool             `json:"is_me"`
-	Linked   bool             `json:"linked"`
+	ID     uuid.UUID     `json:"id"`
+	UserID *uuid.UUID    `json:"user_id"`
+	Name   string        `json:"name"`
+	Avatar shared.Avatar `json:"avatar"`
+	IsMe   bool          `json:"is_me"`
+	Linked bool          `json:"linked"`
 	// ContactID (0.4.0-3) — MY contact for this member (a linked member: my contact linked to that
 	// user; a typed member: my contact with the same name), so a picked contact can be told apart
 	// from a new person. Null when none.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,7 +87,19 @@ func TestRegisterLogin(t *testing.T) {
 	call(t, r, "POST", "/api/v1/auth/login", map[string]any{"identifier": email, "password": "Password123!"}, "login", http.StatusOK)
 
 	call(t, r, "POST", "/api/v1/auth/login", map[string]any{"identifier": name, "password": "wrong-password"}, "login", http.StatusUnauthorized)
-	call(t, r, "POST", "/api/v1/auth/login", map[string]any{"identifier": name}, "login", http.StatusBadRequest)
+	// 0.4.2 1b-2: every login failure is the same 401 INVALID_CREDENTIALS, a bad / empty body included
+	for _, bad := range []any{
+		map[string]any{"identifier": name},
+		map[string]any{"identifier": "nobody_" + name, "password": "Password123!"},
+		map[string]any{},
+		"not json",
+		nil,
+	} {
+		out := call(t, r, "POST", "/api/v1/auth/login", bad, "login", http.StatusUnauthorized)
+		if e, _ := out["error"].(map[string]any); e["code"] != "INVALID_CREDENTIALS" {
+			t.Errorf("login %v = %v", bad, out)
+		}
+	}
 	call(t, r, "POST", "/api/v1/auth/register", map[string]any{"username": uniq(), "password": "short", "display_name": "X"}, "register", http.StatusBadRequest)
 	call(t, r, "POST", "/api/v1/auth/register", map[string]any{"username": "ab", "password": "Password123!", "display_name": "X"}, "register", http.StatusBadRequest)
 	call(t, r, "POST", "/api/v1/auth/register", body, "", http.StatusConflict)
@@ -130,4 +143,59 @@ func TestLogoutAndChangePassword(t *testing.T) {
 	}
 	call(t, pub, "POST", "/api/v1/auth/login", map[string]any{"identifier": name, "password": "Another123!"}, "login", http.StatusOK)
 	call(t, pub, "POST", "/api/v1/auth/login", map[string]any{"identifier": name, "password": "Password123!"}, "login", http.StatusUnauthorized)
+}
+
+// 0.4.2 1b-2: an account made through Telegram has no password: password login is refused (the
+// same 401), and it sets its first password without a current one.
+func TestPasswordlessAccount(t *testing.T) {
+	pub, h := newPublic(t)
+	pool := testdb.Pool(t)
+	ctx := context.Background()
+	cfg := &config.Config{}
+	cfg.App.RegistrationOpen = true
+	cfg.JWT.Secret, cfg.JWT.ExpirationTime = "test-secret", time.Hour
+	svc := auth.NewService(auth.NewStore(pool), cfg)
+
+	name := uniq()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, err := svc.CreateExternalUserTx(ctx, tx, auth.ExternalSignup{Username: name, DisplayName: "Tg", CreatedVia: auth.CreatedViaTelegram})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// a password account can't be created without one (DB check)
+	tx, _ = pool.Begin(ctx)
+	if _, err := svc.CreateExternalUserTx(ctx, tx, auth.ExternalSignup{Username: uniq(), DisplayName: "X", CreatedVia: auth.CreatedViaPassword}); err == nil {
+		t.Errorf("a passwordless password account was made")
+	}
+	tx.Rollback(ctx)
+	if _, err := pool.Exec(ctx, `INSERT INTO users (id, username, display_name, password_hash, currency) VALUES ($1, $2, 'X', NULL, 'THB')`,
+		uuid.New(), uniq()); err == nil {
+		t.Errorf("the DB took a password account with no password")
+	}
+
+	for _, pw := range []string{"", "anything-123"} {
+		out := call(t, pub, "POST", "/api/v1/auth/login", map[string]any{"identifier": name, "password": pw}, "login", http.StatusUnauthorized)
+		if e, _ := out["error"].(map[string]any); e["code"] != "INVALID_CREDENTIALS" {
+			t.Errorf("passwordless login = %v", out)
+		}
+	}
+	if resp, err := svc.IssueFor(ctx, uid); err != nil || resp.User.Username != name || resp.Token.AccessToken == "" {
+		t.Errorf("issue for = %+v %v", resp, err)
+	}
+	if taken, err := svc.UsernameTaken(ctx, strings.ToUpper(name)); err != nil || !taken {
+		t.Errorf("username taken = %v %v", taken, err)
+	}
+
+	r := apitest.Engine(uid, func(g *gin.RouterGroup) { g.PUT("/auth/password", h.ChangePassword) })
+	call(t, r, "PUT", "/api/v1/auth/password", map[string]any{"new_password": "First123!"}, "changePassword", http.StatusOK)
+	call(t, pub, "POST", "/api/v1/auth/login", map[string]any{"identifier": name, "password": "First123!"}, "login", http.StatusOK)
+	// now it has one: the current password is required again
+	call(t, r, "PUT", "/api/v1/auth/password", map[string]any{"new_password": "Second123!"}, "changePassword", http.StatusUnauthorized)
+	call(t, r, "PUT", "/api/v1/auth/password", map[string]any{"current_password": "First123!", "new_password": "Second123!"}, "changePassword", http.StatusOK)
 }

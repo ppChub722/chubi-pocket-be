@@ -266,7 +266,7 @@ func (s *Store) TransferOwnershipTx(
 
 func (s *Store) ListMembersByAccount(ctx context.Context, callerID, accountID uuid.UUID) ([]MemberHistoryView, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT am.id, am.user_id, u.display_name, u.icon_code, am.role,
+		SELECT am.id, am.user_id, u.display_name, avatar_src(u.id, NULL), am.role,
 		       am.joined_at, am.left_at
 		FROM account_members am
 		JOIN users u ON u.id = am.user_id
@@ -292,7 +292,7 @@ func (s *Store) ListMembersByAccount(ctx context.Context, callerID, accountID uu
 			&m.Role, &m.JoinedAt, &m.LeftAt); err != nil {
 			return nil, fmt.Errorf("scan member history: %w", err)
 		}
-		m.IconCode = shared.IconFromJSON(iconBytes)
+		m.Avatar = shared.AvatarFromSrc(m.Name, iconBytes)
 		m.IsMe = m.UserID == callerID
 		switch {
 		case m.LeftAt != nil:
@@ -327,7 +327,7 @@ func (s *Store) fillMembers(ctx context.Context, callerID uuid.UUID, accs []Acco
 		idx[accs[i].ID] = i
 	}
 	rows, err := s.db.Query(ctx, `
-		SELECT am.account_id, am.id, am.user_id, u.display_name, u.icon_code,
+		SELECT am.account_id, am.id, am.user_id, u.display_name, avatar_src(u.id, NULL),
 		       am.role, am.joined_at, am.report_scope, am.sort_order
 		FROM account_members am
 		JOIN users u ON u.id = am.user_id
@@ -350,7 +350,7 @@ func (s *Store) fillMembers(ctx context.Context, callerID uuid.UUID, accs []Acco
 			&m.Role, &m.JoinedAt, &scope, &sortOrder); err != nil {
 			return fmt.Errorf("scan member: %w", err)
 		}
-		m.IconCode = shared.IconFromJSON(iconBytes)
+		m.Avatar = shared.AvatarFromSrc(m.Name, iconBytes)
 		m.IsMe = m.UserID == callerID
 		i, ok := idx[accountID]
 		if !ok {

@@ -9,6 +9,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Service struct {
@@ -123,7 +125,66 @@ func (s *Service) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdatePro
 			}
 		}
 	}
+	if req.AvatarSettings != nil {
+		if err := normalizeAvatarSettings(req.AvatarSettings); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.store.UpdateProfile(ctx, id, req); err != nil {
+		return nil, err
+	}
+	return s.store.GetProfile(ctx, id)
+}
+
+// ErrInvalidAvatarSettings — a 400 on avatar_settings.
+var ErrInvalidAvatarSettings = errors.New("invalid avatar_settings")
+
+const (
+	maxAvatarColors     = 8
+	maxAvatarColorChars = 32
+)
+
+// normalizeAvatarSettings checks the shape and fills empty lists (the source's availability is
+// checked in the store, inside the write).
+func normalizeAvatarSettings(a *shared.AvatarSettings) error {
+	if a.Source != shared.AvatarSourceIcon && !shared.AvatarSources[a.Source] {
+		return fmt.Errorf("%w: source %q", ErrInvalidAvatarSettings, a.Source)
+	}
+	// only set colours are kept: empty / null entries are dropped (an unset slot is just missing)
+	check := func(field string, colors []string) ([]string, error) {
+		out := shared.CleanColors(colors)
+		if len(out) > maxAvatarColors {
+			return nil, fmt.Errorf("%w: %s holds at most %d colours", ErrInvalidAvatarSettings, field, maxAvatarColors)
+		}
+		for _, c := range out {
+			if utf8.RuneCountInString(c) > maxAvatarColorChars {
+				return nil, fmt.Errorf("%w: %s entries are at most %d characters", ErrInvalidAvatarSettings, field, maxAvatarColorChars)
+			}
+		}
+		return out, nil
+	}
+	var err error
+	if a.Colors, err = check("colors", a.Colors); err != nil {
+		return err
+	}
+	if a.Border != nil {
+		if !shared.AvatarBorderStyles[a.Border.Style] {
+			return fmt.Errorf("%w: border.style is thin, thick or dashed (no border = null)", ErrInvalidAvatarSettings)
+		}
+		if a.Border.Colors, err = check("border.colors", a.Border.Colors); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeleteAvatar — DELETE /avatars/{source}: my stored picture of that source goes; the pick falls
+// back to the icon when it was picked.
+func (s *Service) DeleteAvatar(ctx context.Context, id uuid.UUID, source string) (*Profile, error) {
+	if !shared.AvatarSources[source] {
+		return nil, fmt.Errorf("%w: source %q", ErrInvalidAvatarSettings, source)
+	}
+	if err := s.store.DeleteAvatar(ctx, id, source); err != nil {
 		return nil, err
 	}
 	return s.store.GetProfile(ctx, id)

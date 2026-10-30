@@ -19,12 +19,12 @@ type Config struct {
 	Telegram TelegramConfig
 }
 
-// TelegramConfig: the bot (0.4.2, modules/telegram). Webhook only; empty token = off.
+// TelegramConfig: the bot (0.4.2, modules/telegram). Webhook only; empty token = off. Who may use
+// it = the chats linked from the app (0.4.2 1b; TELEGRAM_ALLOWED_CHAT_IDS is retired).
 type TelegramConfig struct {
-	BotToken       string // TELEGRAM_BOT_TOKEN — from @BotFather; never logged
-	WebhookSecret  string // TELEGRAM_WEBHOOK_SECRET — 1-256 chars A-Za-z0-9_-, checked on every call
-	WebhookURL     string // TELEGRAM_WEBHOOK_URL — set with setWebhook on start (empty = not set)
-	AllowedChatIDs string // TELEGRAM_ALLOWED_CHAT_IDS — comma list; empty = nobody
+	BotToken      string // TELEGRAM_BOT_TOKEN — from @BotFather; never logged
+	WebhookSecret string // TELEGRAM_WEBHOOK_SECRET — 1-256 chars A-Za-z0-9_-, checked on every call
+	WebhookURL    string // TELEGRAM_WEBHOOK_URL — set with setWebhook on start (empty = not set)
 }
 
 type AppConfig struct {
@@ -120,10 +120,9 @@ func Load() (*Config, error) {
 			MessageEN:   getEnv("APP_UPDATE_MESSAGE_EN", ""),
 		},
 		Telegram: TelegramConfig{
-			BotToken:       getEnv("TELEGRAM_BOT_TOKEN", ""),
-			WebhookSecret:  getEnv("TELEGRAM_WEBHOOK_SECRET", ""),
-			WebhookURL:     getEnv("TELEGRAM_WEBHOOK_URL", ""),
-			AllowedChatIDs: getEnv("TELEGRAM_ALLOWED_CHAT_IDS", ""),
+			BotToken:      getEnv("TELEGRAM_BOT_TOKEN", ""),
+			WebhookSecret: getEnv("TELEGRAM_WEBHOOK_SECRET", ""),
+			WebhookURL:    getEnv("TELEGRAM_WEBHOOK_URL", ""),
 		},
 	}
 

@@ -75,7 +75,7 @@ func TestClientSetWebhookGetMeInfo(t *testing.T) {
 		b["secret_token"] != "s3cret" {
 		t.Errorf("setWebhook = %s %v", (*calls)[0].path, b)
 	}
-	if au, _ := b["allowed_updates"].([]any); len(au) != 1 || au[0] != "message" {
+	if au, _ := b["allowed_updates"].([]any); len(au) != 2 || au[0] != "message" || au[1] != "callback_query" {
 		t.Errorf("allowed_updates = %v", b["allowed_updates"])
 	}
 
@@ -133,3 +133,28 @@ func TestClientErrorsNeverCarryTheToken(t *testing.T) {
 type strErr struct{ s string }
 
 func (e *strErr) Error() string { return e.s }
+
+func TestClientButtonsCallbackEditPhotoCheck(t *testing.T) {
+	srv, calls := fakeBotAPI(t, 200, `{"ok":true,"result":{"total_count":2}}`)
+	c := NewClient(testToken, srv.URL, srv.Client())
+	ctx := context.Background()
+	if err := c.SendButtons(ctx, 7, "ask", 3, []Button{{Text: "✓ ยืนยัน", Data: "li:x"}}); err != nil {
+		t.Fatal(err)
+	}
+	b := (*calls)[0].body
+	kb := b["reply_markup"].(map[string]any)["inline_keyboard"].([]any)[0].([]any)[0].(map[string]any)
+	if (*calls)[0].path != "/bot"+testToken+"/sendMessage" || kb["text"] != "✓ ยืนยัน" || kb["callback_data"] != "li:x" {
+		t.Errorf("buttons = %v", b)
+	}
+	if err := c.AnswerCallback(ctx, "cb1", "หมดอายุ"); err != nil || (*calls)[1].body["callback_query_id"] != "cb1" ||
+		(*calls)[1].body["text"] != "หมดอายุ" {
+		t.Errorf("answer = %v %v", (*calls)[1].body, err)
+	}
+	if err := c.EditText(ctx, 7, 90, "done"); err != nil || (*calls)[2].path != "/bot"+testToken+"/editMessageText" ||
+		(*calls)[2].body["message_id"] != float64(90) {
+		t.Errorf("edit = %v %v", (*calls)[2], err)
+	}
+	if has, err := c.HasProfilePhoto(ctx, 7); err != nil || !has {
+		t.Errorf("has photo = %v %v", has, err)
+	}
+}

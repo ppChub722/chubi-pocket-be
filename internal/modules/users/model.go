@@ -10,17 +10,19 @@ import (
 )
 
 type Profile struct {
-	ID              uuid.UUID           `json:"id"`
-	Username        string              `json:"username"`
-	Email           *string             `json:"email"`
-	EmailVerifiedAt *time.Time          `json:"email_verified_at"`
-	DisplayName     string              `json:"display_name"`
-	Currency        string              `json:"currency"`
-	IconCode        *shared.IconCode    `json:"icon_code"`
-	Status          string              `json:"status"`
-	Preferences     Preferences         `json:"preferences"`
-	DefaultAccount  *shared.AccountRef  `json:"default_account"`
-	FeeCategory     *shared.CategoryRef `json:"fee_category"`
+	ID              uuid.UUID             `json:"id"`
+	Username        string                `json:"username"`
+	Email           *string               `json:"email"`
+	EmailVerifiedAt *time.Time            `json:"email_verified_at"`
+	DisplayName     string                `json:"display_name"`
+	Currency        string                `json:"currency"`
+	Avatar          shared.Avatar         `json:"avatar"` // 0.4.2 1b (replaces icon_code; my icon = avatar.icon_code)
+	AvatarSettings  shared.AvatarSettings `json:"avatar_settings"`
+	HasPassword     bool                  `json:"has_password"` // 0.4.2 1b-2: false = made through Telegram, none set yet
+	Status          string                `json:"status"`
+	Preferences     Preferences           `json:"preferences"`
+	DefaultAccount  *shared.AccountRef    `json:"default_account"`
+	FeeCategory     *shared.CategoryRef   `json:"fee_category"`
 	// AutoSyncEvents / AutoSyncDebts (0.4.1-2 S4) — the two auto-sync switches (user_notification_settings).
 	AutoSyncEvents bool `json:"auto_sync_events"`
 	AutoSyncDebts  bool `json:"auto_sync_debts"`
@@ -33,16 +35,17 @@ type Profile struct {
 }
 
 type UpdateProfileRequest struct {
-	DisplayName      *string          `json:"display_name" binding:"omitempty,min=1,max=100"`
-	Currency         *string          `json:"currency" binding:"omitempty,len=3,alpha"`
-	IconCode         *shared.IconCode `json:"icon_code"    binding:"omitempty"`
-	Email            *string          `json:"email"        binding:"omitempty,email,max=255"`
-	Preferences      map[string]any   `json:"preferences"  binding:"omitempty"`
-	DefaultAccountID json.RawMessage  `json:"default_account_id"`
-	AutoSyncEvents   *bool            `json:"auto_sync_events"`
-	AutoSyncDebts    *bool            `json:"auto_sync_debts"`
-	AutoAcceptEvents *bool            `json:"auto_accept_events"`
-	AutoAcceptDebts  *bool            `json:"auto_accept_debts"`
+	DisplayName      *string                `json:"display_name" binding:"omitempty,min=1,max=100"`
+	Currency         *string                `json:"currency" binding:"omitempty,len=3,alpha"`
+	IconCode         *shared.IconCode       `json:"icon_code"    binding:"omitempty"`
+	AvatarSettings   *shared.AvatarSettings `json:"avatar_settings"`
+	Email            *string                `json:"email"        binding:"omitempty,email,max=255"`
+	Preferences      map[string]any         `json:"preferences"  binding:"omitempty"`
+	DefaultAccountID json.RawMessage        `json:"default_account_id"`
+	AutoSyncEvents   *bool                  `json:"auto_sync_events"`
+	AutoSyncDebts    *bool                  `json:"auto_sync_debts"`
+	AutoAcceptEvents *bool                  `json:"auto_accept_events"`
+	AutoAcceptDebts  *bool                  `json:"auto_accept_debts"`
 }
 
 // Preference keys (0.4.1-2 P1 / P6: theme_mode / theme_id / font_th / font_en / page_prefs added,

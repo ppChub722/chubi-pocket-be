@@ -244,7 +244,7 @@ func buildDetails(
 		d.CanEditCategory = own && !d.IsLocked && f.billable
 		if r.AccountID != nil && f.activeMembers > 1 {
 			d.CreatedBy = &shared.UserRef{
-				UserID: r.UserID, DisplayName: f.authorName, IconCode: shared.IconFromJSON(f.authorIcon),
+				UserID: r.UserID, DisplayName: f.authorName, Avatar: shared.AvatarFromSrc(f.authorName, f.authorIcon),
 			}
 		}
 		if r.Type == TypeTransfer && f.peerID != nil {
@@ -290,7 +290,7 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		         WHERE am.account_id = t.account_id
 		           AND am.joined_at IS NOT NULL AND am.left_at IS NULL),
 		       `+shared.ActiveMembershipPredicate("t.account_id", "$2")+`,
-		       u.display_name, u.icon_code,
+		       u.display_name, `+shared.AvatarSQL("u.id", "NULL")+`,
 		       peer.id, peer.account_id, c.system_kind, pc.system_kind,
 		       de.counterparty_contact_id, de.counterparty_person_name, de.direction, de.paid, de.kind,
 		       COALESCE(bp.parent_project_transaction_id, bp.id),

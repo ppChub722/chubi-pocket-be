@@ -15,37 +15,37 @@ const (
 )
 
 type LinkedUser struct {
-	ID          uuid.UUID        `json:"id"`
-	DisplayName string           `json:"display_name"`
-	Username    string           `json:"username"`
-	Email       *string          `json:"email"`
-	IconCode    *shared.IconCode `json:"icon_code"`
+	ID          uuid.UUID     `json:"id"`
+	DisplayName string        `json:"display_name"`
+	Username    string        `json:"username"`
+	Email       *string       `json:"email"`
+	Avatar      shared.Avatar `json:"avatar"`
 }
 
 type Contact struct {
-	ID           uuid.UUID        `json:"id"`
-	UserID       uuid.UUID        `json:"-"`
-	Name         string           `json:"name"`
-	Nickname     *string          `json:"nickname"`
-	ShowNickname bool             `json:"show_nickname"`
-	DisplayName  string           `json:"display_name"`
-	Email        *string          `json:"email"`
-	Phone        *string          `json:"phone"`
-	Description  *string          `json:"description"`
-	Note         *string          `json:"note"`
-	IconCode     *shared.IconCode `json:"icon_code"`
-	LinkedUserID *uuid.UUID       `json:"-"`
-	LinkedUser   *LinkedUser      `json:"linked_user"`
-	Status       string           `json:"status"`
-	LastUsedAt *time.Time `json:"last_used_at"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	ID           uuid.UUID     `json:"id"`
+	UserID       uuid.UUID     `json:"-"`
+	Name         string        `json:"name"`
+	Nickname     *string       `json:"nickname"`
+	ShowNickname bool          `json:"show_nickname"`
+	DisplayName  string        `json:"display_name"`
+	Email        *string       `json:"email"`
+	Phone        *string       `json:"phone"`
+	Description  *string       `json:"description"`
+	Note         *string       `json:"note"`
+	Avatar       shared.Avatar `json:"avatar"` // 0.4.2 1b: linked user's avatar, else the own icon, else initials
+	LinkedUserID *uuid.UUID    `json:"-"`
+	LinkedUser   *LinkedUser   `json:"linked_user"`
+	Status       string        `json:"status"`
+	LastUsedAt   *time.Time    `json:"last_used_at"`
+	CreatedAt    time.Time     `json:"created_at"`
+	UpdatedAt    time.Time     `json:"updated_at"`
 }
 
 type ContactDetail struct {
 	Contact
 	UnlinkedNames []UnlinkedName `json:"unlinked_names"`
-	UnlinkedTotal UnlinkedTotal `json:"unlinked_total"`
+	UnlinkedTotal UnlinkedTotal  `json:"unlinked_total"`
 	DeletePreview *DeletePreview `json:"delete_preview"`
 }
 
@@ -58,7 +58,7 @@ type CreateContactRequest struct {
 	Description  *string          `json:"description"  binding:"omitempty,max=200"`
 	Note         *string          `json:"note"         binding:"omitempty,max=500"`
 	IconCode     *shared.IconCode `json:"icon_code"    binding:"omitempty"`
-	AbsorbNames []string `json:"absorb_names"`
+	AbsorbNames  []string         `json:"absorb_names"`
 }
 
 type UpdateContactRequest struct {
@@ -131,11 +131,11 @@ type UnlinkedNameList struct {
 }
 
 type SenderProfile struct {
-	ID          uuid.UUID        `json:"id"`
-	DisplayName string           `json:"display_name"`
-	Email       *string          `json:"email"`
-	IconCode    *shared.IconCode `json:"icon_code"`
-	ContactID   *uuid.UUID       `json:"contact_id"`
+	ID          uuid.UUID     `json:"id"`
+	DisplayName string        `json:"display_name"`
+	Email       *string       `json:"email"`
+	Avatar      shared.Avatar `json:"avatar"`
+	ContactID   *uuid.UUID    `json:"contact_id"`
 }
 
 type LinkExistingContactRequest struct {

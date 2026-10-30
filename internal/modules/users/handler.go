@@ -51,14 +51,38 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	prof, err := h.service.UpdateProfile(c.Request.Context(), id, req)
 	if err != nil {
 		switch {
-		case errors.Is(err, ErrUnknownPreferenceKey), errors.Is(err, ErrInvalidFeeCategory), errors.Is(err, ErrInvalidDefaultAccount):
+		case errors.Is(err, ErrUnknownPreferenceKey), errors.Is(err, ErrInvalidFeeCategory), errors.Is(err, ErrInvalidDefaultAccount),
+			errors.Is(err, ErrInvalidAvatarSettings):
 			response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		case errors.Is(err, ErrAvatarSourceUnavailable):
+			response.Fail(c, http.StatusConflict, "AVATAR_SOURCE_UNAVAILABLE",
+				"No picture from that source (or the app is no longer linked)", nil)
 		case errors.Is(err, ErrEmailExists):
 			response.Fail(c, http.StatusConflict, "EMAIL_EXISTS",
 				"Email already registered", nil)
 		default:
 			response.InternalError(c, "Failed to update profile", err.Error())
 		}
+		return
+	}
+	c.JSON(http.StatusOK, prof)
+}
+
+// DeleteAvatar — DELETE /avatars/:id where id is the source name (0.4.2 1b; one spec entry with
+// GET /avatars/{id}).
+func (h *Handler) DeleteAvatar(c *gin.Context) {
+	id, ok := auth.UserIDFromContext(c)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		return
+	}
+	prof, err := h.service.DeleteAvatar(c.Request.Context(), id, c.Param("id"))
+	if err != nil {
+		if errors.Is(err, ErrInvalidAvatarSettings) {
+			response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+			return
+		}
+		response.InternalError(c, "Failed to delete the picture", err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, prof)

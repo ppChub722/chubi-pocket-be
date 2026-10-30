@@ -8,9 +8,18 @@ import "encoding/json"
 // Update is one incoming update; only the fields the bot reads.
 // https://core.telegram.org/bots/api#update
 type Update struct {
-	UpdateID      int64    `json:"update_id"`
-	Message       *Message `json:"message,omitempty"`
-	EditedMessage *Message `json:"edited_message,omitempty"`
+	UpdateID      int64          `json:"update_id"`
+	Message       *Message       `json:"message,omitempty"`
+	EditedMessage *Message       `json:"edited_message,omitempty"`
+	CallbackQuery *CallbackQuery `json:"callback_query,omitempty"`
+}
+
+// CallbackQuery — a tap on an inline button (1b-2 login). Message = the bot's message with it.
+type CallbackQuery struct {
+	ID      string   `json:"id"`
+	From    User     `json:"from"`
+	Message *Message `json:"message,omitempty"`
+	Data    string   `json:"data"`
 }
 
 type Chat struct {
@@ -23,6 +32,7 @@ type User struct {
 	IsBot     bool   `json:"is_bot"`
 	Username  string `json:"username"`
 	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
 }
 
 // Message: the media fields are kept raw; only their presence matters (a non-text message).
@@ -53,6 +63,13 @@ func (m *Message) Kind() string {
 		return "sticker"
 	}
 	return "other"
+}
+
+// PhotoSize — one size of a profile photo (getUserProfilePhotos).
+type PhotoSize struct {
+	FileID string `json:"file_id"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
 }
 
 // WebhookInfo: the getWebhookInfo fields the start log shows.

@@ -9,17 +9,18 @@ import (
 )
 
 type User struct {
-	ID              uuid.UUID        `json:"id"`
-	Username        string           `json:"username"`
-	Email           *string          `json:"email"`
-	EmailVerifiedAt *time.Time       `json:"email_verified_at"`
-	DisplayName     string           `json:"display_name"`
-	PasswordHash    string           `json:"-"`
-	Currency        string           `json:"currency"`
-	IconCode        *shared.IconCode `json:"icon_code"`
-	Status          string           `json:"status"`
-	CreatedAt       time.Time        `json:"created_at"`
-	UpdatedAt       time.Time        `json:"updated_at"`
+	ID              uuid.UUID     `json:"id"`
+	Username        string        `json:"username"`
+	Email           *string       `json:"email"`
+	EmailVerifiedAt *time.Time    `json:"email_verified_at"`
+	DisplayName     string        `json:"display_name"`
+	PasswordHash    string        `json:"-"` // "" = no password (an account made through an outside app)
+	Currency        string        `json:"currency"`
+	Avatar          shared.Avatar `json:"-"`
+	CreatedVia      string        `json:"-"` // insert only: password | telegram | line | google
+	Status          string        `json:"status"`
+	CreatedAt       time.Time     `json:"created_at"`
+	UpdatedAt       time.Time     `json:"updated_at"`
 }
 
 type RegisterRequest struct {
@@ -35,8 +36,10 @@ type LoginRequest struct {
 	Password   string `json:"password"   binding:"required"`
 }
 
+// ChangePasswordRequest — current_password is required only when the account has a password
+// (0.4.2 1b-2: a passwordless account sets its first one with new_password alone).
 type ChangePasswordRequest struct {
-	CurrentPassword string `json:"current_password" binding:"required"`
+	CurrentPassword string `json:"current_password"`
 	NewPassword     string `json:"new_password"     binding:"required,min=8,max=128"`
 }
 
@@ -51,16 +54,16 @@ type TokenInfo struct {
 }
 
 type AuthUser struct {
-	ID              uuid.UUID        `json:"id"`
-	Username        string           `json:"username"`
-	Email           *string          `json:"email"`
-	EmailVerifiedAt *time.Time       `json:"email_verified_at"`
-	DisplayName     string           `json:"display_name"`
-	Currency        string           `json:"currency"`
-	IconCode        *shared.IconCode `json:"icon_code"`
-	Status          string           `json:"status"`
-	CreatedAt       time.Time        `json:"created_at"`
-	UpdatedAt       time.Time        `json:"updated_at"`
+	ID              uuid.UUID     `json:"id"`
+	Username        string        `json:"username"`
+	Email           *string       `json:"email"`
+	EmailVerifiedAt *time.Time    `json:"email_verified_at"`
+	DisplayName     string        `json:"display_name"`
+	Currency        string        `json:"currency"`
+	Avatar          shared.Avatar `json:"avatar"`
+	Status          string        `json:"status"`
+	CreatedAt       time.Time     `json:"created_at"`
+	UpdatedAt       time.Time     `json:"updated_at"`
 }
 
 func APIStatus(stored string) string {
@@ -73,7 +76,7 @@ func APIStatus(stored string) string {
 func (u *User) AuthView() AuthUser {
 	return AuthUser{
 		ID: u.ID, Username: u.Username, Email: u.Email, EmailVerifiedAt: u.EmailVerifiedAt,
-		DisplayName: u.DisplayName, Currency: u.Currency, IconCode: u.IconCode,
+		DisplayName: u.DisplayName, Currency: u.Currency, Avatar: u.Avatar,
 		Status: APIStatus(u.Status), CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
 	}
 }

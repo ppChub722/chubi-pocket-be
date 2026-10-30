@@ -135,7 +135,7 @@ func loadEvent(ctx context.Context, q shared.Querier, callerID, id uuid.UUID) (E
 
 func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid.UUID) ([]EventMember, error) {
 	rows, err := q.Query(ctx, `SELECT pm.id, pm.user_id, COALESCE(u.display_name, pm.display_name),
-			COALESCE(u.icon_code, pm.icon_code), pm.role, pm.status, pm.invited_at, pm.joined_at, pm.left_at,
+			`+shared.AvatarSQL("u.id", "pm.icon_code")+`, pm.role, pm.status, pm.invited_at, pm.joined_at, pm.left_at,
 			mc.id, pm.removed_at
 		FROM project_members pm LEFT JOIN users u ON u.id = pm.user_id
 		LEFT JOIN LATERAL (
@@ -159,7 +159,7 @@ func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid
 			&m.ContactID, &m.RemovedAt); err != nil {
 			return nil, err
 		}
-		m.IconCode = shared.IconFromJSON(icon)
+		m.Avatar = shared.AvatarFromSrc(m.Name, icon)
 		m.Linked = m.UserID != nil
 		m.IsMe = m.UserID != nil && *m.UserID == callerID
 		out = append(out, m)
@@ -169,7 +169,7 @@ func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid
 	}
 	refs := make([]shared.MemberRef, len(out))
 	for i, m := range out {
-		refs[i] = shared.MemberRef{ID: m.ID, UserID: m.UserID, Name: m.Name, Icon: m.IconCode, IsMe: m.IsMe,
+		refs[i] = shared.MemberRef{ID: m.ID, UserID: m.UserID, Name: m.Name, Avatar: m.Avatar, IsMe: m.IsMe,
 			Removed: m.RemovedAt != nil}
 	}
 	shared.RememberMemberRefs(ctx, callerID, refs)
