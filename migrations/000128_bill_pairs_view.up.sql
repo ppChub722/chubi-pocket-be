@@ -1,6 +1,6 @@
 -- 0.4.2-4 split phase A: the real pairs of every bill, read from the people table
 -- (replaces project_bill_pairs, which reads the child rows + payers; that one stays until
--- migration 126 removes the old tables).
+-- migration 129 removes the old tables).
 -- On a bill, a person who paid owes nothing; every other person owes each payer
 -- share x paid / amount (2 dp). Income is flipped (the one who received owes each share).
 -- A payback (from -> to): the receiver owes the giver, as an expense does.
