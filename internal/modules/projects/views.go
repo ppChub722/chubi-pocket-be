@@ -462,7 +462,7 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 	// The tags of a bill, the transaction it was made from (with its wallet) and what of my books
 	// holds it ride along on the bill's own row.
 	rows, err := q.Query(ctx, `WITH page AS (`+page+`)
-		SELECT page.total, `+strings.ReplaceAll(ptColumnsPrefixed, "@", "x.")+`,
+		SELECT page.total, `+strings.ReplaceAll(strings.ReplaceAll(ptColumnsPrefixed, "@marks", boardMarksSQL), "@", "x.")+`,
 		COALESCE((
 			SELECT json_agg(json_build_object('id', et.id, 'name', et.name, 'icon_code', et.icon_code,
 				'mine', EXISTS (SELECT 1 FROM tags t WHERE t.user_id = `+caller+` AND LOWER(t.name) = LOWER(et.name)))
@@ -486,9 +486,8 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 					OR EXISTS (SELECT 1 FROM personal_debt_bills pb WHERE pb.user_id = `+caller+` AND pb.pt_id = x.id))
 			FROM (SELECT 1) one
 			LEFT JOIN transactions t ON t.user_id = `+caller+` AND (
-				t.id = x.linked_transaction_id OR t.source_project_transaction_id = x.id
-				OR t.source_project_transaction_id IN (SELECT c.id FROM project_transactions c
-					WHERE c.parent_project_transaction_id = x.id))),
+				t.id = x.linked_transaction_id
+				OR (t.split_transaction_id = x.id AND t.source_project_transaction_id IS NOT NULL))),
 		-- the splits: everyone with a part who is not the main payer (the split's id = the person's id)
 		(SELECT json_agg(json_build_object('id', sp.id, 'm', sp.event_member_id, 'a', sp.share, 'back', sp.paid_back)
 				ORDER BY sp.sort, sp.id)
@@ -582,6 +581,12 @@ func addBoardSplits(bill ProjectTransaction, js []byte, children map[uuid.UUID][
 	}
 	return nil
 }
+
+// boardMarksSQL — the members marked "เคลียร์แล้ว" on a bill (the people rows' marked_at), where the
+// bill's old marks column used to be read.
+const boardMarksSQL = `ARRAY(SELECT mk.event_member_id FROM split_transaction_people mk
+		WHERE mk.split_transaction_id = x.id AND mk.marked_at IS NOT NULL AND mk.event_member_id IS NOT NULL
+		ORDER BY mk.marked_at, mk.sort, mk.id)`
 
 const ptColumnsPrefixed = `@id, @project_id, @parent_project_transaction_id,
 	@transaction_member_id, @record_user_id,

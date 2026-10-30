@@ -371,21 +371,16 @@ func (s *Store) PTRecipientsForChange(
 	// removed hears nothing more), and nobody who disconnected their copy of this bill.
 	rows, err := s.db.Query(ctx, `
 		SELECT DISTINCT u FROM (
-			SELECT pm.user_id AS u FROM (
-				SELECT transaction_member_id AS member_id FROM project_transactions WHERE id = $1
-				UNION
-				SELECT transaction_member_id FROM project_transactions WHERE parent_project_transaction_id = $1
-			) sub
-			JOIN project_members pm ON pm.id = sub.member_id
+			SELECT sp.user_id AS u FROM split_transaction_people sp WHERE sp.split_transaction_id = $1
 			UNION
 			SELECT t.user_id FROM transactions t
-			WHERE t.source_project_transaction_id = $1
-			   OR t.source_project_transaction_id IN (SELECT c.id FROM project_transactions c WHERE c.parent_project_transaction_id = $1)
+			WHERE t.split_transaction_id = $1 AND t.source_project_transaction_id IS NOT NULL
 		) x
 		WHERE u IS NOT NULL AND u <> $2
 		  AND EXISTS (SELECT 1 FROM project_members am JOIN project_transactions b ON b.project_id = am.project_id
 		              WHERE b.id = $1 AND am.user_id = x.u AND am.status = 'active')
-		  AND NOT EXISTS (SELECT 1 FROM shared_bill_opt_outs o WHERE o.project_transaction_id = $1 AND o.user_id = x.u)`,
+		  AND NOT EXISTS (SELECT 1 FROM split_transaction_people o WHERE o.split_transaction_id = $1
+		                   AND o.user_id = x.u AND o.disconnected_at IS NOT NULL)`,
 		ptID, editorUserID)
 	if err != nil {
 		return nil, fmt.Errorf("recipients: %w", err)
