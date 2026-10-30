@@ -170,10 +170,11 @@ func LoadEventBillPeople(ctx context.Context, q Querier, callerUserID uuid.UUID,
 		       p.project_id, to_char(p.date, 'YYYY-MM-DD'), p.description, p.note, p.linked_transaction_id
 		FROM project_transactions p WHERE p.id = ANY($1::uuid[])
 		UNION ALL
-		SELECT c.parent_project_transaction_id, c.transaction_member_id, 0, c.transaction_member_id, SUM(c.amount)::float8,
+		SELECT sp.split_transaction_id, sp.event_member_id, 0, sp.event_member_id, sp.share::float8,
 		       NULL, NULL, NULL, NULL, NULL
-		FROM project_transactions c WHERE c.parent_project_transaction_id = ANY($1::uuid[])
-		GROUP BY c.parent_project_transaction_id, c.transaction_member_id
+		FROM split_transaction_people sp JOIN project_transactions b ON b.id = sp.split_transaction_id
+		WHERE sp.split_transaction_id = ANY($1::uuid[]) AND sp.share > 0 AND sp.event_member_id IS NOT NULL
+		  AND sp.event_member_id IS DISTINCT FROM b.transaction_member_id
 		ORDER BY 1, 4 NULLS FIRST, 2`, uniqueIDs(billIDs))
 	if err != nil {
 		return nil, fmt.Errorf("bill people: %w", err)

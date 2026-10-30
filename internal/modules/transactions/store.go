@@ -317,8 +317,10 @@ func (s *Store) EventSplitsTotal(ctx context.Context, txID uuid.UUID) (float64, 
 	var total float64
 	err := s.db.QueryRow(ctx, `
 		SELECT CASE WHEN `+shared.EventBillPredicate("t")+` THEN COALESCE((
-			SELECT SUM(c.amount) FROM project_transactions c
-			WHERE c.parent_project_transaction_id = t.source_project_transaction_id), 0)
+			SELECT SUM(sp.share) FROM split_transaction_people sp
+			JOIN project_transactions pb ON pb.id = sp.split_transaction_id
+			WHERE sp.split_transaction_id = t.split_transaction_id
+			  AND sp.event_member_id IS DISTINCT FROM pb.transaction_member_id), 0)
 		ELSE 0 END
 		FROM transactions t WHERE t.id = $1`, txID).Scan(&total)
 	return total, err

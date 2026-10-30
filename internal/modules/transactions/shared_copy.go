@@ -116,11 +116,10 @@ func sharedCopyGuardTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current
 	err := tx.QueryRow(ctx, `SELECT p.status,
 			COALESCE(b.transaction_member_id = pm.id OR EXISTS (SELECT 1 FROM project_transactions pb
 				WHERE pb.paid_back_for_id = b.id AND pb.transaction_member_id = pm.id AND pb.parent_project_transaction_id IS NULL), FALSE)
-		FROM project_transactions s
-		JOIN project_transactions b ON b.id = COALESCE(s.parent_project_transaction_id, s.id)
+		FROM project_transactions b
 		JOIN projects p ON p.id = b.project_id
 		LEFT JOIN project_members pm ON pm.project_id = b.project_id AND pm.user_id = $2
-		WHERE s.id = $1`, *current.SourceProjectTransactionID, userID).Scan(&status, &walletOK)
+		WHERE b.id = (SELECT split_transaction_id FROM transactions WHERE id = $1)`, current.ID, userID).Scan(&status, &walletOK)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}

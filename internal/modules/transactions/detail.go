@@ -293,7 +293,7 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		       u.display_name, `+shared.AvatarSQL("u.id", "NULL")+`,
 		       peer.id, peer.account_id, c.system_kind, pc.system_kind,
 		       de.counterparty_contact_id, de.counterparty_person_name, de.direction, de.paid, de.kind,
-		       COALESCE(bp.parent_project_transaction_id, bp.id),
+		       CASE WHEN t.source_project_transaction_id IS NOT NULL THEN t.split_transaction_id END,
 		       ri.id, ri.user_id, ri.seq, rr.id, rr.name, rr.icon_code, rr.total_count,
 		       pb.id, pb.source_kind, pb.counterparty_contact_id, pb.counterparty_person_name, pb.paid
 		FROM transactions t
@@ -301,7 +301,6 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		LEFT JOIN recurring_items ri ON ri.transaction_id = t.id
 		LEFT JOIN recurring_rules rr ON rr.id = ri.rule_id
 		LEFT JOIN personal_debts de ON de.id = t.source_personal_debt_id
-		LEFT JOIN project_transactions bp ON bp.id = t.source_project_transaction_id
 		JOIN users u ON u.id = t.user_id
 		LEFT JOIN accounts a ON a.id = t.account_id
 		LEFT JOIN categories c ON c.id = t.category_id

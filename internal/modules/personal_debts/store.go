@@ -484,8 +484,9 @@ func loadBillParts(ctx context.Context, q shared.Querier, out []DebtEntry) error
 	}
 	rows, err := q.Query(ctx, `
 		SELECT b.debt_id, b.pt_id, p.project_id, p.description, b.amount::float8, pr.status, pr.completed_at IS NOT NULL,
-		       COALESCE((SELECT SUM(c.amount) FROM project_transactions c WHERE c.parent_project_transaction_id = p.id
-		           AND c.transaction_member_id = CASE WHEN p.transaction_member_id = me.id THEN b.member_id ELSE me.id END
+		       COALESCE((SELECT SUM(c.share) FROM split_transaction_people c WHERE c.split_transaction_id = p.id
+		           AND c.event_member_id = CASE WHEN p.transaction_member_id = me.id THEN b.member_id ELSE me.id END
+		           AND c.event_member_id IS DISTINCT FROM p.transaction_member_id
 		           AND p.transaction_member_id IN (me.id, b.member_id)), 0)::float8
 		FROM personal_debt_bills b
 		JOIN project_transactions p ON p.id = b.pt_id

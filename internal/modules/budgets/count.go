@@ -75,12 +75,8 @@ func countSQL(expected bool) string {
 var countSQLHead = `
 WITH ev AS (
 	SELECT pt.id, pt.project_id, pt.date, pt.description,
-		CASE WHEN pt.transaction_member_id = pm.id
-			THEN pt.amount - COALESCE((SELECT SUM(ch.amount) FROM project_transactions ch
-				WHERE ch.parent_project_transaction_id = pt.id), 0)
-			ELSE COALESCE((SELECT SUM(ch.amount) FROM project_transactions ch
-				WHERE ch.parent_project_transaction_id = pt.id AND ch.transaction_member_id = pm.id), 0)
-		END AS share,
+		COALESCE((SELECT SUM(sp.share) FROM split_transaction_people sp
+			WHERE sp.split_transaction_id = pt.id AND sp.event_member_id = pm.id), 0) AS share,
 		(SELECT t2.id FROM transactions t2 WHERE t2.user_id = $1
 			AND (t2.id = pt.linked_transaction_id OR t2.source_project_transaction_id = pt.id)
 			ORDER BY (t2.id = pt.linked_transaction_id) DESC LIMIT 1) AS my_tx
@@ -90,8 +86,7 @@ WITH ev AS (
 	WHERE pt.parent_project_transaction_id IS NULL AND pt.type = 'expense' AND pt.date BETWEEN $2 AND $3
 	  -- V4 / X5: a bill counts once. My tx unlinked from it ("ลงบัญชีของฉัน" off, a tx-detail
 	  -- disconnect) counts as a plain tx in the first branch, so the bill's share doesn't.
-	  AND NOT EXISTS (SELECT 1 FROM transactions u WHERE u.user_id = $1 AND (u.unlinked_project_transaction_id = pt.id
-		OR u.unlinked_project_transaction_id IN (SELECT c.id FROM project_transactions c WHERE c.parent_project_transaction_id = pt.id)))
+	  AND NOT EXISTS (SELECT 1 FROM transactions u WHERE u.user_id = $1 AND u.unlinked_split_transaction_id = pt.id)
 ),
 all_rows AS (
 	SELECT 'transaction' AS kind, t.id, CASE WHEN ri.id IS NULL THEN 'normal' ELSE 'recurring' END AS source,
