@@ -1,4 +1,4 @@
--- 0.4.2-4 split_transactions, phase A, step 1 of 2 = EXPAND (owner 2026-10-28 / 2026-10-30).
+-- 0.4.2-3 split_transactions, phase A, step 1 of 2 = EXPAND (owner 2026-10-28 / 2026-10-30).
 -- Plan: chubi-pocket-docs/now/briefs/split-transactions-plan.md.
 --
 -- One bill model for split bills AND events: project_transactions holds BILLS, the people of a
@@ -6,7 +6,7 @@
 -- until phase B renames it). This migration only ADDS: the people table, the links from
 -- transactions / personal_debts / personal_debt_bills, and triggers that keep the people rows equal
 -- to the old child rows / payers / opt-outs / marks while the code moves over. It deletes nothing.
--- Migration 125 (CONTRACT) then removes the child rows, the hidden `projects.kind = 'split'`
+-- Migration 129 (CONTRACT) then removes the child rows, the hidden `projects.kind = 'split'`
 -- projects and the old pointers, once nothing reads them. Both ship in the same release.
 -- Prod data is REAL: the people rows are built from every existing bill, the asserts at the end
 -- abort the whole migration (one transaction) if anything does not add up.
