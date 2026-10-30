@@ -10,6 +10,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/goccy/go-yaml"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
 //go:embed openapi.yaml
@@ -75,8 +77,7 @@ func (h *Handler) build() {
 func (h *Handler) Serve(c *gin.Context) {
 	h.once.Do(h.build)
 	if h.err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false,
-			"error": gin.H{"code": "INTERNAL_SERVER_ERROR", "message": h.err.Error()}})
+		response.InternalError(c, "The API document could not be built", h.err)
 		return
 	}
 	c.Data(http.StatusOK, "application/json; charset=utf-8", h.body)

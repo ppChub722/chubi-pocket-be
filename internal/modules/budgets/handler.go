@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -32,7 +33,7 @@ func tz(c *gin.Context) string { return c.GetHeader("X-Timezone") }
 func user(c *gin.Context) (uuid.UUID, bool) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 	}
 	return id, ok
 }
@@ -44,7 +45,7 @@ func userAndID(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 	}
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid budget id", nil)
+		response.Validation(c, "Invalid budget id", apierr.Field("id", apierr.FieldInvalid))
 		return uuid.Nil, uuid.Nil, false
 	}
 	return uid, id, true
@@ -57,7 +58,7 @@ func optionalID(c *gin.Context, name string) (*uuid.UUID, bool) {
 	}
 	id, err := uuid.Parse(v)
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid "+name, nil)
+		response.Validation(c, "Invalid "+name, apierr.Field(name, apierr.FieldInvalid))
 		return nil, false
 	}
 	return &id, true
@@ -76,7 +77,7 @@ func bind(c *gin.Context, v any) (map[string]bool, bool) {
 		err = json.Unmarshal(raw, &keys)
 	}
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return nil, false
 	}
 	present := map[string]bool{}
@@ -97,21 +98,21 @@ func reply(c *gin.Context, status int, out any, err error) {
 func mapError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrBudgetNotFound):
-		response.NotFound(c, "NOT_FOUND", "Budget not found")
+		response.NotFound(c, apierr.NotFound, "Budget not found")
 	case errors.Is(err, ErrPeriodNotFound):
-		response.NotFound(c, "NOT_FOUND", "Budget period not found")
+		response.NotFound(c, apierr.NotFound, "Budget period not found")
 	case errors.Is(err, ErrValidation):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrInvalidRule):
-		response.BadRequest(c, "INVALID_RULE", err.Error(), nil)
+		response.BadRequest(c, apierr.InvalidRule, err.Error(), nil)
 	case errors.Is(err, ErrInvalidCategory):
-		response.BadRequest(c, "INVALID_CATEGORY", err.Error(), nil)
+		response.BadRequest(c, apierr.InvalidCategory, err.Error(), nil)
 	case errors.Is(err, ErrAccountNotFound):
-		response.BadRequest(c, "ACCOUNT_NOT_FOUND", err.Error(), nil)
+		response.BadRequest(c, apierr.AccountNotFound, err.Error(), nil)
 	case errors.Is(err, ErrInvalidTransition):
-		response.Fail(c, http.StatusConflict, "INVALID_TRANSITION", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.InvalidTransition, err.Error(), nil)
 	default:
-		response.InternalError(c, "Budget operation failed", err.Error())
+		response.InternalError(c, "Budget operation failed", err)
 	}
 }
 
@@ -122,17 +123,17 @@ func (h *Handler) List(c *gin.Context) {
 	}
 	status := c.DefaultQuery("status", "active")
 	if status != "active" && status != "ended" && status != "archived" {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
+		response.Validation(c, "Invalid status", apierr.Field("status", apierr.FieldInvalid))
 		return
 	}
 	health := c.Query("health")
 	if health != "" && health != "normal" && health != "near" && health != "over" {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid health", nil)
+		response.Validation(c, "Invalid health", apierr.Field("health", apierr.FieldInvalid))
 		return
 	}
 	sortBy := c.DefaultQuery("sort", "risk")
 	if sortBy != "risk" && sortBy != "name" && sortBy != "newest" {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid sort", nil)
+		response.Validation(c, "Invalid sort", apierr.Field("sort", apierr.FieldInvalid))
 		return
 	}
 	out, err := h.service.List(c.Request.Context(), uid, status, sortBy, health, tz(c))
@@ -208,7 +209,7 @@ func (h *Handler) UpdatePeriod(c *gin.Context) {
 	}
 	periodID, err := uuid.Parse(c.Param("period_id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid period id", nil)
+		response.Validation(c, "Invalid period id", apierr.Field("period_id", apierr.FieldInvalid))
 		return
 	}
 	var req PeriodRequest
@@ -234,7 +235,7 @@ func (h *Handler) Items(c *gin.Context) {
 	switch source {
 	case "", SourceNormal, SourceRecurring, SourceEvent, SourceUpcoming, SourcePending, SourceFutureTx:
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid source", nil)
+		response.Validation(c, "Invalid source", apierr.Field("source", apierr.FieldInvalid))
 		return
 	}
 	out, err := h.service.Items(c.Request.Context(), uid, id, periodID, source,

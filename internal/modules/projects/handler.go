@@ -15,6 +15,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -36,7 +37,7 @@ func reply(c *gin.Context, status int, out any, err error) {
 
 func bindJSON(c *gin.Context, v any) bool {
 	if err := c.ShouldBindBodyWith(v, binding.JSON); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return false
 	}
 	return true
@@ -45,7 +46,7 @@ func bindJSON(c *gin.Context, v any) bool {
 func pathID(c *gin.Context, name, label string) (uuid.UUID, bool) {
 	id, err := uuid.Parse(c.Param(name))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid "+label, nil)
+		response.Validation(c, "Invalid "+label, apierr.Field(name, apierr.FieldInvalid))
 		return uuid.Nil, false
 	}
 	return id, true
@@ -54,7 +55,7 @@ func pathID(c *gin.Context, name, label string) (uuid.UUID, bool) {
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	var req CreateProjectRequest
@@ -68,7 +69,7 @@ func (h *Handler) Create(c *gin.Context) {
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	f := ListFilter{
@@ -78,19 +79,19 @@ func (h *Handler) List(c *gin.Context) {
 	switch f.Status {
 	case "", StatusActive, StatusCompleted, StatusCancelled, StatusArchived, "all", "current", "unsettled", "receivable", "payable", "ended":
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
+		response.Validation(c, "Invalid status", apierr.Field("status", apierr.FieldInvalid))
 		return
 	}
 	switch f.Sort {
 	case "", "updated_desc", "start_date_desc", "name_asc":
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid sort", nil)
+		response.Validation(c, "Invalid sort", apierr.Field("sort", apierr.FieldInvalid))
 		return
 	}
 	for _, v := range c.QueryArray("tag_id") {
 		id, err := uuid.Parse(v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid tag_id", nil)
+			response.Validation(c, "Invalid tag_id", apierr.Field("tag_id", apierr.FieldInvalid))
 			return
 		}
 		f.TagIDs = append(f.TagIDs, id)
@@ -267,7 +268,7 @@ func (h *Handler) RequestLink(c *gin.Context) {
 func (h *Handler) AcceptLinkRequest(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	notifID, ok := pathID(c, "notification_id", "notification id")
@@ -290,7 +291,7 @@ func (h *Handler) AcceptLinkRequest(c *gin.Context) {
 func (h *Handler) RejectLinkRequest(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	notifID, ok := pathID(c, "notification_id", "notification id")
@@ -364,19 +365,19 @@ func (h *Handler) ListPT(c *gin.Context) {
 	switch f.Type {
 	case "", PTTypeExpense, PTTypeIncome:
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid type", nil)
+		response.Validation(c, "Invalid type", apierr.Field("type", apierr.FieldInvalid))
 		return
 	}
 	switch f.Sort {
 	case "", "date_desc", "date_asc", "amount_desc", "amount_asc":
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid sort", nil)
+		response.Validation(c, "Invalid sort", apierr.Field("sort", apierr.FieldInvalid))
 		return
 	}
 	if v := c.Query("tag_id"); v != "" {
 		tid, err := uuid.Parse(v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid tag_id", nil)
+			response.Validation(c, "Invalid tag_id", apierr.Field("tag_id", apierr.FieldInvalid))
 			return
 		}
 		f.TagID = &tid
@@ -384,7 +385,7 @@ func (h *Handler) ListPT(c *gin.Context) {
 	if v := c.Query("payer_member_id"); v != "" {
 		pid, err := uuid.Parse(v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid payer_member_id", nil)
+			response.Validation(c, "Invalid payer_member_id", apierr.Field("payer_member_id", apierr.FieldInvalid))
 			return
 		}
 		f.PayerMemberID = &pid
@@ -493,7 +494,7 @@ func (h *Handler) ImportTags(c *gin.Context) {
 func (h *Handler) bindProjectID(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return uuid.Nil, uuid.Nil, false
 	}
 	id, ok := pathID(c, "id", "project id")
@@ -507,136 +508,136 @@ func mapServiceError(c *gin.Context, err error) {
 	)
 	switch {
 	case errors.As(err, &empty):
-		response.Fail(c, http.StatusConflict, "EVENT_HAS_EMPTY_PERSON", err.Error(), gin.H{"bill_ids": empty.BillIDs})
+		response.Fail(c, http.StatusConflict, apierr.EventHasEmptyPerson, err.Error(), gin.H{"bill_ids": empty.BillIDs})
 	case errors.Is(err, ErrEventCompleted), isEventCompletedPg(err):
-		response.Fail(c, http.StatusConflict, "EVENT_COMPLETED", ErrEventCompleted.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.EventCompleted, ErrEventCompleted.Error(), nil)
 	case errors.Is(err, ErrUseCompleteEndpoint):
-		response.BadRequest(c, "USE_COMPLETE_ENDPOINT", err.Error(), nil)
+		response.BadRequest(c, apierr.UseCompleteEndpoint, err.Error(), nil)
 	case errors.Is(err, ErrCompleteNotActive):
-		response.Fail(c, http.StatusConflict, "PROJECT_NOT_ACTIVE", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.ProjectNotActive, err.Error(), nil)
 	case errors.Is(err, ErrMemberNotRemoved):
-		response.Fail(c, http.StatusConflict, "MEMBER_NOT_REMOVED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.MemberNotRemoved, err.Error(), nil)
 	case errors.As(err, &claimErr) && errors.Is(err, ErrNotInBill):
-		response.BadRequest(c, "NOT_IN_BILL", err.Error(), gin.H{"bill_ids": claimErr.BillIDs})
+		response.BadRequest(c, apierr.NotInBill, err.Error(), gin.H{"bill_ids": claimErr.BillIDs})
 	case errors.As(err, &claimErr):
-		response.Fail(c, http.StatusConflict, "BILL_ALREADY_BOOKED", err.Error(), gin.H{"bill_ids": claimErr.BillIDs})
+		response.Fail(c, http.StatusConflict, apierr.BillAlreadyBooked, err.Error(), gin.H{"bill_ids": claimErr.BillIDs})
 	case errors.Is(err, personal_debts.ErrBillAlreadyBooked):
-		response.Fail(c, http.StatusConflict, "BILL_ALREADY_BOOKED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.BillAlreadyBooked, err.Error(), nil)
 	case errors.Is(err, ErrSettleNotCompleted):
-		response.Fail(c, http.StatusConflict, "EVENT_NOT_COMPLETED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.EventNotCompleted, err.Error(), nil)
 	case errors.Is(err, ErrSettleBooked):
-		response.Fail(c, http.StatusConflict, "SETTLE_BOOKED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.SettleBooked, err.Error(), nil)
 	case errors.Is(err, ErrSettleLines):
-		response.BadRequest(c, "SETTLE_LINES", err.Error(), nil)
+		response.BadRequest(c, apierr.SettleLines, err.Error(), nil)
 	case errors.Is(err, ErrClaimMixedDirection):
-		response.BadRequest(c, "CLAIM_MIXED_DIRECTION", err.Error(), nil)
+		response.BadRequest(c, apierr.ClaimMixedDirection, err.Error(), nil)
 	case errors.Is(err, ErrClaimLinkOne), errors.Is(err, ErrClaimTxNotLinkable):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrProjectNotFound):
-		response.NotFound(c, "NOT_FOUND", "Project not found")
+		response.NotFound(c, apierr.NotFound, "Project not found")
 	case errors.Is(err, ErrPTNotFound):
-		response.NotFound(c, "NOT_FOUND", "Project transaction not found")
+		response.NotFound(c, apierr.NotFound, "Project transaction not found")
 	case errors.Is(err, ErrEventTagNotFound):
-		response.NotFound(c, "NOT_FOUND", "Event tag not found")
+		response.NotFound(c, apierr.NotFound, "Event tag not found")
 	case errors.Is(err, ErrUnknownTag), errors.Is(err, transactions.ErrTagNotFound):
-		response.BadRequest(c, "TAG_NOT_FOUND", "Tag not found", nil)
+		response.BadRequest(c, apierr.TagNotFound, "Tag not found", nil)
 	case errors.Is(err, ErrTagNameTaken):
-		response.Fail(c, http.StatusConflict, "TAG_NAME_TAKEN", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.TagNameTaken, err.Error(), nil)
 	case errors.Is(err, ErrTagNameRequired), errors.Is(err, ErrBadMemberRequest):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrInvalidDateRange):
-		response.BadRequest(c, "INVALID_DATE_RANGE", err.Error(), nil)
+		response.BadRequest(c, apierr.InvalidDateRange, err.Error(), nil)
 
 	case errors.Is(err, ErrNoShareToCopy):
-		response.Fail(c, http.StatusUnprocessableEntity, "NO_SHARE_TO_COPY", err.Error(), nil)
+		response.Fail(c, http.StatusUnprocessableEntity, apierr.NoShareToCopy, err.Error(), nil)
 	case errors.Is(err, ErrPaybackNotCopyable):
-		response.Fail(c, http.StatusUnprocessableEntity, "PAYBACK_NOT_COPYABLE", err.Error(), nil)
+		response.Fail(c, http.StatusUnprocessableEntity, apierr.PaybackNotCopyable, err.Error(), nil)
 	case errors.Is(err, ErrBadPayback):
-		response.BadRequest(c, "BAD_PAYBACK", err.Error(), nil)
+		response.BadRequest(c, apierr.BadPayback, err.Error(), nil)
 	case errors.Is(err, ErrPayerFixed):
-		response.BadRequest(c, "PAYER_FIXED", err.Error(), nil)
+		response.BadRequest(c, apierr.PayerFixed, err.Error(), nil)
 	case errors.Is(err, ErrPTIsChild):
-		response.Fail(c, http.StatusConflict, "PT_IS_CHILD", "Cannot operate on a split-child row directly", nil)
+		response.Fail(c, http.StatusConflict, apierr.PtIsChild, "Cannot operate on a split-child row directly", nil)
 	case errors.Is(err, ErrSelfSplit):
-		response.BadRequest(c, "SELF_SPLIT", "A split's member must differ from the payer", nil)
+		response.BadRequest(c, apierr.SelfSplit, "A split's member must differ from the payer", nil)
 	case errors.Is(err, ErrSplitsExceedParent):
-		response.BadRequest(c, "SPLITS_EXCEED_AMOUNT", "Splits add up to more than the bill", nil)
+		response.BadRequest(c, apierr.SplitsExceedAmount, "Splits add up to more than the bill", nil)
 	case errors.Is(err, ErrMemberNotFound):
-		response.NotFound(c, "NOT_FOUND", "Member not found")
+		response.NotFound(c, apierr.NotFound, "Member not found")
 	case errors.Is(err, ErrNotOwner):
-		response.Fail(c, http.StatusForbidden, "FORBIDDEN_ROLE", "Only the event owner can do this", nil)
+		response.Fail(c, http.StatusForbidden, apierr.ForbiddenRole, "Only the event owner can do this", nil)
 	case errors.Is(err, ErrProjectLocked):
-		response.Fail(c, http.StatusConflict, "PROJECT_LOCKED", "The event is cancelled or archived; writes are blocked", nil)
+		response.Fail(c, http.StatusConflict, apierr.ProjectLocked, "The event is cancelled or archived; writes are blocked", nil)
 	case errors.Is(err, ErrProjectNotActive):
-		response.Fail(c, http.StatusConflict, "PROJECT_LOCKED", "The event is not active", nil)
+		response.Fail(c, http.StatusConflict, apierr.ProjectLocked, "The event is not active", nil)
 	case errors.Is(err, ErrMemberAlreadyExists):
-		response.Fail(c, http.StatusConflict, "ALREADY_MEMBER", "Already a member", nil)
+		response.Fail(c, http.StatusConflict, apierr.AlreadyMember, "Already a member", nil)
 	case errors.Is(err, ErrCannotRemoveOwner):
-		response.BadRequest(c, "CANNOT_REMOVE_OWNER", "Cannot remove the owner", nil)
+		response.BadRequest(c, apierr.CannotRemoveOwner, "Cannot remove the owner", nil)
 	case errors.Is(err, ErrOwnerCannotLeave):
-		response.Fail(c, http.StatusConflict, "OWNER_CANNOT_LEAVE", "Owner cannot leave; transfer ownership first", nil)
+		response.Fail(c, http.StatusConflict, apierr.OwnerCannotLeave, "Owner cannot leave; transfer ownership first", nil)
 	case errors.Is(err, ErrNotPending):
-		response.Fail(c, http.StatusConflict, "NOT_PENDING", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.NotPending, err.Error(), nil)
 	case errors.Is(err, ErrNotMember):
-		response.Fail(c, http.StatusForbidden, "NOT_MEMBER", "Caller is not a member of this event", nil)
+		response.Fail(c, http.StatusForbidden, apierr.NotMember, "Caller is not a member of this event", nil)
 	case errors.Is(err, ErrCannotChangeOwner):
-		response.Fail(c, http.StatusConflict, "CANNOT_CHANGE_OWNER", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.CannotChangeOwner, err.Error(), nil)
 	case errors.Is(err, ErrViewerReadOnly):
-		response.Fail(c, http.StatusForbidden, "FORBIDDEN_ROLE", err.Error(), nil)
+		response.Fail(c, http.StatusForbidden, apierr.ForbiddenRole, err.Error(), nil)
 	case errors.Is(err, ErrMemberNotInProject):
-		response.BadRequest(c, "MEMBER_NOT_IN_PROJECT", "Member does not belong to this event", nil)
+		response.BadRequest(c, apierr.MemberNotInProject, "Member does not belong to this event", nil)
 	case errors.Is(err, ErrLinkRequestNotForYou):
-		response.BadRequest(c, "NOT_PROJECT_INVITE", err.Error(), nil)
+		response.BadRequest(c, apierr.NotProjectInvite, err.Error(), nil)
 	case errors.Is(err, notifications.ErrNotificationNotFound):
-		response.NotFound(c, "NOT_FOUND", "Notification not found")
+		response.NotFound(c, apierr.NotFound, "Notification not found")
 	case errors.Is(err, notifications.ErrNotForYou):
-		response.Fail(c, http.StatusForbidden, "NOT_FOR_YOU", "Notification is not addressed to caller", nil)
+		response.Fail(c, http.StatusForbidden, apierr.NotForYou, "Notification is not addressed to caller", nil)
 	case errors.Is(err, notifications.ErrStateConflict):
-		response.Fail(c, http.StatusConflict, "NOTIFICATION_STATE_CONFLICT", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.NotificationStateConflict, err.Error(), nil)
 	default:
-		response.InternalError(c, "Project operation failed", err.Error())
+		response.InternalError(c, "Project operation failed", err)
 	}
 }
 
 func mapQuickCreateError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrQuickTxNotFound):
-		response.NotFound(c, "TX_NOT_FOUND", "Transaction not found or not owned")
+		response.NotFound(c, apierr.TxNotFound, "Transaction not found or not owned")
 	case errors.Is(err, ErrQuickTxAlreadyInProject):
-		response.Fail(c, http.StatusConflict, "TX_ALREADY_IN_PROJECT", "Transaction is already in a project", nil)
+		response.Fail(c, http.StatusConflict, apierr.TxAlreadyInProject, "Transaction is already in a project", nil)
 	case errors.Is(err, ErrQuickTxNotBillable), errors.Is(err, ErrQuickNothingToAdd):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrQuickTxSplitPaid):
-		response.Fail(c, http.StatusUnprocessableEntity, "TX_SPLIT_PAID", err.Error(), nil)
+		response.Fail(c, http.StatusUnprocessableEntity, apierr.TxSplitPaid, err.Error(), nil)
 	case errors.Is(err, transactions.ErrSplitContactNotFound):
-		response.BadRequest(c, "CONTACT_NOT_FOUND", "Split contact not found", nil)
+		response.BadRequest(c, apierr.ContactNotFound, "Split contact not found", nil)
 	case errors.Is(err, ErrQuickTxIsRepayment), errors.Is(err, ErrQuickTxSystemRow):
-		response.Fail(c, http.StatusUnprocessableEntity, "TX_NOT_BILLABLE", err.Error(), nil)
+		response.Fail(c, http.StatusUnprocessableEntity, apierr.TxNotBillable, err.Error(), nil)
 	case errors.Is(err, ErrBillNotInProject):
-		response.NotFound(c, "TX_NOT_IN_PROJECT", "Transaction is not in this project")
+		response.NotFound(c, apierr.TxNotInProject, "Transaction is not in this project")
 	case errors.Is(err, transactions.ErrTxNotFound):
-		response.NotFound(c, "NOT_FOUND", "Transaction not found")
+		response.NotFound(c, apierr.NotFound, "Transaction not found")
 	case errors.Is(err, transactions.ErrLinkModeConflict):
-		response.BadRequest(c, "LINK_MODE_CONFLICT", err.Error(), nil)
+		response.BadRequest(c, apierr.LinkModeConflict, err.Error(), nil)
 	case errors.Is(err, ErrBadBillPeople), errors.Is(err, ErrPayerIncome):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrSplitsExceedParent):
-		response.BadRequest(c, "SPLITS_EXCEED_AMOUNT", "Shares add up to more than the bill", nil)
+		response.BadRequest(c, apierr.SplitsExceedAmount, "Shares add up to more than the bill", nil)
 	case errors.Is(err, ErrMemberNotInProject):
-		response.BadRequest(c, "MEMBER_NOT_IN_PROJECT", "Member does not belong to this event", nil)
+		response.BadRequest(c, apierr.MemberNotInProject, "Member does not belong to this event", nil)
 	case errors.Is(err, transactions.ErrAccountArchived):
-		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.AccountArchived, err.Error(), nil)
 	case errors.Is(err, transactions.ErrAccountForbidden):
-		response.NotFound(c, "ACCOUNT_NOT_FOUND", "Account not found")
+		response.NotFound(c, apierr.AccountNotFound, "Account not found")
 	case errors.Is(err, transactions.ErrCategoryForbidden):
-		response.Fail(c, http.StatusForbidden, "FORBIDDEN", "Category not accessible", nil)
+		response.Fail(c, http.StatusForbidden, apierr.Forbidden, "Category not accessible", nil)
 	case errors.Is(err, transactions.ErrCategoryTypeMismatch),
 		errors.Is(err, transactions.ErrSystemCategoryNotAllowed),
 		errors.Is(err, transactions.ErrTransferFieldsOnNonTransfer),
 		errors.Is(err, transactions.ErrProjectIDNotAllowed),
 		errors.Is(err, transactions.ErrSplitsNotSupportedYet),
 		errors.Is(err, transactions.ErrAmountInvalid):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	default:
 		mapServiceError(c, err)
 	}
@@ -685,7 +686,7 @@ func (h *Handler) AssignRemoved(c *gin.Context) {
 	}
 	memberID, err := uuid.Parse(c.Param("member_id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid member_id", nil)
+		response.Validation(c, "Invalid member_id", apierr.Field("member_id", apierr.FieldInvalid))
 		return
 	}
 	var req AssignRemovedRequest
@@ -707,7 +708,7 @@ func (h *Handler) ListClaimable(c *gin.Context) {
 		if v := c.Query(key); v != "" {
 			m, err := uuid.Parse(v)
 			if err != nil {
-				response.BadRequest(c, "VALIDATION_ERROR", "Invalid "+key, nil)
+				response.Validation(c, "Invalid "+key, apierr.Field(key, apierr.FieldInvalid))
 				return
 			}
 			*dst = &m

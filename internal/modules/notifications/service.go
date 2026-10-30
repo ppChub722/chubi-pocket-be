@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 )
 
 type Service struct {
@@ -98,7 +100,7 @@ var (
 var (
 	ErrUnknownType       = errors.New("unknown or unsupported notification type")
 	ErrTypeNotMutable    = errors.New("invites and link requests can't be muted")
-	ErrDefaultAccountBad = errors.New("default_account_id must be an active wallet you're a member of")
+	ErrDefaultAccountBad = apierr.Invalid("default_account_id must be an active wallet you're a member of", "default_account_id", apierr.FieldInvalid)
 )
 
 func cleanTypes(in []string, allowed map[string]bool) ([]string, error) {

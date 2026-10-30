@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -22,7 +24,10 @@ const dateLayout = "2006-01-02"
 
 var ErrInvalidDraft = errors.New("invalid draft")
 
-type submitErr struct{ code, msg string }
+type submitErr struct {
+	code apierr.Code
+	msg  string
+}
 
 func (e *submitErr) Error() string { return e.msg }
 
@@ -60,15 +65,15 @@ func checkDraft(d Draft) error {
 		switch transactions.TxType(*d.Type) {
 		case transactions.TypeExpense, transactions.TypeIncome, transactions.TypeTransfer, typeSaving:
 		default:
-			return fmt.Errorf("%w: type must be expense, income or transfer", ErrInvalidDraft)
+			return apierr.Wrap(ErrInvalidDraft, "type must be expense, income or transfer", apierr.Field("type", apierr.FieldInvalid, "allowed", []string{"expense", "income", "transfer"}))
 		}
 	}
 	if d.Amount != nil && *d.Amount < 0 {
-		return fmt.Errorf("%w: amount can't be negative", ErrInvalidDraft)
+		return apierr.Wrap(ErrInvalidDraft, "amount can't be negative", apierr.Field("amount", apierr.FieldOutOfRange, "min", 0))
 	}
 	if d.Date != nil {
 		if _, err := time.Parse(dateLayout, *d.Date); err != nil {
-			return fmt.Errorf("%w: date must be YYYY-MM-DD", ErrInvalidDraft)
+			return apierr.Wrap(ErrInvalidDraft, "date must be YYYY-MM-DD", apierr.Field("date", apierr.FieldInvalid, "format", "date"))
 		}
 	}
 	return nil
@@ -276,31 +281,31 @@ func (s *Service) submitOne(ctx context.Context, userID uuid.UUID, p *PendingTra
 
 func createRequest(d Draft) (transactions.CreateRequest, error) {
 	if d.Type == nil {
-		return transactions.CreateRequest{}, &submitErr{"MISSING_TYPE", "type is required"}
+		return transactions.CreateRequest{}, &submitErr{apierr.MissingType, "type is required"}
 	}
 	if d.Amount == nil || *d.Amount <= 0 {
-		return transactions.CreateRequest{}, &submitErr{"MISSING_AMOUNT", "amount must be more than 0"}
+		return transactions.CreateRequest{}, &submitErr{apierr.MissingAmount, "amount must be more than 0"}
 	}
 	if d.Date == nil {
-		return transactions.CreateRequest{}, &submitErr{"MISSING_DATE", "date is required"}
+		return transactions.CreateRequest{}, &submitErr{apierr.MissingDate, "date is required"}
 	}
 	for _, sp := range d.Splits {
 		if name := strings.TrimSpace(sp.PersonName); name == "" || len([]rune(name)) > 100 {
-			return transactions.CreateRequest{}, &submitErr{"INVALID_SPLIT", "every split needs a person name (max 100 characters)"}
+			return transactions.CreateRequest{}, &submitErr{apierr.InvalidSplit, "every split needs a person name (max 100 characters)"}
 		}
 		if sp.OwedAmount <= 0 {
-			return transactions.CreateRequest{}, &submitErr{"INVALID_SPLIT", "every split amount must be more than 0"}
+			return transactions.CreateRequest{}, &submitErr{apierr.InvalidSplit, "every split amount must be more than 0"}
 		}
 	}
 	if (d.Payer != nil || len(d.Members) > 0) && (d.ProjectID == nil || len(d.Splits) > 0 || d.PaidBy != nil) {
-		return transactions.CreateRequest{}, &submitErr{"LINK_MODE_CONFLICT", "payer / members go with project_id only (no splits, no paid_by)"}
+		return transactions.CreateRequest{}, &submitErr{apierr.LinkModeConflict, "payer / members go with project_id only (no splits, no paid_by)"}
 	}
 	if pb := d.PaidBy; pb != nil {
 		if len(d.Splits) > 0 || d.ProjectID != nil {
-			return transactions.CreateRequest{}, &submitErr{"LINK_MODE_CONFLICT", transactions.ErrLinkModeConflict.Error()}
+			return transactions.CreateRequest{}, &submitErr{apierr.LinkModeConflict, transactions.ErrLinkModeConflict.Error()}
 		}
 		if pb.Amount <= 0 || (pb.ContactID == nil && strings.TrimSpace(pb.PersonName) == "") {
-			return transactions.CreateRequest{}, &submitErr{"INVALID_PAID_BY", "paid_by needs a person and an amount more than 0"}
+			return transactions.CreateRequest{}, &submitErr{apierr.InvalidPaidBy, "paid_by needs a person and an amount more than 0"}
 		}
 	}
 	return transactions.CreateRequest{
@@ -392,10 +397,10 @@ func (s *Service) submitSaving(ctx context.Context, userID uuid.UUID, p *Pending
 	}
 	d := p.Draft
 	if d.Amount == nil || *d.Amount <= 0 {
-		return nil, &submitErr{"MISSING_AMOUNT", "amount must be more than 0"}
+		return nil, &submitErr{apierr.MissingAmount, "amount must be more than 0"}
 	}
 	if d.Date == nil {
-		return nil, &submitErr{"MISSING_DATE", "date is required"}
+		return nil, &submitErr{apierr.MissingDate, "date is required"}
 	}
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -433,7 +438,7 @@ func (s *Service) submitSettle(ctx context.Context, userID uuid.UUID, p *Pending
 		return nil, errors.New("debt settle not available")
 	}
 	if p.Draft.Amount == nil || *p.Draft.Amount <= 0 {
-		return nil, &submitErr{"MISSING_AMOUNT", "amount must be more than 0"}
+		return nil, &submitErr{apierr.MissingAmount, "amount must be more than 0"}
 	}
 	res, err := s.debts.RepayEntry(ctx, userID, *p.TargetDebtID, *p.Draft.Amount, p.Draft.AccountID,
 		p.Draft.Date, p.Draft.Description, p.Draft.Note)
@@ -482,51 +487,52 @@ func toSubmitError(err error) SubmitError {
 	}
 	codes := []struct {
 		target error
-		code   string
+		code   apierr.Code
 	}{
-		{ErrPendingNotFound, "NOT_FOUND"},
-		{transactions.ErrAccountForbidden, "ACCOUNT_NOT_FOUND"},
-		{transactions.ErrAccountArchived, "ACCOUNT_ARCHIVED"},
-		{transactions.ErrCategoryForbidden, "CATEGORY_NOT_FOUND"},
-		{transactions.ErrCategoryTypeMismatch, "CATEGORY_TYPE_MISMATCH"},
-		{transactions.ErrSystemCategoryNotAllowed, "CATEGORY_NOT_FOUND"},
-		{transactions.ErrTransferSameAccount, "TRANSFER_SAME_ACCOUNT"},
-		{transactions.ErrTransferToAccountRequired, "TRANSFER_NEEDS_WALLETS"},
-		{transactions.ErrTransferRequiresAccount, "TRANSFER_NEEDS_WALLETS"},
-		{transactions.ErrSplitsOnTransfer, "SPLITS_ON_TRANSFER"},
-		{transactions.ErrSplitContactNotFound, "CONTACT_NOT_FOUND"},
-		{transactions.ErrSplitsExceedAmount, "SPLITS_EXCEED_AMOUNT"},
-		{transactions.ErrPaidByExpenseOnly, "PAID_BY_EXPENSE_ONLY"},
-		{transactions.ErrPaidByExceedsAmount, "PAID_BY_EXCEEDS_AMOUNT"},
-		{transactions.ErrPaidByPersonRequired, "INVALID_PAID_BY"},
-		{transactions.ErrLinkModeConflict, "LINK_MODE_CONFLICT"},
-		{projects.ErrBadBillPeople, "INVALID_BILL_PEOPLE"},
-		{projects.ErrPayerIncome, "INVALID_BILL_PEOPLE"},
-		{projects.ErrMemberNotInProject, "PROJECT_NOT_MEMBER"},
-		{projects.ErrNoShareToCopy, "NO_SHARE"},
-		{projects.ErrSplitsExceedParent, "SPLITS_EXCEED_AMOUNT"},
-		{projects.ErrProjectNotFound, "PROJECT_NOT_FOUND"},
-		{projects.ErrProjectNotActive, "PROJECT_NOT_ACTIVE"},
-		{projects.ErrEventCompleted, "PROJECT_NOT_ACTIVE"},
-		{projects.ErrProjectLocked, "PROJECT_LOCKED"},
-		{projects.ErrNotMember, "PROJECT_NOT_MEMBER"},
-		{projects.ErrMemberNotFound, "PROJECT_NOT_MEMBER"},
-		{projects.ErrViewerReadOnly, "PROJECT_READ_ONLY"},
-		{projects.ErrQuickTxNotBillable, "TX_NOT_BILLABLE"},
-		{tags.ErrTagNotFound, "TAG_NOT_FOUND"},
-		{personal_debts.ErrEntryNotFound, "DEBT_NOT_FOUND"},
-		{transactions.ErrTxNotFound, "TRANSACTION_NOT_FOUND"},
-		{saving_goals.ErrAccountNotFound, "ACCOUNT_NOT_FOUND"},
-		{saving_goals.ErrWalletNotTracked, "WALLET_NOT_TRACKED"},
-		{saving_goals.ErrGoalNotActive, "GOAL_NOT_ACTIVE"},
-		{saving_goals.ErrGoalNotFound, "NOT_FOUND"},
+		{ErrPendingNotFound, apierr.NotFound},
+		{transactions.ErrAccountForbidden, apierr.AccountNotFound},
+		{transactions.ErrAccountArchived, apierr.AccountArchived},
+		{transactions.ErrCategoryForbidden, apierr.CategoryNotFound},
+		{transactions.ErrCategoryTypeMismatch, apierr.CategoryTypeMismatch},
+		{transactions.ErrSystemCategoryNotAllowed, apierr.CategoryNotFound},
+		{transactions.ErrTransferSameAccount, apierr.TransferSameAccount},
+		{transactions.ErrTransferToAccountRequired, apierr.TransferNeedsWallets},
+		{transactions.ErrTransferRequiresAccount, apierr.TransferNeedsWallets},
+		{transactions.ErrSplitsOnTransfer, apierr.SplitsOnTransfer},
+		{transactions.ErrSplitContactNotFound, apierr.ContactNotFound},
+		{transactions.ErrSplitsExceedAmount, apierr.SplitsExceedAmount},
+		{transactions.ErrPaidByExpenseOnly, apierr.PaidByExpenseOnly},
+		{transactions.ErrPaidByExceedsAmount, apierr.PaidByExceedsAmount},
+		{transactions.ErrPaidByPersonRequired, apierr.InvalidPaidBy},
+		{transactions.ErrLinkModeConflict, apierr.LinkModeConflict},
+		{projects.ErrBadBillPeople, apierr.InvalidBillPeople},
+		{projects.ErrPayerIncome, apierr.InvalidBillPeople},
+		{projects.ErrMemberNotInProject, apierr.ProjectNotMember},
+		{projects.ErrNoShareToCopy, apierr.NoShare},
+		{projects.ErrSplitsExceedParent, apierr.SplitsExceedAmount},
+		{projects.ErrProjectNotFound, apierr.ProjectNotFound},
+		{projects.ErrProjectNotActive, apierr.ProjectNotActive},
+		{projects.ErrEventCompleted, apierr.ProjectNotActive},
+		{projects.ErrProjectLocked, apierr.ProjectLocked},
+		{projects.ErrNotMember, apierr.ProjectNotMember},
+		{projects.ErrMemberNotFound, apierr.ProjectNotMember},
+		{projects.ErrViewerReadOnly, apierr.ProjectReadOnly},
+		{projects.ErrQuickTxNotBillable, apierr.TxNotBillable},
+		{tags.ErrTagNotFound, apierr.TagNotFound},
+		{personal_debts.ErrEntryNotFound, apierr.DebtNotFound},
+		{transactions.ErrTxNotFound, apierr.TransactionNotFound},
+		{saving_goals.ErrAccountNotFound, apierr.AccountNotFound},
+		{saving_goals.ErrWalletNotTracked, apierr.WalletNotTracked},
+		{saving_goals.ErrGoalNotActive, apierr.GoalNotActive},
+		{saving_goals.ErrGoalNotFound, apierr.NotFound},
 	}
 	for _, c := range codes {
 		if errors.Is(err, c.target) {
-			return SubmitError{Code: c.code, Message: err.Error()}
+			return SubmitError{Code: c.code, Message: c.target.Error()}
 		}
 	}
-	return SubmitError{Code: "SUBMIT_FAILED", Message: err.Error()}
+	slog.Error("pending: submit failed", "error", err)
+	return SubmitError{Code: apierr.SubmitFailed, Message: "Couldn't save this item"}
 }
 
 type SubmitHook func(ctx context.Context, tx pgx.Tx, userID, draftID, id uuid.UUID, kind string) error

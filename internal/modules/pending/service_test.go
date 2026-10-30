@@ -23,7 +23,7 @@ func TestCreateRequestNeedsTheBasics(t *testing.T) {
 	}
 	for _, c := range cases {
 		_, err := createRequest(c.d)
-		if got := toSubmitError(err).Code; got != c.code {
+		if got := toSubmitError(err).Code; string(got) != c.code {
 			t.Errorf("%s: code %q, want %q", c.name, got, c.code)
 		}
 	}

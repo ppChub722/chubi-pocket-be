@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -22,13 +23,13 @@ func NewHandler(s *Service) *Handler {
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
 	var req CreateCategoryRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 
@@ -43,14 +44,14 @@ func (h *Handler) Create(c *gin.Context) {
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
 	var f ListFilter
 	if t := c.Query("type"); t != "" {
 		if t != "income" && t != "expense" {
-			response.BadRequest(c, "VALIDATION_ERROR", "type must be 'income' or 'expense'", nil)
+			response.Validation(c, "type must be 'income' or 'expense'", apierr.Field("type", apierr.FieldInvalid))
 			return
 		}
 		f.Type = &t
@@ -61,7 +62,7 @@ func (h *Handler) List(c *gin.Context) {
 
 	cats, err := h.service.ListMonth(c.Request.Context(), userID, f, c.GetHeader("X-Timezone"))
 	if err != nil {
-		response.InternalError(c, "Failed to list categories", err.Error())
+		response.InternalError(c, "Failed to list categories", err)
 		return
 	}
 	c.JSON(http.StatusOK, ListResponse{Data: cats})
@@ -70,7 +71,7 @@ func (h *Handler) List(c *gin.Context) {
 func (h *Handler) Get(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -89,7 +90,7 @@ func (h *Handler) Get(c *gin.Context) {
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -99,7 +100,7 @@ func (h *Handler) Update(c *gin.Context) {
 
 	var req UpdateCategoryRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 
@@ -114,7 +115,7 @@ func (h *Handler) Update(c *gin.Context) {
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -133,13 +134,13 @@ func (h *Handler) Delete(c *gin.Context) {
 func (h *Handler) Reorder(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
 	var req ReorderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 
@@ -154,7 +155,7 @@ func (h *Handler) Reorder(c *gin.Context) {
 func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid category id", nil)
+		response.Validation(c, "Invalid category id", apierr.Field("id", apierr.FieldInvalid))
 		return uuid.Nil, false
 	}
 	return id, true
@@ -163,18 +164,18 @@ func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 func mapServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrCategoryNotFound):
-		response.NotFound(c, "NOT_FOUND", "Category not found")
+		response.NotFound(c, apierr.NotFound, "Category not found")
 	case errors.Is(err, ErrDuplicateName):
-		response.Fail(c, http.StatusUnprocessableEntity, "CATEGORY_NAME_DUPLICATE", err.Error(), map[string]string{"field": "name"})
+		response.Fail(c, http.StatusUnprocessableEntity, apierr.CategoryNameDuplicate, err.Error(), map[string]string{"field": "name"})
 	case errors.Is(err, ErrInvalidParent):
-		response.BadRequest(c, "INVALID_PARENT", err.Error(), nil)
+		response.BadRequest(c, apierr.InvalidParent, err.Error(), nil)
 	case errors.Is(err, ErrCycleDetected):
-		response.BadRequest(c, "CYCLE_DETECTED", err.Error(), nil)
+		response.BadRequest(c, apierr.CycleDetected, err.Error(), nil)
 	case errors.Is(err, ErrMaxDepth):
-		response.BadRequest(c, "MAX_DEPTH_EXCEEDED", err.Error(), nil)
+		response.BadRequest(c, apierr.MaxDepthExceeded, err.Error(), nil)
 	case errors.Is(err, ErrSystemImmutable):
-		response.BadRequest(c, "SYSTEM_CATEGORY_IMMUTABLE", err.Error(), nil)
+		response.BadRequest(c, apierr.SystemCategoryImmutable, err.Error(), nil)
 	default:
-		response.InternalError(c, "Category operation failed", err.Error())
+		response.InternalError(c, "Category operation failed", err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 )
 
 type Service struct {
@@ -22,7 +23,7 @@ func (s *Service) WithFeeCategoryCheck(fn func(ctx context.Context, userID, cate
 	s.feeCategoryCheck = fn
 }
 
-var ErrInvalidFeeCategory = errors.New("fee_category_id must be one of your expense categories")
+var ErrInvalidFeeCategory = apierr.Invalid("fee_category_id must be one of your expense categories", "fee_category_id", apierr.FieldInvalid)
 
 // ValidTimezone: an IANA name Go's embedded tz database knows. SQL uses the
 // stored name as is (shared.TodaySQL), so only real zones may be saved;

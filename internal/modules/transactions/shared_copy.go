@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -17,7 +18,7 @@ import (
 
 var (
 	// ErrPrivateNoteTooLong — private_note over 500 characters (400 VALIDATION_ERROR).
-	ErrPrivateNoteTooLong = errors.New("private_note: at most 500 characters")
+	ErrPrivateNoteTooLong = apierr.Invalid("private_note: at most 500 characters", "private_note", apierr.FieldTooLong, "max", 500)
 	// ErrPrivateNoteNotShared — private_note only lives on a copy of a shared bill (S11).
 	ErrPrivateNoteNotShared = errors.New("private_note is only for a copy of a shared bill")
 )

@@ -15,6 +15,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 )
 
 const evTestDefaultDSN = "postgres://chubadmin:admin1234@localhost:5433/chubi_pocket_db?sslmode=disable"
@@ -180,7 +181,7 @@ func (f *evFixture) balance(t *testing.T) float64 {
 	return b
 }
 
-func (f *evFixture) assertFailed(t *testing.T, id uuid.UUID, res *SubmitResponse, code string) {
+func (f *evFixture) assertFailed(t *testing.T, id uuid.UUID, res *SubmitResponse, code apierr.Code) {
 	t.Helper()
 	if len(res.Submitted) != 0 || len(res.Failed) != 1 || res.Failed[0].Error.Code != code {
 		t.Fatalf("want one failure %q, got %+v", code, res)
@@ -283,7 +284,7 @@ func TestSubmitEventNotAllowed(t *testing.T) {
 	d := f.save(t, f.draft(&ghost))
 	f.assertFailed(t, d.ID, f.submit(t, d.ID), "PROJECT_NOT_FOUND")
 
-	for status, code := range map[string]string{
+	for status, code := range map[string]apierr.Code{
 		projects.StatusCompleted: "PROJECT_NOT_ACTIVE",
 		projects.StatusCancelled: "PROJECT_LOCKED",
 		projects.StatusArchived:  "PROJECT_LOCKED",
@@ -338,7 +339,7 @@ func TestSubmitBadSplitsOnEventDraft(t *testing.T) {
 	cases := []struct {
 		name   string
 		splits []transactions.SplitInput
-		code   string
+		code   apierr.Code
 	}{
 		{"over the amount", []transactions.SplitInput{{PersonName: "A", OwedAmount: 100}, {PersonName: "B", OwedAmount: 100}}, "SPLITS_EXCEED_AMOUNT"},
 		{"no name", []transactions.SplitInput{{PersonName: "  ", OwedAmount: 10}}, "INVALID_SPLIT"},

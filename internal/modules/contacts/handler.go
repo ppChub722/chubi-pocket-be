@@ -12,6 +12,7 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -26,13 +27,13 @@ func NewHandler(s *Service) *Handler {
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
 	var req CreateContactRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 
@@ -47,7 +48,7 @@ func (h *Handler) Create(c *gin.Context) {
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
@@ -58,7 +59,7 @@ func (h *Handler) List(c *gin.Context) {
 	if v := c.Query("linked"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "linked must be true or false", nil)
+			response.Validation(c, "linked must be true or false", apierr.Field("linked", apierr.FieldInvalid))
 			return
 		}
 		f.Linked = &b
@@ -66,7 +67,7 @@ func (h *Handler) List(c *gin.Context) {
 
 	out, err := h.service.List(c.Request.Context(), userID, f)
 	if err != nil {
-		response.InternalError(c, "Failed to list contacts", err.Error())
+		response.InternalError(c, "Failed to list contacts", err)
 		return
 	}
 	c.JSON(http.StatusOK, ListResponse{Data: out})
@@ -75,7 +76,7 @@ func (h *Handler) List(c *gin.Context) {
 func (h *Handler) Get(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -93,7 +94,7 @@ func (h *Handler) Get(c *gin.Context) {
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -102,7 +103,7 @@ func (h *Handler) Update(c *gin.Context) {
 	}
 	var req UpdateContactRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	out, err := h.service.Update(c.Request.Context(), userID, id, req)
@@ -116,7 +117,7 @@ func (h *Handler) Update(c *gin.Context) {
 func (h *Handler) Archive(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -134,7 +135,7 @@ func (h *Handler) Archive(c *gin.Context) {
 func (h *Handler) Restore(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -152,7 +153,7 @@ func (h *Handler) Restore(c *gin.Context) {
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -170,7 +171,7 @@ func (h *Handler) Delete(c *gin.Context) {
 func (h *Handler) Absorb(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -179,7 +180,7 @@ func (h *Handler) Absorb(c *gin.Context) {
 	}
 	var req AbsorbRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	out, err := h.service.Absorb(c.Request.Context(), userID, id, req.Names)
@@ -193,7 +194,7 @@ func (h *Handler) Absorb(c *gin.Context) {
 func (h *Handler) RequestLink(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -211,12 +212,12 @@ func (h *Handler) RequestLink(c *gin.Context) {
 func (h *Handler) AcceptLinkRequest(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	notifID, err := uuid.Parse(c.Param("notification_id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		response.Validation(c, "Invalid notification id", apierr.Field("notification_id", apierr.FieldInvalid))
 		return
 	}
 	out, err := h.service.AcceptLinkRequest(c.Request.Context(), userID, notifID)
@@ -230,12 +231,12 @@ func (h *Handler) AcceptLinkRequest(c *gin.Context) {
 func (h *Handler) RejectLinkRequest(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	notifID, err := uuid.Parse(c.Param("notification_id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		response.Validation(c, "Invalid notification id", apierr.Field("notification_id", apierr.FieldInvalid))
 		return
 	}
 	out, err := h.service.RejectLinkRequest(c.Request.Context(), userID, notifID)
@@ -249,12 +250,12 @@ func (h *Handler) RejectLinkRequest(c *gin.Context) {
 func (h *Handler) SenderProfile(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	notifID, err := uuid.Parse(c.Param("notification_id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		response.Validation(c, "Invalid notification id", apierr.Field("notification_id", apierr.FieldInvalid))
 		return
 	}
 	out, err := h.service.GetSenderProfile(c.Request.Context(), userID, notifID)
@@ -268,17 +269,17 @@ func (h *Handler) SenderProfile(c *gin.Context) {
 func (h *Handler) CreateLinkedContact(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	notifID, err := uuid.Parse(c.Param("notification_id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		response.Validation(c, "Invalid notification id", apierr.Field("notification_id", apierr.FieldInvalid))
 		return
 	}
 	var req CreateLinkedContactRequest
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	out, err := h.service.CreateLinkedContactFromLinkRequest(
@@ -294,22 +295,22 @@ func (h *Handler) CreateLinkedContact(c *gin.Context) {
 func (h *Handler) LinkExistingContact(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	notifID, err := uuid.Parse(c.Param("notification_id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		response.Validation(c, "Invalid notification id", apierr.Field("notification_id", apierr.FieldInvalid))
 		return
 	}
 	contactID, err := uuid.Parse(c.Param("contact_id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid contact id", nil)
+		response.Validation(c, "Invalid contact id", apierr.Field("contact_id", apierr.FieldInvalid))
 		return
 	}
 	var req LinkExistingContactRequest
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	out, err := h.service.LinkExistingContactFromLinkRequest(
@@ -325,7 +326,7 @@ func (h *Handler) LinkExistingContact(c *gin.Context) {
 func (h *Handler) Unlink(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -343,12 +344,12 @@ func (h *Handler) Unlink(c *gin.Context) {
 func (h *Handler) UnlinkedNames(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	out, err := h.service.UnlinkedNames(c.Request.Context(), userID)
 	if err != nil {
-		response.InternalError(c, "Failed to list unlinked names", err.Error())
+		response.InternalError(c, "Failed to list unlinked names", err)
 		return
 	}
 	if out == nil {
@@ -360,7 +361,7 @@ func (h *Handler) UnlinkedNames(c *gin.Context) {
 func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid contact id", nil)
+		response.Validation(c, "Invalid contact id", apierr.Field("id", apierr.FieldInvalid))
 		return uuid.Nil, false
 	}
 	return id, true
@@ -369,27 +370,27 @@ func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 func mapServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrContactNotFound):
-		response.NotFound(c, "NOT_FOUND", "Contact not found")
+		response.NotFound(c, apierr.NotFound, "Contact not found")
 	case errors.Is(err, ErrAlreadyArchived):
-		response.BadRequest(c, "ALREADY_ARCHIVED", "Contact is already archived", nil)
+		response.BadRequest(c, apierr.AlreadyArchived, "Contact is already archived", nil)
 	case errors.Is(err, ErrNotArchived):
-		response.BadRequest(c, "NOT_ARCHIVED", "Contact is not archived", nil)
+		response.BadRequest(c, apierr.NotArchived, "Contact is not archived", nil)
 	case errors.Is(err, ErrAlreadyLinked):
-		response.Fail(c, http.StatusConflict, "ALREADY_LINKED", "Contact is already linked", nil)
+		response.Fail(c, http.StatusConflict, apierr.AlreadyLinked, "Contact is already linked", nil)
 	case errors.Is(err, ErrNotLinked):
-		response.BadRequest(c, "NOT_LINKED", "Contact is not linked", nil)
+		response.BadRequest(c, apierr.NotLinked, "Contact is not linked", nil)
 	case errors.Is(err, ErrCannotLinkSelf):
-		response.BadRequest(c, "CANNOT_LINK_SELF", "Cannot link a contact to yourself", nil)
+		response.BadRequest(c, apierr.CannotLinkSelf, "Cannot link a contact to yourself", nil)
 	case errors.Is(err, notifications.ErrNotificationNotFound), errors.Is(err, notifications.ErrNotForYou), errors.Is(err, ErrNotLinkRequest):
-		response.NotFound(c, "NOT_FOUND", "Link request not found")
+		response.NotFound(c, apierr.NotFound, "Link request not found")
 	case errors.Is(err, ErrRequestRejected):
-		response.Fail(c, http.StatusConflict, "REQUEST_REJECTED", "The link request was rejected", nil)
+		response.Fail(c, http.StatusConflict, apierr.RequestRejected, "The link request was rejected", nil)
 	case errors.Is(err, ErrNotAccepted):
-		response.Fail(c, http.StatusConflict, "NOT_ACCEPTED", "Accept the link request first", nil)
+		response.Fail(c, http.StatusConflict, apierr.NotAccepted, "Accept the link request first", nil)
 	case errors.Is(err, notifications.ErrStateConflict):
-		response.Fail(c, http.StatusConflict, "STATE_CONFLICT", "The link request was already answered", nil)
+		response.Fail(c, http.StatusConflict, apierr.StateConflict, "The link request was already answered", nil)
 	default:
-		response.InternalError(c, "Contact operation failed", err.Error())
+		response.InternalError(c, "Contact operation failed", err)
 	}
 }
 

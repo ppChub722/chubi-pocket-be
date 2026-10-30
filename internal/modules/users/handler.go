@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -23,13 +24,13 @@ func NewHandler(s *Service, a *auth.Service) *Handler {
 func (h *Handler) GetMe(c *gin.Context) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
 	prof, err := h.service.GetProfile(c.Request.Context(), id)
 	if err != nil {
-		response.InternalError(c, "Failed to fetch profile", err.Error())
+		response.InternalError(c, "Failed to fetch profile", err)
 		return
 	}
 	c.JSON(http.StatusOK, prof)
@@ -38,13 +39,13 @@ func (h *Handler) GetMe(c *gin.Context) {
 func (h *Handler) UpdateMe(c *gin.Context) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
 	var req UpdateProfileRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 
@@ -53,15 +54,15 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		switch {
 		case errors.Is(err, ErrUnknownPreferenceKey), errors.Is(err, ErrInvalidFeeCategory), errors.Is(err, ErrInvalidDefaultAccount),
 			errors.Is(err, ErrInvalidAvatarSettings):
-			response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+			response.BindError(c, err)
 		case errors.Is(err, ErrAvatarSourceUnavailable):
-			response.Fail(c, http.StatusConflict, "AVATAR_SOURCE_UNAVAILABLE",
+			response.Fail(c, http.StatusConflict, apierr.AvatarSourceUnavailable,
 				"No picture from that source (or the app is no longer linked)", nil)
 		case errors.Is(err, ErrEmailExists):
-			response.Fail(c, http.StatusConflict, "EMAIL_EXISTS",
+			response.Fail(c, http.StatusConflict, apierr.EmailExists,
 				"Email already registered", nil)
 		default:
-			response.InternalError(c, "Failed to update profile", err.Error())
+			response.InternalError(c, "Failed to update profile", err)
 		}
 		return
 	}
@@ -73,16 +74,16 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 func (h *Handler) DeleteAvatar(c *gin.Context) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	prof, err := h.service.DeleteAvatar(c.Request.Context(), id, c.Param("id"))
 	if err != nil {
 		if errors.Is(err, ErrInvalidAvatarSettings) {
-			response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+			response.ValidationErr(c, err)
 			return
 		}
-		response.InternalError(c, "Failed to delete the picture", err.Error())
+		response.InternalError(c, "Failed to delete the picture", err)
 		return
 	}
 	c.JSON(http.StatusOK, prof)
@@ -91,12 +92,12 @@ func (h *Handler) DeleteAvatar(c *gin.Context) {
 func (h *Handler) Deactivate(c *gin.Context) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
 	if err := h.service.Deactivate(c.Request.Context(), id); err != nil {
-		response.InternalError(c, "Failed to deactivate", err.Error())
+		response.InternalError(c, "Failed to deactivate", err)
 		return
 	}
 	h.respondProfile(c, id)
@@ -105,21 +106,21 @@ func (h *Handler) Deactivate(c *gin.Context) {
 func (h *Handler) Reactivate(c *gin.Context) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	prof, err := h.service.GetProfile(c.Request.Context(), id)
 	if err != nil {
-		response.InternalError(c, "Failed to reactivate", err.Error())
+		response.InternalError(c, "Failed to reactivate", err)
 		return
 	}
 
 	if err := h.service.Reactivate(c.Request.Context(), id, prof.Status); err != nil {
 		if errors.Is(err, ErrAlreadyActive) {
-			response.Fail(c, http.StatusBadRequest, "ALREADY_ACTIVE", "Account is already active", nil)
+			response.Fail(c, http.StatusBadRequest, apierr.AlreadyActive, "Account is already active", nil)
 			return
 		}
-		response.InternalError(c, "Failed to reactivate", err.Error())
+		response.InternalError(c, "Failed to reactivate", err)
 		return
 	}
 	h.respondProfile(c, id)
@@ -128,7 +129,7 @@ func (h *Handler) Reactivate(c *gin.Context) {
 func (h *Handler) respondProfile(c *gin.Context, id uuid.UUID) {
 	prof, err := h.service.GetProfile(c.Request.Context(), id)
 	if err != nil {
-		response.InternalError(c, "Failed to fetch profile", err.Error())
+		response.InternalError(c, "Failed to fetch profile", err)
 		return
 	}
 	c.JSON(http.StatusOK, prof)

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -27,7 +28,7 @@ var (
 	ErrAccountHasMembers = errors.New("account has other active members; remove them or transfer ownership first")
 	ErrScopeNotAllowed   = errors.New("ex-members may only use report_scope 'none' or 'own'")
 	ErrNotInvite         = errors.New("notification is not an account_invite")
-	ErrInvalidInclude    = errors.New("include must be summary and/or members")
+	ErrInvalidInclude    = apierr.Invalid("include must be summary and/or members", "include", apierr.FieldInvalid, "allowed", []string{"summary", "members"})
 	ErrInvalidDate       = errors.New("from / to must be YYYY-MM-DD")
 )
 

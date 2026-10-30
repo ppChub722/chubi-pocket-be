@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared/recurrence"
 )
@@ -32,7 +33,7 @@ func atoiOr(s string, def int) int {
 func user(c *gin.Context) (uuid.UUID, bool) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 	}
 	return id, ok
 }
@@ -44,7 +45,7 @@ func userAndID(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 	}
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid id", nil)
+		response.Validation(c, "Invalid id", apierr.Field("id", apierr.FieldInvalid))
 		return uuid.Nil, uuid.Nil, false
 	}
 	return uid, id, true
@@ -57,7 +58,7 @@ func monthParam(c *gin.Context) (string, bool) {
 		return "", true
 	}
 	if _, err := time.Parse("2006-01", m); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid month", nil)
+		response.Validation(c, "Invalid month", apierr.Field("month", apierr.FieldInvalid))
 		return "", false
 	}
 	return m, true
@@ -70,7 +71,7 @@ func optionalID(c *gin.Context, name string) (*uuid.UUID, bool) {
 	}
 	id, err := uuid.Parse(v)
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid "+name, nil)
+		response.Validation(c, "Invalid "+name, apierr.Field(name, apierr.FieldInvalid))
 		return nil, false
 	}
 	return &id, true
@@ -89,7 +90,7 @@ func bind(c *gin.Context, v any) (map[string]bool, bool) {
 		err = json.Unmarshal(raw, &keys)
 	}
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return nil, false
 	}
 	present := map[string]bool{}
@@ -111,31 +112,31 @@ func mapError(c *gin.Context, err error) {
 	var insufficient *InsufficientError
 	switch {
 	case errors.As(err, &insufficient):
-		response.Fail(c, http.StatusConflict, "INSUFFICIENT_SAVING", err.Error(), gin.H{"available": insufficient.Available})
+		response.Fail(c, http.StatusConflict, apierr.InsufficientSaving, err.Error(), gin.H{"available": insufficient.Available})
 	case errors.Is(err, ErrGoalNotFound):
-		response.NotFound(c, "NOT_FOUND", "Saving goal not found")
+		response.NotFound(c, apierr.NotFound, "Saving goal not found")
 	case errors.Is(err, ErrEntryNotFound):
-		response.NotFound(c, "NOT_FOUND", "Saving entry not found")
+		response.NotFound(c, apierr.NotFound, "Saving entry not found")
 	case errors.Is(err, ErrValidation):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, recurrence.ErrInvalidRule):
-		response.BadRequest(c, "INVALID_RULE", err.Error(), nil)
+		response.BadRequest(c, apierr.InvalidRule, err.Error(), nil)
 	case errors.Is(err, recurrence.ErrEndTooFar):
-		response.BadRequest(c, "END_TOO_FAR", err.Error(), nil)
+		response.BadRequest(c, apierr.EndTooFar, err.Error(), nil)
 	case errors.Is(err, ErrSplitMismatch):
-		response.BadRequest(c, "SPLIT_MISMATCH", err.Error(), nil)
+		response.BadRequest(c, apierr.SplitMismatch, err.Error(), nil)
 	case errors.Is(err, ErrAccountNotFound):
-		response.BadRequest(c, "ACCOUNT_NOT_FOUND", err.Error(), nil)
+		response.BadRequest(c, apierr.AccountNotFound, err.Error(), nil)
 	case errors.Is(err, ErrWalletNotTracked):
-		response.BadRequest(c, "WALLET_NOT_TRACKED", err.Error(), nil)
+		response.BadRequest(c, apierr.WalletNotTracked, err.Error(), nil)
 	case errors.Is(err, ErrGoalNotActive):
-		response.Fail(c, http.StatusConflict, "GOAL_NOT_ACTIVE", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.GoalNotActive, err.Error(), nil)
 	case errors.Is(err, ErrGoalHasSavings):
-		response.Fail(c, http.StatusConflict, "GOAL_HAS_SAVINGS", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.GoalHasSavings, err.Error(), nil)
 	case errors.Is(err, ErrInvalidTransition):
-		response.Fail(c, http.StatusConflict, "INVALID_TRANSITION", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.InvalidTransition, err.Error(), nil)
 	default:
-		response.InternalError(c, "Saving operation failed", err.Error())
+		response.InternalError(c, "Saving operation failed", err)
 	}
 }
 
@@ -146,12 +147,12 @@ func (h *Handler) List(c *gin.Context) {
 	}
 	status := c.DefaultQuery("status", StateActive)
 	if status != StateActive && status != StateCompleted && status != StateArchived {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
+		response.Validation(c, "Invalid status", apierr.Field("status", apierr.FieldInvalid))
 		return
 	}
 	sortBy := c.Query("sort")
 	if !goalSorts[sortBy] {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid sort", nil)
+		response.Validation(c, "Invalid sort", apierr.Field("sort", apierr.FieldInvalid))
 		return
 	}
 	month, ok := monthParam(c)
@@ -269,7 +270,7 @@ func (h *Handler) Entries(c *gin.Context) {
 	}
 	bucket := c.Query("bucket")
 	if bucket != "" && bucket != BucketSpare {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid bucket", nil)
+		response.Validation(c, "Invalid bucket", apierr.Field("bucket", apierr.FieldInvalid))
 		return
 	}
 	out, err := h.service.Entries(c.Request.Context(), uid, goalID, bucket == BucketSpare, accountID,

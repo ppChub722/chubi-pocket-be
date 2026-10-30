@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -24,20 +25,20 @@ var (
 	ErrSystemCategoryNotAllowed    = errors.New("user category required (system categories are auto-assigned)")
 	ErrSplitsNotSupportedYet       = errors.New("splits are not supported in Phase 1a; ships in Phase 1b")
 	ErrSplitsOnTransfer            = errors.New("transfer transactions cannot have splits")
-	ErrProjectIDNotAllowed         = errors.New("project_id is auto-managed; cannot be set on POST /v1/transactions")
-	ErrTransferToAccountRequired   = errors.New("transfer_to_account_id is required for type=transfer")
-	ErrTransferFieldsOnNonTransfer = errors.New("transfer_to_account_id is only valid for type=transfer")
-	ErrAmountInvalid               = errors.New("amount must be > 0")
+	ErrProjectIDNotAllowed         = apierr.Invalid("project_id is auto-managed; cannot be set on POST /v1/transactions", "project_id", apierr.FieldInvalid)
+	ErrTransferToAccountRequired   = apierr.Invalid("transfer_to_account_id is required for type=transfer", "transfer_to_account_id", apierr.FieldRequired)
+	ErrTransferFieldsOnNonTransfer = apierr.Invalid("transfer_to_account_id is only valid for type=transfer", "transfer_to_account_id", apierr.FieldInvalid)
+	ErrAmountInvalid               = apierr.Invalid("amount must be > 0", "amount", apierr.FieldOutOfRange, "gt", 0)
 	ErrSplitContactNotFound        = errors.New("split contact not found or not owned")
 	ErrSplitsAuthorOnly            = errors.New("only the transaction's author can change its splits")
 	ErrSplitsExceedAmount          = errors.New("splits add up to more than the transaction amount")
 	ErrSplitUnknownDebt            = errors.New("debt_id is not one of this transaction's splits (or is listed twice)")
 	ErrSplitPersonRequired         = errors.New("person_name is required for a new split")
 	ErrSplitsExceedShare           = errors.New("splits add up to more than your share of this event bill")
-	ErrCategoryRequiredForTransfer = errors.New("transfer category is auto-set; do not pass category_id")
-	ErrTransferRequiresAccount     = errors.New("account_id is required for type=transfer")
+	ErrCategoryRequiredForTransfer = apierr.Invalid("transfer category is auto-set; do not pass category_id", "category_id", apierr.FieldInvalid)
+	ErrTransferRequiresAccount     = apierr.Invalid("account_id is required for type=transfer", "account_id", apierr.FieldRequired)
 	ErrTransferEditCurrency        = errors.New("cannot edit currency on a transfer; delete and recreate")
-	ErrTransferCategoryEdit        = errors.New("cannot change category on a transfer; delete and recreate")
+	ErrTransferCategoryEdit        = apierr.Invalid("cannot change category on a transfer; delete and recreate", "category_id", apierr.FieldInvalid)
 	// tag_ids / PUT /:id/tags: every id must be one of the caller's tags.
 	ErrTagNotFound                = errors.New("tag not found")
 	ErrSystemTransactionImmutable = errors.New("transactions in a system category cannot be edited or deleted directly; use the account-level operation that created them")
@@ -1011,7 +1012,7 @@ func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID, alsoDel
 		return nil, err
 	}
 	out.Effects.RemovedDebtIDs = append(out.Effects.RemovedDebtIDs, d.debts.removed...) // X4
-	if d.item != nil && s.recurring != nil { // the occurrence it filled, now skipped (R2)
+	if d.item != nil && s.recurring != nil {                                            // the occurrence it filled, now skipped (R2)
 		if slot, err := s.recurring.SlotView(ctx, *d.item); err == nil {
 			out.Effects.Slots = append(out.Effects.Slots, slot)
 		}

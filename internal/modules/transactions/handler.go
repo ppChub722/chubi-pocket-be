@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -28,13 +29,13 @@ func NewHandler(s *Service) *Handler {
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
 	var req CreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 
@@ -49,7 +50,7 @@ func (h *Handler) Create(c *gin.Context) {
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
@@ -61,7 +62,7 @@ func (h *Handler) List(c *gin.Context) {
 	switch f.Sort {
 	case "date_desc", "date_asc", "amount_desc", "amount_asc":
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "sort must be date_desc, date_asc, amount_desc or amount_asc", nil)
+		response.Validation(c, "sort must be date_desc, date_asc, amount_desc or amount_asc", apierr.Field("sort", apierr.FieldInvalid))
 		return
 	}
 	if v := c.Query("page"); v != "" {
@@ -77,7 +78,7 @@ func (h *Handler) List(c *gin.Context) {
 	for _, v := range c.QueryArray("account_id") {
 		id, err := uuid.Parse(v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid account_id", nil)
+			response.Validation(c, "Invalid account_id", apierr.Field("account_id", apierr.FieldInvalid))
 			return
 		}
 		f.AccountIDs = append(f.AccountIDs, id)
@@ -85,7 +86,7 @@ func (h *Handler) List(c *gin.Context) {
 	for _, v := range c.QueryArray("category_id") {
 		id, err := uuid.Parse(v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid category_id", nil)
+			response.Validation(c, "Invalid category_id", apierr.Field("category_id", apierr.FieldInvalid))
 			return
 		}
 		f.CategoryIDs = append(f.CategoryIDs, id)
@@ -95,7 +96,7 @@ func (h *Handler) List(c *gin.Context) {
 	f.Uncategorized = c.Query("uncategorized") == "true"
 	if v := strings.TrimSpace(c.Query("q")); v != "" {
 		if utf8.RuneCountInString(v) > 100 {
-			response.BadRequest(c, "VALIDATION_ERROR", "q must be at most 100 characters", nil)
+			response.Validation(c, "q must be at most 100 characters", apierr.Field("q", apierr.FieldInvalid))
 			return
 		}
 		f.Q = v
@@ -103,14 +104,14 @@ func (h *Handler) List(c *gin.Context) {
 	for _, v := range c.QueryArray("tag_id") {
 		id, err := uuid.Parse(v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid tag_id", nil)
+			response.Validation(c, "Invalid tag_id", apierr.Field("tag_id", apierr.FieldInvalid))
 			return
 		}
 		f.TagIDs = append(f.TagIDs, id)
 	}
 	for _, v := range c.QueryArray("type") {
 		if v != "expense" && v != "income" && v != "transfer" {
-			response.BadRequest(c, "VALIDATION_ERROR", "type must be 'expense', 'income', or 'transfer'", nil)
+			response.Validation(c, "type must be 'expense', 'income', or 'transfer'", apierr.Field("type", apierr.FieldInvalid))
 			return
 		}
 		f.Types = append(f.Types, TxType(v))
@@ -121,7 +122,7 @@ func (h *Handler) List(c *gin.Context) {
 	}{{"from", &f.From}, {"to", &f.To}} {
 		if v := c.Query(p.key); v != "" {
 			if !validDate(v) {
-				response.BadRequest(c, "VALIDATION_ERROR", p.key+" must be YYYY-MM-DD", nil)
+				response.Validation(c, p.key+" must be YYYY-MM-DD", apierr.Field(p.key, apierr.FieldInvalid, "format", "date"))
 				return
 			}
 			*p.dst = &v
@@ -134,14 +135,14 @@ func (h *Handler) List(c *gin.Context) {
 		if v := c.Query(p.key); v != "" {
 			n, err := strconv.ParseFloat(v, 64)
 			if err != nil || n < 0 || math.IsNaN(n) || math.IsInf(n, 0) {
-				response.BadRequest(c, "VALIDATION_ERROR", p.key+" must be a non-negative number", nil)
+				response.Validation(c, p.key+" must be a non-negative number", apierr.Field(p.key, apierr.FieldOutOfRange, "min", 0))
 				return
 			}
 			*p.dst = &n
 		}
 	}
 	if f.AmountMin != nil && f.AmountMax != nil && *f.AmountMin > *f.AmountMax {
-		response.BadRequest(c, "VALIDATION_ERROR", "amount_min must be at most amount_max", nil)
+		response.Validation(c, "amount_min must be at most amount_max", apierr.Field("amount_min", apierr.FieldInvalid))
 		return
 	}
 	if c.Query("include_archived") == "true" {
@@ -154,7 +155,7 @@ func (h *Handler) List(c *gin.Context) {
 	if v := c.Query("counterparty_key"); v != "" {
 		k, err := shared.ParseDebtKey(v)
 		if err != nil {
-			response.BadRequest(c, "INVALID_PERSON_KEY", err.Error(), nil)
+			response.BadRequest(c, apierr.InvalidPersonKey, err.Error(), nil)
 			return
 		}
 		f.CounterpartyKey = k.Key()
@@ -163,7 +164,7 @@ func (h *Handler) List(c *gin.Context) {
 	f.TZ = c.GetHeader("X-Timezone")
 	resp, err := h.service.List(c.Request.Context(), userID, f)
 	if err != nil {
-		response.InternalError(c, "Failed to list transactions", err.Error())
+		response.InternalError(c, "Failed to list transactions", err)
 		return
 	}
 	c.JSON(http.StatusOK, resp)
@@ -172,7 +173,7 @@ func (h *Handler) List(c *gin.Context) {
 func (h *Handler) Get(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -191,7 +192,7 @@ func (h *Handler) Get(c *gin.Context) {
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -201,7 +202,7 @@ func (h *Handler) Update(c *gin.Context) {
 
 	var req UpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 
@@ -226,7 +227,7 @@ func (h *Handler) Update(c *gin.Context) {
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -245,7 +246,7 @@ func (h *Handler) Delete(c *gin.Context) {
 func (h *Handler) EditSplits(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -254,7 +255,7 @@ func (h *Handler) EditSplits(c *gin.Context) {
 	}
 	var req EditSplitsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	out, err := h.service.EditSplits(c.Request.Context(), userID, id, *req.Splits)
@@ -268,7 +269,7 @@ func (h *Handler) EditSplits(c *gin.Context) {
 func (h *Handler) SetTags(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -277,7 +278,7 @@ func (h *Handler) SetTags(c *gin.Context) {
 	}
 	var req SetTagsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	out, err := h.service.SetTags(c.Request.Context(), userID, id, *req.TagIDs)
@@ -291,12 +292,12 @@ func (h *Handler) SetTags(c *gin.Context) {
 func (h *Handler) FormOptions(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	out, err := h.service.FormOptions(c.Request.Context(), userID)
 	if err != nil {
-		response.InternalError(c, "Failed to load form options", err.Error())
+		response.InternalError(c, "Failed to load form options", err)
 		return
 	}
 	c.JSON(http.StatusOK, out)
@@ -305,14 +306,20 @@ func (h *Handler) FormOptions(c *gin.Context) {
 func (h *Handler) Summary(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
 	from := c.Query("from")
 	to := c.Query("to")
 	if !validDate(from) || !validDate(to) {
-		response.BadRequest(c, "VALIDATION_ERROR", "from and to are required (YYYY-MM-DD)", nil)
+		var fields []apierr.FieldError
+		for _, q := range []struct{ name, v string }{{"from", from}, {"to", to}} {
+			if !validDate(q.v) {
+				fields = append(fields, apierr.Field(q.name, apierr.FieldInvalid, "format", "date"))
+			}
+		}
+		response.Validation(c, "from and to are required (YYYY-MM-DD)", fields...)
 		return
 	}
 
@@ -320,14 +327,13 @@ func (h *Handler) Summary(c *gin.Context) {
 	switch req.GroupBy {
 	case "", "day", "week", "month", "category", "parent_category", "account":
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR",
-			"group_by must be day, week, month, category, parent_category or account", nil)
+		response.Validation(c, "group_by must be day, week, month, category, parent_category or account", apierr.Field("group_by", apierr.FieldInvalid))
 		return
 	}
 	if v := c.Query("account_id"); v != "" {
 		id, err := uuid.Parse(v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid account_id", nil)
+			response.Validation(c, "Invalid account_id", apierr.Field("account_id", apierr.FieldInvalid))
 			return
 		}
 		req.AccountID = &id
@@ -335,7 +341,7 @@ func (h *Handler) Summary(c *gin.Context) {
 	if v := c.Query("category_id"); v != "" {
 		id, err := uuid.Parse(v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid category_id", nil)
+			response.Validation(c, "Invalid category_id", apierr.Field("category_id", apierr.FieldInvalid))
 			return
 		}
 		req.CategoryID = &id
@@ -345,13 +351,13 @@ func (h *Handler) Summary(c *gin.Context) {
 	case TypeIncome, TypeExpense:
 		req.Type = &v
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "type must be income or expense", nil)
+		response.Validation(c, "type must be income or expense", apierr.Field("type", apierr.FieldInvalid))
 		return
 	}
 
 	summary, err := h.service.Summary(c.Request.Context(), userID, req)
 	if err != nil {
-		response.InternalError(c, "Failed to compute summary", err.Error())
+		response.InternalError(c, "Failed to compute summary", err)
 		return
 	}
 	c.JSON(http.StatusOK, summary)
@@ -365,7 +371,7 @@ func validDate(s string) bool {
 func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid transaction id", nil)
+		response.Validation(c, "Invalid transaction id", apierr.Field("id", apierr.FieldInvalid))
 		return uuid.Nil, false
 	}
 	return id, true
@@ -376,76 +382,76 @@ func MapError(c *gin.Context, err error) { mapServiceError(c, err) }
 func mapServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrTxNotFound):
-		response.NotFound(c, "NOT_FOUND", "Transaction not found")
+		response.NotFound(c, apierr.NotFound, "Transaction not found")
 	case errors.Is(err, ErrAccountArchived):
-		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.AccountArchived, err.Error(), nil)
 	case errors.Is(err, ErrAccountForbidden):
-		response.NotFound(c, "ACCOUNT_NOT_FOUND", "Account not found")
+		response.NotFound(c, apierr.AccountNotFound, "Account not found")
 	case errors.Is(err, ErrCategoryForbidden):
-		response.Fail(c, http.StatusForbidden, "FORBIDDEN", "Category not accessible", nil)
+		response.Fail(c, http.StatusForbidden, apierr.Forbidden, "Category not accessible", nil)
 	case errors.Is(err, ErrCategoryTypeMismatch):
-		response.BadRequest(c, "CATEGORY_TYPE_MISMATCH", err.Error(), nil)
+		response.BadRequest(c, apierr.CategoryTypeMismatch, err.Error(), nil)
 	case errors.Is(err, ErrTagNotFound):
-		response.BadRequest(c, "TAG_NOT_FOUND", "Tag not found", nil)
+		response.BadRequest(c, apierr.TagNotFound, "Tag not found", nil)
 	case errors.Is(err, ErrSplitContactNotFound):
-		response.BadRequest(c, "CONTACT_NOT_FOUND", "Split contact not found", nil)
+		response.BadRequest(c, apierr.ContactNotFound, "Split contact not found", nil)
 	case errors.Is(err, ErrTransferSameAccount):
-		response.BadRequest(c, "TRANSFER_SAME_ACCOUNT", err.Error(), nil)
+		response.BadRequest(c, apierr.TransferSameAccount, err.Error(), nil)
 	case errors.Is(err, ErrSystemCategoryNotAllowed):
-		response.BadRequest(c, "SYSTEM_CATEGORY_NOT_ALLOWED", err.Error(), nil)
+		response.BadRequest(c, apierr.SystemCategoryNotAllowed, err.Error(), nil)
 	case errors.Is(err, ErrSplitsNotSupportedYet):
-		response.BadRequest(c, "SPLITS_NOT_SUPPORTED_YET", err.Error(), nil)
+		response.BadRequest(c, apierr.SplitsNotSupportedYet, err.Error(), nil)
 	case errors.Is(err, ErrProjectIDNotAllowed):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrSourcePTNotFound):
-		response.NotFound(c, "SOURCE_PT_NOT_FOUND", err.Error())
+		response.NotFound(c, apierr.SourcePtNotFound, err.Error())
 	case errors.Is(err, ErrSourcePTNotForUser):
-		response.Fail(c, http.StatusForbidden, "SOURCE_PT_NOT_FOR_USER", err.Error(), nil)
+		response.Fail(c, http.StatusForbidden, apierr.SourcePtNotForUser, err.Error(), nil)
 	case errors.Is(err, ErrTransferToAccountRequired),
 		errors.Is(err, ErrTransferFieldsOnNonTransfer),
 		errors.Is(err, ErrCategoryRequiredForTransfer),
 		errors.Is(err, ErrTransferCategoryEdit),
 		errors.Is(err, ErrTransferRequiresAccount):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrSystemTransactionImmutable):
-		response.BadRequest(c, "SYSTEM_TRANSACTION_IMMUTABLE", err.Error(), nil)
+		response.BadRequest(c, apierr.SystemTransactionImmutable, err.Error(), nil)
 	case errors.Is(err, ErrCategoryAuthorOnly):
-		response.Fail(c, http.StatusForbidden, "CATEGORY_AUTHOR_ONLY", err.Error(), nil)
+		response.Fail(c, http.StatusForbidden, apierr.CategoryAuthorOnly, err.Error(), nil)
 	case errors.Is(err, ErrDebtTxAuthorOnly):
-		response.Fail(c, http.StatusForbidden, "DEBT_TX_AUTHOR_ONLY", err.Error(), nil)
+		response.Fail(c, http.StatusForbidden, apierr.DebtTxAuthorOnly, err.Error(), nil)
 	case errors.Is(err, ErrDebtTxNeedsWallet):
-		response.BadRequest(c, "DEBT_TX_NEEDS_WALLET", err.Error(), nil)
+		response.BadRequest(c, apierr.DebtTxNeedsWallet, err.Error(), nil)
 	case errors.Is(err, ErrRowLocked):
-		response.Fail(c, http.StatusForbidden, "ROW_LOCKED", err.Error(), nil)
+		response.Fail(c, http.StatusForbidden, apierr.RowLocked, err.Error(), nil)
 	case errors.Is(err, ErrSplitsOnTransfer):
-		response.BadRequest(c, "SPLITS_ON_TRANSFER", err.Error(), nil)
+		response.BadRequest(c, apierr.SplitsOnTransfer, err.Error(), nil)
 	case errors.Is(err, ErrSplitsAuthorOnly):
-		response.Fail(c, http.StatusForbidden, "SPLITS_AUTHOR_ONLY", err.Error(), nil)
+		response.Fail(c, http.StatusForbidden, apierr.SplitsAuthorOnly, err.Error(), nil)
 	case errors.Is(err, ErrSplitsExceedAmount):
-		response.BadRequest(c, "SPLITS_EXCEED_AMOUNT", err.Error(), nil)
+		response.BadRequest(c, apierr.SplitsExceedAmount, err.Error(), nil)
 	case errors.Is(err, ErrSplitUnknownDebt), errors.Is(err, ErrSplitPersonRequired):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrSplitsExceedShare):
-		response.BadRequest(c, "SPLITS_EXCEED_SHARE", err.Error(), nil)
+		response.BadRequest(c, apierr.SplitsExceedShare, err.Error(), nil)
 	case errors.Is(err, ErrAmountInvalid), errors.Is(err, ErrPaidByPersonRequired):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrPaidByExpenseOnly):
-		response.BadRequest(c, "PAID_BY_EXPENSE_ONLY", err.Error(), nil)
+		response.BadRequest(c, apierr.PaidByExpenseOnly, err.Error(), nil)
 	case errors.Is(err, ErrPaidByExceedsAmount):
-		response.BadRequest(c, "PAID_BY_EXCEEDS_AMOUNT", err.Error(), nil)
+		response.BadRequest(c, apierr.PaidByExceedsAmount, err.Error(), nil)
 	case errors.Is(err, ErrLinkModeConflict):
-		response.BadRequest(c, "LINK_MODE_CONFLICT", err.Error(), nil)
+		response.BadRequest(c, apierr.LinkModeConflict, err.Error(), nil)
 	case errors.Is(err, ErrLinkModeInput):
-		response.BadRequest(c, "LINK_MODE_INPUT", err.Error(), nil)
+		response.BadRequest(c, apierr.LinkModeInput, err.Error(), nil)
 	case errors.As(err, new(*SharedBillFieldError)):
 		var f *SharedBillFieldError
 		errors.As(err, &f)
-		response.Fail(c, http.StatusConflict, "SHARED_BILL_FIELD", err.Error(), map[string]any{"fields": f.Fields})
+		response.Fail(c, http.StatusConflict, apierr.SharedBillField, err.Error(), map[string]any{"fields": f.Fields})
 	case errors.Is(err, ErrPrivateNoteNotShared):
-		response.BadRequest(c, "PRIVATE_NOTE_NOT_SHARED", err.Error(), nil)
+		response.BadRequest(c, apierr.PrivateNoteNotShared, err.Error(), nil)
 	case errors.Is(err, ErrPrivateNoteTooLong):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	default:
-		response.InternalError(c, "Transaction operation failed", err.Error())
+		response.InternalError(c, "Transaction operation failed", err)
 	}
 }

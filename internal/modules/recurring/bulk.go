@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -53,22 +54,22 @@ func validateBulk(req *OccBulkRequest) ([]time.Time, error) {
 	switch req.Action {
 	case BulkConfirm, BulkSkip, BulkMarkPaid:
 	default:
-		return nil, fmt.Errorf("%w: action must be confirm, skip or mark_paid", ErrValidation)
+		return nil, apierr.Wrap(ErrValidation, "action must be confirm, skip or mark_paid", apierr.Field("action", apierr.FieldInvalid, "allowed", []string{BulkConfirm, BulkSkip, BulkMarkPaid}))
 	}
 	if len(req.Items) == 0 || len(req.Items) > bulkMaxItems {
-		return nil, fmt.Errorf("%w: items must hold 1 to %d occurrences", ErrValidation, bulkMaxItems)
+		return nil, apierr.Wrap(ErrValidation, fmt.Sprintf("items must hold 1 to %d occurrences", bulkMaxItems), apierr.Field("items", apierr.FieldOutOfRange, "min", 1, "max", bulkMaxItems))
 	}
 	slots := make([]time.Time, len(req.Items))
 	for i, it := range req.Items {
 		if it.RuleID == uuid.Nil {
-			return nil, fmt.Errorf("%w: items[%d].rule_id is required", ErrValidation, i)
+			return nil, apierr.Wrap(ErrValidation, fmt.Sprintf("items[%d].rule_id is required", i), apierr.Field(fmt.Sprintf("items[%d].rule_id", i), apierr.FieldRequired))
 		}
 		d, err := time.Parse(dateLayout, it.Slot)
 		if err != nil {
-			return nil, fmt.Errorf("%w: items[%d].slot must be YYYY-MM-DD", ErrValidation, i)
+			return nil, apierr.Wrap(ErrValidation, fmt.Sprintf("items[%d].slot must be YYYY-MM-DD", i), apierr.Field(fmt.Sprintf("items[%d].slot", i), apierr.FieldInvalid, "format", "date"))
 		}
 		if it.Amount != nil && (req.Action == BulkSkip || *it.Amount <= 0) {
-			return nil, fmt.Errorf("%w: items[%d].amount must be > 0 and only comes with confirm / mark_paid", ErrValidation, i)
+			return nil, apierr.Wrap(ErrValidation, fmt.Sprintf("items[%d].amount must be > 0 and only comes with confirm / mark_paid", i), apierr.Field(fmt.Sprintf("items[%d].amount", i), apierr.FieldInvalid))
 		}
 		slots[i] = d
 	}

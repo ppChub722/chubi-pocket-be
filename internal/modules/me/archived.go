@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -19,8 +20,8 @@ type ArchivedItem struct {
 	Name       string           `json:"name"`
 	IconCode   *shared.IconCode `json:"icon_code"`
 	ArchivedAt time.Time        `json:"archived_at"` // last change of the row
-	CanRestore bool `json:"can_restore"`
-	Secondary *Secondary `json:"secondary"`
+	CanRestore bool             `json:"can_restore"`
+	Secondary  *Secondary       `json:"secondary"`
 }
 
 type ArchivedGroup struct {
@@ -121,12 +122,12 @@ func (s *Service) Archived(ctx context.Context, userID uuid.UUID) (*ArchivedHub,
 func (h *Handler) Archived(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	out, err := h.service.Archived(c.Request.Context(), userID)
 	if err != nil {
-		response.InternalError(c, "Failed to load archived items", err.Error())
+		response.InternalError(c, "Failed to load archived items", err)
 		return
 	}
 	c.JSON(http.StatusOK, out)

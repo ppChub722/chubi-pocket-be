@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -67,20 +68,20 @@ func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, items []Reorder
 func (h *Handler) Reorder(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	var req ReorderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	out, err := h.service.ReorderPage(c.Request.Context(), userID, req.Items)
 	switch {
 	case errors.Is(err, ErrReorderForbidden):
-		response.Fail(c, http.StatusForbidden, "FORBIDDEN", err.Error(), nil)
+		response.Fail(c, http.StatusForbidden, apierr.Forbidden, err.Error(), nil)
 	case errors.Is(err, ErrReorderDuplicate):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 	case err != nil:
 		mapServiceError(c, err)
 	default:

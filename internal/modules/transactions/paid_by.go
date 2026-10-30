@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -23,7 +24,7 @@ import (
 var (
 	ErrPaidByExpenseOnly    = errors.New("paid_by is for an expense or an income")
 	ErrPaidByExceedsAmount  = errors.New("paid_by.amount is more than the bill")
-	ErrPaidByPersonRequired = errors.New("paid_by needs a contact_id or a person_name")
+	ErrPaidByPersonRequired = apierr.Invalid("paid_by needs a contact_id or a person_name", "paid_by", apierr.FieldRequired)
 	ErrLinkModeConflict     = errors.New("a bill is shared one way at a time: splits, paid_by or an event")
 )
 

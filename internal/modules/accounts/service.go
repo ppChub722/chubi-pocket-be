@@ -14,22 +14,23 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 var (
-	ErrCreditFieldMismatch  = errors.New("credit_limit is required for credit_card / pay_later types; other types must not set credit fields")
-	ErrTypeChangeNeedsLimit = errors.New("changing account type to a credit type requires credit_limit")
+	ErrCreditFieldMismatch  = apierr.Invalid("credit_limit is required for credit_card / pay_later types; other types must not set credit fields", "credit_limit", apierr.FieldInvalid)
+	ErrTypeChangeNeedsLimit = apierr.Invalid("changing account type to a credit type requires credit_limit", "credit_limit", apierr.FieldRequired)
 	ErrBalanceNotEditable   = errors.New("balance is not directly editable; use POST /v1/accounts/:id/adjust-balance")
 	ErrAdjustNoOp           = errors.New("new_balance equals current balance — nothing to adjust")
 	ErrBalanceNotTracked    = errors.New("this wallet doesn't track its balance; turn track_balance on first")
-	ErrCurrentBalanceAlone  = errors.New("current_balance goes with track_balance: true")
+	ErrCurrentBalanceAlone  = apierr.Invalid("current_balance goes with track_balance: true", "current_balance", apierr.FieldInvalid)
 )
 
 type Service struct {
-	store *Store
-	txs   *transactions.Service
-	cats  *categories.Service
+	store  *Store
+	txs    *transactions.Service
+	cats   *categories.Service
 	notifs *notifications.Service
 }
 

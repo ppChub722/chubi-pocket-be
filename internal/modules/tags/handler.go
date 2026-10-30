@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -25,13 +26,13 @@ func NewHandler(s *Service) *Handler {
 func (h *Handler) Create(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
 	raw, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	var probe map[string]json.RawMessage
@@ -46,7 +47,7 @@ func (h *Handler) Create(c *gin.Context) {
 
 	var req CreateTagRequest
 	if err := binding.JSON.BindBody(raw, &req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 
@@ -61,7 +62,7 @@ func (h *Handler) Create(c *gin.Context) {
 func (h *Handler) batch(c *gin.Context, userID uuid.UUID, raw []byte) {
 	var req BatchRequest
 	if err := binding.JSON.BindBody(raw, &req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	out, err := h.service.Batch(c.Request.Context(), userID, req)
@@ -71,19 +72,19 @@ func (h *Handler) batch(c *gin.Context, userID uuid.UUID, raw []byte) {
 			details := map[string]any{"op": be.Op, "index": be.Index}
 			switch {
 			case errors.Is(err, ErrTagNotFound):
-				response.Fail(c, http.StatusNotFound, "NOT_FOUND", "Tag not found", details)
+				response.Fail(c, http.StatusNotFound, apierr.NotFound, "Tag not found", details)
 			case errors.Is(err, ErrTagExists):
-				response.Fail(c, http.StatusConflict, "TAG_EXISTS", ErrTagExists.Error(), details)
+				response.Fail(c, http.StatusConflict, apierr.TagExists, ErrTagExists.Error(), details)
 			default:
-				response.InternalError(c, "Tag operation failed", err.Error())
+				response.InternalError(c, "Tag operation failed", err)
 			}
 			return
 		}
 		if errors.Is(err, ErrBatchInvalid) {
-			response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+			response.BindError(c, err)
 			return
 		}
-		response.InternalError(c, "Tag operation failed", err.Error())
+		response.InternalError(c, "Tag operation failed", err)
 		return
 	}
 	c.JSON(http.StatusOK, out)
@@ -92,13 +93,13 @@ func (h *Handler) batch(c *gin.Context, userID uuid.UUID, raw []byte) {
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
 	tags, err := h.service.List(c.Request.Context(), userID)
 	if err != nil {
-		response.InternalError(c, "Failed to list tags", err.Error())
+		response.InternalError(c, "Failed to list tags", err)
 		return
 	}
 	c.JSON(http.StatusOK, ListResponse{Data: tags})
@@ -107,7 +108,7 @@ func (h *Handler) List(c *gin.Context) {
 func (h *Handler) Update(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -117,7 +118,7 @@ func (h *Handler) Update(c *gin.Context) {
 
 	var req UpdateTagRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 
@@ -132,7 +133,7 @@ func (h *Handler) Update(c *gin.Context) {
 func (h *Handler) Delete(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -150,7 +151,7 @@ func (h *Handler) Delete(c *gin.Context) {
 func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid tag id", nil)
+		response.Validation(c, "Invalid tag id", apierr.Field("id", apierr.FieldInvalid))
 		return uuid.Nil, false
 	}
 	return id, true
@@ -159,12 +160,12 @@ func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 func mapServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrTagNotFound):
-		response.NotFound(c, "NOT_FOUND", "Tag not found")
+		response.NotFound(c, apierr.NotFound, "Tag not found")
 	case errors.Is(err, ErrTagExists):
-		response.Fail(c, http.StatusConflict, "TAG_EXISTS", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.TagExists, err.Error(), nil)
 	case errors.Is(err, ErrTransactionNotOwned):
-		response.NotFound(c, "NOT_FOUND", "Transaction not found")
+		response.NotFound(c, apierr.NotFound, "Transaction not found")
 	default:
-		response.InternalError(c, "Tag operation failed", err.Error())
+		response.InternalError(c, "Tag operation failed", err)
 	}
 }

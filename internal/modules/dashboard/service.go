@@ -2,7 +2,6 @@ package dashboard
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -17,12 +16,13 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 const dateLayout = "2006-01-02"
 
-var ErrInvalidMonth = errors.New("month must be YYYY-MM")
+var ErrInvalidMonth = apierr.Invalid("month must be YYYY-MM", "month", apierr.FieldInvalid, "format", "month")
 
 type Service struct {
 	store        *Store

@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
@@ -47,7 +48,7 @@ func NewWebhook(secret string, h *Handler, log *slog.Logger) *Webhook {
 
 func (w *Webhook) Serve(c *gin.Context) {
 	if subtle.ConstantTimeCompare([]byte(c.GetHeader(SecretHeader)), w.secret) != 1 {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Bad webhook secret", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Bad webhook secret", nil)
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, maxUpdateBytes))

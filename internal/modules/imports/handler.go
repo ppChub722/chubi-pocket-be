@@ -18,6 +18,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports/slip"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/providers"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -36,7 +37,7 @@ type Handler struct {
 	// Import logs (migration 50): what the import met and can't handle yet.
 	writeLog      func(ctx context.Context, l ImportLog) error
 	providerKnown func(ctx context.Context, scheme, code string) (bool, error)
-	resolve func(ctx context.Context, userID uuid.UUID, drafts []pending.Draft) ([]pending.DraftResolved, error)
+	resolve       func(ctx context.Context, userID uuid.UUID, drafts []pending.Draft) ([]pending.DraftResolved, error)
 
 	mu   sync.Mutex
 	seen map[uuid.UUID]map[string]bool // user → scanned file keys
@@ -52,7 +53,7 @@ type CheckRequest struct {
 
 type CheckResponse struct {
 	// Keys never scanned before — the ones the app should upload.
-	NewFiles []string `json:"new_files"`
+	NewFiles  []string `json:"new_files"`
 	SeenFiles []string `json:"seen_files"`
 }
 
@@ -63,7 +64,7 @@ type ParseTextRequest struct {
 func userID(c *gin.Context) (uuid.UUID, bool) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 	}
 	return id, ok
 }
@@ -75,7 +76,7 @@ func (h *Handler) CheckSlips(c *gin.Context) {
 	}
 	var req CheckRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	out := CheckResponse{NewFiles: []string{}, SeenFiles: []string{}}
@@ -119,27 +120,27 @@ func (h *Handler) ScanSlip(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxSlipBytes+1<<20)
 	file, err := c.FormFile("image")
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "image is required", nil)
+		response.Validation(c, "image is required", apierr.Field("image", apierr.FieldRequired))
 		return
 	}
 	if file.Size > maxSlipBytes {
-		response.BadRequest(c, "VALIDATION_ERROR", "image is larger than 10 MB", nil)
+		response.Validation(c, "image is larger than 10 MB", apierr.Field("image", apierr.FieldTooLarge, "max_bytes", maxSlipBytes))
 		return
 	}
 	f, err := file.Open()
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "image could not be read", nil)
+		response.Validation(c, "image could not be read", apierr.Field("image", apierr.FieldInvalid))
 		return
 	}
 	data, err := io.ReadAll(f)
 	_ = f.Close()
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "image could not be read", nil)
+		response.Validation(c, "image could not be read", apierr.Field("image", apierr.FieldInvalid))
 		return
 	}
 	contentType := http.DetectContentType(data)
 	if contentType != "image/png" && contentType != "image/jpeg" {
-		response.BadRequest(c, "UNSUPPORTED_IMAGE", "image must be PNG or JPEG",
+		response.BadRequest(c, apierr.UnsupportedImage, "image must be PNG or JPEG",
 			gin.H{"detected": contentType})
 		return
 	}
@@ -148,7 +149,7 @@ func (h *Handler) ScanSlip(c *gin.Context) {
 	if s := c.PostForm("psm"); s != "" {
 		n, err := strconv.Atoi(s)
 		if err != nil || !ocr.AllowedPSM[n] {
-			response.BadRequest(c, "VALIDATION_ERROR", "psm must be 3, 4, 6 or 11", nil)
+			response.Validation(c, "psm must be 3, 4, 6 or 11", apierr.Field("psm", apierr.FieldInvalid))
 			return
 		}
 		opt.PSM = n
@@ -163,12 +164,12 @@ func (h *Handler) ScanSlip(c *gin.Context) {
 			"user_id", uid, "file_key", key, "size", file.Size, "err", err)
 		switch {
 		case errors.Is(err, ocr.ErrBadImage):
-			response.BadRequest(c, "UNSUPPORTED_IMAGE", "image could not be decoded", nil)
+			response.BadRequest(c, apierr.UnsupportedImage, "image could not be decoded", nil)
 		case errors.Is(err, ocr.ErrUnavailable):
-			response.Fail(c, http.StatusServiceUnavailable, "OCR_UNAVAILABLE",
+			response.Fail(c, http.StatusServiceUnavailable, apierr.OcrUnavailable,
 				"OCR is not installed on this server", nil)
 		case errors.Is(err, ocr.ErrTimeout):
-			response.Fail(c, http.StatusGatewayTimeout, "OCR_TIMEOUT",
+			response.Fail(c, http.StatusGatewayTimeout, apierr.OcrTimeout,
 				"Reading the slip took too long", nil)
 		default:
 			response.InternalError(c, "Reading the slip failed", nil)
@@ -243,7 +244,7 @@ func (h *Handler) ParseText(c *gin.Context) {
 	}
 	var req ParseTextRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	h.log.Info("imports: parse text OK (stub)", "user_id", uid, "text", req.Text)

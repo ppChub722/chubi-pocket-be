@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -35,7 +36,7 @@ var (
 	ErrBillNotFound       = errors.New("bill not found in an event you are a member of")
 	// ErrManagedByTx — a paid-by debt is one record with its expense: edit or delete the transaction.
 	ErrManagedByTx   = errors.New("this debt is the paid-by part of a transaction: edit or delete the transaction instead")
-	ErrDueBeforeDate = errors.New("due_date can't be before the entry's date")
+	ErrDueBeforeDate = apierr.Invalid("due_date can't be before the entry's date", "due_date", apierr.FieldOutOfRange)
 	// ErrTxNotLinkable — the transaction's type is not the entry's direction (paid = expense,
 	// received = income), or it is not a plain transaction of mine (a debt, repayment, event or system row).
 	ErrTxNotLinkable = errors.New("this transaction can't be linked to this entry")

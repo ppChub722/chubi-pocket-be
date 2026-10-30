@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth/utils"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 )
 
@@ -27,7 +28,7 @@ func NewService(s *Store, c *config.Config, hooks ...RegistrationHook) *Service 
 }
 
 var ErrWrongPassword = errors.New("current password is incorrect")
-var ErrSamePassword = errors.New("new password must differ from current")
+var ErrSamePassword = apierr.Invalid("new password must differ from current", "new_password", apierr.FieldInvalid)
 
 func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthResponse, error) {
 	hash, err := utils.HashPassword(req.Password)

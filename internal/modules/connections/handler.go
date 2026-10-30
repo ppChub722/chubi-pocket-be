@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -39,7 +40,7 @@ func (h *Handler) LoginStart(c *gin.Context) {
 		CodeChallenge string `json:"code_challenge"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "body must be {code_challenge}", nil)
+		response.Validation(c, "body must be {code_challenge}")
 		return
 	}
 	out, err := h.s.StartLogin(c.Request.Context(), req.CodeChallenge)
@@ -60,7 +61,7 @@ func (h *Handler) LoginExchange(c *gin.Context) {
 		CodeVerifier string `json:"code_verifier"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "body must be {code, code_verifier}", nil)
+		response.Validation(c, "body must be {code, code_verifier}")
 		return
 	}
 	out, err := h.s.Exchange(c.Request.Context(), req.Code, req.CodeVerifier)
@@ -82,7 +83,7 @@ func (h *Handler) LoginSignup(c *gin.Context) {
 	}
 	var req SignupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "invalid body", nil)
+		response.Validation(c, "invalid body")
 		return
 	}
 	out, err := h.s.Signup(c.Request.Context(), req)
@@ -97,25 +98,25 @@ func (h *Handler) loginFail(c *gin.Context, err error) {
 	var taken *UsernameTakenError
 	switch {
 	case errors.Is(err, ErrBadLoginRequest):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrLoginCodeInvalid):
-		response.Fail(c, http.StatusUnauthorized, "LOGIN_CODE_INVALID", "The login link is no longer valid, start again", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.LoginCodeInvalid, "The login link is no longer valid, start again", nil)
 	case errors.As(err, &taken):
-		response.Fail(c, http.StatusConflict, "USERNAME_EXISTS", "Username already registered",
+		response.Fail(c, http.StatusConflict, apierr.UsernameExists, "Username already registered",
 			gin.H{"username_suggestion": taken.Suggestion})
 	case errors.Is(err, ErrAlreadyLinked):
-		response.Fail(c, http.StatusConflict, "TELEGRAM_ALREADY_LINKED", "This Telegram has an account: log in instead", nil)
+		response.Fail(c, http.StatusConflict, apierr.TelegramAlreadyLinked, "This Telegram has an account: log in instead", nil)
 	case errors.Is(err, ErrRegistrationClosed):
-		response.Fail(c, http.StatusForbidden, "REGISTRATION_CLOSED", "Registration is closed", nil)
+		response.Fail(c, http.StatusForbidden, apierr.RegistrationClosed, "Registration is closed", nil)
 	case errors.Is(err, ErrUnavailable):
-		response.Fail(c, http.StatusConflict, "CONNECTION_UNAVAILABLE", "Telegram login is not available", nil)
+		response.Fail(c, http.StatusConflict, apierr.ConnectionUnavailable, "Telegram login is not available", nil)
 	default:
-		response.InternalError(c, "Telegram login failed", err.Error())
+		response.InternalError(c, "Telegram login failed", err)
 	}
 }
 
 func rateLimited(c *gin.Context) {
-	response.Fail(c, http.StatusTooManyRequests, "RATE_LIMITED", "Too many tries, wait a few minutes", nil)
+	response.Fail(c, http.StatusTooManyRequests, apierr.RateLimited, "Too many tries, wait a few minutes", nil)
 }
 
 // limiter — a fixed window per key (in memory; one API process).
@@ -158,7 +159,7 @@ func (l *limiter) allow(key string) bool {
 func (h *Handler) List(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	out, err := h.s.List(c.Request.Context(), userID)
@@ -192,7 +193,7 @@ func (h *Handler) ImportPhoto(c *gin.Context) {
 func (h *Handler) UpdatePermissions(c *gin.Context) {
 	var patch map[string]bool
 	if err := c.ShouldBindJSON(&patch); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "body must be an object of {key: bool}", nil)
+		response.Validation(c, "body must be an object of {key: bool}")
 		return
 	}
 	h.one(c, func(userID uuid.UUID, key string) (any, error) {
@@ -203,7 +204,7 @@ func (h *Handler) UpdatePermissions(c *gin.Context) {
 func (h *Handler) one(c *gin.Context, fn func(userID uuid.UUID, key string) (any, error)) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	out, err := fn(userID, c.Param("provider"))
@@ -217,25 +218,25 @@ func (h *Handler) one(c *gin.Context, fn func(userID uuid.UUID, key string) (any
 func (h *Handler) fail(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrUnknownProvider):
-		response.NotFound(c, "NOT_FOUND", "Unknown provider")
+		response.NotFound(c, apierr.NotFound, "Unknown provider")
 	case errors.Is(err, ErrBadPermissions):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrUnavailable):
-		response.Fail(c, http.StatusConflict, "CONNECTION_UNAVAILABLE", "This app can't be linked yet", nil)
+		response.Fail(c, http.StatusConflict, apierr.ConnectionUnavailable, "This app can't be linked yet", nil)
 	case errors.Is(err, ErrNotLinked):
-		response.Fail(c, http.StatusConflict, "NOT_LINKED", "This app is not linked", nil)
+		response.Fail(c, http.StatusConflict, apierr.NotLinked, "This app is not linked", nil)
 	case errors.Is(err, ErrPermissionUnavailable):
-		response.Fail(c, http.StatusConflict, "PERMISSION_UNAVAILABLE", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.PermissionUnavailable, err.Error(), nil)
 	case errors.Is(err, ErrNoPhoto):
-		response.NotFound(c, "NO_PHOTO", "The app gave no picture")
+		response.NotFound(c, apierr.NoPhoto, "The app gave no picture")
 	case errors.Is(err, shared.ErrLastLoginMethod):
-		response.Fail(c, http.StatusConflict, "LAST_LOGIN_METHOD",
+		response.Fail(c, http.StatusConflict, apierr.LastLoginMethod,
 			"This is the only way into an account without a password: set a password first", nil)
 	case errors.Is(err, ErrProvider):
 		// the cause may name the app's URL; it is logged by the request log only as status 502
-		response.Fail(c, http.StatusBadGateway, "PROVIDER_ERROR", "The app did not answer, try again", nil)
+		response.Fail(c, http.StatusBadGateway, apierr.ProviderError, "The app did not answer, try again", nil)
 	default:
-		response.InternalError(c, "Connections failed", err.Error())
+		response.InternalError(c, "Connections failed", err)
 	}
 }
 
@@ -243,16 +244,16 @@ func (h *Handler) fail(c *gin.Context, err error) {
 func (h *Handler) Image(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		response.NotFound(c, "NOT_FOUND", "No such picture")
+		response.NotFound(c, apierr.NotFound, "No such picture")
 		return
 	}
 	img, ok, err := h.s.Image(c.Request.Context(), id)
 	if err != nil {
-		response.InternalError(c, "Failed to read the picture", err.Error())
+		response.InternalError(c, "Failed to read the picture", err)
 		return
 	}
 	if !ok {
-		response.NotFound(c, "NOT_FOUND", "No such picture")
+		response.NotFound(c, apierr.NotFound, "No such picture")
 		return
 	}
 	c.Header("Cache-Control", "private, max-age=31536000, immutable")
@@ -264,12 +265,12 @@ func BrandLogo(c *gin.Context) {
 	file := c.Param("file")
 	key := strings.TrimSuffix(file, ".png")
 	if _, ok := providerOf(key); !ok || key == file {
-		response.NotFound(c, "NOT_FOUND", "No such logo")
+		response.NotFound(c, apierr.NotFound, "No such logo")
 		return
 	}
 	b, err := logos.ReadFile("logos/" + key + ".png")
 	if err != nil {
-		response.NotFound(c, "NOT_FOUND", "No such logo")
+		response.NotFound(c, apierr.NotFound, "No such logo")
 		return
 	}
 	c.Header("Cache-Control", "public, max-age=31536000, immutable")

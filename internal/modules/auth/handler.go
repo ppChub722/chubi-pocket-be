@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/logger"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
@@ -23,7 +24,7 @@ func NewHandler(s *Service, log *slog.Logger) *Handler {
 func (h *Handler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 
@@ -31,11 +32,11 @@ func (h *Handler) Register(c *gin.Context) {
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrUsernameExists):
-			response.Fail(c, http.StatusConflict, "USERNAME_EXISTS", "Username already registered", nil)
+			response.Fail(c, http.StatusConflict, apierr.UsernameExists, "Username already registered", nil)
 		case errors.Is(err, ErrEmailExists):
-			response.Fail(c, http.StatusConflict, "EMAIL_EXISTS", "Email already registered", nil)
+			response.Fail(c, http.StatusConflict, apierr.EmailExists, "Email already registered", nil)
 		default:
-			response.InternalError(c, "Registration failed", err.Error())
+			response.InternalError(c, "Registration failed", err)
 		}
 		return
 	}
@@ -54,7 +55,7 @@ func (h *Handler) Login(c *gin.Context) {
 	if err != nil {
 		// Never log the identifier verbatim (could be an email — PII).
 		logger.FromCtx(c, h.log).Warn("auth login failed")
-		response.Fail(c, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Invalid credentials", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.InvalidCredentials, "Invalid credentials", nil)
 		return
 	}
 
@@ -70,13 +71,13 @@ func (h *Handler) Logout(c *gin.Context) {
 func (h *Handler) ChangePassword(c *gin.Context) {
 	userID, ok := UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 
 	var req ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 
@@ -84,13 +85,13 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		switch {
 		case errors.Is(err, ErrWrongPassword):
 			logger.FromCtx(c, h.log).Warn("auth password change rejected", "reason", "wrong_current_password")
-			response.Fail(c, http.StatusUnauthorized, "WRONG_PASSWORD", err.Error(), nil)
+			response.Fail(c, http.StatusUnauthorized, apierr.WrongPassword, err.Error(), nil)
 		case errors.Is(err, ErrSamePassword):
 			logger.FromCtx(c, h.log).Warn("auth password change rejected", "reason", "same_password")
-			response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+			response.BindError(c, err)
 		default:
 			logger.FromCtx(c, h.log).Error("auth password change failed", "error", err)
-			response.InternalError(c, "Failed to change password", err.Error())
+			response.InternalError(c, "Failed to change password", err)
 		}
 		return
 	}

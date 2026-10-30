@@ -11,12 +11,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 // ErrInvalidDefaultAccount — default_account_id must be an active wallet the caller is an active
 // member of.
-var ErrInvalidDefaultAccount = errors.New("default_account_id must be an active wallet you're a member of")
+var ErrInvalidDefaultAccount = apierr.Invalid("default_account_id must be an active wallet you're a member of", "default_account_id", apierr.FieldInvalid)
 
 func (r *UpdateProfileRequest) defaultAccountChange() (*uuid.UUID, bool, error) {
 	raw := bytes.TrimSpace(r.DefaultAccountID)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -26,7 +27,7 @@ func NewHandler(s *Service) *Handler {
 func caller(c *gin.Context) (uuid.UUID, bool) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 	}
 	return userID, ok
 }
@@ -43,13 +44,13 @@ func (h *Handler) People(c *gin.Context) {
 	switch f.Sort {
 	case "", "oldest", "amount", "recent":
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "sort must be oldest, amount or recent", nil)
+		response.Validation(c, "sort must be oldest, amount or recent", apierr.Field("sort", apierr.FieldInvalid))
 		return
 	}
 	switch f.Side {
 	case "", "owed_to_me", "i_owe", "receivable", "payable", "overdue_30":
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "side must be receivable, payable, overdue_30 (or owed_to_me / i_owe)", nil)
+		response.Validation(c, "side must be receivable, payable, overdue_30 (or owed_to_me / i_owe)", apierr.Field("side", apierr.FieldInvalid))
 		return
 	}
 	out, err := h.service.People(c.Request.Context(), userID, f)
@@ -87,23 +88,23 @@ func (h *Handler) Entries(c *gin.Context) {
 	switch f.Kind {
 	case "", KindDebt, KindRepayment, "all":
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "kind must be debt, repayment or all", nil)
+		response.Validation(c, "kind must be debt, repayment or all", apierr.Field("kind", apierr.FieldInvalid))
 		return
 	}
 	switch f.Cycle {
 	case "", "current", "earlier", "all":
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "cycle must be current or earlier", nil)
+		response.Validation(c, "cycle must be current or earlier", apierr.Field("cycle", apierr.FieldInvalid))
 		return
 	}
 	switch f.Sort {
 	case "", "date_desc", "date_asc", "amount_desc", "amount_asc":
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid sort", nil)
+		response.Validation(c, "Invalid sort", apierr.Field("sort", apierr.FieldInvalid))
 		return
 	}
 	if f.Direction != "" && f.Direction != DirectionPaid && f.Direction != DirectionReceived {
-		response.BadRequest(c, "VALIDATION_ERROR", "direction must be paid or received", nil)
+		response.Validation(c, "direction must be paid or received", apierr.Field("direction", apierr.FieldInvalid))
 		return
 	}
 	if v := c.Query("paid"); v != "" {
@@ -113,7 +114,7 @@ func (h *Handler) Entries(c *gin.Context) {
 	if v := c.Query("account_id"); v != "" {
 		id, err := uuid.Parse(v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "Invalid account_id", nil)
+			response.Validation(c, "Invalid account_id", apierr.Field("account_id", apierr.FieldInvalid))
 			return
 		}
 		f.AccountID = &id
@@ -124,7 +125,7 @@ func (h *Handler) Entries(c *gin.Context) {
 	}{{"from", &f.From}, {"to", &f.To}} {
 		if v := c.Query(p.key); v != "" {
 			if !validDate(v) {
-				response.BadRequest(c, "VALIDATION_ERROR", "Invalid "+p.key, nil)
+				response.Validation(c, "Invalid "+p.key, apierr.Field(p.key, apierr.FieldInvalid))
 				return
 			}
 			vv := v
@@ -146,7 +147,7 @@ func (h *Handler) CreateEntry(c *gin.Context) {
 	}
 	var req CreateEntryRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	if c.Query("preview") == "true" {
@@ -174,7 +175,7 @@ func (h *Handler) CreateRepayment(c *gin.Context) {
 	}
 	var req RepaymentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	if c.Query("preview") == "true" {
@@ -222,7 +223,7 @@ func (h *Handler) Update(c *gin.Context) {
 	}
 	var req UpdateEntryRequest
 	if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	out, err := h.service.UpdateEntry(c.Request.Context(), userID, id, req)
@@ -245,7 +246,7 @@ func (h *Handler) LinkTx(c *gin.Context) {
 	}
 	var req LinkTxRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	out, err := h.service.LinkTx(c.Request.Context(), userID, id, req.TransactionID)
@@ -312,7 +313,7 @@ func (h *Handler) Delete(c *gin.Context) {
 func parseIDParam(c *gin.Context) (uuid.UUID, bool) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid entry id", nil)
+		response.Validation(c, "Invalid entry id", apierr.Field("id", apierr.FieldInvalid))
 		return uuid.Nil, false
 	}
 	return id, true
@@ -331,61 +332,61 @@ func validDate(s string) bool {
 func mapServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrEntryNotFound):
-		response.NotFound(c, "NOT_FOUND", "Debt entry not found")
+		response.NotFound(c, apierr.NotFound, "Debt entry not found")
 	case errors.Is(err, ErrPersonNotFound):
-		response.NotFound(c, "NOT_FOUND", err.Error())
+		response.NotFound(c, apierr.NotFound, err.Error())
 	case errors.Is(err, shared.ErrInvalidPersonKey):
-		response.BadRequest(c, "INVALID_PERSON_KEY", err.Error(), nil)
+		response.BadRequest(c, apierr.InvalidPersonKey, err.Error(), nil)
 	case errors.Is(err, ErrContactNotFound):
-		response.BadRequest(c, "CONTACT_NOT_FOUND", "Contact not found", nil)
+		response.BadRequest(c, apierr.ContactNotFound, "Contact not found", nil)
 	case errors.Is(err, ErrTagsNeedWallet):
-		response.BadRequest(c, "TAGS_NEED_WALLET", err.Error(), nil)
+		response.BadRequest(c, apierr.TagsNeedWallet, err.Error(), nil)
 	case errors.Is(err, ErrDueBeforeDate):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrLedgerOnlyNoWallet):
-		response.BadRequest(c, "LEDGER_ONLY_NO_WALLET", err.Error(), nil)
+		response.BadRequest(c, apierr.LedgerOnlyNoWallet, err.Error(), nil)
 	case errors.Is(err, ErrMarkPaidNotFound):
-		response.BadRequest(c, "ENTRY_NOT_FOUND", err.Error(), nil)
+		response.BadRequest(c, apierr.EntryNotFound, err.Error(), nil)
 	case errors.Is(err, ErrManagedBySource):
-		response.Fail(c, http.StatusConflict, "ENTRY_MANAGED_BY_SOURCE", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.EntryManagedBySource, err.Error(), nil)
 	case errors.As(err, new(*transactions.SharedBillFieldError)):
 		var f *transactions.SharedBillFieldError
 		errors.As(err, &f)
-		response.Fail(c, http.StatusConflict, "SHARED_BILL_FIELD", err.Error(), map[string]any{"fields": f.Fields})
+		response.Fail(c, http.StatusConflict, apierr.SharedBillField, err.Error(), map[string]any{"fields": f.Fields})
 	case errors.Is(err, transactions.ErrPrivateNoteNotShared):
-		response.BadRequest(c, "PRIVATE_NOTE_NOT_SHARED", err.Error(), nil)
+		response.BadRequest(c, apierr.PrivateNoteNotShared, err.Error(), nil)
 	case errors.Is(err, transactions.ErrPrivateNoteTooLong):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrBillNotFound):
-		response.BadRequest(c, "BILL_NOT_FOUND", err.Error(), nil)
+		response.BadRequest(c, apierr.BillNotFound, err.Error(), nil)
 	case errors.Is(err, ErrUseClaim):
-		response.BadRequest(c, "USE_CLAIM", err.Error(), nil)
+		response.BadRequest(c, apierr.UseClaim, err.Error(), nil)
 	case errors.Is(err, ErrBillAlreadyBooked):
-		response.Fail(c, http.StatusConflict, "BILL_ALREADY_BOOKED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.BillAlreadyBooked, err.Error(), nil)
 	case errors.Is(err, ErrManagedByTx):
-		response.Fail(c, http.StatusConflict, "DEBT_MANAGED_BY_TX", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.DebtManagedByTx, err.Error(), nil)
 	case errors.Is(err, transactions.ErrTxNotFound):
-		response.NotFound(c, "TRANSACTION_NOT_FOUND", "Transaction not found")
+		response.NotFound(c, apierr.TransactionNotFound, "Transaction not found")
 	case errors.Is(err, ErrTxNotLinkable):
-		response.BadRequest(c, "TX_NOT_LINKABLE", err.Error(), nil)
+		response.BadRequest(c, apierr.TxNotLinkable, err.Error(), nil)
 	case errors.Is(err, ErrTxLinkedElsewhere):
-		response.Fail(c, http.StatusConflict, "DEBT_TX_ALREADY_LINKED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.DebtTxAlreadyLinked, err.Error(), nil)
 	case errors.Is(err, ErrEntryHasTx):
-		response.Fail(c, http.StatusConflict, "ENTRY_HAS_TRANSACTION", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.EntryHasTransaction, err.Error(), nil)
 	case errors.Is(err, ErrTxNotDisconnectable):
-		response.Fail(c, http.StatusConflict, "TX_NOT_DISCONNECTABLE", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.TxNotDisconnectable, err.Error(), nil)
 	case errors.Is(err, ErrDebtNotLinked):
-		response.Fail(c, http.StatusConflict, "DEBT_NOT_LINKED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.DebtNotLinked, err.Error(), nil)
 	case errors.Is(err, ErrInvalidInput):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, transactions.ErrAccountArchived):
-		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.AccountArchived, err.Error(), nil)
 	case errors.Is(err, transactions.ErrAccountForbidden):
-		response.BadRequest(c, "ACCOUNT_NOT_FOUND", "Account not found", nil)
+		response.BadRequest(c, apierr.AccountNotFound, "Account not found", nil)
 	case errors.Is(err, transactions.ErrTagNotFound):
-		response.BadRequest(c, "TAG_NOT_FOUND", "Tag not found", nil)
+		response.BadRequest(c, apierr.TagNotFound, "Tag not found", nil)
 	default:
-		response.InternalError(c, "Debt operation failed", err.Error())
+		response.InternalError(c, "Debt operation failed", err)
 	}
 }
 

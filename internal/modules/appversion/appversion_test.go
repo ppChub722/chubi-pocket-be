@@ -79,7 +79,7 @@ func TestOutdatedBuildGets426(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Success || body.Error.Code != CodeOutdated ||
+	if body.Success || body.Error.Code != string(CodeOutdated) ||
 		body.Error.Details["download_url"] != info.DownloadURL || body.Error.Details["min_build"] != 41.0 {
 		t.Errorf("body = %s", w.Body)
 	}

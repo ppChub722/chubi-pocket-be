@@ -14,6 +14,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -35,7 +36,7 @@ func tz(c *gin.Context) string { return c.GetHeader("X-Timezone") }
 func user(c *gin.Context) (uuid.UUID, bool) {
 	id, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 	}
 	return id, ok
 }
@@ -47,7 +48,7 @@ func userAndID(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 	}
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid id", nil)
+		response.Validation(c, "Invalid id", apierr.Field("id", apierr.FieldInvalid))
 		return uuid.Nil, uuid.Nil, false
 	}
 	return uid, id, true
@@ -81,7 +82,7 @@ func bind(c *gin.Context, v any) (map[string]json.RawMessage, bool) {
 		keys, err = presence(raw)
 	}
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return nil, false
 	}
 	return keys, true
@@ -100,59 +101,59 @@ func mapError(c *gin.Context, err error) {
 	var link *LinkConflict
 	switch {
 	case errors.As(err, &conflict):
-		response.Fail(c, http.StatusConflict, "ITEM_ALREADY_LINKED", "Some items can't take this action", gin.H{"ids": conflict.IDs})
+		response.Fail(c, http.StatusConflict, apierr.ItemAlreadyLinked, "Some items can't take this action", gin.H{"ids": conflict.IDs})
 	case errors.As(err, &link):
-		response.Fail(c, http.StatusConflict, "ITEM_ALREADY_LINKED", err.Error(), gin.H{"transaction": link.Linked, "other": link.Other})
+		response.Fail(c, http.StatusConflict, apierr.ItemAlreadyLinked, err.Error(), gin.H{"transaction": link.Linked, "other": link.Other})
 	case errors.Is(err, ErrAmountRequired):
-		response.BadRequest(c, "AMOUNT_REQUIRED", err.Error(), nil)
+		response.BadRequest(c, apierr.AmountRequired, err.Error(), nil)
 	case errors.Is(err, ErrNothingOwed):
-		response.Fail(c, http.StatusConflict, "NOTHING_OWED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.NothingOwed, err.Error(), nil)
 	case errors.Is(err, ErrAlreadyRecorded):
-		response.Fail(c, http.StatusConflict, "ALREADY_RECORDED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.AlreadyRecorded, err.Error(), nil)
 	case errors.Is(err, ErrNotFound):
-		response.NotFound(c, "NOT_FOUND", "Recurring setting not found")
+		response.NotFound(c, apierr.NotFound, "Recurring setting not found")
 	case errors.Is(err, ErrTxNotFound):
-		response.NotFound(c, "NOT_FOUND", "Transaction not found")
+		response.NotFound(c, apierr.NotFound, "Transaction not found")
 	case errors.Is(err, ErrItemNotFound):
-		response.NotFound(c, "NOT_FOUND", "Recurring item not found")
+		response.NotFound(c, apierr.NotFound, "Recurring item not found")
 	case errors.Is(err, ErrValidation):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrInvalidRule):
-		response.BadRequest(c, "INVALID_RULE", err.Error(), nil)
+		response.BadRequest(c, apierr.InvalidRule, err.Error(), nil)
 	case errors.Is(err, ErrEndTooFar):
-		response.BadRequest(c, "END_TOO_FAR", err.Error(), nil)
+		response.BadRequest(c, apierr.EndTooFar, err.Error(), nil)
 	case errors.Is(err, transactions.ErrAccountArchived):
-		response.Fail(c, http.StatusConflict, "ACCOUNT_ARCHIVED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.AccountArchived, err.Error(), nil)
 	case errors.Is(err, ErrAccountNotFound):
-		response.BadRequest(c, "ACCOUNT_NOT_FOUND", err.Error(), nil)
+		response.BadRequest(c, apierr.AccountNotFound, err.Error(), nil)
 	case errors.Is(err, ErrInvalidCategory):
-		response.BadRequest(c, "INVALID_CATEGORY", err.Error(), nil)
+		response.BadRequest(c, apierr.InvalidCategory, err.Error(), nil)
 	case errors.Is(err, ErrTagNotFound):
-		response.BadRequest(c, "TAG_NOT_FOUND", err.Error(), nil)
+		response.BadRequest(c, apierr.TagNotFound, err.Error(), nil)
 	case errors.Is(err, ErrContactNotFound):
-		response.BadRequest(c, "CONTACT_NOT_FOUND", err.Error(), nil)
+		response.BadRequest(c, apierr.ContactNotFound, err.Error(), nil)
 	case errors.Is(err, ErrContactArchived):
-		response.BadRequest(c, "CONTACT_ARCHIVED", err.Error(), nil)
+		response.BadRequest(c, apierr.ContactArchived, err.Error(), nil)
 	case errors.Is(err, ErrInvalidTransition):
-		response.Fail(c, http.StatusConflict, "INVALID_TRANSITION", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.InvalidTransition, err.Error(), nil)
 	case errors.Is(err, ErrSavingNeedsWallet):
-		response.BadRequest(c, "SAVING_NEEDS_WALLET", err.Error(), nil)
+		response.BadRequest(c, apierr.SavingNeedsWallet, err.Error(), nil)
 	case errors.Is(err, saving_goals.ErrAccountNotFound):
-		response.BadRequest(c, "ACCOUNT_NOT_FOUND", err.Error(), nil)
+		response.BadRequest(c, apierr.AccountNotFound, err.Error(), nil)
 	case errors.Is(err, saving_goals.ErrValidation):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, saving_goals.ErrInsufficientSaving):
-		response.Fail(c, http.StatusConflict, "INSUFFICIENT_SAVING", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.InsufficientSaving, err.Error(), nil)
 	case errors.Is(err, saving_goals.ErrWalletNotTracked):
-		response.BadRequest(c, "WALLET_NOT_TRACKED", err.Error(), nil)
+		response.BadRequest(c, apierr.WalletNotTracked, err.Error(), nil)
 	case errors.Is(err, saving_goals.ErrGoalNotFound):
-		response.NotFound(c, "NOT_FOUND", "Saving goal not found")
+		response.NotFound(c, apierr.NotFound, "Saving goal not found")
 	case errors.Is(err, saving_goals.ErrGoalNotActive):
-		response.Fail(c, http.StatusConflict, "GOAL_NOT_ACTIVE", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.GoalNotActive, err.Error(), nil)
 	case errors.Is(err, saving_goals.ErrGoalReached):
-		response.Fail(c, http.StatusConflict, "GOAL_REACHED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.GoalReached, err.Error(), nil)
 	case errors.Is(err, ErrAlreadyLinked):
-		response.Fail(c, http.StatusConflict, "ITEM_ALREADY_LINKED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.ItemAlreadyLinked, err.Error(), nil)
 	default:
 		transactions.MapError(c, err)
 	}
@@ -165,19 +166,19 @@ func (h *Handler) List(c *gin.Context) {
 	}
 	status := c.DefaultQuery("status", "current")
 	if status != "current" && status != "archived" && status != "all" {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
+		response.Validation(c, "Invalid status", apierr.Field("status", apierr.FieldInvalid))
 		return
 	}
 	forType := c.Query("for_type")
 	if forType != "" && forType != "expense" && forType != "income" && forType != "transfer" {
-		response.BadRequest(c, "VALIDATION_ERROR", "for_type must be expense, income or transfer", nil)
+		response.Validation(c, "for_type must be expense, income or transfer", apierr.Field("for_type", apierr.FieldInvalid))
 		return
 	}
 	var hint PickerHint
 	if v := c.Query("category_id"); v != "" {
 		id, err := uuid.Parse(v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "category_id must be a uuid", nil)
+			response.Validation(c, "category_id must be a uuid", apierr.Field("category_id", apierr.FieldInvalid))
 			return
 		}
 		hint.CategoryID = &id
@@ -185,14 +186,14 @@ func (h *Handler) List(c *gin.Context) {
 	if v := c.Query("amount"); v != "" {
 		a, err := strconv.ParseFloat(v, 64)
 		if err != nil || a <= 0 {
-			response.BadRequest(c, "VALIDATION_ERROR", "amount must be a positive number", nil)
+			response.Validation(c, "amount must be a positive number", apierr.Field("amount", apierr.FieldInvalid))
 			return
 		}
 		hint.Amount = &a
 	}
 	kind := c.Query("kind")
 	if kind != "" && !validKind(kind) {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid kind", nil)
+		response.Validation(c, "Invalid kind", apierr.Field("kind", apierr.FieldInvalid))
 		return
 	}
 	out, err := h.service.List(c.Request.Context(), uid, status, c.Query("q"), forType, hint, kind,
@@ -256,14 +257,14 @@ func (h *Handler) RuleItems(c *gin.Context) {
 	}
 	tab := c.DefaultQuery("tab", "produced")
 	if tab != "produced" && tab != "upcoming" {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid tab", nil)
+		response.Validation(c, "Invalid tab", apierr.Field("tab", apierr.FieldInvalid))
 		return
 	}
 	var from *time.Time
 	if v := c.Query("from"); v != "" {
 		d, err := time.Parse(dateLayout, v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "from must be YYYY-MM-DD", nil)
+			response.Validation(c, "from must be YYYY-MM-DD", apierr.Field("from", apierr.FieldInvalid, "format", "date"))
 			return
 		}
 		from = &d
@@ -330,7 +331,7 @@ func (h *Handler) Items(c *gin.Context) {
 	month := c.Query("month") // calendar: the items of one month (YYYY-MM), every status, oldest first
 	if month != "" {
 		if _, err := time.Parse("2006-01", month); err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "month must be YYYY-MM", nil)
+			response.Validation(c, "month must be YYYY-MM", apierr.Field("month", apierr.FieldInvalid, "format", "month"))
 			return
 		}
 	}
@@ -345,12 +346,12 @@ func (h *Handler) Items(c *gin.Context) {
 	switch status {
 	case StatusUpcoming, StatusDue, StatusPending, StatusDone, StatusPaid, StatusSkipped, StatusNotCreated, StatusArchived, "all":
 	default:
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid status", nil)
+		response.Validation(c, "Invalid status", apierr.Field("status", apierr.FieldInvalid))
 		return
 	}
 	kind := c.DefaultQuery("kind", "all")
 	if kind != "all" && kind != "recurring" {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid kind", nil)
+		response.Validation(c, "Invalid kind", apierr.Field("kind", apierr.FieldInvalid))
 		return
 	}
 	ruleID, ok := optionalRuleID(c)
@@ -447,7 +448,7 @@ func optionalRuleID(c *gin.Context) (*uuid.UUID, bool) {
 	}
 	id, err := uuid.Parse(v)
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid rule_id", nil)
+		response.Validation(c, "Invalid rule_id", apierr.Field("rule_id", apierr.FieldInvalid))
 		return nil, false
 	}
 	return &id, true
@@ -461,7 +462,7 @@ func ruleAndSlot(c *gin.Context) (uuid.UUID, uuid.UUID, time.Time, bool) {
 	}
 	slot, err := time.Parse(dateLayout, c.Param("slot"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "slot must be YYYY-MM-DD", nil)
+		response.Validation(c, "slot must be YYYY-MM-DD", apierr.Field("slot", apierr.FieldInvalid, "format", "date"))
 		return uuid.Nil, uuid.Nil, time.Time{}, false
 	}
 	return uid, id, slot, true
@@ -476,7 +477,7 @@ func (h *Handler) Occurrences(c *gin.Context) {
 	if v := c.Query("tx_date"); v != "" {
 		d, err := time.Parse(dateLayout, v)
 		if err != nil {
-			response.BadRequest(c, "VALIDATION_ERROR", "tx_date must be YYYY-MM-DD", nil)
+			response.Validation(c, "tx_date must be YYYY-MM-DD", apierr.Field("tx_date", apierr.FieldInvalid, "format", "date"))
 			return
 		}
 		txDate = &d

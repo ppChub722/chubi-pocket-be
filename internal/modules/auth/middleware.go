@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth/utils"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
@@ -18,34 +19,34 @@ func Middleware(cfg *config.Config, store *Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if header == "" {
-			response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Authorization header required", nil)
+			response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Authorization header required", nil)
 			c.Abort()
 			return
 		}
 
 		parts := strings.SplitN(header, " ", 2)
 		if len(parts) != 2 || parts[0] != "Bearer" {
-			response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid header format. Use 'Bearer <token>'", nil)
+			response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Invalid header format. Use 'Bearer <token>'", nil)
 			c.Abort()
 			return
 		}
 
 		userID, err := utils.ParseToken(parts[1], cfg.JWT.Secret)
 		if err != nil {
-			response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid or expired token", nil)
+			response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Invalid or expired token", nil)
 			c.Abort()
 			return
 		}
 
 		status, err := store.StatusByID(c.Request.Context(), userID)
 		if err != nil {
-			response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "User not found", nil)
+			response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "User not found", nil)
 			c.Abort()
 			return
 		}
 
 		if status != "active" && !inactiveAllowed(c) {
-			response.Fail(c, http.StatusForbidden, "ACCOUNT_INACTIVE", "Account is inactive — reactivate to continue", nil)
+			response.Fail(c, http.StatusForbidden, apierr.AccountInactive, "Account is inactive — reactivate to continue", nil)
 			c.Abort()
 			return
 		}

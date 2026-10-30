@@ -8,6 +8,7 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -42,8 +43,8 @@ type Draft struct {
 }
 
 type SubmitError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    apierr.Code `json:"code"`
+	Message string      `json:"message"`
 }
 
 type PendingTransaction struct {

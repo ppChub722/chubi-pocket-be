@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -24,7 +25,7 @@ func NewHandler(s *Service) *Handler {
 }
 
 func unauthorized(c *gin.Context) {
-	response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+	response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 }
 
 func (h *Handler) List(c *gin.Context) {
@@ -46,7 +47,7 @@ func (h *Handler) List(c *gin.Context) {
 		switch strings.ToLower(strings.TrimSpace(v)) {
 		case "", "true", "false", "all":
 		default:
-			response.BadRequest(c, "VALIDATION_ERROR", name+" must be true, false or all", nil)
+			response.Validation(c, name+" must be true, false or all", apierr.Field(name, apierr.FieldInvalid, "allowed", []string{"true", "false", "all"}))
 			return
 		}
 	}
@@ -58,7 +59,7 @@ func (h *Handler) List(c *gin.Context) {
 	}
 	out, err := h.service.ListViews(c.Request.Context(), userID, f)
 	if err != nil {
-		response.InternalError(c, "Failed to list notifications", err.Error())
+		response.InternalError(c, "Failed to list notifications", err)
 		return
 	}
 	c.JSON(http.StatusOK, out)
@@ -72,7 +73,7 @@ func (h *Handler) UnreadCount(c *gin.Context) {
 	}
 	b, err := h.service.Badges(c.Request.Context(), userID)
 	if err != nil {
-		response.InternalError(c, "Failed to count unread", err.Error())
+		response.InternalError(c, "Failed to count unread", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"unread_count": b.UnreadNotifications})
@@ -86,17 +87,17 @@ func (h *Handler) ReadAll(c *gin.Context) {
 	}
 	n, err := h.service.MarkReadAll(c.Request.Context(), userID)
 	if err != nil {
-		response.InternalError(c, "Mark all read failed", err.Error())
+		response.InternalError(c, "Mark all read failed", err)
 		return
 	}
 	badges, err := h.service.Badges(c.Request.Context(), userID)
 	if err != nil {
-		response.InternalError(c, "Mark all read failed", err.Error())
+		response.InternalError(c, "Mark all read failed", err)
 		return
 	}
 	sum, err := h.service.inboxSummary(c.Request.Context(), userID)
 	if err != nil {
-		response.InternalError(c, "Mark all read failed", err.Error())
+		response.InternalError(c, "Mark all read failed", err)
 		return
 	}
 	c.JSON(http.StatusOK, ReadAllResult{MarkedRead: n, Badges: badges, Summary: sum})
@@ -152,12 +153,12 @@ func (h *Handler) Delete(c *gin.Context) {
 	}
 	badges, err := h.service.Badges(c.Request.Context(), userID)
 	if err != nil {
-		response.InternalError(c, "Notification operation failed", err.Error())
+		response.InternalError(c, "Notification operation failed", err)
 		return
 	}
 	sum, err := h.service.inboxSummary(c.Request.Context(), userID)
 	if err != nil {
-		response.InternalError(c, "Notification operation failed", err.Error())
+		response.InternalError(c, "Notification operation failed", err)
 		return
 	}
 	c.JSON(http.StatusOK, DeleteResult{ID: id, Badges: badges, Summary: sum})
@@ -171,7 +172,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	}
 	out, err := h.service.GetSettingsView(c.Request.Context(), userID)
 	if err != nil {
-		response.InternalError(c, "Failed to get settings", err.Error())
+		response.InternalError(c, "Failed to get settings", err)
 		return
 	}
 	c.JSON(http.StatusOK, out)
@@ -185,7 +186,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 	var req UpdateSettingsRequest
 	if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	var raw map[string]json.RawMessage
@@ -198,13 +199,13 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	out, err := h.service.UpdateSettingsView(c.Request.Context(), userID, req)
 	switch {
 	case errors.Is(err, ErrTypeNotMutable):
-		response.BadRequest(c, "TYPE_NOT_MUTABLE", err.Error(), nil)
+		response.BadRequest(c, apierr.TypeNotMutable, err.Error(), nil)
 		return
 	case errors.Is(err, ErrUnknownType), errors.Is(err, ErrDefaultAccountBad):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	case err != nil:
-		response.InternalError(c, "Failed to update settings", err.Error())
+		response.InternalError(c, "Failed to update settings", err)
 		return
 	}
 	c.JSON(http.StatusOK, out)
@@ -218,7 +219,7 @@ func (h *Handler) bind(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 	}
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		response.Validation(c, "Invalid notification id", apierr.Field("id", apierr.FieldInvalid))
 		return uuid.Nil, uuid.Nil, false
 	}
 	return userID, id, true
@@ -227,13 +228,13 @@ func (h *Handler) bind(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 func mapServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrNotificationNotFound):
-		response.NotFound(c, "NOT_FOUND", "Notification not found")
+		response.NotFound(c, apierr.NotFound, "Notification not found")
 	case errors.Is(err, ErrStateConflict):
-		response.Fail(c, http.StatusConflict, "NOTIFICATION_STATE_CONFLICT", "Notification was already handled the other way", nil)
+		response.Fail(c, http.StatusConflict, apierr.NotificationStateConflict, "Notification was already handled the other way", nil)
 	case errors.Is(err, ErrNotForYou):
-		response.Fail(c, http.StatusForbidden, "NOT_FOR_YOU", "Notification is not addressed to caller", nil)
+		response.Fail(c, http.StatusForbidden, apierr.NotForYou, "Notification is not addressed to caller", nil)
 	default:
-		response.InternalError(c, "Notification operation failed", err.Error())
+		response.InternalError(c, "Notification operation failed", err)
 	}
 }
 

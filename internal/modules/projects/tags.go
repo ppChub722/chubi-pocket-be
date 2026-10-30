@@ -10,14 +10,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 var (
 	ErrEventTagNotFound = errors.New("event tag not found")
-	ErrUnknownTag = errors.New("tag not found")
-	ErrTagNameTaken = errors.New("this event already has a tag with that name")
-	ErrTagNameRequired = errors.New("name is required")
+	ErrUnknownTag       = errors.New("tag not found")
+	ErrTagNameTaken     = errors.New("this event already has a tag with that name")
+	ErrTagNameRequired  = apierr.Invalid("name is required", "name", apierr.FieldRequired)
 )
 
 func cleanTagName(n string) string {

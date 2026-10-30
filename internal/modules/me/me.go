@@ -13,6 +13,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/budgets"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -201,12 +202,12 @@ func NewHandler(s *Service) *Handler { return &Handler{service: s} }
 func (h *Handler) Counts(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	out, err := h.service.Counts(c.Request.Context(), userID, c.GetHeader("X-Timezone"))
 	if err != nil {
-		response.InternalError(c, "Failed to load counts", err.Error())
+		response.InternalError(c, "Failed to load counts", err)
 		return
 	}
 	c.JSON(http.StatusOK, out)

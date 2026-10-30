@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/logger"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
@@ -48,8 +49,8 @@ type DatasetData struct {
 }
 
 type DatasetError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    apierr.Code `json:"code"`
+	Message string      `json:"message"`
 }
 
 type Response struct {
@@ -69,17 +70,21 @@ type loaded struct {
 func (h *Handler) Sync(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	var req Request
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid request body", nil)
+		response.BindError(c, err)
 		return
 	}
 	want, bad := h.resolveWant(req.Want)
 	if len(bad) > 0 {
-		response.BadRequest(c, "VALIDATION_ERROR", "Unknown or duplicate dataset in want", bad)
+		fields := make([]apierr.FieldError, 0, len(bad))
+		for _, name := range bad {
+			fields = append(fields, apierr.Field("want", apierr.FieldInvalid, "value", name))
+		}
+		response.Validation(c, "Unknown or duplicate dataset in want", fields...)
 		return
 	}
 
@@ -94,7 +99,7 @@ func (h *Handler) Sync(c *gin.Context) {
 	}
 	versions, err := Fingerprints(ctx, h.db, userID, tz)
 	if err != nil {
-		response.InternalError(c, "Failed to compute sync versions", err.Error())
+		response.InternalError(c, "Failed to compute sync versions", err)
 		return
 	}
 
@@ -122,7 +127,7 @@ func (h *Handler) Sync(c *gin.Context) {
 			if errors.Is(r.err, context.DeadlineExceeded) {
 				msg = "Timed out loading " + name
 			}
-			out.Errors[name] = DatasetError{Code: "INTERNAL_ERROR", Message: msg}
+			out.Errors[name] = DatasetError{Code: apierr.InternalError, Message: msg}
 			continue
 		}
 		out.Data[name] = DatasetData{V: versions[name], Body: r.body}

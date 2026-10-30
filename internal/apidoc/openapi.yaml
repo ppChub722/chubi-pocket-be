@@ -12,7 +12,7 @@ info:
     - **No lookup lists.** Anything a row shows about another record (account / category / event / tag / person: name, icon, colour, flag) is embedded in the row. The FE never loads a whole list to look a name up by id. Pickers may still load their list.
     - **Person display name** (one SQL fragment, everywhere, including the contacts module): (1) the contact's `nickname` when it is set AND `show_nickname` is on → (2) else, when the contact is linked, the linked user's live profile name → (3) else the contact's `display_name` → (4) the stored snapshot `person_name` only when the row has no contact. Resolved server-side; the snapshot never reaches the FE when a contact exists.
     - **Wallet balances.** Every write returns the post-write balances of ALL wallets it touched (`account_balances: [{account_id, balance}]`; a transfer touches two). The FE patches its wallet cards from the response and never reloads `/accounts` after a write. That includes the money-moving writes of pages not redesigned yet (debt settle, event bills, quick create, scheduled generate-now): they are listed below as touch-points and gain only `account_balances`; the FE adopts it on those pages in their own rounds.
-    - **Errors.** Any operation may also answer 400 / 401 / 403 / 404 / 409 with the `Error` schema; the stable `code`s (e.g. ROW_LOCKED, CATEGORY_AUTHOR_ONLY, SPLITS_AUTHOR_ONLY, SYSTEM_TRANSACTION_IMMUTABLE, TAG_NOT_FOUND, ACCOUNT_NOT_FOUND, CONTACT_ARCHIVED) are documented per module in design/api. A tag id that is not the caller's is 400 TAG_NOT_FOUND.
+    - **Errors.** Any operation may also answer 400 / 401 / 403 / 404 / 409 with the `Error` schema; `error.code` is one of the registered codes (the `Error` enum = the server registry `internal/platform/apierr`, kept equal by a test; never renamed). Clients map the code to their own text and never show `message` (safe English, no internals: 500 causes are only logged). VALIDATION_ERROR always carries `details` = FieldError[] (`field` = the body JSON path or the query / path parameter, `code` = required / too_long / invalid ..., `params`). 426 APP_OUTDATED = update the app. A tag id that is not the caller's is 400 TAG_NOT_FOUND. No rate or daily limit exists yet, so no 429.
     - **Keys.** A response object always carries every documented key; "none" is `null`; arrays are never `null`. Money is a JSON number in the row's currency (2 decimals, never a string). Dates are `YYYY-MM-DD` (the user's calendar date), timestamps RFC 3339. Ids are UUIDs.
     - **Envelope (unchanged).** A single resource is the bare object; a list is `{data, pagination}` (or `{data, count}` where noted); errors are `{success:false, error:{code, message, details}}`.
     - `x-used-by` = `[{page, calls}]`: the FE pages that call the operation and how many times per page open (or per user action). `x-breaking` = a string saying what breaks.
@@ -5971,7 +5971,7 @@ components:
       schema: { $ref: '#/components/schemas/PersonKey' }
   responses:
     ValidationError:
-      description: '400 VALIDATION_ERROR (or a module code such as SPLITS_EXCEED_AMOUNT).'
+      description: '400 VALIDATION_ERROR with `details` = FieldError[] (the invalid fields; maybe empty), or a module code such as SPLITS_EXCEED_AMOUNT.'
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -6243,9 +6243,60 @@ components:
           type: object
           required: [code, message]
           properties:
-            code: { type: string, description: 'Stable UPPER_SNAKE identifier. Clients key on this.', example: VALIDATION_ERROR }
-            message: { type: string, description: 'Human readable; never parse it. '}
-            details: {}
+            code:
+              type: string
+              description: |
+                Stable UPPER_SNAKE identifier; clients key on it (map it to their own text), never on `message`. The enum is the server registry (`internal/platform/apierr`; a test keeps them equal): codes are never renamed, new cases only add codes. Each code's HTTP status(es) and meaning: the registry, mirrored in docs `ref/api-document.md` (Errors).
+              example: VALIDATION_ERROR
+              enum: [
+                VALIDATION_ERROR, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, INTERNAL_SERVER_ERROR,
+                APP_OUTDATED, INVALID_CREDENTIALS, WRONG_PASSWORD, EMAIL_EXISTS, USERNAME_EXISTS,
+                ACCOUNT_INACTIVE, AVATAR_SOURCE_UNAVAILABLE, ALREADY_ACTIVE, ACCOUNT_NOT_FOUND,
+                ACCOUNT_ARCHIVED, ACCOUNT_HAS_MEMBERS, OWNER_MUST_TRANSFER, USER_ALREADY_MEMBER,
+                USER_NOT_FOUND, NOT_MEMBER, NOT_OWNER, SCOPE_NOT_ALLOWED, INVALID_IDENTIFIER,
+                BALANCE_NOT_EDITABLE, BALANCE_NOT_TRACKED, NO_OP, WALLET_NOT_TRACKED, ROW_LOCKED,
+                CONTACT_NOT_LINKED, CATEGORY_NAME_DUPLICATE, INVALID_PARENT, CYCLE_DETECTED,
+                MAX_DEPTH_EXCEEDED, SYSTEM_CATEGORY_IMMUTABLE, SYSTEM_CATEGORY_NOT_ALLOWED,
+                CATEGORY_TYPE_MISMATCH, CATEGORY_AUTHOR_ONLY, INVALID_CATEGORY, TAG_NOT_FOUND,
+                TAG_EXISTS, TAG_NAME_TAKEN, TRANSACTION_NOT_FOUND, TX_NOT_FOUND, TRANSFER_SAME_ACCOUNT,
+                SYSTEM_TRANSACTION_IMMUTABLE, SPLITS_NOT_SUPPORTED_YET, SPLITS_ON_TRANSFER,
+                SPLITS_AUTHOR_ONLY, SPLITS_EXCEED_AMOUNT, SPLITS_EXCEED_SHARE, SPLIT_MISMATCH,
+                PAID_BY_EXPENSE_ONLY, PAID_BY_EXCEEDS_AMOUNT, LINK_MODE_CONFLICT, LINK_MODE_INPUT,
+                SHARED_BILL_FIELD, PRIVATE_NOTE_NOT_SHARED, SOURCE_PT_NOT_FOUND, SOURCE_PT_NOT_FOR_USER,
+                INVALID_PERSON_KEY, ENTRY_NOT_FOUND, ENTRY_MANAGED_BY_SOURCE, ENTRY_HAS_TRANSACTION,
+                DEBT_MANAGED_BY_TX, DEBT_NOT_LINKED, DEBT_TX_ALREADY_LINKED, DEBT_TX_AUTHOR_ONLY,
+                DEBT_TX_NEEDS_WALLET, TX_NOT_LINKABLE, TX_NOT_DISCONNECTABLE, TAGS_NEED_WALLET,
+                LEDGER_ONLY_NO_WALLET, BILL_NOT_FOUND, USE_CLAIM, CONTACT_NOT_FOUND, CONTACT_ARCHIVED,
+                ALREADY_ARCHIVED, NOT_ARCHIVED, ALREADY_LINKED, NOT_LINKED, CANNOT_LINK_SELF,
+                REQUEST_REJECTED, NOT_ACCEPTED, STATE_CONFLICT, NOT_FOR_YOU,
+                NOTIFICATION_STATE_CONFLICT, NOT_PROJECT_INVITE, TYPE_NOT_MUTABLE, PROJECT_NOT_ACTIVE,
+                PROJECT_LOCKED, EVENT_COMPLETED, EVENT_NOT_COMPLETED, EVENT_HAS_EMPTY_PERSON,
+                USE_COMPLETE_ENDPOINT, ALREADY_MEMBER, MEMBER_NOT_IN_PROJECT, MEMBER_NOT_REMOVED,
+                NOT_PENDING, CANNOT_CHANGE_OWNER, CANNOT_REMOVE_OWNER, OWNER_CANNOT_LEAVE,
+                FORBIDDEN_ROLE, PT_IS_CHILD, SELF_SPLIT, NOT_IN_BILL, BILL_ALREADY_BOOKED, BILL_CHANGED,
+                BILL_DISCONNECTED, BILL_GONE, MOVE_TARGET, PAYERS_SUM, PAYER_FIXED, BAD_PAYBACK,
+                PAYBACK_NOT_COPYABLE, NO_SHARE_TO_COPY, SETTLE_BOOKED, SETTLE_LINES,
+                CLAIM_MIXED_DIRECTION, TX_ALREADY_IN_PROJECT, TX_NOT_BILLABLE, TX_NOT_IN_PROJECT,
+                TX_SPLIT_PAID, INVALID_DATE_RANGE, INVALID_RULE, INVALID_TRANSITION, END_TOO_FAR,
+                AMOUNT_REQUIRED, ALREADY_RECORDED, NOTHING_OWED, ITEM_ALREADY_LINKED,
+                SAVING_NEEDS_WALLET, INSUFFICIENT_SAVING, GOAL_NOT_ACTIVE, GOAL_REACHED,
+                GOAL_HAS_SAVINGS, UNSUPPORTED_IMAGE, OCR_UNAVAILABLE, OCR_TIMEOUT, LOGIN_CODE_INVALID,
+                TELEGRAM_ALREADY_LINKED, REGISTRATION_CLOSED, CONNECTION_UNAVAILABLE, RATE_LIMITED,
+                PERMISSION_UNAVAILABLE, NO_PHOTO, LAST_LOGIN_METHOD, PROVIDER_ERROR
+              ]
+            message: { type: string, description: 'Safe human-readable English (never raw Go / DB text: that is logged server-side). Never parse it; the app shows its own text for the code.' }
+            details:
+              description: |
+                Depends on the code. VALIDATION_ERROR: always an array of `FieldError` (maybe empty). Others, where noted: SHARED_BILL_FIELD `{fields}`, BILL_CHANGED `{bill}`, EVENT_HAS_EMPTY_PERSON / NOT_IN_BILL / BILL_ALREADY_BOOKED (claim) `{bill_ids}`, ITEM_ALREADY_LINKED `{ids}` or `{transaction, other}`, INSUFFICIENT_SAVING `{available}`, TAG_EXISTS / NOT_FOUND in a tags batch `{op, index}`, CATEGORY_NAME_DUPLICATE `{field}`, UNSUPPORTED_IMAGE `{detected}`. Absent otherwise.
+    FieldError:
+      type: object
+      description: |
+        One invalid input of a VALIDATION_ERROR. `field` = the JSON path in the request body (`name`, `splits[0].amount`, `items[2].slot`), or the query / path parameter name (`status`, `id`); "" = the whole body. `code`: required; too_long / too_short (params.max / min characters); too_many / too_few (params.max / min items); out_of_range (params: min, max, gt, gte, lt or lte); invalid (a wrong value or format; params may hold `allowed`, `format` or `len`); invalid_type (params.expected: string / number / integer / boolean / array / object); invalid_json (field ""); too_large (an upload; params.max_bytes).
+      required: [field, code, params]
+      properties:
+        field: { type: string, example: 'splits[0].amount' }
+        code: { type: string, enum: [required, too_long, too_short, too_many, too_few, out_of_range, invalid, invalid_type, invalid_json, too_large] }
+        params: { type: object, additionalProperties: true, example: { max: 100 } }
     Ids:
       type: array
       items: { $ref: '#/components/schemas/Uuid' }
@@ -6324,7 +6375,7 @@ components:
             type: object
             required: [code, message]
             properties:
-              code: { type: string, example: INTERNAL_ERROR }
+              code: { type: string, enum: [INTERNAL_ERROR] }
               message: { type: string }
 
     # ───────── shared refs (what a row shows about another record) ─────────
@@ -6795,8 +6846,18 @@ components:
       properties:
         code:
           type: string
-          description: |
-            MISSING_TYPE, MISSING_AMOUNT, MISSING_DATE, MISSING_ACCOUNT, WALLET_NOT_TRACKED, GOAL_NOT_ACTIVE, INVALID_SPLIT, SPLITS_EXCEED_AMOUNT, INVALID_PAID_BY, PAID_BY_EXPENSE_ONLY, PAID_BY_EXCEEDS_AMOUNT, LINK_MODE_CONFLICT, INVALID_BILL_PEOPLE, NO_SHARE, ACCOUNT_NOT_FOUND, CATEGORY_NOT_FOUND, CATEGORY_TYPE_MISMATCH, TRANSFER_SAME_ACCOUNT, TRANSFER_NEEDS_WALLETS, SPLITS_ON_TRANSFER, CONTACT_NOT_FOUND, TAG_NOT_FOUND, PROJECT_NOT_FOUND, PROJECT_NOT_ACTIVE, PROJECT_LOCKED, PROJECT_NOT_MEMBER, PROJECT_READ_ONLY, TX_NOT_BILLABLE, DEBT_NOT_FOUND, DEBT_ALREADY_SETTLED, OVERPAYMENT, TRANSACTION_NOT_FOUND, NOT_FOUND, SUBMIT_FAILED.
+          description: 'The draft''s last submit failure (the apierr registry, pending use). MISSING_ACCOUNT, DEBT_ALREADY_SETTLED and OVERPAYMENT are no longer produced but may remain on stored drafts. SUBMIT_FAILED = any other failure (the cause is logged; the message is generic).'
+          enum: [
+            NOT_FOUND, ACCOUNT_NOT_FOUND, ACCOUNT_ARCHIVED, WALLET_NOT_TRACKED,
+            CATEGORY_TYPE_MISMATCH, CATEGORY_NOT_FOUND, TAG_NOT_FOUND, TRANSACTION_NOT_FOUND,
+            TRANSFER_SAME_ACCOUNT, TRANSFER_NEEDS_WALLETS, SPLITS_ON_TRANSFER,
+            SPLITS_EXCEED_AMOUNT, INVALID_SPLIT, PAID_BY_EXPENSE_ONLY, PAID_BY_EXCEEDS_AMOUNT,
+            INVALID_PAID_BY, LINK_MODE_CONFLICT, DEBT_NOT_FOUND, CONTACT_NOT_FOUND,
+            PROJECT_NOT_FOUND, PROJECT_NOT_ACTIVE, PROJECT_LOCKED, PROJECT_NOT_MEMBER,
+            PROJECT_READ_ONLY, NO_SHARE, TX_NOT_BILLABLE, INVALID_BILL_PEOPLE, GOAL_NOT_ACTIVE,
+            MISSING_TYPE, MISSING_AMOUNT, MISSING_DATE, SUBMIT_FAILED, MISSING_ACCOUNT,
+            DEBT_ALREADY_SETTLED, OVERPAYMENT
+          ]
         message: { type: string }
     PendingTransaction:
       type: object

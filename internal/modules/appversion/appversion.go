@@ -8,12 +8,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
 const Header = "X-App-Build"
 
-const CodeOutdated = "APP_OUTDATED"
+const CodeOutdated = apierr.AppOutdated
 
 type Info struct {
 	MinBuild    int    `json:"min_build"`    // 0 = check off

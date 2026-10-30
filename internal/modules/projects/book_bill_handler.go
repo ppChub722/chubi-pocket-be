@@ -10,6 +10,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
@@ -17,7 +18,7 @@ import (
 func (h *Handler) BookBill(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	var req EventBillBookRequest
@@ -41,7 +42,7 @@ func (h *Handler) BookBill(c *gin.Context) {
 func (h *Handler) RebookBill(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	ptID, ok := pathID(c, "pt_id", "project transaction id")
@@ -64,7 +65,7 @@ func (h *Handler) RebookBill(c *gin.Context) {
 func (h *Handler) billCall(c *gin.Context, fn func(userID, ptID uuid.UUID) (any, error)) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	ptID, ok := pathID(c, "pt_id", "project transaction id")
@@ -109,23 +110,23 @@ func mapBookBillError(c *gin.Context, err error) {
 	var changed *BillChangedError
 	switch {
 	case errors.As(err, &changed):
-		response.Fail(c, http.StatusConflict, "BILL_CHANGED", err.Error(), gin.H{"bill": changed.Bill})
+		response.Fail(c, http.StatusConflict, apierr.BillChanged, err.Error(), gin.H{"bill": changed.Bill})
 	case errors.Is(err, ErrBillDisconnected):
-		response.Fail(c, http.StatusConflict, "BILL_DISCONNECTED", err.Error(), nil)
+		response.Fail(c, http.StatusConflict, apierr.BillDisconnected, err.Error(), nil)
 	case errors.Is(err, ErrBillGone):
-		response.Fail(c, http.StatusGone, "BILL_GONE", err.Error(), nil)
+		response.Fail(c, http.StatusGone, apierr.BillGone, err.Error(), nil)
 	case errors.Is(err, ErrMoveTarget):
-		response.BadRequest(c, "MOVE_TARGET", err.Error(), nil)
+		response.BadRequest(c, apierr.MoveTarget, err.Error(), nil)
 	case errors.Is(err, ErrPayersSum):
-		response.BadRequest(c, "PAYERS_SUM", err.Error(), nil)
+		response.BadRequest(c, apierr.PayersSum, err.Error(), nil)
 	case errors.Is(err, transactions.ErrPrivateNoteTooLong):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, ErrBookBillTarget), errors.Is(err, ErrBookBillKind), errors.Is(err, ErrBookBillInput):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, personal_debts.ErrInvalidInput):
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.ValidationErr(c, err)
 	case errors.Is(err, personal_debts.ErrContactNotFound):
-		response.BadRequest(c, "CONTACT_NOT_FOUND", err.Error(), nil)
+		response.BadRequest(c, apierr.ContactNotFound, err.Error(), nil)
 	default:
 		mapQuickCreateError(c, err)
 	}

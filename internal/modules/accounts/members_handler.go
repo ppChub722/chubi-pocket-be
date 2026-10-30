@@ -7,13 +7,14 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
 func (h *Handler) InviteMember(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -22,7 +23,7 @@ func (h *Handler) InviteMember(c *gin.Context) {
 	}
 	var req InviteMemberRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	if _, err := h.service.InviteMember(c.Request.Context(), userID, id, req); err != nil {
@@ -35,7 +36,7 @@ func (h *Handler) InviteMember(c *gin.Context) {
 func (h *Handler) RemoveMember(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -44,7 +45,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	}
 	memberID, err := uuid.Parse(c.Param("member_id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid member id", nil)
+		response.Validation(c, "Invalid member id", apierr.Field("member_id", apierr.FieldInvalid))
 		return
 	}
 	if _, err := h.service.RemoveMember(c.Request.Context(), userID, id, memberID); err != nil {
@@ -57,7 +58,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 func (h *Handler) TransferOwnership(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -66,7 +67,7 @@ func (h *Handler) TransferOwnership(c *gin.Context) {
 	}
 	var req TransferOwnershipRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	if err := h.service.TransferOwnership(c.Request.Context(), userID, id, req.NewOwnerUserID); err != nil {
@@ -79,7 +80,7 @@ func (h *Handler) TransferOwnership(c *gin.Context) {
 func (h *Handler) UpdateReportScope(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	id, ok := parseIDParam(c)
@@ -88,7 +89,7 @@ func (h *Handler) UpdateReportScope(c *gin.Context) {
 	}
 	var req ReportScopeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", err.Error(), nil)
+		response.BindError(c, err)
 		return
 	}
 	out, err := h.service.UpdateReportScope(c.Request.Context(), userID, id, req.ReportScope)
@@ -102,12 +103,12 @@ func (h *Handler) UpdateReportScope(c *gin.Context) {
 func (h *Handler) AcceptInvite(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	notifID, err := uuid.Parse(c.Param("notification_id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		response.Validation(c, "Invalid notification id", apierr.Field("notification_id", apierr.FieldInvalid))
 		return
 	}
 	m, err := h.service.AcceptInvite(c.Request.Context(), userID, notifID)
@@ -121,12 +122,12 @@ func (h *Handler) AcceptInvite(c *gin.Context) {
 func (h *Handler) RejectInvite(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
-		response.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", nil)
+		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
 		return
 	}
 	notifID, err := uuid.Parse(c.Param("notification_id"))
 	if err != nil {
-		response.BadRequest(c, "VALIDATION_ERROR", "Invalid notification id", nil)
+		response.Validation(c, "Invalid notification id", apierr.Field("notification_id", apierr.FieldInvalid))
 		return
 	}
 	out, err := h.service.RejectInvite(c.Request.Context(), userID, notifID)
