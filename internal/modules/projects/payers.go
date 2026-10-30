@@ -13,7 +13,7 @@ import (
 
 // Multi-payer bills (0.4.1-2, owner 2026-10-28, migration 105): a bill's payers live in
 // project_transaction_payers when there are 2+; else the bill's transaction_member_id paid it all.
-// The real pairs of every bill come from the view project_bill_pairs (shares split over the payers in
+// The real pairs of every bill come from the view bill_pairs (shares split over the payers in
 // proportion to what they paid).
 
 // BillPayer — one payer of a bill, page-ready.
@@ -75,7 +75,7 @@ func billPayersOf(ctx context.Context, q shared.Querier, ptIDs []uuid.UUID) (map
 
 // BillPairsTx — the real pairs of one bill (who owes whom on it), read through tx.
 func BillPairsTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) ([]BillPair, error) {
-	rows, err := tx.Query(ctx, `SELECT debtor, creditor, amount::float8 FROM project_bill_pairs WHERE pt_id = $1
+	rows, err := tx.Query(ctx, `SELECT debtor, creditor, amount::float8 FROM bill_pairs WHERE pt_id = $1
 		ORDER BY debtor, creditor`, ptID)
 	if err != nil {
 		return nil, fmt.Errorf("bill pairs: %w", err)

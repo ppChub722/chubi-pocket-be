@@ -70,7 +70,7 @@ func settleMoves(ctx context.Context, q shared.Querier, id uuid.UUID) ([]settleM
 	// Every split child owes its parent's member (bills and paybacks alike); on an income bill the
 	// member who received owes each split their share (V14, Q-E3: the mirror of an expense).
 	// Multi-payer (migration 105): the view splits each share over the payers by what they paid.
-	rows, err := q.Query(ctx, `SELECT debtor, creditor, SUM(amount)::float8 FROM project_bill_pairs
+	rows, err := q.Query(ctx, `SELECT debtor, creditor, SUM(amount)::float8 FROM bill_pairs
 		WHERE project_id = $1 GROUP BY 1, 2`, id)
 	if err != nil {
 		return nil, nil, fmt.Errorf("settle: %w", err)

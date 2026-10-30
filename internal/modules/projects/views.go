@@ -42,9 +42,9 @@ func loadEvents(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids [
 		                 WHERE x.project_id = p.id AND x.parent_project_transaction_id IS NULL AND x.type = 'income'), 0),
 		       me.id, me.role, me.status,
 		       (SELECT COUNT(*) FROM transactions lt WHERE lt.project_id = p.id AND lt.user_id = $2),
-		       -- my real pairs (project_bill_pairs: income flipped, multi-payer proportional)
+		       -- my real pairs (bill_pairs: income flipped, multi-payer proportional)
 		       COALESCE((SELECT SUM(CASE WHEN v.creditor = me.id THEN v.amount ELSE -v.amount END)
-		                 FROM project_bill_pairs v WHERE v.project_id = p.id AND me.id IN (v.debtor, v.creditor)), 0),
+		                 FROM bill_pairs v WHERE v.project_id = p.id AND me.id IN (v.debtor, v.creditor)), 0),
 		       (SELECT COUNT(DISTINCT COALESCE(x.parent_project_transaction_id, x.id)) FROM project_transactions x
 		         JOIN project_members rm ON rm.id = x.transaction_member_id
 		         WHERE x.project_id = p.id AND rm.removed_at IS NOT NULL)
