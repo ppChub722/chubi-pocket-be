@@ -140,3 +140,9 @@ func safeMessage(status int) string {
 		return "Invalid request"
 	}
 }
+
+// NoRoute answers a path no route matches (r.NoRoute): the envelope with NOT_FOUND, never gin's
+// plain-text "404 page not found".
+func NoRoute(c *gin.Context) {
+	NotFound(c, apierr.NotFound, "Route not found")
+}

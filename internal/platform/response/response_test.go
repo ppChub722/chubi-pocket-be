@@ -139,3 +139,21 @@ func TestValidationDetailsAlwaysAList(t *testing.T) {
 		t.Errorf("got %+v", env.Error)
 	}
 }
+
+func TestNoRouteAnswersTheEnvelope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.NoRoute(NoRoute)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/nope", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var env envelope
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("not JSON: %q", w.Body.String())
+	}
+	if env.Success || env.Error.Code != string(apierr.NotFound) {
+		t.Errorf("envelope = %+v", env)
+	}
+}

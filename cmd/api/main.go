@@ -48,6 +48,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/database"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/logger"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -266,6 +267,7 @@ func main() {
 		)
 		c.AbortWithStatus(http.StatusInternalServerError)
 	}))
+	r.NoRoute(response.NoRoute)
 	r.Use(cors.New(cors.Config{
 		AllowAllOrigins: true,
 		AllowMethods:    []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
