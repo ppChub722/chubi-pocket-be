@@ -108,14 +108,14 @@ func TestUpdateMe(t *testing.T) {
 			"theme_mode": "dark", "theme_id": "mint", "language": "en",
 			"font_th": "IBM Plex Sans Thai", "font_en": "Inter", "fee_category_id": cat.String(),
 		},
-		"currency": "usd", // relabel (no conversion), upper-cased
+		"currency": "thb", // locked: the current one (any case) is a no-op
 	}
 	out := f.do(t, "PUT", "/api/v1/users/me", body, "updateMe", http.StatusOK)
 	if out["display_name"] != "New name" || out["email"] != email {
 		t.Errorf("updated = %v", out)
 	}
-	if out["currency"] != "USD" {
-		t.Errorf("currency relabel, got %v", out["currency"])
+	if out["currency"] != "THB" {
+		t.Errorf("currency, got %v", out["currency"])
 	}
 	prefs := out["preferences"].(map[string]any)
 	if prefs["theme_mode"] != "dark" || prefs["theme_id"] != "mint" || prefs["language"] != "en" ||
@@ -127,9 +127,10 @@ func TestUpdateMe(t *testing.T) {
 		t.Errorf("fee_category = %v", out["fee_category"])
 	}
 	var cur string
-	if err := f.pool.QueryRow(context.Background(), `SELECT currency FROM users WHERE id = $1`, f.uid).Scan(&cur); err != nil || cur != "USD" {
+	if err := f.pool.QueryRow(context.Background(), `SELECT currency FROM users WHERE id = $1`, f.uid).Scan(&cur); err != nil || cur != "THB" {
 		t.Errorf("stored currency = %q (%v)", cur, err)
 	}
+	f.do(t, "PUT", "/api/v1/users/me", `{"currency":"USD"}`, "updateMe", http.StatusConflict)
 
 	out = f.do(t, "PUT", "/api/v1/users/me", `{"preferences":{"fee_category_id":null}}`, "updateMe", http.StatusOK)
 	if out["preferences"].(map[string]any)["fee_category_id"] != nil {

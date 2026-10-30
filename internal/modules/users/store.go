@@ -30,6 +30,7 @@ var (
 	// ErrAvatarSourceUnavailable — avatar_settings.source names a picture I don't have (or an app
 	// no longer linked).
 	ErrAvatarSourceUnavailable = errors.New("no picture from that source")
+	ErrCurrencyLocked          = errors.New("currency is locked after sign-up")
 )
 
 func (s *Store) GetProfile(ctx context.Context, id uuid.UUID) (*Profile, error) {
@@ -137,17 +138,14 @@ func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfi
 		}
 	}
 
+	// Currency is locked after sign-up (owner 2026-10-31); the current one is a no-op.
 	if req.Currency != nil {
-		cur := strings.ToUpper(*req.Currency)
-		for _, q := range []string{
-			`UPDATE users SET currency = $2, updated_by_user_id = $1 WHERE id = $1`,
-			`UPDATE accounts SET currency = $2 WHERE user_id = $1`,
-			`UPDATE personal_debts SET currency = $2 WHERE user_id = $1`,
-			`UPDATE project_transactions SET currency = $2 WHERE record_user_id = $1`,
-		} {
-			if _, err := tx.Exec(ctx, q, id, cur); err != nil {
-				return fmt.Errorf("relabel currency: %w", err)
-			}
+		var cur string
+		if err := tx.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, id).Scan(&cur); err != nil {
+			return fmt.Errorf("read currency: %w", err)
+		}
+		if !strings.EqualFold(cur, *req.Currency) {
+			return ErrCurrencyLocked
 		}
 	}
 

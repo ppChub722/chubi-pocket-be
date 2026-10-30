@@ -6251,7 +6251,7 @@ components:
               enum: [
                 VALIDATION_ERROR, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, INTERNAL_SERVER_ERROR,
                 APP_OUTDATED, INVALID_CREDENTIALS, WRONG_PASSWORD, EMAIL_EXISTS, USERNAME_EXISTS,
-                ACCOUNT_INACTIVE, AVATAR_SOURCE_UNAVAILABLE, ALREADY_ACTIVE, ACCOUNT_NOT_FOUND,
+                ACCOUNT_INACTIVE, AVATAR_SOURCE_UNAVAILABLE, CURRENCY_LOCKED, ALREADY_ACTIVE, ACCOUNT_NOT_FOUND,
                 ACCOUNT_ARCHIVED, ACCOUNT_HAS_MEMBERS, OWNER_MUST_TRANSFER, USER_ALREADY_MEMBER,
                 USER_NOT_FOUND, NOT_MEMBER, NOT_OWNER, SCOPE_NOT_ALLOWED, INVALID_IDENTIFIER,
                 BALANCE_NOT_EDITABLE, BALANCE_NOT_TRACKED, NO_OP, WALLET_NOT_TRACKED, ROW_LOCKED,
@@ -9807,7 +9807,7 @@ components:
           },
           "currency": {
             "$ref": "#/components/schemas/CurrencyCode",
-            "description": "The user's currency, picked at registration (default THB), changeable with PUT /users/me (relabel only, no conversion). Every record takes it; calculations ignore it."
+            "description": "The user's currency, picked at registration (default THB), locked afterwards (0.4.2-3). Every record takes it; calculations ignore it."
           },
           "avatar": {
             "$ref": "#/components/schemas/Avatar",
@@ -9957,7 +9957,7 @@ components:
         "properties": {
           "currency": {
             "$ref": "#/components/schemas/CurrencyCode",
-            "description": "Optional. Relabels the user currency (3 letters, upper-cased). No conversion: amounts stay as they are; the user, wallet, debt and event rows follow the new label. Calculations ignore currency."
+            "description": "Locked (0.4.2-3): the current currency is accepted as a no-op; any other → 409 CURRENCY_LOCKED."
           },
           "display_name": {
             "type": "string",

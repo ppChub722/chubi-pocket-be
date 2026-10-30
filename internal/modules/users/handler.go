@@ -58,6 +58,9 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		case errors.Is(err, ErrAvatarSourceUnavailable):
 			response.Fail(c, http.StatusConflict, apierr.AvatarSourceUnavailable,
 				"No picture from that source (or the app is no longer linked)", nil)
+		case errors.Is(err, ErrCurrencyLocked):
+			response.Fail(c, http.StatusConflict, apierr.CurrencyLocked,
+				"The currency can't be changed", nil)
 		case errors.Is(err, ErrEmailExists):
 			response.Fail(c, http.StatusConflict, apierr.EmailExists,
 				"Email already registered", nil)

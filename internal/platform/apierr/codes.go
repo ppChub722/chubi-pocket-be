@@ -49,6 +49,7 @@ const (
 	UsernameExists          Code = "USERNAME_EXISTS"
 	AccountInactive         Code = "ACCOUNT_INACTIVE"
 	AvatarSourceUnavailable Code = "AVATAR_SOURCE_UNAVAILABLE"
+	CurrencyLocked          Code = "CURRENCY_LOCKED"
 	AlreadyActive           Code = "ALREADY_ACTIVE"
 
 	// wallets (accounts)
@@ -246,6 +247,7 @@ var registry = []Def{
 	{UsernameExists, []int{409}, InEnvelope, "The username is already registered."},
 	{AccountInactive, []int{403}, InEnvelope, "The user deactivated their account; reactivate to continue."},
 	{AvatarSourceUnavailable, []int{409}, InEnvelope, "Profile: the picked avatar source has no picture (or the app is no longer linked)."},
+	{CurrencyLocked, []int{409}, InEnvelope, "Profile: the currency can't be changed after sign-up (sending the current one is a no-op)."},
 	{AlreadyActive, []int{400}, InEnvelope, "Reactivate: the account is already active."},
 
 	// wallets (accounts)
