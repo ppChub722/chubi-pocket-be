@@ -223,6 +223,10 @@ const (
 	NoPhoto               Code = "NO_PHOTO"
 	LastLoginMethod       Code = "LAST_LOGIN_METHOD"
 	ProviderError         Code = "PROVIDER_ERROR"
+
+	// idempotent saves (0.4.2-3)
+	IdempotencyKeyReused  Code = "IDEMPOTENCY_KEY_REUSED"
+	IdempotencyInProgress Code = "IDEMPOTENCY_IN_PROGRESS"
 )
 
 var registry = []Def{
@@ -416,6 +420,10 @@ var registry = []Def{
 	{NoPhoto, []int{404}, InEnvelope, "Connections: the linked app gave no picture."},
 	{LastLoginMethod, []int{409}, InEnvelope, "Unlink: it is the account's only way in (no password); set a password first."},
 	{ProviderError, []int{502}, InEnvelope, "The linked app did not answer; try again."},
+
+	// idempotent saves (0.4.2-3)
+	{IdempotencyKeyReused, []int{422}, InEnvelope, "The Idempotency-Key was already used for a different request."},
+	{IdempotencyInProgress, []int{409}, InEnvelope, "The first request with this Idempotency-Key is still running; retry in a moment."},
 }
 
 var byCode = func() map[Code]Def {

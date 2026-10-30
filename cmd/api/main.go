@@ -47,6 +47,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/users"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/database"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/idempotency"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/logger"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
@@ -278,8 +279,9 @@ func main() {
 			"X-Request-ID",
 			appversion.Header,
 			"X-Timezone",
+			idempotency.Header,
 		},
-		ExposeHeaders:    []string{"X-Request-ID", datasync.VersionsHeader},
+		ExposeHeaders:    []string{"X-Request-ID", datasync.VersionsHeader, idempotency.ReplayHeader},
 		AllowCredentials: false,
 		MaxAge:           12 * time.Hour,
 	}))
@@ -335,6 +337,8 @@ func main() {
 			c.Next()
 		})
 		protected.Use(datasync.Middleware(dbPool, log))
+		// 0.4.2-3: a save sent again with the same Idempotency-Key gets its first answer back
+		protected.Use(idempotency.Middleware(dbPool, log))
 		{
 			protected.POST("/auth/logout", authHandler.Logout)
 			protected.PUT("/auth/password", authHandler.ChangePassword)
