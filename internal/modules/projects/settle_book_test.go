@@ -45,6 +45,7 @@ func TestBookSimplifiedSettle(t *testing.T) {
 			VALUES (gen_random_uuid(), $2, $3, $4, 'expense', $5, 'THB', '2026-10-02', $1)`, b, id, debtor, f.owner, amount); err != nil {
 			t.Fatal(err)
 		}
+		f.rowsToPeople(t, nil)
 		return b.String()
 	}
 	b1 := bill(beeM, mine, 300) // Bee paid for me

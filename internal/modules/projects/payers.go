@@ -11,8 +11,8 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// Multi-payer bills (0.4.1-2, owner 2026-10-28, migration 105): a bill's payers live in
-// project_transaction_payers when there are 2+; else the bill's transaction_member_id paid it all.
+// Multi-payer bills (0.4.1-2, owner 2026-10-28): what each person paid is on their people row; a
+// bill paid by one person has the whole amount on its transaction_member_id.
 // The real pairs of every bill come from the view bill_pairs (shares split over the payers in
 // proportion to what they paid).
 
@@ -102,12 +102,9 @@ func BillPayersTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) ([]BillPair, e
 	return out, nil
 }
 
-// SetBillPayersTx writes a bill's payers (as given; Σ = the bill, checked by the caller): 2+ payers
-// → the rows, and the bill's transaction_member_id = the biggest; one → no rows, that member pays.
+// SetBillPayersTx writes a bill's payers (as given; Σ = the bill, checked by the caller) on its
+// people, and the bill's transaction_member_id = the biggest; one payer pays the whole bill.
 func SetBillPayersTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID, payers map[uuid.UUID]float64) error {
-	if _, err := tx.Exec(ctx, `DELETE FROM project_transaction_payers WHERE project_transaction_id = $1`, ptID); err != nil {
-		return fmt.Errorf("clear payers: %w", err)
-	}
 	var (
 		main uuid.UUID
 		best float64
@@ -117,20 +114,25 @@ func SetBillPayersTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID, payers map[
 			main, best = m, a
 		}
 	}
-	if len(payers) > 1 {
-		for m, a := range payers {
-			if _, err := tx.Exec(ctx, `INSERT INTO project_transaction_payers (project_transaction_id, member_id, amount)
-				VALUES ($1, $2, $3)`, ptID, m, round2(a)); err != nil {
-				return fmt.Errorf("payer: %w", err)
-			}
+	// the splits as they are, read before the main payer (who carries the rest) changes
+	people, err := billPeopleNowTx(ctx, tx, ptID)
+	if err != nil {
+		return err
+	}
+	w := billPeopleWrite{Splits: map[uuid.UUID]float64{}, Payers: map[uuid.UUID]float64{}}
+	for _, p := range people {
+		if !p.main && p.share > 0 {
+			w.Splits[p.member] = p.share
 		}
 	}
-	if main == uuid.Nil {
-		return nil
+	if main != uuid.Nil {
+		if _, err := tx.Exec(ctx, `UPDATE project_transactions SET transaction_member_id = $2 WHERE id = $1
+			AND transaction_member_id IS DISTINCT FROM $2`, ptID, main); err != nil {
+			return fmt.Errorf("main payer: %w", err)
+		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE project_transactions SET transaction_member_id = $2 WHERE id = $1
-		AND transaction_member_id <> $2`, ptID, main); err != nil {
-		return fmt.Errorf("main payer: %w", err)
+	if len(payers) > 1 {
+		w.Payers = payers
 	}
-	return nil
+	return putBillPeopleTx(ctx, tx, ptID, w)
 }

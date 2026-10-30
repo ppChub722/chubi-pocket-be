@@ -60,68 +60,27 @@ func (s *Service) AssignRemoved(ctx context.Context, userID, projectID, memberID
 	if to == memberID {
 		return nil, ErrBadBillPeople
 	}
-	type spot struct {
-		id     uuid.UUID
-		parent *uuid.UUID
-		amount float64
-	}
-	rows, err := tx.Query(ctx, `SELECT id, parent_project_transaction_id, amount::float8 FROM project_transactions
-		WHERE project_id = $1 AND transaction_member_id = $2 ORDER BY parent_project_transaction_id NULLS FIRST, id`,
+	all, err := collectIDs(ctx, tx, `SELECT DISTINCT sp.split_transaction_id FROM split_transaction_people sp
+		JOIN project_transactions b ON b.id = sp.split_transaction_id
+		WHERE b.project_id = $1 AND sp.event_member_id = $2
+		UNION SELECT id FROM project_transactions WHERE project_id = $1 AND transaction_member_id = $2`,
 		projectID, memberID)
 	if err != nil {
-		return nil, fmt.Errorf("spots: %w", err)
-	}
-	var spots []spot
-	for rows.Next() {
-		var sp spot
-		if err := rows.Scan(&sp.id, &sp.parent, &sp.amount); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		bill := sp.id
-		if sp.parent != nil {
-			bill = *sp.parent
-		}
-		if len(req.BillIDs) == 0 || slices.Contains(req.BillIDs, bill) {
-			spots = append(spots, sp)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for _, sp := range spots {
-		if sp.parent == nil { // the payer: the new person pays; their own share in it merges into the rest
-			if _, err := tx.Exec(ctx, `DELETE FROM project_transactions WHERE parent_project_transaction_id = $1
-				AND transaction_member_id = $2`, sp.id, to); err != nil {
-				return nil, fmt.Errorf("assign payer share: %w", err)
-			}
-			if _, err := tx.Exec(ctx, `UPDATE project_transactions SET transaction_member_id = $2, updated_by_user_id = $3
-				WHERE id = $1`, sp.id, to, userID); err != nil {
-				return nil, fmt.Errorf("assign payer: %w", err)
-			}
-			continue
+	bills := make([]uuid.UUID, 0, len(all))
+	for _, id := range all {
+		if len(req.BillIDs) == 0 || slices.Contains(req.BillIDs, id) {
+			bills = append(bills, id)
 		}
-		var payer uuid.UUID
-		if err := tx.QueryRow(ctx, `SELECT transaction_member_id FROM project_transactions WHERE id = $1`, *sp.parent).
-			Scan(&payer); err != nil {
-			return nil, fmt.Errorf("bill payer: %w", err)
-		}
-		tag, err := tx.Exec(ctx, `UPDATE project_transactions SET amount = amount + $3, updated_by_user_id = $4
-			WHERE parent_project_transaction_id = $1 AND transaction_member_id = $2`, *sp.parent, to, sp.amount, userID)
-		if err != nil {
-			return nil, fmt.Errorf("assign share: %w", err)
-		}
-		if tag.RowsAffected() > 0 || payer == to { // merged into their share / the payer's rest
-			if _, err := tx.Exec(ctx, `DELETE FROM project_transactions WHERE id = $1`, sp.id); err != nil {
-				return nil, fmt.Errorf("drop spot: %w", err)
-			}
-			continue
-		}
-		if _, err := tx.Exec(ctx, `UPDATE project_transactions SET transaction_member_id = $2, updated_by_user_id = $3
-			WHERE id = $1`, sp.id, to, userID); err != nil {
-			return nil, fmt.Errorf("assign share: %w", err)
-		}
+	}
+	// the payer's spot: the new person pays; a share they had in it merges into the payer's rest
+	if _, err := tx.Exec(ctx, `UPDATE project_transactions SET transaction_member_id = $3, updated_by_user_id = $4
+		WHERE id = ANY($1) AND transaction_member_id = $2`, bills, memberID, to, userID); err != nil {
+		return nil, fmt.Errorf("assign payer: %w", err)
+	}
+	if err := movePersonTx(ctx, tx, bills, memberID, to); err != nil {
+		return nil, err
 	}
 	name := userDisplayOrEmpty(ctx, tx, userID)
 	if err := s.dispatchAddedTx(ctx, tx, p, mb, name); err != nil {

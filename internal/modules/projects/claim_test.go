@@ -49,6 +49,7 @@ func TestClaimBills(t *testing.T) {
 		(gen_random_uuid(), $2, $3, $4, 'payback', 20, 'THB', '2026-10-05', $1)`, p1, id, mine, f.owner); err != nil {
 		t.Fatal(err)
 	}
+	f.rowsToPeople(t, nil)
 
 	list := me.do("GET", "/projects/"+id+"/claimable?member_id="+beeM.String(), nil, "listClaimableBills", http.StatusOK)
 	if d := list["data"].([]any); len(d) != 4 {
@@ -106,6 +107,7 @@ func TestClaimBills(t *testing.T) {
 		(gen_random_uuid(), $2, $3, $4, 'expense', 40, 'THB', '2026-10-06', $1)`, b4, id, beeM, f.owner); err != nil {
 		t.Fatal(err)
 	}
+	f.rowsToPeople(t, nil)
 	existing := f.insertBill(t, f.owner, f.acctPersonal, f.cat, 80, "2026-10-06")
 	me.do("POST", claim, map[string]any{"member_id": beeM, "bill_ids": []string{b4}, "link_transaction_id": existing}, "claimBills", http.StatusOK)
 	if c := f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE id = $1 AND linked_transaction_id = $2`, b4, existing); c != 1 {

@@ -471,17 +471,6 @@ func (b *booking) asOrigin(ctx context.Context, billID, txID uuid.UUID) error {
 	return err
 }
 
-// mySplitRow — my split row of a bill (a copy of my share points at it).
-func (b *booking) mySplitRow(ctx context.Context, billID uuid.UUID) (uuid.UUID, error) {
-	var id uuid.UUID
-	err := b.tx.QueryRow(ctx, `SELECT id FROM project_transactions WHERE parent_project_transaction_id = $1
-		AND transaction_member_id = $2 LIMIT 1`, billID, b.meMem).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return billID, nil
-	}
-	return id, err
-}
-
 // payback adds a board payback row: from paid to back amount; forBill = the bill it was ticked
 // "คืนแล้ว" on (nil: a payback of its own).
 func (b *booking) payback(ctx context.Context, from, to uuid.UUID, amount float64, date string, forBill *uuid.UUID) (uuid.UUID, error) {
@@ -495,6 +484,9 @@ func (b *booking) payback(ctx context.Context, from, to uuid.UUID, amount float6
 	if forBill != nil {
 		if _, err := b.tx.Exec(ctx, `UPDATE project_transactions SET paid_back_for_id = $2 WHERE id = $1`, pt.ID, *forBill); err != nil {
 			return uuid.Nil, fmt.Errorf("payback of bill: %w", err)
+		}
+		if err := refreshPaidBackTx(ctx, b.tx, *forBill); err != nil {
+			return uuid.Nil, err
 		}
 	}
 	b.paybacks = append(b.paybacks, pt.ID)
@@ -682,9 +674,9 @@ func (b *booking) paidBackRows(ctx context.Context, in EventBillInput, r *resolv
 		}
 	}
 	have := map[pair]made{}
-	rows, err := b.tx.Query(ctx, `SELECT pb.id, pb.transaction_member_id, c.transaction_member_id, pb.amount::float8
-		FROM project_transactions pb JOIN project_transactions c ON c.parent_project_transaction_id = pb.id
-		WHERE pb.paid_back_for_id = $1 AND pb.parent_project_transaction_id IS NULL`, b.rowID)
+	rows, err := b.tx.Query(ctx, `SELECT pb.id, pb.transaction_member_id, c.event_member_id, pb.amount::float8
+		FROM project_transactions pb JOIN split_transaction_people c ON c.split_transaction_id = pb.id AND c.sort > 0
+		WHERE pb.paid_back_for_id = $1`, b.rowID)
 	if err != nil {
 		return fmt.Errorf("paybacks of bill: %w", err)
 	}
@@ -802,8 +794,7 @@ func (b *booking) books(ctx context.Context, in EventBillInput, r *resolvedBill,
 // + the debts of the others (and a "คืนแล้ว" member's repayment into my wallet, E2); someone else
 // paid → my share with no wallet + my debt (E4), or from my wallet with no debt when I paid back (E3).
 func (b *booking) myCopy(ctx context.Context, books EventBillBooks) error {
-	if _, err := b.tx.Exec(ctx, `DELETE FROM shared_bill_opt_outs WHERE project_transaction_id = $1 AND user_id = $2`,
-		b.rowID, b.me); err != nil {
+	if _, err := setDisconnectedTx(ctx, b.tx, b.rowID, b.me, false); err != nil {
 		return fmt.Errorf("connect my copy: %w", err)
 	}
 	st, err := b.s.loadBillTx(ctx, b.tx, b.rowID)

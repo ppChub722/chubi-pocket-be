@@ -65,6 +65,7 @@ func TestMultiPayerPairs(t *testing.T) {
 		VALUES (gen_random_uuid(), $2, $3, $4, 'expense', 100, 'THB', '2026-10-28', $1)`, b2, id, mine, f.owner); err != nil {
 		t.Fatal(err)
 	}
+	f.rowsToPeople(t, nil)
 	tx, _ = f.pool.Begin(ctx)
 	if err := SetBillPayersTx(ctx, tx, b2, map[uuid.UUID]float64{lee: 150, bee: 50}); err != nil {
 		t.Fatal(err)

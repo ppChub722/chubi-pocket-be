@@ -69,6 +69,7 @@ func (e *mpEvent) bill(total float64, payers, shares map[uuid.UUID]float64) stri
 			e.t.Fatal(err)
 		}
 	}
+	e.f.rowsToPeople(e.t, nil)
 	tx, err := e.f.pool.Begin(ctx)
 	if err != nil {
 		e.t.Fatal(err)
@@ -158,7 +159,7 @@ func TestMultiPayerLumpThenDeleteEvent(t *testing.T) {
 		WHERE x.id IN ($1::uuid, $2::uuid) AND p.kind = 'split'`, b1, b2); c != 2 {
 		t.Errorf("bills in split projects = %d, want 2", c)
 	}
-	if c := e.f.countRows(t, `SELECT COUNT(*) FROM project_transaction_payers WHERE project_transaction_id IN ($1::uuid, $2::uuid)`, b1, b2); c != 4 {
+	if c := e.f.countRows(t, `SELECT COUNT(*) FROM split_transaction_people WHERE split_transaction_id IN ($1::uuid, $2::uuid) AND paid > 0`, b1, b2); c != 4 {
 		t.Errorf("payers rows kept = %d, want 4", c)
 	}
 	// my lump still covers both bills, my copies still point at them

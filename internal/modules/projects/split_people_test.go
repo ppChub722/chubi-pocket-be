@@ -8,13 +8,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/apidoc/apitest"
 )
 
-// Split phase A (migrations 124-125): the people rows follow the old child rows / payers / marks /
-// opt-outs / paid-back ticks through the triggers, and the readers already moved to them give the
-// numbers worked out by hand. One event with every kind of bill:
+// Split phase A: the people rows are the bill's people (shares, payers, marks, opt-outs, paid-back
+// ticks), the writers keep them adding up, and the readers give the numbers worked out by hand. One
+// event with every kind of bill:
 //
 //	b1 expense 300, me paid; shares me 100, Lee 100, Bee 100; Lee marked; my copy disconnected
 //	b2 expense 200, Lee paid 150 + Bee 50; shares me 100, Lee 100 (the main payer's rest)
@@ -23,7 +24,7 @@ import (
 //
 // By hand: paid me 300 / Lee 150 / Bee 50; share me 200 / Lee 200 / Bee 100; sent Lee 100;
 // received me 100; income net me +30, Lee +30, Bee -60 → net me +30, Lee +80, Bee -110.
-func TestSplitPeopleFollowTheOldRows(t *testing.T) {
+func TestSplitPeopleAddUp(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
 	h := NewHandler(f.svc)
@@ -63,13 +64,10 @@ func TestSplitPeopleFollowTheOldRows(t *testing.T) {
 
 	b1 := bill(mine, "expense", 300)
 	child(b1, lee, "expense", 100)
-	beeOnB1 := child(b1, bee, "expense", 100)
-	exec(`UPDATE project_transactions SET marks = ARRAY[$2::uuid] WHERE id = $1`, b1, lee)
-	exec(`INSERT INTO shared_bill_opt_outs (project_transaction_id, user_id) VALUES ($1, $2)`, b1, f.owner)
+	child(b1, bee, "expense", 100)
 
 	b2 := bill(lee, "expense", 200)
 	child(b2, mine, "expense", 100)
-	exec(`INSERT INTO project_transaction_payers (project_transaction_id, member_id, amount) VALUES ($1, $2, 150), ($1, $3, 50)`, b2, lee, bee)
 
 	b3 := bill(bee, "income", 90)
 	child(b3, mine, "income", 30)
@@ -78,6 +76,9 @@ func TestSplitPeopleFollowTheOldRows(t *testing.T) {
 	b4 := bill(lee, "payback", 100)
 	child(b4, mine, "payback", 100)
 	exec(`UPDATE project_transactions SET paid_back_for_id = $2 WHERE id = $1`, b4, b1)
+	f.rowsToPeople(t, map[uuid.UUID]map[uuid.UUID]float64{b2: {lee: 150, bee: 50}})
+	exec(`UPDATE split_transaction_people SET marked_at = NOW() WHERE split_transaction_id = $1 AND event_member_id = $2`, b1, lee)
+	exec(`UPDATE split_transaction_people SET disconnected_at = NOW() WHERE split_transaction_id = $1 AND event_member_id = $2`, b1, mine)
 
 	// the people rows
 	type person struct {
@@ -198,23 +199,43 @@ func TestSplitPeopleFollowTheOldRows(t *testing.T) {
 		t.Fatalf("mine = %d bills, want 4 (I am a person of each)", len(mineOnly["data"].([]any)))
 	}
 
-	// edits through the old tables keep the people equal: a smaller split, a removed split,
-	// the main payer swapped
-	exec(`UPDATE project_transactions SET amount = 50 WHERE parent_project_transaction_id = $1 AND transaction_member_id = $2`, b1, lee)
-	exec(`DELETE FROM project_transactions WHERE id = $1`, beeOnB1)
+	// the writers keep the people adding up: a smaller split and a removed split, the main payer
+	// swapped, the ticks undone
+	inTx := func(do func(tx pgx.Tx) error) {
+		t.Helper()
+		tx, err := f.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		if err := do(tx); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inTx(func(tx pgx.Tx) error {
+		return putBillPeopleTx(ctx, tx, b1, billPeopleWrite{Splits: map[uuid.UUID]float64{lee: 50}})
+	})
 	want("b1 edited", people(b1), map[uuid.UUID]person{
 		mine: {share: 250, paid: 300, off: true},
 		lee:  {share: 50, paidBack: true, marked: true},
 	})
-	exec(`DELETE FROM project_transaction_payers WHERE project_transaction_id = $1`, b2)
-	exec(`UPDATE project_transactions SET transaction_member_id = $2 WHERE id = $1`, b2, bee)
+	inTx(func(tx pgx.Tx) error { return SetBillPayersTx(ctx, tx, b2, map[uuid.UUID]float64{bee: 200}) })
 	want("b2 one payer", people(b2), map[uuid.UUID]person{
 		mine: {share: 100},
 		bee:  {share: 100, paid: 200},
 	})
-	exec(`UPDATE project_transactions SET marks = '{}' WHERE id = $1`, b1)
-	exec(`DELETE FROM shared_bill_opt_outs WHERE project_transaction_id = $1`, b1)
-	exec(`DELETE FROM project_transactions WHERE id = $1`, b4)
+	if err := f.svc.store.ToggleMark(ctx, uuid.MustParse(id), b1, lee, false); err != nil {
+		t.Fatal(err)
+	}
+	inTx(func(tx pgx.Tx) error {
+		if _, err := setDisconnectedTx(ctx, tx, b1, f.owner, false); err != nil {
+			return err
+		}
+		return f.svc.deleteBoardRowTx(ctx, tx, f.owner, uuid.MustParse(id), b4)
+	})
 	want("b1 unticked", people(b1), map[uuid.UUID]person{
 		mine: {share: 250, paid: 300},
 		lee:  {share: 50},
@@ -234,10 +255,10 @@ func TestSplitPeopleFollowTheOldRows(t *testing.T) {
 	}
 }
 
-// The books' links follow the old pointers (migration 127): a copy that points at a split row
+// The books' links follow the pointers (migrations 127 / 129): a copy that points at the bill
 // carries the bill and the person; a transaction a bill is made from carries the bill; a debt and
 // a lump line too; unlinking clears them.
-func TestSplitLinksFollowTheOldPointers(t *testing.T) {
+func TestSplitLinksFollowThePointers(t *testing.T) {
 	f := newQCFixture(t)
 	ctx := context.Background()
 	h := NewHandler(f.svc)
@@ -256,11 +277,12 @@ func TestSplitLinksFollowTheOldPointers(t *testing.T) {
 	}
 	exec(`INSERT INTO project_members (id, project_id, user_id, display_name, role, status) VALUES ($1, $2, $3, 'Lee', 'contributor', 'active')`,
 		lee, id, f.friend)
-	bill, split := uuid.New(), uuid.New()
+	bill := uuid.New()
 	exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date)
 		VALUES ($1, $2, $3, $4, 'expense', 300, 'THB', '2026-10-30')`, bill, id, mine, f.owner)
 	exec(`INSERT INTO project_transactions (id, project_id, parent_project_transaction_id, transaction_member_id, record_user_id, type, amount, currency, date)
-		VALUES ($1, $2, $3, $4, $5, 'expense', 100, 'THB', '2026-10-30')`, split, id, bill, lee, f.owner)
+		VALUES (gen_random_uuid(), $2, $1, $3, $4, 'expense', 100, 'THB', '2026-10-30')`, bill, id, lee, f.owner)
+	f.rowsToPeople(t, nil)
 
 	var person uuid.UUID
 	if err := f.pool.QueryRow(ctx, `SELECT id FROM split_transaction_people WHERE split_transaction_id = $1 AND event_member_id = $2`, bill, lee).Scan(&person); err != nil {
@@ -275,8 +297,8 @@ func TestSplitLinksFollowTheOldPointers(t *testing.T) {
 		return b, p
 	}
 
-	// Lee's copy of his share points at the split row
-	copyTx := f.insertCopy(t, f.friend, uuid.MustParse(id), split, 100)
+	// Lee's copy of his share points at the bill
+	copyTx := f.insertCopy(t, f.friend, uuid.MustParse(id), bill, 100)
 	if b, p := links(copyTx); b == nil || *b != bill || p == nil || *p != person {
 		t.Fatalf("copy links = %v %v, want bill %s person %s", b, p, bill, person)
 	}

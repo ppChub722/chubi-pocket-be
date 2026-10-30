@@ -199,13 +199,19 @@ func (s *Service) deleteBoardRowTx(ctx context.Context, tx pgx.Tx, editorUserID,
 	if err := unlinkCopiesTx(ctx, tx, ptID); err != nil {
 		return err
 	}
-	tag, err := tx.Exec(ctx,
-		`DELETE FROM project_transactions WHERE id = $1 AND project_id = $2`, ptID, projectID)
+	var paidBackFor *uuid.UUID
+	err := tx.QueryRow(ctx, `DELETE FROM project_transactions WHERE id = $1 AND project_id = $2
+		RETURNING paid_back_for_id`, ptID, projectID).Scan(&paidBackFor)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrPTNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("delete PT: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrPTNotFound
+	if paidBackFor != nil { // the "คืนแล้ว" tick of the bill it paid back goes with it
+		if err := refreshPaidBackTx(ctx, tx, *paidBackFor); err != nil {
+			return err
+		}
 	}
 
 	if s.notifs == nil || len(recipients) == 0 {

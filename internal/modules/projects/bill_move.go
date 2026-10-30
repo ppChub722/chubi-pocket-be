@@ -30,9 +30,8 @@ func (b *booking) moveBill(ctx context.Context, current *ProjectTransaction, mv 
 		return ErrBookBillInput
 	}
 	source, sourceKind := current.ProjectID, b.kind
-	rows, err := collectIDs(ctx, b.tx, `SELECT id FROM project_transactions
-		WHERE id = $1 OR parent_project_transaction_id = $1 OR paid_back_for_id = $1
-		   OR parent_project_transaction_id IN (SELECT id FROM project_transactions WHERE paid_back_for_id = $1)`, current.ID)
+	rows, err := collectIDs(ctx, b.tx, `SELECT id FROM project_transactions WHERE id = $1 OR paid_back_for_id = $1`,
+		current.ID)
 	if err != nil {
 		return err
 	}
@@ -61,12 +60,18 @@ func (b *booking) moveBill(ctx context.Context, current *ProjectTransaction, mv 
 	target := b.project.ID
 	// the people: each member of the moved rows → the same person in the target
 	// The rows move first (the completed-event lock reads the new project_id), then their people.
-	if _, err := b.tx.Exec(ctx, `UPDATE project_transactions SET project_id = $2, marks = '{}', updated_by_user_id = $3
+	if _, err := b.tx.Exec(ctx, `UPDATE project_transactions SET project_id = $2, updated_by_user_id = $3
 		WHERE id = ANY($1)`, rows, target, b.me); err != nil {
 		return fmt.Errorf("move bill: %w", err)
 	}
-	members, err := collectIDs(ctx, b.tx, `SELECT transaction_member_id FROM project_transactions WHERE id = ANY($1)
-		UNION SELECT member_id FROM project_transaction_payers WHERE project_transaction_id = ANY($1)`, rows)
+	if _, err := b.tx.Exec(ctx, `UPDATE split_transaction_people SET marked_at = NULL
+		WHERE split_transaction_id = ANY($1) AND marked_at IS NOT NULL`, rows); err != nil {
+		return fmt.Errorf("move marks: %w", err)
+	}
+	members, err := collectIDs(ctx, b.tx, `SELECT transaction_member_id FROM project_transactions
+		WHERE id = ANY($1) AND transaction_member_id IS NOT NULL
+		UNION SELECT event_member_id FROM split_transaction_people
+		WHERE split_transaction_id = ANY($1) AND event_member_id IS NOT NULL`, rows)
 	if err != nil {
 		return err
 	}
@@ -94,9 +99,8 @@ func (b *booking) moveBill(ctx context.Context, current *ProjectTransaction, mv 
 			WHERE id = ANY($1) AND transaction_member_id = $2`, rows, old, to); err != nil {
 			return fmt.Errorf("move member: %w", err)
 		}
-		if _, err := b.tx.Exec(ctx, `UPDATE project_transaction_payers SET member_id = $3
-			WHERE project_transaction_id = ANY($1) AND member_id = $2`, rows, old, to); err != nil {
-			return fmt.Errorf("move payer: %w", err)
+		if err := movePersonTx(ctx, b.tx, rows, old, to); err != nil {
+			return err
 		}
 		// every user's bill parts of it point at the same person in the target (lumps survive)
 		if _, err := b.tx.Exec(ctx, `UPDATE personal_debt_bills SET member_id = $3

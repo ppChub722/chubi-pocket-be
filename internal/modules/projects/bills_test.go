@@ -254,8 +254,9 @@ func TestMoveBill(t *testing.T) {
 		t.Errorf("personal splits on the moved bill = %d, want 0", n)
 	}
 	if n := f.countRows(t, `
-		SELECT COUNT(*) FROM project_transactions
-		WHERE parent_project_transaction_id = $1`, f.boardParentOf(t, f.bill1)); n != 2 {
+
+		SELECT COUNT(*) FROM split_transaction_people sp JOIN project_transactions b ON b.id = sp.split_transaction_id
+		WHERE sp.split_transaction_id = $1 AND sp.share > 0 AND sp.event_member_id IS DISTINCT FROM b.transaction_member_id`, f.boardParentOf(t, f.bill1)); n != 2 {
 		t.Errorf("new board row splits = %d, want 2", n)
 	}
 	if n := f.countRows(t, `SELECT COUNT(*) FROM notifications WHERE type = 'split_created' AND recipient_user_id = $1`,
@@ -362,7 +363,7 @@ func TestPullMovesLinkedSplitToBoard(t *testing.T) {
 		t.Errorf("my split still on the bill: %d", n)
 	}
 	if n := f.countRows(t, `
-		SELECT COUNT(*) FROM project_transactions WHERE parent_project_transaction_id = $1 AND amount = 30`,
+		SELECT COUNT(*) FROM split_transaction_people WHERE split_transaction_id = $1 AND share = 30 AND sort > 0`,
 		f.boardParentOf(t, billID)); n != 1 {
 		t.Errorf("Bee's split should be on the board")
 	}
@@ -400,7 +401,8 @@ func TestNewBillSplitsGoStraightToBoard(t *testing.T) {
 		f.friend); n != 0 {
 		t.Errorf("split_created to Bee = %d, want 0", n)
 	}
-	if n := f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE parent_project_transaction_id = $1`,
+	if n := f.countRows(t, `SELECT COUNT(*) FROM split_transaction_people sp JOIN project_transactions b ON b.id = sp.split_transaction_id
+		WHERE sp.split_transaction_id = $1 AND sp.share > 0 AND sp.event_member_id IS DISTINCT FROM b.transaction_member_id`,
 		f.boardParentOf(t, newID)); n != 2 {
 		t.Errorf("board splits = %d, want 2", n)
 	}

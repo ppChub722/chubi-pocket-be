@@ -44,7 +44,12 @@ func TestEventComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	me.code("POST", "/projects/"+id+"/complete", nil, http.StatusConflict, "EVENT_HAS_EMPTY_PERSON")
-	if _, err := f.pool.Exec(ctx, `DELETE FROM project_transactions WHERE transaction_member_id = $1`, goneM); err != nil {
+	// the spot goes (its share back to the payer's rest)
+	if _, err := f.pool.Exec(ctx, `UPDATE split_transaction_people SET share = share + 50
+		WHERE split_transaction_id = $1 AND sort = 0`, ptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.pool.Exec(ctx, `DELETE FROM split_transaction_people WHERE event_member_id = $1`, goneM); err != nil {
 		t.Fatal(err)
 	}
 

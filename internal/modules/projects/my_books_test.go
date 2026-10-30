@@ -114,15 +114,14 @@ func TestSetMyBooks(t *testing.T) {
 	}
 
 	// a viewer books / unbooks their OWN copy; my bill stays where it is. Bee has a split on the row
-	// (bill1's split moved onto the board): her copy goes back to her split.
+	// (bill1's split moved onto the board): her copy goes back to the bill.
 	if _, err := f.pool.Exec(ctx, `UPDATE project_members SET role = $3 WHERE project_id = $1 AND user_id = $2`,
 		proj, f.friend, RoleViewer); err != nil {
 		t.Fatal(err)
 	}
 	var split uuid.UUID
-	if err := f.pool.QueryRow(ctx, `SELECT c.id FROM project_transactions c
-		JOIN project_members pm ON pm.id = c.transaction_member_id AND pm.user_id = $2
-		WHERE c.parent_project_transaction_id = $1`, pt, f.friend).Scan(&split); err != nil {
+	if err := f.pool.QueryRow(ctx, `SELECT id FROM split_transaction_people
+		WHERE split_transaction_id = $1 AND user_id = $2`, pt, f.friend).Scan(&split); err != nil {
 		t.Fatalf("Bee's split on the row: %v", err)
 	}
 	beeCopy := f.insertCopy(t, f.friend, proj, pt, 100)
@@ -134,8 +133,8 @@ func TestSetMyBooks(t *testing.T) {
 	if out := books(f.friend, MyBooksRequest{Link: []string{BookTx}}); !slices.Equal(out.Relinked, []string{BookTx}) {
 		t.Errorf("viewer relink = %v", out.Relinked)
 	}
-	if got := f.boardParentOf(t, beeCopy); got != split {
-		t.Errorf("copy relinked to %s, want Bee's split %s", got, split)
+	if got := f.boardParentOf(t, beeCopy); got != pt {
+		t.Errorf("copy relinked to %s, want the bill %s", got, pt)
 	}
 	if l, _ := origin(); l == nil || *l != f.bill1 {
 		t.Errorf("a member's relink took the bill origin: %v", l)

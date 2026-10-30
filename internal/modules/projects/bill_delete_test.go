@@ -43,6 +43,7 @@ func TestDeleteEventBillBySwitch(t *testing.T) {
 			VALUES (gen_random_uuid(), $2, $3, $4, 'expense', $5, 'THB', '2026-10-02', $1)`, b, id, debtor, f.owner, share); err != nil {
 			t.Fatal(err)
 		}
+		f.rowsToPeople(t, nil)
 		return b.String()
 	}
 	bBee, bChai := bill(beeM, 300, 100), bill(chaiM, 200, 50)
@@ -51,6 +52,7 @@ func TestDeleteEventBillBySwitch(t *testing.T) {
 		VALUES (gen_random_uuid(), $1, $2, $3, 'payback', 10, 'THB', '2026-10-02', $4)`, id, beeM, f.owner, bBee); err != nil {
 		t.Fatal(err)
 	}
+	f.rowsToPeople(t, nil)
 	ownerID := uuid.MustParse(mine)
 	bee.do("POST", "/projects/"+id+"/claim", map[string]any{"member_id": ownerID, "bill_ids": []string{bBee}}, "claimBills", http.StatusOK)
 	chai.do("POST", "/projects/"+id+"/claim", map[string]any{"member_id": ownerID, "bill_ids": []string{bChai}}, "claimBills", http.StatusOK)

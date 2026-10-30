@@ -250,8 +250,12 @@ func TestSubmitDraftIntoEvent(t *testing.T) {
 		WHERE id = $1 AND project_id = $2 AND source_project_transaction_id IS NOT NULL`, txID, f.event); n != 1 {
 		t.Errorf("transaction not linked to the event")
 	}
-	if n := f.count(t, `SELECT COUNT(*) FROM project_transactions WHERE project_id = $1`, f.event); n != 2 {
-		t.Errorf("board rows = %d, want parent + 1 split child", n)
+	if n := f.count(t, `SELECT COUNT(*) FROM project_transactions WHERE project_id = $1`, f.event); n != 1 {
+		t.Errorf("board rows = %d, want 1 bill", n)
+	}
+	if n := f.count(t, `SELECT COUNT(*) FROM split_transaction_people sp JOIN project_transactions b ON b.id = sp.split_transaction_id
+		WHERE b.project_id = $1 AND sp.share > 0 AND sp.sort > 0`, f.event); n != 1 {
+		t.Errorf("bill splits = %d, want 1", n)
 	}
 	if n := f.count(t, `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1`, f.owner); n != 0 {
 		t.Errorf("%d personal debts, want none (splits moved to the board)", n)

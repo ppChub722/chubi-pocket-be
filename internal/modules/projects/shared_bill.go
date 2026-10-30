@@ -695,12 +695,11 @@ func (s *Service) paybackCopyTx(ctx context.Context, tx pgx.Tx, st *billState, u
 
 // disconnectCopyTx — I disconnect my copy of the bill (rule a / f): my copy transaction and my debts /
 // repayments of it become plain records (each remembers the bill, unlinked_project_transaction_id),
-// and the bill no longer reaches me (shared_bill_opt_outs) until I connect again. Idempotent.
+// and the bill no longer reaches me (my person's disconnected_at) until I connect again. Idempotent.
 func (s *Service) disconnectCopyTx(ctx context.Context, tx pgx.Tx, ptID, userID uuid.UUID) (*copyResult, error) {
 	out := &copyResult{}
-	if _, err := tx.Exec(ctx, `INSERT INTO shared_bill_opt_outs (project_transaction_id, user_id) VALUES ($1, $2)
-		ON CONFLICT DO NOTHING`, ptID, userID); err != nil {
-		return nil, fmt.Errorf("disconnect: %w", err)
+	if _, err := setDisconnectedTx(ctx, tx, ptID, userID, true); err != nil {
+		return nil, err
 	}
 	if err := unlinkMineTx(ctx, tx, userID, ptID, BookTx); err != nil {
 		return nil, err
@@ -755,11 +754,11 @@ func (s *Service) CopyDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uu
 // transaction takes the link back, and my old debts / repayments of the bill are dropped (applyCopyTx
 // writes them fresh from the bill). No-op when I never disconnected.
 func (s *Service) reconnectCopyTx(ctx context.Context, tx pgx.Tx, ptID, userID uuid.UUID) error {
-	tag, err := tx.Exec(ctx, `DELETE FROM shared_bill_opt_outs WHERE project_transaction_id = $1 AND user_id = $2`, ptID, userID)
+	was, err := setDisconnectedTx(ctx, tx, ptID, userID, false)
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return err
 	}
-	if tag.RowsAffected() == 0 {
+	if !was {
 		return nil
 	}
 	var projectID uuid.UUID

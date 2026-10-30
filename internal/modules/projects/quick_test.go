@@ -370,8 +370,9 @@ func TestQuickCreateHappyPath(t *testing.T) {
 		t.Errorf("board parents = %d, want 3", n)
 	}
 	if n := f.countRows(t, `
-		SELECT COUNT(*) FROM project_transactions
-		WHERE project_id = $1 AND parent_project_transaction_id IS NOT NULL`, resp.Detail.Event.ID); n != 4 {
+		SELECT COUNT(*) FROM split_transaction_people sp JOIN project_transactions b ON b.id = sp.split_transaction_id
+		WHERE b.project_id = $1 AND sp.share > 0 AND sp.event_member_id IS DISTINCT FROM b.transaction_member_id`,
+		resp.Detail.Event.ID); n != 4 {
 		t.Errorf("board children = %d, want 4", n)
 	}
 
@@ -409,8 +410,9 @@ func TestQuickCreateHappyPath(t *testing.T) {
 			t.Errorf("board parent of %s: amount=%.2f (want %.2f), child=%v", txID, amount, wantAmount, isChild)
 		}
 		if n := f.countRows(t, `
-			SELECT COUNT(*) FROM project_transactions
-			WHERE parent_project_transaction_id = $1`, parentID); n != wantChildren {
+			SELECT COUNT(*) FROM split_transaction_people sp JOIN project_transactions b ON b.id = sp.split_transaction_id
+			WHERE sp.split_transaction_id = $1 AND sp.share > 0 AND sp.event_member_id IS DISTINCT FROM b.transaction_member_id`,
+			parentID); n != wantChildren {
 			t.Errorf("bill %s children = %d, want %d", txID, n, wantChildren)
 		}
 	}
@@ -420,9 +422,9 @@ func TestQuickCreateHappyPath(t *testing.T) {
 
 	// Bill1's Bee child must be attributed to Bee's member row with the debt's amount.
 	if n := f.countRows(t, `
-		SELECT COUNT(*) FROM project_transactions pt
-		JOIN transactions tr ON tr.source_project_transaction_id = pt.parent_project_transaction_id
-		WHERE tr.id = $1 AND pt.transaction_member_id = $2 AND pt.amount = 100`,
+		SELECT COUNT(*) FROM split_transaction_people pt
+		JOIN transactions tr ON tr.source_project_transaction_id = pt.split_transaction_id
+		WHERE tr.id = $1 AND pt.event_member_id = $2 AND pt.share = 100`,
 		f.bill1, beeMember.id); n != 1 {
 		t.Errorf("bill1 Bee split child rows = %d, want 1", n)
 	}

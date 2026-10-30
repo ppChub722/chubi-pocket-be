@@ -30,6 +30,7 @@ func TestIncomeBillInSettle(t *testing.T) {
 		VALUES ($1, $2, $3, $4, 'income', 100, 'THB', '2026-10-02', $5)`, c, id, ev["my_member_id"], f.owner, b); err != nil {
 		t.Fatal(err)
 	}
+	f.rowsToPeople(t, nil)
 	st := me.do("GET", "/projects/"+id+"/settle", nil, "getProjectSettle", http.StatusOK)
 	pairs := st["pairs"].([]any)
 	if len(pairs) != 1 {

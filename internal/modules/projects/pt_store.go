@@ -16,7 +16,7 @@ const ptColumns = `id, project_id, parent_project_transaction_id,
 	type, amount, currency,
 	to_char(date, 'YYYY-MM-DD') AS date,
 	note, description,
-	marks, created_at, updated_at, payback_kind`
+	'{}'::uuid[] AS marks, created_at, updated_at, payback_kind`
 
 func scanPT(row pgx.Row) (*ProjectTransaction, error) { return scanPTAround(row, nil, nil) }
 
@@ -77,9 +77,9 @@ func (s *Store) InsertPTTx(
 		if err := s.assertMembersInProject(ctx, tx, projectID, splitMemberIDs(req.Splits)); err != nil {
 			return nil, err
 		}
-		if err := s.insertSplitChildrenTx(ctx, tx, parent, recordUserID, req.Splits); err != nil {
-			return nil, err
-		}
+	}
+	if err := putBillPeopleTx(ctx, tx, parent.ID, billPeopleWrite{Splits: splitShares(req.Splits)}); err != nil {
+		return nil, err
 	}
 	return parent, nil
 }
@@ -130,105 +130,21 @@ func (s *Store) assertMembersInProject(
 	return nil
 }
 
-func (s *Store) insertSplitChildrenTx(
-	ctx context.Context, tx pgx.Tx, parent *ProjectTransaction,
-	recordUserID uuid.UUID, splits []ProjectSplitInput,
-) error {
-	q := `INSERT INTO project_transactions
-		(id, project_id, parent_project_transaction_id, transaction_member_id,
-		 record_user_id, type, amount, currency, date, note, description,
-		 created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $5, $5)`
+// splitShares — the split list as shares by member (a member listed twice adds up).
+func splitShares(splits []ProjectSplitInput) map[uuid.UUID]float64 {
+	out := map[uuid.UUID]float64{}
 	for _, sp := range splits {
-		childID, err := uuid.NewV7()
-		if err != nil {
-			return fmt.Errorf("uuid: %w", err)
-		}
-		if _, err := tx.Exec(ctx, q,
-			childID, parent.ProjectID, parent.ID, sp.MemberID,
-			recordUserID, parent.Type, sp.Amount, parent.Currency, parent.Date, parent.Note, parent.Description,
-		); err != nil {
-			return fmt.Errorf("insert split child: %w", err)
-		}
+		out[sp.MemberID] += sp.Amount
 	}
-	return nil
+	return out
 }
 
-// replaceSplitChildrenTx makes the bill's split rows the given list IN PLACE (0.4.1-1 B4): a member
-// who stays keeps their row (its id, its ticks, and a copy of my share that points at it), with the
-// new amount; a member who left loses their row, and a copy pointing at it is unlinked first (the
-// bill is remembered, as "ลงบัญชี" unlink does); a new member gets a new row.
-func (s *Store) replaceSplitChildrenTx(
-	ctx context.Context, tx pgx.Tx, parent *ProjectTransaction, actorUserID uuid.UUID, splits []ProjectSplitInput,
-) error {
-	want := map[uuid.UUID]float64{}
-	for _, sp := range splits {
-		want[sp.MemberID] += sp.Amount
-	}
-	rows, err := tx.Query(ctx, `SELECT id, transaction_member_id FROM project_transactions
-		WHERE parent_project_transaction_id = $1 ORDER BY created_at, id FOR UPDATE`, parent.ID)
-	if err != nil {
-		return fmt.Errorf("split rows: %w", err)
-	}
-	type child struct{ id, member uuid.UUID }
-	var have []child
-	for rows.Next() {
-		var c child
-		if err := rows.Scan(&c.id, &c.member); err != nil {
-			rows.Close()
-			return err
-		}
-		have = append(have, c)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	kept := map[uuid.UUID]bool{}
-	for _, c := range have {
-		amount, stays := want[c.member]
-		if stays && !kept[c.member] {
-			kept[c.member] = true
-			if _, err := tx.Exec(ctx, `UPDATE project_transactions SET amount = $2, updated_by_user_id = $3
-				WHERE id = $1`, c.id, amount, actorUserID); err != nil {
-				return fmt.Errorf("update split row: %w", err)
-			}
-			continue
-		}
-		if _, err := tx.Exec(ctx, `UPDATE transactions
-			SET project_id = NULL, source_project_transaction_id = NULL, unlinked_project_transaction_id = $2
-			WHERE source_project_transaction_id = $1`, c.id, parent.ID); err != nil {
-			return fmt.Errorf("unlink copy of split row: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `DELETE FROM project_transactions WHERE id = $1`, c.id); err != nil {
-			return fmt.Errorf("delete split row: %w", err)
-		}
-	}
-	var added []ProjectSplitInput
-	for _, sp := range splits {
-		if !kept[sp.MemberID] {
-			kept[sp.MemberID] = true
-			added = append(added, ProjectSplitInput{MemberID: sp.MemberID, Amount: want[sp.MemberID]})
-		}
-	}
-	if len(added) == 0 {
-		return nil
-	}
-	return s.insertSplitChildrenTx(ctx, tx, parent, actorUserID, added)
-}
-
-// splitRowOf maps a board split id (a people row) to the old split row it stands for (same bill, same
-// member); any other id comes back as it is. For the legacy /project-transactions/{id} endpoints.
-func (s *Store) splitRowOf(ctx context.Context, id uuid.UUID) uuid.UUID {
-	var row uuid.UUID
-	err := s.db.QueryRow(ctx, `SELECT c.id FROM split_transaction_people sp
-		JOIN project_transactions c ON c.parent_project_transaction_id = sp.split_transaction_id
-		 AND c.transaction_member_id = sp.event_member_id
-		WHERE sp.id = $1 LIMIT 1`, id).Scan(&row)
-	if err != nil {
-		return id
-	}
-	return row
+// billOfPerson maps a board split id (a people row) to its bill and member; ok = false when the id
+// is not a person (a bill id). For the legacy /project-transactions/{id} endpoints.
+func (s *Store) billOfPerson(ctx context.Context, id uuid.UUID) (bill, member uuid.UUID, ok bool) {
+	err := s.db.QueryRow(ctx, `SELECT split_transaction_id, event_member_id FROM split_transaction_people
+		WHERE id = $1 AND event_member_id IS NOT NULL`, id).Scan(&bill, &member)
+	return bill, member, err == nil
 }
 
 func (s *Store) GetPT(ctx context.Context, ptID uuid.UUID) (*ProjectTransaction, error) {
@@ -312,17 +228,12 @@ func (s *Store) UpdatePTTx(
 	if err != nil {
 		return nil, fmt.Errorf("update PT: %w", err)
 	}
-	if req.Date != nil {
-		if _, err := tx.Exec(ctx, `UPDATE project_transactions SET date = $2::date
-			WHERE parent_project_transaction_id = $1`, parent.ID, parent.Date); err != nil {
-			return nil, fmt.Errorf("children date: %w", err)
-		}
-	}
 	if req.TagIDs != nil {
 		if err := setRowTagsTx(ctx, tx, projectID, parent.ID, *req.TagIDs); err != nil {
 			return nil, err
 		}
 	}
+	var w billPeopleWrite
 	if req.Splits != nil {
 		if err := validateSplits(parent.TransactionMemberID, parent.Amount, *req.Splits); err != nil {
 			return nil, err
@@ -332,17 +243,20 @@ func (s *Store) UpdatePTTx(
 				return nil, err
 			}
 		}
-		if err := s.replaceSplitChildrenTx(ctx, tx, parent, actorUserID, *req.Splits); err != nil {
-			return nil, err
-		}
+		w.Splits = splitShares(*req.Splits)
 	} else if req.Amount != nil {
 		var sum float64
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM project_transactions
-			WHERE parent_project_transaction_id = $1`, parent.ID).Scan(&sum); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(share), 0) FROM split_transaction_people
+			WHERE split_transaction_id = $1 AND sort > 0`, parent.ID).Scan(&sum); err != nil {
 			return nil, err
 		}
 		if sum-parent.Amount > 0.005 {
 			return nil, ErrSplitsExceedParent
+		}
+	}
+	if req.Splits != nil || req.Amount != nil || req.TransactionMemberID != nil {
+		if err := putBillPeopleTx(ctx, tx, parent.ID, w); err != nil {
+			return nil, err
 		}
 	}
 	return getPT(ctx, tx, parent.ID, false)
@@ -351,11 +265,13 @@ func (s *Store) UpdatePTTx(
 func (s *Store) ToggleMark(
 	ctx context.Context, projectID, ptID, projectMemberID uuid.UUID, marked bool,
 ) error {
-	q := `UPDATE project_transactions SET marks = array_remove(marks, $1::uuid)
-		WHERE id = $2 AND project_id = $3`
+	q := `UPDATE split_transaction_people sp SET marked_at = NULL
+		FROM project_transactions b WHERE sp.split_transaction_id = b.id
+		  AND sp.event_member_id = $1 AND b.id = $2 AND b.project_id = $3 AND sp.marked_at IS NOT NULL`
 	if marked {
-		q = `UPDATE project_transactions SET marks = array_append(marks, $1::uuid)
-			WHERE id = $2 AND project_id = $3 AND NOT ($1::uuid = ANY(marks))`
+		q = `UPDATE split_transaction_people sp SET marked_at = NOW()
+			FROM project_transactions b WHERE sp.split_transaction_id = b.id
+			  AND sp.event_member_id = $1 AND b.id = $2 AND b.project_id = $3 AND sp.marked_at IS NULL`
 	}
 	if _, err := s.db.Exec(ctx, q, projectMemberID, ptID, projectID); err != nil {
 		return fmt.Errorf("toggle mark: %w", err)

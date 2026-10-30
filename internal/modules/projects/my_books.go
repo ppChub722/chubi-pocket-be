@@ -2,7 +2,6 @@ package projects
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 
@@ -161,26 +160,17 @@ func relinkMineTx(ctx context.Context, tx pgx.Tx, userID, projectID, ptID uuid.U
 		if len(ids) == 0 {
 			return false, nil
 		}
-		// The bill's own tx goes back to the bill; a copy of my share to my split.
-		var origin *uuid.UUID
-		if err := tx.QueryRow(ctx, `UPDATE project_transactions
+		// The bill's own tx goes back to the bill (its origin); a copy of my share points at it too.
+		if _, err := tx.Exec(ctx, `UPDATE project_transactions
 			SET linked_transaction_id = unlinked_transaction_id, unlinked_transaction_id = NULL
-			WHERE id = $1 AND unlinked_transaction_id = ANY($2) AND linked_transaction_id IS NULL
-			RETURNING linked_transaction_id`, ptID, ids).Scan(&origin); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			WHERE id = $1 AND unlinked_transaction_id = ANY($2) AND linked_transaction_id IS NULL`,
+			ptID, ids); err != nil {
 			return false, fmt.Errorf("relink bill origin: %w", err)
 		}
-		var mySplit *uuid.UUID
-		err = tx.QueryRow(ctx, `SELECT c.id FROM project_transactions c
-			JOIN project_members pm ON pm.id = c.transaction_member_id AND pm.user_id = $2
-			WHERE c.parent_project_transaction_id = $1 LIMIT 1`, ptID, userID).Scan(&mySplit)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("my split: %w", err)
-		}
 		if _, err := tx.Exec(ctx, `UPDATE transactions
-			SET source_project_transaction_id = CASE
-			        WHEN $4::uuid IS NOT NULL AND id IS DISTINCT FROM $5::uuid THEN $4::uuid ELSE $1 END,
+			SET source_project_transaction_id = $1,
 			    project_id = $3, unlinked_project_transaction_id = NULL, updated_by_user_id = $2
-			WHERE id = ANY($6)`, ptID, userID, projectID, mySplit, origin, ids); err != nil {
+			WHERE id = ANY($4)`, ptID, userID, projectID, ids); err != nil {
 			return false, fmt.Errorf("relink %s: %w", kind, err)
 		}
 		return true, nil

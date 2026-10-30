@@ -54,13 +54,13 @@ func TestRemoveMemberEmptySpotAndAssign(t *testing.T) {
 	}
 	var payer uuid.UUID
 	var children int
-	_ = f.pool.QueryRow(ctx, `SELECT transaction_member_id, (SELECT COUNT(*) FROM project_transactions c WHERE c.parent_project_transaction_id = p.id)
+	_ = f.pool.QueryRow(ctx, `SELECT transaction_member_id, (SELECT COUNT(*) FROM split_transaction_people c WHERE c.split_transaction_id = p.id AND c.sort > 0 AND c.share > 0)
 		FROM project_transactions p WHERE id = $1`, b1).Scan(&payer, &children)
 	if payer != chaiM || children != 1 {
 		t.Errorf("b1 payer %v children %d, want Chai and 1 (my share)", payer, children)
 	}
-	if c := f.countRows(t, `SELECT COUNT(*) FROM project_transactions WHERE parent_project_transaction_id = $1
-		AND transaction_member_id = $2 AND amount = 50`, b2, chaiM); c != 1 {
+	if c := f.countRows(t, `SELECT COUNT(*) FROM split_transaction_people WHERE split_transaction_id = $1
+		AND event_member_id = $2 AND share = 50`, b2, chaiM); c != 1 {
 		t.Errorf("b2 share not moved to Chai")
 	}
 	me.do("POST", "/projects/"+id+"/complete", nil, "completeProject", http.StatusOK)

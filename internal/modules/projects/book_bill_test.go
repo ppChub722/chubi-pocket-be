@@ -202,10 +202,8 @@ func TestRebookBill(t *testing.T) {
 		t.Fatalf("E6: origin %v tx %v amount %v wallet %v", linked, r.TransactionID, amount, f.accountBalance(t, f.acctPersonal))
 	}
 
-	// B4: Bee's copy points at her split row; editing the shares keeps the row (and the copy)
-	var beeRow uuid.UUID
-	_ = f.pool.QueryRow(ctx, `SELECT c.id FROM project_transactions c JOIN project_members m ON m.id = c.transaction_member_id
-		WHERE c.parent_project_transaction_id = $1 AND m.user_id = $2`, billID, f.friend).Scan(&beeRow)
+	// B4: Bee's copy points at the bill and her person; editing the shares keeps both
+	beeRow := billID
 	copyID := qcMustV7(t)
 	if _, err := f.pool.Exec(ctx, `INSERT INTO transactions (id, user_id, type, amount, date, project_id, source_project_transaction_id)
 		VALUES ($1, $2, 'expense', 200, '2026-09-20', $3, $4)`, copyID, f.friend, res.Event.ID, beeRow); err != nil {
@@ -222,8 +220,8 @@ func TestRebookBill(t *testing.T) {
 	}
 	var src *uuid.UUID
 	var share float64
-	_ = f.pool.QueryRow(ctx, `SELECT t.source_project_transaction_id, c.amount FROM transactions t
-		JOIN project_transactions c ON c.id = $2 WHERE t.id = $1`, copyID, beeRow).Scan(&src, &share)
+	_ = f.pool.QueryRow(ctx, `SELECT t.source_project_transaction_id, c.share FROM transactions t
+		JOIN split_transaction_people c ON c.id = t.split_person_id WHERE t.id = $1`, copyID).Scan(&src, &share)
 	if src == nil || *src != beeRow || share != 250 {
 		t.Errorf("B4: Bee's copy source %v (want %v), her row %v (want 250)", src, beeRow, share)
 	}

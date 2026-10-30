@@ -522,8 +522,8 @@ func TestDeleteTxWithLinkedBill(t *testing.T) {
 	if err != nil || res.BillID != nil || bills(drop) != 1 {
 		t.Fatalf("also_delete_link: %v %+v bills %d", err, res, bills(drop))
 	}
-	if n := f.countRows(t, `SELECT COUNT(*) FROM shared_bill_opt_outs o JOIN project_transactions b ON b.id = o.project_transaction_id
-		WHERE b.project_id = $1 AND o.user_id = $2`, drop, f.owner); n != 1 {
+	if n := f.countRows(t, `SELECT COUNT(*) FROM split_transaction_people o JOIN project_transactions b ON b.id = o.split_transaction_id
+		WHERE b.project_id = $1 AND o.user_id = $2 AND o.disconnected_at IS NOT NULL`, drop, f.owner); n != 1 {
 		t.Errorf("deleting my copy must disconnect it (opt-outs %d)", n)
 	}
 }

@@ -130,7 +130,9 @@ func (s *Service) UpdateProjectTransaction(
 	if err := s.store.AssertWritable(ctx, projectID, "edit_pt"); err != nil {
 		return nil, err
 	}
-	ptID = s.store.splitRowOf(ctx, ptID) // a board split id is a person; the row it stands for
+	if _, _, ok := s.store.billOfPerson(ctx, ptID); ok { // a board split id is a person, not a bill
+		return nil, ErrPTIsChild
+	}
 	current, err := s.store.GetPT(ctx, ptID)
 	if err != nil {
 		return nil, err
@@ -258,7 +260,9 @@ func (s *Service) DeleteProjectTransaction(
 	if err := s.store.AssertWritable(ctx, projectID, "edit_pt"); err != nil {
 		return nil, err
 	}
-	ptID = s.store.splitRowOf(ctx, ptID) // a board split id is a person; the row it stands for
+	if bill, member, ok := s.store.billOfPerson(ctx, ptID); ok { // a board split id: that share goes
+		return s.dropShare(ctx, callerUserID, projectID, bill, member)
+	}
 	pt, err := s.store.GetPT(ctx, ptID)
 	if err != nil {
 		return nil, err
@@ -310,6 +314,43 @@ func (s *Service) DeleteProjectTransaction(
 	return s.patch(ctx, callerUserID, projectID, nil, &ptID, nil)
 }
 
+// dropShare takes one member's share out of a bill (the legacy delete of a split row): the main
+// payer carries it again.
+func (s *Service) dropShare(ctx context.Context, callerUserID, projectID, billID, member uuid.UUID) (*EventPatch, error) {
+	bill, err := s.store.GetPT(ctx, billID)
+	if err != nil {
+		return nil, err
+	}
+	if bill.ProjectID != projectID {
+		return nil, ErrPTNotFound
+	}
+	if _, err := s.store.AssertCanWrite(ctx, projectID, callerUserID); err != nil {
+		return nil, err
+	}
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	people, err := billPeopleNowTx(ctx, tx, billID)
+	if err != nil {
+		return nil, err
+	}
+	splits := map[uuid.UUID]float64{}
+	for _, p := range people {
+		if !p.main && p.share > 0 && p.member != member {
+			splits[p.member] = p.share
+		}
+	}
+	if err := putBillPeopleTx(ctx, tx, billID, billPeopleWrite{Splits: splits}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.patch(ctx, callerUserID, projectID, &billID, nil, nil)
+}
+
 func (s *Service) ListPT(ctx context.Context, callerUserID, projectID uuid.UUID, f BoardFilter) (*BoardRowList, error) {
 	if _, err := s.store.GetByIDForCaller(ctx, callerUserID, projectID); err != nil {
 		return nil, err
@@ -336,7 +377,9 @@ func (s *Service) ToggleMark(
 	if err != nil {
 		return nil, err
 	}
-	ptID = s.store.splitRowOf(ctx, ptID) // a board split id is a person; the row it stands for
+	if bill, _, ok := s.store.billOfPerson(ctx, ptID); ok { // a board split id: its bill
+		ptID = bill
+	}
 	current, err := s.store.GetPT(ctx, ptID)
 	if err != nil {
 		return nil, err

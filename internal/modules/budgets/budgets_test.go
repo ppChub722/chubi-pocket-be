@@ -292,11 +292,10 @@ func TestBudgetFutureEventBillIsExpected(t *testing.T) {
 	tag := uuid.New()
 	f.exec(`INSERT INTO event_tags (id, project_id, name) VALUES ($1, $2, 'trip')`, tag, ev)
 	bill := func(date string, share float64) {
-		b, c := uuid.New(), uuid.New()
+		b := uuid.New()
 		f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date) VALUES
 			($1, $2, $3, $4, 'expense', $5, 'THB', $6)`, b, ev, beeM, f.me, share*3, date)
-		f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date, parent_project_transaction_id) VALUES
-			($1, $2, $3, $4, 'expense', $5, 'THB', $6, $7)`, c, ev, meM, f.me, share, date, b)
+		f.splitPeople(b, beeM, share*3, meM, share)
 		f.exec(`INSERT INTO project_transaction_tags (project_transaction_id, event_tag_id) VALUES ($1, $2)`, b, tag)
 	}
 	bill(f.day(-1), 100) // past: used
@@ -325,14 +324,13 @@ func TestBudgetUnlinkedBillCountsOnce(t *testing.T) {
 		($1, $2, $3, 'Me', 'owner', 'active'), ($4, $2, NULL, 'Bee', 'contributor', 'active')`, meM, ev, f.me, beeM)
 	tag := uuid.New()
 	f.exec(`INSERT INTO event_tags (id, project_id, name) VALUES ($1, $2, 'trip')`, tag, ev)
-	b, c := uuid.New(), uuid.New()
+	b := uuid.New()
 	f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date) VALUES
 		($1, $2, $3, $4, 'expense', 300, 'THB', $5)`, b, ev, beeM, f.me, f.day(-1))
-	f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date, parent_project_transaction_id) VALUES
-		($1, $2, $3, $4, 'expense', 100, 'THB', $5, $6)`, c, ev, meM, f.me, f.day(-1), b)
+	f.splitPeople(b, beeM, 300, meM, 100)
 	f.exec(`INSERT INTO project_transaction_tags (project_transaction_id, event_tag_id) VALUES ($1, $2)`, b, tag)
 	copyTx := f.tx(100, &f.food, f.day(-1), "trip")
-	f.exec(`UPDATE transactions SET project_id = $2, source_project_transaction_id = $3 WHERE id = $1`, copyTx, ev, c)
+	f.exec(`UPDATE transactions SET project_id = $2, source_project_transaction_id = $3 WHERE id = $1`, copyTx, ev, b)
 
 	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
 	if p := d.Budget.Period; p.Used != 100 {
@@ -340,7 +338,7 @@ func TestBudgetUnlinkedBillCountsOnce(t *testing.T) {
 	}
 	// "ลงบัญชีของฉัน" off / a tx-detail disconnect: the tx remembers the bill it left.
 	f.exec(`UPDATE transactions SET project_id = NULL, source_project_transaction_id = NULL,
-		unlinked_project_transaction_id = $2 WHERE id = $1`, copyTx, c)
+		unlinked_project_transaction_id = $2 WHERE id = $1`, copyTx, b)
 	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
 	if p := d.Budget.Period; p.Used != 100 || src(d, SourceEvent) != nil {
 		t.Fatalf("unlinked: used %v, want 100 (the tx only); sources %+v", p.Used, d.BySource)
@@ -364,18 +362,16 @@ func TestBudgetTagRangeWithEvent(t *testing.T) {
 		($1, $2, $3, 'Me', 'owner', 'active'), ($4, $2, NULL, 'Bee', 'contributor', 'active')`, meM, ev, f.me, beeM)
 	tag := uuid.New()
 	f.exec(`INSERT INTO event_tags (id, project_id, name) VALUES ($1, $2, 'trip')`, tag, ev)
-	b1, c1 := uuid.New(), uuid.New()
+	b1 := uuid.New()
 	f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date) VALUES
 		($1, $2, $3, $4, 'expense', 300, 'THB', $5)`, b1, ev, beeM, f.me, f.day(-1))
-	f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date, parent_project_transaction_id) VALUES
-		($1, $2, $3, $4, 'expense', 100, 'THB', $5, $6)`, c1, ev, meM, f.me, f.day(-1), b1)
+	f.splitPeople(b1, beeM, 300, meM, 100)
 	f.exec(`INSERT INTO project_transaction_tags (project_transaction_id, event_tag_id) VALUES ($1, $2)`, b1, tag)
 	mine := f.tx(200, &f.food, f.day(-2), "trip")
 	b2 := uuid.New()
 	f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date, linked_transaction_id) VALUES
 		($1, $2, $3, $4, 'expense', 200, 'THB', $5, $6)`, b2, ev, meM, f.me, f.day(-2), mine)
-	f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date, parent_project_transaction_id) VALUES
-		(gen_random_uuid(), $1, $2, $3, 'expense', 80, 'THB', $4, $5)`, ev, beeM, f.me, f.day(-2), b2)
+	f.splitPeople(b2, meM, 200, beeM, 80)
 
 	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
 	p := d.Budget.Period
@@ -555,4 +551,15 @@ func TestBudgetScopeListsAreAnd(t *testing.T) {
 	if d.Budget.Period.Used != 100 {
 		t.Fatalf("used = %v, want 100 (only rows matching every picked list)", d.Budget.Period.Used)
 	}
+}
+
+// splitPeople writes a bill's people (split phase A): the payer paid it all and carries the rest,
+// member has share.
+func (f *budFix) splitPeople(bill, payer uuid.UUID, amount float64, member uuid.UUID, share float64) {
+	f.exec(`INSERT INTO split_transaction_people (split_transaction_id, user_id, event_member_id, name, share, paid, sort)
+		SELECT $1, pm.user_id, pm.id, pm.display_name,
+		       CASE WHEN pm.id = $2 THEN $3::numeric - $5::numeric ELSE $5::numeric END,
+		       CASE WHEN pm.id = $2 THEN $3::numeric ELSE 0 END,
+		       CASE WHEN pm.id = $2 THEN 0 ELSE 1 END
+		FROM project_members pm WHERE pm.id IN ($2, $4)`, bill, payer, amount, member, share)
 }
