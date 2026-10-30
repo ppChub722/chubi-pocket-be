@@ -30,6 +30,7 @@ func TestSplitPeopleFollowTheOldRows(t *testing.T) {
 	me := evClient{t, apitest.CountedEngine(f.owner, func(g *gin.RouterGroup) {
 		g.POST("/projects", h.Create)
 		g.GET("/projects/:id/detail", h.Detail)
+		g.GET("/projects/:id/transactions", h.ListPT)
 	})}
 	ev := m(me.do("POST", "/projects", map[string]any{"name": "Trip"}, "createProject", http.StatusCreated), "event")
 	id := ev["id"].(string)
@@ -160,6 +161,41 @@ func TestSplitPeopleFollowTheOldRows(t *testing.T) {
 			!near(got.received, w.received) || !near(got.net, w.net) {
 			t.Fatalf("position of %s = %+v, want %+v", mid, got, w)
 		}
+	}
+
+	// the board: a bill's splits are the people with a part who are not the main payer (id = the person),
+	// the "คืนแล้ว" tick, the payers of a multi-payer bill, and "mine" = bills I am a person of
+	board := me.do("GET", "/projects/"+id+"/transactions", nil, "listBoardRows", http.StatusOK)
+	rowsByID := map[string]map[string]any{}
+	for _, r := range board["data"].([]any) {
+		rowsByID[r.(map[string]any)["id"].(string)] = r.(map[string]any)
+	}
+	splitsOf := func(b uuid.UUID) map[string][2]any {
+		out := map[string][2]any{}
+		for _, c := range rowsByID[b.String()]["children"].([]any) {
+			cm := c.(map[string]any)
+			out[cm["transaction_member"].(map[string]any)["id"].(string)] = [2]any{cm["amount"], cm["paid_back"]}
+		}
+		return out
+	}
+	if got := splitsOf(b1); len(got) != 2 || got[lee.String()] != [2]any{100.0, true} || got[bee.String()] != [2]any{100.0, false} {
+		t.Fatalf("b1 splits = %v, want Lee 100 (paid back) and Bee 100", got)
+	}
+	if got := splitsOf(b2); len(got) != 1 || got[mine.String()] != [2]any{100.0, false} {
+		t.Fatalf("b2 splits = %v, want only me 100 (Lee is the main payer)", got)
+	}
+	if py := rowsByID[b2.String()]["payers"].([]any); len(py) != 2 || n(py[0].(map[string]any), "amount") != 150 {
+		t.Fatalf("b2 payers = %v, want Lee 150 then Bee 50", py)
+	}
+	if py := rowsByID[b1.String()]["payers"].([]any); len(py) != 1 || n(py[0].(map[string]any), "amount") != 300 {
+		t.Fatalf("b1 payers = %v, want me 300 only", py)
+	}
+	if n(rowsByID[b1.String()], "my_share") != 100 || n(rowsByID[b2.String()], "my_share") != 100 || n(rowsByID[b3.String()], "my_share") != 30 {
+		t.Fatalf("my_share = %v / %v / %v, want 100 / 100 / 30", rowsByID[b1.String()]["my_share"], rowsByID[b2.String()]["my_share"], rowsByID[b3.String()]["my_share"])
+	}
+	mineOnly := me.do("GET", "/projects/"+id+"/transactions?mine=true", nil, "listBoardRows", http.StatusOK)
+	if len(mineOnly["data"].([]any)) != 4 {
+		t.Fatalf("mine = %d bills, want 4 (I am a person of each)", len(mineOnly["data"].([]any)))
 	}
 
 	// edits through the old tables keep the people equal: a smaller split, a removed split,

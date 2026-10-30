@@ -130,6 +130,7 @@ func (s *Service) UpdateProjectTransaction(
 	if err := s.store.AssertWritable(ctx, projectID, "edit_pt"); err != nil {
 		return nil, err
 	}
+	ptID = s.store.splitRowOf(ctx, ptID) // a board split id is a person; the row it stands for
 	current, err := s.store.GetPT(ctx, ptID)
 	if err != nil {
 		return nil, err
@@ -257,6 +258,7 @@ func (s *Service) DeleteProjectTransaction(
 	if err := s.store.AssertWritable(ctx, projectID, "edit_pt"); err != nil {
 		return nil, err
 	}
+	ptID = s.store.splitRowOf(ctx, ptID) // a board split id is a person; the row it stands for
 	pt, err := s.store.GetPT(ctx, ptID)
 	if err != nil {
 		return nil, err
@@ -334,6 +336,7 @@ func (s *Service) ToggleMark(
 	if err != nil {
 		return nil, err
 	}
+	ptID = s.store.splitRowOf(ctx, ptID) // a board split id is a person; the row it stands for
 	current, err := s.store.GetPT(ctx, ptID)
 	if err != nil {
 		return nil, err

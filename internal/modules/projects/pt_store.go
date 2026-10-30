@@ -217,6 +217,20 @@ func (s *Store) replaceSplitChildrenTx(
 	return s.insertSplitChildrenTx(ctx, tx, parent, actorUserID, added)
 }
 
+// splitRowOf maps a board split id (a people row) to the old split row it stands for (same bill, same
+// member); any other id comes back as it is. For the legacy /project-transactions/{id} endpoints.
+func (s *Store) splitRowOf(ctx context.Context, id uuid.UUID) uuid.UUID {
+	var row uuid.UUID
+	err := s.db.QueryRow(ctx, `SELECT c.id FROM split_transaction_people sp
+		JOIN project_transactions c ON c.parent_project_transaction_id = sp.split_transaction_id
+		 AND c.transaction_member_id = sp.event_member_id
+		WHERE sp.id = $1 LIMIT 1`, id).Scan(&row)
+	if err != nil {
+		return id
+	}
+	return row
+}
+
 func (s *Store) GetPT(ctx context.Context, ptID uuid.UUID) (*ProjectTransaction, error) {
 	return getPT(ctx, s.db, ptID, false)
 }

@@ -423,8 +423,8 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 			add("pt.type = $%d", f.Type)
 		}
 		if f.Mine {
-			add(`(pt.transaction_member_id = $%[1]d OR EXISTS (SELECT 1 FROM project_transactions c
-				WHERE c.parent_project_transaction_id = pt.id AND c.transaction_member_id = $%[1]d))`, me)
+			add(`EXISTS (SELECT 1 FROM split_transaction_people sp
+				WHERE sp.split_transaction_id = pt.id AND sp.event_member_id = $%d)`, me)
 		}
 		if qs := strings.TrimSpace(f.Q); qs != "" {
 			add("(pt.description ILIKE $%[1]d OR pt.note ILIKE $%[1]d)", "%"+shared.EscapeLike(qs)+"%")
@@ -462,20 +462,20 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 	// holds it ride along on the bill's own row.
 	rows, err := q.Query(ctx, `WITH page AS (`+page+`)
 		SELECT page.total, `+strings.ReplaceAll(ptColumnsPrefixed, "@", "x.")+`,
-		CASE WHEN x.parent_project_transaction_id IS NULL THEN COALESCE((
+		COALESCE((
 			SELECT json_agg(json_build_object('id', et.id, 'name', et.name, 'icon_code', et.icon_code,
 				'mine', EXISTS (SELECT 1 FROM tags t WHERE t.user_id = `+caller+` AND LOWER(t.name) = LOWER(et.name)))
 				ORDER BY LOWER(et.name), et.id)
 			FROM project_transaction_tags ptt JOIN event_tags et ON et.id = ptt.event_tag_id
-			WHERE ptt.project_transaction_id = x.id), '[]'::json) END,
-		CASE WHEN x.parent_project_transaction_id IS NULL AND x.linked_transaction_id IS NOT NULL THEN (
+			WHERE ptt.project_transaction_id = x.id), '[]'::json),
+		CASE WHEN x.linked_transaction_id IS NOT NULL THEN (
 			SELECT json_build_object('tx_id', lt.id, 'owner', lt.user_id, 'description', lt.description,
 				'account', CASE WHEN lt.user_id = `+caller+` AND a.id IS NOT NULL THEN json_build_object(
 					'id', a.id, 'name', a.name, 'icon_code', a.icon_code, 'logo_url', a.logo_url,
 					'type', a.type, 'currency', a.currency, 'status', a.status) END)
 			FROM transactions lt LEFT JOIN accounts a ON a.id = lt.account_id
 			WHERE lt.id = x.linked_transaction_id) END,
-		CASE WHEN x.parent_project_transaction_id IS NULL THEN (
+		(
 			SELECT json_build_object(
 				'tx', COALESCE(bool_or(t.id IS NOT NULL), false),
 				'repay', EXISTS (SELECT 1 FROM personal_debts d
@@ -487,15 +487,17 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 			LEFT JOIN transactions t ON t.user_id = `+caller+` AND (
 				t.id = x.linked_transaction_id OR t.source_project_transaction_id = x.id
 				OR t.source_project_transaction_id IN (SELECT c.id FROM project_transactions c
-					WHERE c.parent_project_transaction_id = x.id))) END,
-		CASE WHEN x.parent_project_transaction_id IS NOT NULL THEN EXISTS (SELECT 1 FROM project_transactions pb
-			WHERE pb.paid_back_for_id = x.parent_project_transaction_id AND pb.transaction_member_id = x.transaction_member_id
-			  AND pb.parent_project_transaction_id IS NULL) END,
-		CASE WHEN x.parent_project_transaction_id IS NULL THEN (
-			SELECT json_agg(json_build_object('m', y.member_id, 'a', y.amount) ORDER BY y.amount DESC, y.member_id)
-			FROM project_transaction_payers y WHERE y.project_transaction_id = x.id) END
-		FROM page JOIN project_transactions x ON x.id = page.id OR x.parent_project_transaction_id = page.id
-		ORDER BY page.rn, (x.parent_project_transaction_id IS NOT NULL), x.created_at, x.id`, args...)
+					WHERE c.parent_project_transaction_id = x.id))),
+		-- the splits: everyone with a part who is not the main payer (the split's id = the person's id)
+		(SELECT json_agg(json_build_object('id', sp.id, 'm', sp.event_member_id, 'a', sp.share, 'back', sp.paid_back)
+				ORDER BY sp.sort, sp.id)
+			FROM split_transaction_people sp WHERE sp.split_transaction_id = x.id AND sp.share > 0
+			  AND sp.event_member_id IS NOT NULL AND sp.event_member_id IS DISTINCT FROM x.transaction_member_id),
+		-- the payers, when there are two or more (one payer = the bill's own member)
+		(SELECT json_agg(json_build_object('m', y.event_member_id, 'a', y.paid) ORDER BY y.paid DESC, y.event_member_id)
+			FROM split_transaction_people y WHERE y.split_transaction_id = x.id AND y.paid > 0 HAVING COUNT(*) > 1)
+		FROM page JOIN project_transactions x ON x.id = page.id
+		ORDER BY page.rn, x.created_at, x.id`, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("board: %w", err)
 	}
@@ -509,24 +511,17 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 		total int
 	)
 	for rows.Next() {
-		var tagsJSON, srcJSON, bookedJSON, payersJSON []byte
-		var paidBack *bool
-		pt, err := scanPTAround(rows, []any{&total}, []any{&tagsJSON, &srcJSON, &bookedJSON, &paidBack, &payersJSON})
+		var tagsJSON, srcJSON, bookedJSON, splitsJSON, payersJSON []byte
+		pt, err := scanPTAround(rows, []any{&total}, []any{&tagsJSON, &srcJSON, &bookedJSON, &splitsJSON, &payersJSON})
 		if err != nil {
 			rows.Close()
 			return nil, 0, err
 		}
-		if pt.ParentProjectTransactionID != nil {
-			if paidBack != nil && *paidBack {
-				if extras.paidBack[*pt.ParentProjectTransactionID] == nil {
-					extras.paidBack[*pt.ParentProjectTransactionID] = map[uuid.UUID]bool{}
-				}
-				extras.paidBack[*pt.ParentProjectTransactionID][pt.TransactionMemberID] = true
-			}
-			children[*pt.ParentProjectTransactionID] = append(children[*pt.ParentProjectTransactionID], *pt)
-			continue
-		}
 		parents = append(parents, *pt)
+		if err := addBoardSplits(*pt, splitsJSON, children, extras.paidBack); err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
 		if err := extras.add(pt.ID, tagsJSON, srcJSON, bookedJSON); err != nil {
 			rows.Close()
 			return nil, 0, err
@@ -554,6 +549,37 @@ func loadBoard(ctx context.Context, q shared.Querier, callerID, projectID uuid.U
 	}
 	out, err := buildRows(ctx, q, callerID, e, parents, children, extras)
 	return out, total, err
+}
+
+// addBoardSplits reads a bill's splits (json from the people table) into the board's child list: the
+// split's id is the person's id, paidBack = the "คืนแล้ว" tick of that person.
+func addBoardSplits(bill ProjectTransaction, js []byte, children map[uuid.UUID][]ProjectTransaction, paidBack map[uuid.UUID]map[uuid.UUID]bool) error {
+	if len(js) == 0 {
+		return nil
+	}
+	var rows []struct {
+		ID   uuid.UUID `json:"id"`
+		M    uuid.UUID `json:"m"`
+		A    float64   `json:"a"`
+		Back bool      `json:"back"`
+	}
+	if err := json.Unmarshal(js, &rows); err != nil {
+		return fmt.Errorf("bill splits: %w", err)
+	}
+	for _, r := range rows {
+		c := bill
+		c.ID, c.TransactionMemberID, c.Amount = r.ID, r.M, r.A
+		c.ParentProjectTransactionID = &bill.ID
+		c.Marks = nil
+		children[bill.ID] = append(children[bill.ID], c)
+		if r.Back {
+			if paidBack[bill.ID] == nil {
+				paidBack[bill.ID] = map[uuid.UUID]bool{}
+			}
+			paidBack[bill.ID][r.M] = true
+		}
+	}
+	return nil
 }
 
 const ptColumnsPrefixed = `@id, @project_id, @parent_project_transaction_id,
