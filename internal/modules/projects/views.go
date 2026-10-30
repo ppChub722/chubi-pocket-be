@@ -222,46 +222,24 @@ func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid
 	rows.Close()
 
 	rows, err = q.Query(ctx, `
-		WITH parents AS (
-			SELECT id, transaction_member_id AS m, amount FROM project_transactions
-			WHERE project_id = $1 AND parent_project_transaction_id IS NULL AND type = 'expense'
+		-- the people of the event's bills: what each paid and owes (paybacks: the sender paid, the receiver owes)
+		WITH pp AS (
+			SELECT p.event_member_id AS m, b.type, p.paid, p.share, b.id AS bid
+			FROM project_transactions b JOIN split_transaction_people p ON p.split_transaction_id = b.id
+			WHERE b.project_id = $1 AND b.parent_project_transaction_id IS NULL AND p.event_member_id IS NOT NULL
 		),
-		kids AS (
-			SELECT c.transaction_member_id AS m, c.amount, c.parent_project_transaction_id AS pid
-			FROM project_transactions c JOIN parents p ON p.id = c.parent_project_transaction_id
-		),
-		-- multi-payer (105): what each payer paid; else the bill's member paid it all
-		paid AS (SELECT COALESCE(x.member_id, p.m) AS m, SUM(COALESCE(x.amount, p.amount)) AS v
-			FROM parents p LEFT JOIN project_transaction_payers x ON x.project_transaction_id = p.id GROUP BY 1),
-		share AS (
-			SELECT m, SUM(amount) AS v FROM (
-				SELECT m, amount FROM kids
-				UNION ALL
-				SELECT p.m, p.amount - COALESCE((SELECT SUM(k.amount) FROM kids k WHERE k.pid = p.id), 0)
-				FROM parents p
-			) x GROUP BY m
-		),
-		backs AS (
-			SELECT id, transaction_member_id AS m, amount FROM project_transactions
-			WHERE project_id = $1 AND parent_project_transaction_id IS NULL AND type = 'payback'
-		),
-		sent AS (SELECT m, SUM(amount) AS v FROM backs GROUP BY m),
-		received AS (
-			SELECT c.transaction_member_id AS m, SUM(c.amount) AS v
-			FROM project_transactions c JOIN backs b ON b.id = c.parent_project_transaction_id
-			GROUP BY c.transaction_member_id
-		),
-		-- V14: an income bill — the receiver owes each split; net = Σ my splits − Σ others' splits I received
-		inc AS (
-			SELECT c.transaction_member_id AS m, c.amount AS v FROM project_transactions c
-			JOIN project_transactions p ON p.id = c.parent_project_transaction_id
-			WHERE p.project_id = $1 AND p.type = 'income' AND c.transaction_member_id <> p.transaction_member_id
-			UNION ALL
-			SELECT p.transaction_member_id, -c.amount FROM project_transactions c
-			JOIN project_transactions p ON p.id = c.parent_project_transaction_id
-			WHERE p.project_id = $1 AND p.type = 'income' AND c.transaction_member_id <> p.transaction_member_id
-		),
-		incnet AS (SELECT m, SUM(v) AS v FROM inc GROUP BY m)
+		paid AS (SELECT m, SUM(paid) AS v FROM pp WHERE type = 'expense' AND paid > 0 GROUP BY m),
+		share AS (SELECT m, SUM(share) AS v FROM pp WHERE type = 'expense' GROUP BY m),
+		sent AS (SELECT m, SUM(paid) AS v FROM pp WHERE type = 'payback' AND paid > 0 GROUP BY m),
+		received AS (SELECT m, SUM(share) AS v FROM pp WHERE type = 'payback' AND share > 0 GROUP BY m),
+		-- V14: an income bill - the receiver owes each split; net = sum of my splits - sum of others' splits I received
+		incnet AS (
+			SELECT m, SUM(CASE WHEN paid > 0 THEN -(SELECT COALESCE(SUM(c.share), 0) FROM pp c
+			                                         WHERE c.bid = pp.bid AND c.paid = 0)
+			                   ELSE share END) AS v
+			FROM pp WHERE type = 'income' AND (paid > 0 OR share > 0)
+			GROUP BY m
+		)
 		SELECT pm.id, COALESCE(paid.v, 0), COALESCE(share.v, 0), COALESCE(sent.v, 0), COALESCE(received.v, 0),
 		       COALESCE(incnet.v, 0)
 		FROM project_members pm
@@ -320,15 +298,12 @@ func loadSummary(ctx context.Context, q shared.Querier, callerID, projectID uuid
 	}
 	rows, err = q.Query(ctx, `
 		WITH parents AS (
-			SELECT id, transaction_member_id AS m, amount FROM project_transactions
+			SELECT id, amount FROM project_transactions
 			WHERE project_id = $1 AND parent_project_transaction_id IS NULL AND type = 'expense'
 		),
 		mine AS (
-			SELECT p.id, CASE WHEN p.m = $2
-				THEN p.amount - COALESCE((SELECT SUM(c.amount) FROM project_transactions c WHERE c.parent_project_transaction_id = p.id), 0)
-				ELSE COALESCE((SELECT SUM(c.amount) FROM project_transactions c
-				               WHERE c.parent_project_transaction_id = p.id AND c.transaction_member_id = $2), 0)
-				END AS share
+			SELECT p.id, COALESCE((SELECT SUM(x.share) FROM split_transaction_people x
+			                       WHERE x.split_transaction_id = p.id AND x.event_member_id = $2), 0) AS share
 			FROM parents p
 		)
 		SELECT ptt.event_tag_id, SUM(p.amount), SUM(m.share), COUNT(*)
