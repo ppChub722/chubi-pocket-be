@@ -89,13 +89,13 @@ type ClaimBillsResult struct {
 
 // claimablePairsTx — my pairs per bill of the event (memberID nil = with everyone).
 func claimablePairsTx(ctx context.Context, q rowQuerier, userID, projectID, me uuid.UUID, memberID *uuid.UUID) ([]ClaimableBill, error) {
-	// the real pairs (project_bill_pairs: multi-payer aware), netted per bill + other member (> 0 =
+	// the real pairs (bill_pairs: multi-payer aware), netted per bill + other member (> 0 =
 	// they owe me)
 	rows, err := q.Query(ctx, `
 		WITH mine AS (
 			SELECT v.pt_id, CASE WHEN v.creditor = $3 THEN v.debtor ELSE v.creditor END AS other,
 			       SUM(CASE WHEN v.creditor = $3 THEN v.amount ELSE -v.amount END) AS net
-			FROM project_bill_pairs v
+			FROM bill_pairs v
 			WHERE v.project_id = $1 AND $3 IN (v.debtor, v.creditor)
 			GROUP BY 1, 2
 		)
