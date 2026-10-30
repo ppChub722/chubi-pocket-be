@@ -31,18 +31,12 @@ type EventCounts struct {
 func fillMyNumbers(ctx context.Context, q shared.Querier, callerID uuid.UUID, events map[uuid.UUID]Event, ids []uuid.UUID) error {
 	rows, err := q.Query(ctx, `
 		SELECT p.id,
-		  COALESCE((SELECT SUM(COALESCE(y.amount, x.amount)) FROM project_transactions x
-		            LEFT JOIN project_transaction_payers y ON y.project_transaction_id = x.id -- multi-payer (105)
-		            WHERE x.project_id = p.id AND x.parent_project_transaction_id IS NULL
-		              AND x.type = 'expense' AND COALESCE(y.member_id, x.transaction_member_id) = me.id), 0)::float8,
-		  COALESCE((SELECT SUM(CASE WHEN x.transaction_member_id = me.id
-		              THEN x.amount - COALESCE((SELECT SUM(c.amount) FROM project_transactions c
-		                                        WHERE c.parent_project_transaction_id = x.id), 0)
-		              ELSE COALESCE((SELECT SUM(c.amount) FROM project_transactions c
-		                             WHERE c.parent_project_transaction_id = x.id AND c.transaction_member_id = me.id), 0)
-		            END)
-		            FROM project_transactions x
-		            WHERE x.project_id = p.id AND x.parent_project_transaction_id IS NULL AND x.type = 'expense'), 0)::float8
+		  COALESCE((SELECT SUM(sp.paid) FROM project_transactions x
+		            JOIN split_transaction_people sp ON sp.split_transaction_id = x.id AND sp.event_member_id = me.id
+		            WHERE x.project_id = p.id AND x.type = 'expense'), 0)::float8,
+		  COALESCE((SELECT SUM(sp.share) FROM project_transactions x
+		            JOIN split_transaction_people sp ON sp.split_transaction_id = x.id AND sp.event_member_id = me.id
+		            WHERE x.project_id = p.id AND x.type = 'expense'), 0)::float8
 		FROM projects p
 		JOIN project_members me ON me.project_id = p.id AND me.user_id = $2
 		WHERE p.id = ANY($1)`, ids, callerID)
