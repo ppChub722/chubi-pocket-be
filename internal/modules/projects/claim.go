@@ -102,8 +102,7 @@ func claimablePairsTx(ctx context.Context, q rowQuerier, userID, projectID, me u
 		SELECT p.id, p.type, p.payback_kind, to_char(p.date, 'YYYY-MM-DD'), p.description, p.amount::float8,
 		       p.transaction_member_id, m.other, m.net::float8,
 		       (SELECT t.id FROM transactions t WHERE t.user_id = $2 AND (t.id = p.linked_transaction_id
-		          OR t.source_project_transaction_id = p.id
-		          OR t.source_project_transaction_id IN (SELECT x.id FROM project_transactions x WHERE x.parent_project_transaction_id = p.id))
+		          OR (t.split_transaction_id = p.id AND t.source_project_transaction_id IS NOT NULL))
 		        ORDER BY (t.id = p.linked_transaction_id) DESC LIMIT 1)
 		FROM mine m JOIN project_transactions p ON p.id = m.pt_id
 		WHERE ABS(m.net) > 0.005
@@ -436,11 +435,8 @@ func (s *Service) claimLumpTx(ctx context.Context, tx pgx.Tx, userID, projectID,
 		case b.MyTransactionID == nil && copies && b.Direction == personal_debts.DirectionReceived:
 			// my copy = my share ("จ่ายโดย" the payers); with several payers it may differ from the pair
 			var share float64
-			if err := tx.QueryRow(ctx, `SELECT CASE WHEN p.transaction_member_id = $2
-					THEN p.amount - COALESCE((SELECT SUM(c.amount) FROM project_transactions c WHERE c.parent_project_transaction_id = p.id), 0)
-					ELSE COALESCE((SELECT SUM(c.amount) FROM project_transactions c WHERE c.parent_project_transaction_id = p.id
-						AND c.transaction_member_id = $2), 0) END::float8
-				FROM project_transactions p WHERE p.id = $1`, b.PtID, me).Scan(&share); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(c.share), 0)::float8 FROM split_transaction_people c
+				WHERE c.split_transaction_id = $1 AND c.event_member_id = $2`, b.PtID, me).Scan(&share); err != nil {
 				return uuid.Nil, eff, fmt.Errorf("my share: %w", err)
 			}
 			if share <= 0.005 {

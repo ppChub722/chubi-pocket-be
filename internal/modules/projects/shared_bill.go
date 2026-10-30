@@ -142,8 +142,8 @@ func (s *Service) loadBillTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) (*b
 	if st.pairs, err = BillPairsTx(ctx, tx, pt.ID); err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query(ctx, `SELECT pb.id, pb.transaction_member_id, c.transaction_member_id FROM project_transactions pb
-		JOIN project_transactions c ON c.parent_project_transaction_id = pb.id
+	rows, err := tx.Query(ctx, `SELECT pb.id, pb.transaction_member_id, c.event_member_id FROM project_transactions pb
+		JOIN split_transaction_people c ON c.split_transaction_id = pb.id AND c.share > 0
 		WHERE pb.paid_back_for_id = $1 AND pb.parent_project_transaction_id IS NULL`, pt.ID)
 	if err != nil {
 		return nil, fmt.Errorf("bill paybacks: %w", err)
@@ -235,7 +235,8 @@ func activeMemberTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UUID)
 
 func optedOutTx(ctx context.Context, tx pgx.Tx, ptID, userID uuid.UUID) (bool, error) {
 	var out bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM shared_bill_opt_outs WHERE project_transaction_id = $1 AND user_id = $2)`,
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM split_transaction_people
+		WHERE split_transaction_id = $1 AND user_id = $2 AND disconnected_at IS NOT NULL)`,
 		ptID, userID).Scan(&out)
 	return out, err
 }
@@ -822,7 +823,8 @@ func (s *Service) fanOutTx(ctx context.Context, tx pgx.Tx, editor, ptID uuid.UUI
 	}
 	users, err := collectIDs(ctx, tx, `SELECT DISTINCT pm.user_id FROM project_members pm
 		WHERE pm.project_id = $1 AND pm.user_id IS NOT NULL AND pm.user_id <> $2 AND pm.status = 'active'
-		  AND NOT EXISTS (SELECT 1 FROM shared_bill_opt_outs o WHERE o.project_transaction_id = $3 AND o.user_id = pm.user_id)`,
+		  AND NOT EXISTS (SELECT 1 FROM split_transaction_people o WHERE o.split_transaction_id = $3
+		                   AND o.user_id = pm.user_id AND o.disconnected_at IS NOT NULL)`,
 		st.pt.ProjectID, editor, st.pt.ID)
 	if err != nil {
 		return err

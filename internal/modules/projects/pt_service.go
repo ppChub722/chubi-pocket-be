@@ -95,8 +95,8 @@ func paybackEdit(ctx context.Context, tx pgx.Tx, current *ProjectTransaction, re
 		if len(*req.Splits) != 1 {
 			return ErrBadPayback
 		}
-	} else if err := tx.QueryRow(ctx, `SELECT transaction_member_id FROM project_transactions
-		WHERE parent_project_transaction_id = $1 LIMIT 1`, current.ID).Scan(&to); err != nil {
+	} else if err := tx.QueryRow(ctx, `SELECT event_member_id FROM split_transaction_people
+		WHERE split_transaction_id = $1 AND share > 0 AND event_member_id IS NOT NULL LIMIT 1`, current.ID).Scan(&to); err != nil {
 		return fmt.Errorf("payback receiver: %w", err)
 	}
 	splits := []ProjectSplitInput{{MemberID: to, Amount: amount}}

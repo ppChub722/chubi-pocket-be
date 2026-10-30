@@ -235,9 +235,9 @@ func claimedNetTx(ctx context.Context, tx pgx.Tx, userID, projectID, memberID uu
 		+ COALESCE((
 			SELECT SUM(CASE WHEN d.direction = 'paid' THEN d.amount ELSE -d.amount END)
 			FROM personal_debts d JOIN project_transactions p ON p.id = d.source_project_transaction_id
-			JOIN project_transactions c ON c.parent_project_transaction_id = p.id
+			JOIN split_transaction_people c ON c.split_transaction_id = p.id AND c.share > 0
 			WHERE d.user_id = $1 AND p.project_id = $2 AND p.type = 'payback'
-			  AND $3 IN (p.transaction_member_id, c.transaction_member_id)
+			  AND $3 IN (p.transaction_member_id, c.event_member_id)
 			  AND NOT EXISTS (SELECT 1 FROM personal_debt_bills b2 WHERE b2.debt_id = d.id)), 0)`,
 		userID, projectID, memberID).Scan(&v)
 	if err != nil {

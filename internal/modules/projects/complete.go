@@ -47,8 +47,9 @@ func (s *Service) Complete(ctx context.Context, userID, id uuid.UUID) (*EventCom
 	if status != StatusActive {
 		return nil, ErrCompleteNotActive
 	}
-	empty, err := collectIDs(ctx, tx, `SELECT DISTINCT COALESCE(pt.parent_project_transaction_id, pt.id)
-		FROM project_transactions pt JOIN project_members pm ON pm.id = pt.transaction_member_id
+	empty, err := collectIDs(ctx, tx, `SELECT DISTINCT pt.id
+		FROM project_transactions pt JOIN split_transaction_people sp ON sp.split_transaction_id = pt.id
+		JOIN project_members pm ON pm.id = sp.event_member_id
 		WHERE pt.project_id = $1 AND pm.removed_at IS NOT NULL`, id)
 	if err != nil {
 		return nil, fmt.Errorf("empty persons: %w", err)
