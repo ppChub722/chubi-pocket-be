@@ -15,11 +15,10 @@ import (
 var ErrNoShareToCopy = errors.New("you have no part in this project row to copy")
 
 func personalCopyTx(ctx context.Context, tx pgx.Tx, userID, ptID uuid.UUID) (id uuid.UUID, amount float64, ok bool) {
-	// A copy may point at the bill or (older resolve flows) at one of its split rows.
+	// A copy points at the bill (split_transaction_id also covers one made from a split row).
 	err := tx.QueryRow(ctx, `
 		SELECT id, amount FROM transactions
-		WHERE user_id = $1 AND (source_project_transaction_id = $2
-		   OR source_project_transaction_id IN (SELECT c.id FROM project_transactions c WHERE c.parent_project_transaction_id = $2))
+		WHERE user_id = $1 AND split_transaction_id = $2 AND source_project_transaction_id IS NOT NULL
 		ORDER BY created_at LIMIT 1`, userID, ptID).Scan(&id, &amount)
 	return id, amount, err == nil
 }
@@ -27,8 +26,10 @@ func personalCopyTx(ctx context.Context, tx pgx.Tx, userID, ptID uuid.UUID) (id 
 func splitSharesTx(ctx context.Context, tx pgx.Tx, parentID uuid.UUID) map[uuid.UUID]float64 {
 	out := map[uuid.UUID]float64{}
 	rows, err := tx.Query(ctx, `
-		SELECT transaction_member_id, SUM(amount) FROM project_transactions
-		WHERE parent_project_transaction_id = $1 GROUP BY transaction_member_id`, parentID)
+		SELECT sp.event_member_id, sp.share FROM split_transaction_people sp
+		JOIN project_transactions b ON b.id = sp.split_transaction_id
+		WHERE sp.split_transaction_id = $1 AND sp.share > 0 AND sp.event_member_id IS NOT NULL
+		  AND sp.event_member_id IS DISTINCT FROM b.transaction_member_id`, parentID)
 	if err != nil {
 		return out
 	}
@@ -53,17 +54,9 @@ func sumShares(m map[uuid.UUID]float64) float64 {
 
 func copyAmountTx(ctx context.Context, tx pgx.Tx, pt *ProjectTransaction, memberID uuid.UUID) (float64, error) {
 	var share float64
-	var err error
-	if pt.TransactionMemberID == memberID {
-		err = tx.QueryRow(ctx, `
-			SELECT $2::numeric - COALESCE(SUM(amount), 0) FROM project_transactions
-			WHERE parent_project_transaction_id = $1`, pt.ID, pt.Amount).Scan(&share)
-	} else {
-		err = tx.QueryRow(ctx, `
-			SELECT COALESCE(SUM(amount), 0) FROM project_transactions
-			WHERE parent_project_transaction_id = $1 AND transaction_member_id = $2`,
-			pt.ID, memberID).Scan(&share)
-	}
+	err := tx.QueryRow(ctx, `
+		SELECT COALESCE(SUM(share), 0)::float8 FROM split_transaction_people
+		WHERE split_transaction_id = $1 AND event_member_id = $2`, pt.ID, memberID).Scan(&share)
 	if err != nil {
 		return 0, err
 	}
