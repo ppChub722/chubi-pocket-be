@@ -93,9 +93,7 @@ func (s *Service) SetMyBooks(
 // at it / its splits; repay = a repayment pointing at it.
 const myTxOfRow = `t.user_id = $2 AND (
 		t.id = (SELECT linked_transaction_id FROM project_transactions WHERE id = $1)
-		OR t.source_project_transaction_id = $1
-		OR t.source_project_transaction_id IN (
-			SELECT c.id FROM project_transactions c WHERE c.parent_project_transaction_id = $1))`
+		OR t.split_transaction_id = $1)`
 
 func unlinkMineTx(ctx context.Context, tx pgx.Tx, userID, ptID uuid.UUID, kind string) error {
 	switch kind {

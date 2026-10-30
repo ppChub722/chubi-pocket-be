@@ -115,11 +115,11 @@ func (s *Service) detachBillTx(
 
 func boardSplitsTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) ([]quickDebt, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT pm.user_id, pm.display_name, c.amount
-		FROM project_transactions c
-		JOIN project_members pm ON pm.id = c.transaction_member_id
-		WHERE c.parent_project_transaction_id = $1
-		ORDER BY c.created_at, c.id`, ptID)
+		SELECT sp.user_id, sp.name, sp.share
+		FROM split_transaction_people sp
+		JOIN project_transactions b ON b.id = sp.split_transaction_id
+		WHERE sp.split_transaction_id = $1 AND sp.share > 0 AND sp.event_member_id IS DISTINCT FROM b.transaction_member_id
+		ORDER BY sp.sort, sp.id`, ptID)
 	if err != nil {
 		return nil, fmt.Errorf("board splits of %s: %w", ptID, err)
 	}
@@ -186,9 +186,7 @@ func isBoardOriginTx(ctx context.Context, tx pgx.Tx, callerUserID, ptID uuid.UUI
 func unlinkCopiesTx(ctx context.Context, tx pgx.Tx, ptID uuid.UUID) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE transactions SET project_id = NULL, source_project_transaction_id = NULL
-		WHERE source_project_transaction_id IN (
-			SELECT id FROM project_transactions
-			WHERE id = $1 OR parent_project_transaction_id = $1)`, ptID)
+		WHERE split_transaction_id = $1 AND source_project_transaction_id IS NOT NULL`, ptID)
 	if err != nil {
 		return fmt.Errorf("unlink copies of %s: %w", ptID, err)
 	}

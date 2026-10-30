@@ -257,8 +257,7 @@ func (s *Service) ApplyEventToTx(ctx context.Context, userID, txID uuid.UUID) (*
 func myLinkedTxTx(ctx context.Context, tx pgx.Tx, userID, billID uuid.UUID) (*uuid.UUID, error) {
 	var id uuid.UUID
 	err := tx.QueryRow(ctx, `SELECT t.id FROM transactions t
-		WHERE t.user_id = $1 AND (t.source_project_transaction_id = $2
-		   OR t.source_project_transaction_id IN (SELECT c.id FROM project_transactions c WHERE c.parent_project_transaction_id = $2))
+		WHERE t.user_id = $1 AND t.split_transaction_id = $2 AND t.source_project_transaction_id IS NOT NULL
 		ORDER BY t.created_at LIMIT 1`, userID, billID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
