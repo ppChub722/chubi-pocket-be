@@ -234,7 +234,7 @@ func TestSplitPeopleFollowTheOldRows(t *testing.T) {
 	}
 }
 
-// The books' links follow the old pointers (migration 124): a copy that points at a split row
+// The books' links follow the old pointers (migration 127): a copy that points at a split row
 // carries the bill and the person; a transaction a bill is made from carries the bill; a debt and
 // a lump line too; unlinking clears them.
 func TestSplitLinksFollowTheOldPointers(t *testing.T) {

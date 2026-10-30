@@ -131,7 +131,7 @@ BEGIN
      WHERE t.split_transaction_id = b.id AND t.split_person_id IS NULL;
 END $$;
 
--- While the old tables are still written, the people follow them (dropped by migration 125).
+-- While the old tables are still written, the people follow them (dropped by migration 129).
 CREATE FUNCTION trg_sync_split_people_pt() RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP <> 'INSERT' THEN

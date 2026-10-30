@@ -1,5 +1,5 @@
 -- Undo the EXPAND step (nothing was deleted by 124, so this is lossless for the old tables).
--- Not valid once migration 125 (CONTRACT) has run.
+-- Not valid once migration 129 (CONTRACT) has run.
 DROP TRIGGER IF EXISTS links_debt_bills ON personal_debt_bills;
 DROP TRIGGER IF EXISTS links_debts ON personal_debts;
 DROP TRIGGER IF EXISTS links_origin ON project_transactions;
