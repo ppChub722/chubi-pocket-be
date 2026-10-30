@@ -48,10 +48,27 @@ type Settings struct {
 	AutoSyncDebts  bool `json:"auto_sync_debts"`
 	// AutoAcceptEvents / AutoAcceptDebts (0.4.1-2, owner 2026-10-28) — a NEW shared bill lands in
 	// my book at once (on) or as a notice with "เพิ่มในสมุด" (off). Events default on, debts off.
-	AutoAcceptEvents bool      `json:"auto_accept_events"`
-	AutoAcceptDebts  bool      `json:"auto_accept_debts"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	AutoAcceptEvents bool `json:"auto_accept_events"`
+	AutoAcceptDebts  bool `json:"auto_accept_debts"`
+	// The three requests' own auto-accept switches (0.4.2-3 F2, migration 125, default off).
+	AutoAcceptEventInvites  bool      `json:"auto_accept_event_invites"`
+	AutoAcceptContactLinks  bool      `json:"auto_accept_contact_links"`
+	AutoAcceptWalletInvites bool      `json:"auto_accept_wallet_invites"`
+	CreatedAt               time.Time `json:"created_at"`
+	UpdatedAt               time.Time `json:"updated_at"`
+}
+
+// AcceptRequest — the request type's auto-accept switch (F2); false for every other type.
+func (s *Settings) AcceptRequest(notifType string) bool {
+	switch notifType {
+	case TypeProjectInvite:
+		return s.AutoAcceptEventInvites
+	case TypeContactLinkRequest:
+		return s.AutoAcceptContactLinks
+	case TypeAccountInvite:
+		return s.AutoAcceptWalletInvites
+	}
+	return false
 }
 
 func (s *Settings) Deliver(notifType string) bool { return !contains(s.MutedTypes, notifType) }
@@ -78,13 +95,16 @@ func contains(list []string, v string) bool {
 }
 
 type UpdateSettingsRequest struct {
-	MutedTypes          *[]string  `json:"muted_types"`
-	AutoSyncEvents      *bool      `json:"auto_sync_events"`
-	AutoSyncDebts       *bool      `json:"auto_sync_debts"`
-	AutoAcceptEvents    *bool      `json:"auto_accept_events"`
-	AutoAcceptDebts     *bool      `json:"auto_accept_debts"`
-	DefaultAccountID    *uuid.UUID `json:"default_account_id"`
-	ClearDefaultAccount bool       `json:"-"`
+	MutedTypes              *[]string  `json:"muted_types"`
+	AutoSyncEvents          *bool      `json:"auto_sync_events"`
+	AutoSyncDebts           *bool      `json:"auto_sync_debts"`
+	AutoAcceptEvents        *bool      `json:"auto_accept_events"`
+	AutoAcceptDebts         *bool      `json:"auto_accept_debts"`
+	AutoAcceptEventInvites  *bool      `json:"auto_accept_event_invites"`
+	AutoAcceptContactLinks  *bool      `json:"auto_accept_contact_links"`
+	AutoAcceptWalletInvites *bool      `json:"auto_accept_wallet_invites"`
+	DefaultAccountID        *uuid.UUID `json:"default_account_id"`
+	ClearDefaultAccount     bool       `json:"-"`
 }
 
 type ListFilter struct {

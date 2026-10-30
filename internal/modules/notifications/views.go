@@ -36,14 +36,17 @@ type DeleteResult struct {
 }
 
 type SettingsView struct {
-	MutedTypes       []string           `json:"muted_types"`
-	Types            []TypeSetting      `json:"types"`
-	AutoSyncEvents   bool               `json:"auto_sync_events"`
-	AutoSyncDebts    bool               `json:"auto_sync_debts"`
-	AutoAcceptEvents bool               `json:"auto_accept_events"`
-	AutoAcceptDebts  bool               `json:"auto_accept_debts"`
-	DefaultAccount   *shared.AccountRef `json:"default_account"`
-	UpdatedAt        time.Time          `json:"updated_at"`
+	MutedTypes              []string           `json:"muted_types"`
+	Types                   []TypeSetting      `json:"types"`
+	AutoSyncEvents          bool               `json:"auto_sync_events"`
+	AutoSyncDebts           bool               `json:"auto_sync_debts"`
+	AutoAcceptEvents        bool               `json:"auto_accept_events"`
+	AutoAcceptDebts         bool               `json:"auto_accept_debts"`
+	AutoAcceptEventInvites  bool               `json:"auto_accept_event_invites"`
+	AutoAcceptContactLinks  bool               `json:"auto_accept_contact_links"`
+	AutoAcceptWalletInvites bool               `json:"auto_accept_wallet_invites"`
+	DefaultAccount          *shared.AccountRef `json:"default_account"`
+	UpdatedAt               time.Time          `json:"updated_at"`
 }
 
 // TypeSetting — one row of the notification settings page (0.4.1-2 P7).
@@ -129,13 +132,16 @@ func (s *Service) MarkDismissedResult(ctx context.Context, userID, id uuid.UUID)
 
 func (s *Service) settingsView(ctx context.Context, st *Settings) (*SettingsView, error) {
 	v := &SettingsView{
-		MutedTypes:       st.MutedTypes,
-		Types:            make([]TypeSetting, 0, len(pageTypes)),
-		AutoSyncEvents:   st.AutoSyncEvents,
-		AutoSyncDebts:    st.AutoSyncDebts,
-		AutoAcceptEvents: st.AutoAcceptEvents,
-		AutoAcceptDebts:  st.AutoAcceptDebts,
-		UpdatedAt:        st.UpdatedAt,
+		MutedTypes:              st.MutedTypes,
+		Types:                   make([]TypeSetting, 0, len(pageTypes)),
+		AutoSyncEvents:          st.AutoSyncEvents,
+		AutoSyncDebts:           st.AutoSyncDebts,
+		AutoAcceptEvents:        st.AutoAcceptEvents,
+		AutoAcceptDebts:         st.AutoAcceptDebts,
+		AutoAcceptEventInvites:  st.AutoAcceptEventInvites,
+		AutoAcceptContactLinks:  st.AutoAcceptContactLinks,
+		AutoAcceptWalletInvites: st.AutoAcceptWalletInvites,
+		UpdatedAt:               st.UpdatedAt,
 	}
 	if v.MutedTypes == nil {
 		v.MutedTypes = []string{}

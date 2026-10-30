@@ -27,25 +27,32 @@ type Profile struct {
 	AutoSyncEvents bool `json:"auto_sync_events"`
 	AutoSyncDebts  bool `json:"auto_sync_debts"`
 	// AutoAcceptEvents / AutoAcceptDebts (0.4.1-2, owner 2026-10-28) — new shared bills land at once.
-	AutoAcceptEvents    bool                `json:"auto_accept_events"`
-	AutoAcceptDebts     bool                `json:"auto_accept_debts"`
-	NotificationSummary NotificationSummary `json:"notification_summary"`
-	CreatedAt           time.Time           `json:"created_at"`
-	UpdatedAt           time.Time           `json:"updated_at"`
+	AutoAcceptEvents bool `json:"auto_accept_events"`
+	AutoAcceptDebts  bool `json:"auto_accept_debts"`
+	// The three requests' auto-accept switches (0.4.2-3 F2, default off).
+	AutoAcceptEventInvites  bool                `json:"auto_accept_event_invites"`
+	AutoAcceptContactLinks  bool                `json:"auto_accept_contact_links"`
+	AutoAcceptWalletInvites bool                `json:"auto_accept_wallet_invites"`
+	NotificationSummary     NotificationSummary `json:"notification_summary"`
+	CreatedAt               time.Time           `json:"created_at"`
+	UpdatedAt               time.Time           `json:"updated_at"`
 }
 
 type UpdateProfileRequest struct {
-	DisplayName      *string                `json:"display_name" binding:"omitempty,min=1,max=100"`
-	Currency         *string                `json:"currency" binding:"omitempty,len=3,alpha"`
-	IconCode         *shared.IconCode       `json:"icon_code"    binding:"omitempty"`
-	AvatarSettings   *shared.AvatarSettings `json:"avatar_settings"`
-	Email            *string                `json:"email"        binding:"omitempty,email,max=255"`
-	Preferences      map[string]any         `json:"preferences"  binding:"omitempty"`
-	DefaultAccountID json.RawMessage        `json:"default_account_id"`
-	AutoSyncEvents   *bool                  `json:"auto_sync_events"`
-	AutoSyncDebts    *bool                  `json:"auto_sync_debts"`
-	AutoAcceptEvents *bool                  `json:"auto_accept_events"`
-	AutoAcceptDebts  *bool                  `json:"auto_accept_debts"`
+	DisplayName             *string                `json:"display_name" binding:"omitempty,min=1,max=100"`
+	Currency                *string                `json:"currency" binding:"omitempty,len=3,alpha"`
+	IconCode                *shared.IconCode       `json:"icon_code"    binding:"omitempty"`
+	AvatarSettings          *shared.AvatarSettings `json:"avatar_settings"`
+	Email                   *string                `json:"email"        binding:"omitempty,email,max=255"`
+	Preferences             map[string]any         `json:"preferences"  binding:"omitempty"`
+	DefaultAccountID        json.RawMessage        `json:"default_account_id"`
+	AutoSyncEvents          *bool                  `json:"auto_sync_events"`
+	AutoSyncDebts           *bool                  `json:"auto_sync_debts"`
+	AutoAcceptEvents        *bool                  `json:"auto_accept_events"`
+	AutoAcceptDebts         *bool                  `json:"auto_accept_debts"`
+	AutoAcceptEventInvites  *bool                  `json:"auto_accept_event_invites"`
+	AutoAcceptContactLinks  *bool                  `json:"auto_accept_contact_links"`
+	AutoAcceptWalletInvites *bool                  `json:"auto_accept_wallet_invites"`
 }
 
 // Preference keys (0.4.1-2 P1 / P6: theme_mode / theme_id / font_th / font_en / page_prefs added,

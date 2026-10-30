@@ -424,6 +424,16 @@ func (s *Service) addMemberByEmailTx(
 		return nil, err
 	}
 	if matchedUser != nil && *matchedUser != callerUserID && s.notifs != nil {
+		// The invitee's auto-accept switch (F2): linked at once, the notice (if not muted) answered.
+		accepted := false
+		if d, err := s.notifs.DeliveryFor(ctx, tx, *matchedUser, &callerUserID, notifications.TypeProjectInvite); err != nil {
+			return nil, err
+		} else if d.AcceptRequest {
+			if member, err = s.store.LinkMemberToUserTx(ctx, tx, member.ID, *matchedUser); err != nil {
+				return nil, err
+			}
+			accepted = true
+		}
 		_ = s.notifs.DispatchProjectInvite(ctx, tx, *matchedUser, callerUserID,
 			notifications.ProjectInvitePayload{
 				ProjectMemberID:    member.ID,
@@ -432,7 +442,7 @@ func (s *Service) addMemberByEmailTx(
 				InviterUserID:      callerUserID,
 				InviterDisplayName: userDisplayOrEmpty(ctx, tx, callerUserID),
 				Role:               role,
-			})
+			}, accepted)
 	}
 	return member, nil
 }

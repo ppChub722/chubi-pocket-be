@@ -350,6 +350,7 @@ func (b *booking) open(ctx context.Context, projectID uuid.UUID, op string) erro
 	if err := b.tx.QueryRow(ctx, `SELECT kind FROM projects WHERE id = $1`, projectID).Scan(&b.kind); err != nil {
 		return fmt.Errorf("event kind: %w", err)
 	}
+	b.mb.invite = b.kind == KindEvent
 	return nil
 }
 
@@ -370,6 +371,7 @@ func (b *booking) newSplit(ctx context.Context, in EventBillInput) error {
 		return fmt.Errorf("split bill: %w", err)
 	}
 	b.kind = KindSplit
+	b.mb.invite = false
 	return nil
 }
 
@@ -383,7 +385,7 @@ func (b *booking) newEvent(ctx context.Context, in NewEventInput) error {
 		return err
 	}
 	b.project, b.meMem, b.kind = p, owner.ID, KindEvent
-	b.mb = &quickMemberBuilder{svc: b.s, tx: b.tx, projectID: p.ID, callerUserID: b.me,
+	b.mb = &quickMemberBuilder{svc: b.s, tx: b.tx, projectID: p.ID, callerUserID: b.me, invite: true,
 		byUser: map[uuid.UUID]uuid.UUID{b.me: owner.ID}, byContact: map[uuid.UUID]uuid.UUID{}, byName: map[string]uuid.UUID{}}
 	return nil
 }

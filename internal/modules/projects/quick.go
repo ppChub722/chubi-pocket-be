@@ -82,7 +82,7 @@ func (s *Service) QuickCreate(
 		return nil, err
 	}
 	mb := &quickMemberBuilder{
-		svc: s, tx: tx, projectID: p.ID, callerUserID: callerUserID,
+		svc: s, tx: tx, projectID: p.ID, callerUserID: callerUserID, invite: true,
 		byUser:    map[uuid.UUID]uuid.UUID{callerUserID: owner.ID},
 		byContact: map[uuid.UUID]uuid.UUID{},
 		byName:    map[string]uuid.UUID{},
@@ -218,26 +218,53 @@ func (s *Service) billWriterTx(
 			mb.byName[strings.ToLower(strings.TrimSpace(m.DisplayName))] = m.ID
 		}
 	}
+	var kind string
+	if err := tx.QueryRow(ctx, `SELECT kind FROM projects WHERE id = $1`, projectID).Scan(&kind); err != nil {
+		return nil, nil, nil, fmt.Errorf("event kind: %w", err)
+	}
+	mb.invite = kind == KindEvent
+	// Invited, not accepted yet (F2): the same person is never invited twice, also after a reject.
+	invited, err := tx.Query(ctx, `SELECT invited_user_id, id FROM project_members
+		WHERE project_id = $1 AND user_id IS NULL AND invited_user_id IS NOT NULL AND status <> 'left'`, projectID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("invited members: %w", err)
+	}
+	defer invited.Close()
+	for invited.Next() {
+		var u, id uuid.UUID
+		if err := invited.Scan(&u, &id); err != nil {
+			return nil, nil, nil, err
+		}
+		if _, ok := mb.byUser[u]; !ok {
+			mb.byUser[u] = id
+		}
+	}
+	if err := invited.Err(); err != nil {
+		return nil, nil, nil, err
+	}
 	return p, me, mb, nil
 }
 
-// dispatchAddedTx — project_added to the linked users a member builder added.
+// dispatchAddedTx — ONE project_invite to each linked person a member builder added to an event
+// (F2; project_added is retired): already answered when their auto-accept switch linked them.
 func (s *Service) dispatchAddedTx(ctx context.Context, tx pgx.Tx, p *Project, mb *quickMemberBuilder, actorName string) error {
 	if s.notifs == nil {
 		return nil
 	}
-	for _, added := range mb.notifyLinked {
-		if err := s.notifs.DispatchProjectAdded(ctx, tx, added.userID, mb.callerUserID,
-			notifications.ProjectAddedPayload{
-				ProjectMemberID:  added.memberID,
-				ProjectID:        p.ID,
-				ProjectName:      p.Name,
-				AdderUserID:      mb.callerUserID,
-				AdderDisplayName: actorName,
-			}); err != nil {
+	for _, in := range mb.invites {
+		if err := s.notifs.DispatchProjectInvite(ctx, tx, in.userID, mb.callerUserID,
+			notifications.ProjectInvitePayload{
+				ProjectMemberID:    in.memberID,
+				ProjectID:          p.ID,
+				ProjectName:        p.Name,
+				InviterUserID:      mb.callerUserID,
+				InviterDisplayName: actorName,
+				Role:               RoleContributor,
+			}, in.accepted); err != nil {
 			return err
 		}
 	}
+	mb.invites = nil
 	return nil
 }
 
@@ -543,7 +570,15 @@ type quickMemberBuilder struct {
 	byContact map[uuid.UUID]uuid.UUID // contact_id -> member id
 	byName    map[string]uuid.UUID    // lower(name)-> member id
 
-	notifyLinked []struct{ userID, memberID uuid.UUID }
+	// invite — an event (F2): a linked person joins as a plain member and gets an invite; a split
+	// bill links them at once.
+	invite  bool
+	invites []pendingInvite
+}
+
+type pendingInvite struct {
+	userID, memberID uuid.UUID
+	accepted         bool
 }
 
 func (b *quickMemberBuilder) memberForDebt(ctx context.Context, d quickDebt) (uuid.UUID, error) {
@@ -576,16 +611,37 @@ func (b *quickMemberBuilder) ensureLinked(
 			displayName = "Member"
 		}
 	}
+	linked, accepted := &userID, false
+	if b.invite {
+		accepted = b.autoAcceptsInvite(ctx, userID)
+		if !accepted {
+			linked = nil
+		}
+	}
 	m, err := b.svc.store.InsertMemberTx(ctx, b.tx,
-		b.projectID, &userID, displayName, RoleContributor, MemberStatusActive,
+		b.projectID, linked, displayName, RoleContributor, MemberStatusActive,
 		b.callerUserID, nil,
 	)
 	if err != nil {
 		return uuid.Nil, err
 	}
 	b.byUser[userID] = m.ID
-	b.notifyLinked = append(b.notifyLinked, struct{ userID, memberID uuid.UUID }{userID, m.ID})
+	if b.invite {
+		if _, err := b.tx.Exec(ctx, `UPDATE project_members SET invited_user_id = $2 WHERE id = $1`, m.ID, userID); err != nil {
+			return uuid.Nil, fmt.Errorf("invited member: %w", err)
+		}
+		b.invites = append(b.invites, pendingInvite{userID: userID, memberID: m.ID, accepted: accepted})
+	}
 	return m.ID, nil
+}
+
+// autoAcceptsInvite — the invitee's "เชิญเข้าอีเวนต์" auto-accept switch (F2).
+func (b *quickMemberBuilder) autoAcceptsInvite(ctx context.Context, userID uuid.UUID) bool {
+	if b.svc.notifs == nil {
+		return false
+	}
+	d, err := b.svc.notifs.DeliveryFor(ctx, b.tx, userID, &b.callerUserID, notifications.TypeProjectInvite)
+	return err == nil && d.AcceptRequest
 }
 
 func (b *quickMemberBuilder) ensureAdHoc(ctx context.Context, name string) (uuid.UUID, error) {

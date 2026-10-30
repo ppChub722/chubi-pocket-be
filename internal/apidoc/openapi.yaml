@@ -3741,7 +3741,7 @@ paths:
       tags: [Events]
       summary: People as event members
       operationId: resolveProjectPeople
-      description: '0.4.0-3, the event bill sheet: the people a bill or payback names (me / member_id / contact_id / person_name), as event members in the same order. Anyone who isn''t a member yet is added (a linked contact gets project_added). Then the sheet writes the row with createProjectTransaction.'
+      description: '0.4.0-3, the event bill sheet: the people a bill or payback names (me / member_id / contact_id / person_name), as event members in the same order. Anyone who isn''t a member yet is added (a linked contact joins as a plain member and gets one project_invite, 0.4.2-3 F2). Then the sheet writes the row with createProjectTransaction.'
       requestBody:
         required: true
         content:
@@ -4295,7 +4295,7 @@ paths:
       summary: Give a removed member's spots to someone (0.4.1-2 V15)
       operationId: assignRemovedMember
       description: |
-        Any member who may edit bills, active event only. `to` = me, a member, one of my contacts or a typed name (a contact / name that isn't a member is ADDED, a linked contact gets project_added). `bill_ids` (optional) = only those bills; empty / absent = every bill of that member. Per spot: as payer → `to` pays (their own share in that bill merges into the payer's rest); as a share → it moves to `to` (added to their share when they already have one; dropped into the payer's rest when `to` is the payer). The bill totals never change. One DB transaction; answers the patch. 409 MEMBER_NOT_REMOVED (that member wasn't removed), 409 EVENT_COMPLETED, 404 NOT_FOUND.
+        Any member who may edit bills, active event only. `to` = me, a member, one of my contacts or a typed name (a contact / name that isn't a member is ADDED, a linked contact joins as a plain member and gets one project_invite, 0.4.2-3 F2). `bill_ids` (optional) = only those bills; empty / absent = every bill of that member. Per spot: as payer → `to` pays (their own share in that bill merges into the payer's rest); as a share → it moves to `to` (added to their share when they already have one; dropped into the payer's rest when `to` is the payer). The bill totals never change. One DB transaction; answers the patch. 409 MEMBER_NOT_REMOVED (that member wasn't removed), 409 EVENT_COMPLETED, 404 NOT_FOUND.
       requestBody:
         required: true
         content:
@@ -7137,12 +7137,12 @@ components:
     NotificationSettings:
       type: object
       description: 'The notification page (0.4.1-2 S4 / P7): on / off per type, plus the two auto-sync switches (one DB value each, the same values `/users/me`, the event page and the person page show). A muted type is never inserted; auto still applies it silently (Q-B10). On / off and auto are independent (owner 2026-10-30, F1): muted with auto off = no notice and nothing applied.'
-      required: [muted_types, types, auto_sync_events, auto_sync_debts, auto_accept_events, auto_accept_debts, default_account, updated_at]
+      required: [muted_types, types, auto_sync_events, auto_sync_debts, auto_accept_events, auto_accept_debts, auto_accept_event_invites, auto_accept_contact_links, auto_accept_wallet_invites, default_account, updated_at]
       properties:
         muted_types: { type: array, items: { type: string } }
         types:
           type: array
-          description: 'Every notification type the page lists, in page order: `group` shared_bill | event | recurring | request; `on` = not muted; `mutable` false = invites / link requests (always on, shown as a locked switch).'
+          description: 'Every notification type the page lists, in page order: `group` shared_bill | event | recurring | request; `on` = not muted; `mutable` is true for every row since 0.4.2-3 F2 (requests too: each has its own auto-accept switch); project_added is retired.'
           items:
             type: object
             required: [type, group, on, mutable]
@@ -7155,17 +7155,23 @@ components:
         auto_sync_debts: { type: boolean, description: 'Auto sync for split bills and debts with a connected contact; off = a notice asks. Default true.' }
         auto_accept_events: { type: boolean, description: '0.4.1-2 (owner 2026-10-28): a NEW event bill with a share of mine lands in my book as a copy at once; off = a shared_bill_created notice with "เพิ่มในสมุด". Auto sync covers later edits. Default true.' }
         auto_accept_debts: { type: boolean, description: '0.4.1-2 (owner 2026-10-28): the same for a new split bill / debt from a connected contact. Default false.' }
+        auto_accept_event_invites: { type: boolean, description: '0.4.2-3 F2: an event invite (project_invite) links me at once; the notice (if not muted) comes already answered. Default false.' }
+        auto_accept_contact_links: { type: boolean, description: '0.4.2-3 F2: the same for a contact link request. Default false.' }
+        auto_accept_wallet_invites: { type: boolean, description: '0.4.2-3 F2: the same for a wallet invite. Default false.' }
         default_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'The main wallet (กระเป๋าหลัก): quick create starts with it (getTransactionFormOptions `default_account_id`); null = the last wallet used. Same value as `/users/me` `default_account`.' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
     UpdateNotificationSettingsRequest:
       type: object
       description: 'Partial; absent = unchanged. `auto_types` is gone (0.4.1-2): auto moved to the two switches.'
       properties:
-        muted_types: { type: array, items: { type: string }, description: 'Replaces the stored list. Only mutable types (400 otherwise).' }
+        muted_types: { type: array, items: { type: string }, description: 'Replaces the stored list. Every listed type is mutable (requests too since 0.4.2-3); a retired type (project_added) is dropped quietly; unknown → 400.' }
         auto_sync_events: { type: boolean }
         auto_sync_debts: { type: boolean }
         auto_accept_events: { type: boolean }
         auto_accept_debts: { type: boolean }
+        auto_accept_event_invites: { type: boolean }
+        auto_accept_contact_links: { type: boolean }
+        auto_accept_wallet_invites: { type: boolean }
         default_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'A key present with null clears it. '}
 
     # ───────── categories ─────────
@@ -9857,6 +9863,18 @@ components:
             "type": "boolean",
             "description": "0.4.1-2 (owner 2026-10-28): the same for a new split bill / debt from a connected contact. Default false."
           },
+          "auto_accept_event_invites": {
+            "type": "boolean",
+            "description": "0.4.2-3 F2: event invites are accepted at once. Default false."
+          },
+          "auto_accept_contact_links": {
+            "type": "boolean",
+            "description": "0.4.2-3 F2: contact link requests are accepted at once. Default false."
+          },
+          "auto_accept_wallet_invites": {
+            "type": "boolean",
+            "description": "0.4.2-3 F2: wallet invites are accepted at once. Default false."
+          },
           "preferences": {
             "type": "object",
             "properties": {
@@ -9946,6 +9964,9 @@ components:
           "auto_sync_debts",
           "auto_accept_events",
           "auto_accept_debts",
+          "auto_accept_event_invites",
+          "auto_accept_contact_links",
+          "auto_accept_wallet_invites",
           "notification_summary",
           "created_at",
           "updated_at"
@@ -9996,6 +10017,9 @@ components:
             "type": "boolean",
             "description": "0.4.1-2: the debts / split bills auto-accept switch (new bills)."
           },
+          "auto_accept_event_invites": { "type": "boolean" },
+          "auto_accept_contact_links": { "type": "boolean" },
+          "auto_accept_wallet_invites": { "type": "boolean" },
           "preferences": {
             "type": "object",
             "description": "A partial merge: a key present replaces that preference, null clears it, absent keys stay. Unknown keys and bad values → 400 VALIDATION_ERROR.",

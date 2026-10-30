@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type Service struct {

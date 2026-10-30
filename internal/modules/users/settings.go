@@ -41,8 +41,10 @@ func (s *Store) loadSettings(ctx context.Context, p *Profile) error {
 	)
 	p.AutoSyncEvents, p.AutoSyncDebts, p.AutoAcceptEvents = true, true, true // no row yet = the defaults (110 / 113)
 	err := s.db.QueryRow(ctx, `SELECT default_account_id, auto_sync_events, auto_sync_debts, auto_accept_events,
-		auto_accept_debts, muted_types FROM user_notification_settings WHERE user_id = $1`, p.ID).Scan(&acc,
-		&p.AutoSyncEvents, &p.AutoSyncDebts, &p.AutoAcceptEvents, &p.AutoAcceptDebts, &muted)
+		auto_accept_debts, auto_accept_event_invites, auto_accept_contact_links, auto_accept_wallet_invites,
+		muted_types FROM user_notification_settings WHERE user_id = $1`, p.ID).Scan(&acc,
+		&p.AutoSyncEvents, &p.AutoSyncDebts, &p.AutoAcceptEvents, &p.AutoAcceptDebts,
+		&p.AutoAcceptEventInvites, &p.AutoAcceptContactLinks, &p.AutoAcceptWalletInvites, &muted)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("settings: %w", err)
 	}
@@ -96,6 +98,8 @@ func (r *UpdateProfileRequest) settingSwitches() map[string]*bool {
 	for col, v := range map[string]*bool{
 		"auto_sync_events": r.AutoSyncEvents, "auto_sync_debts": r.AutoSyncDebts,
 		"auto_accept_events": r.AutoAcceptEvents, "auto_accept_debts": r.AutoAcceptDebts,
+		"auto_accept_event_invites": r.AutoAcceptEventInvites, "auto_accept_contact_links": r.AutoAcceptContactLinks,
+		"auto_accept_wallet_invites": r.AutoAcceptWalletInvites,
 	} {
 		if v != nil {
 			out[col] = v

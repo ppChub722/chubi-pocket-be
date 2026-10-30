@@ -226,13 +226,31 @@ func (s *Service) RequestLink(ctx context.Context, userID, contactID uuid.UUID) 
 		}
 		defer tx.Rollback(ctx)
 
+		// The recipient's auto-accept switch (F2): linked at once, the notice (if not muted) answered.
+		d, err := s.notifs.DeliveryFor(ctx, tx, *matchedUser, &userID, notifications.TypeContactLinkRequest)
+		if err != nil {
+			return nil, err
+		}
+		accepted := false
+		if d.AcceptRequest {
+			exists, err := s.store.LinkExistsBetween(ctx, tx, *matchedUser, userID)
+			if err != nil {
+				return nil, err
+			}
+			if !exists {
+				if contact, err = s.store.SetLinkedUserIDTx(ctx, tx, userID, contactID, *matchedUser); err != nil {
+					return nil, err
+				}
+				accepted = true
+			}
+		}
 		if err := s.notifs.DispatchContactLinkRequest(
 			ctx, tx, *matchedUser, userID,
 			notifications.ContactLinkRequestPayload{
 				ContactID:         contactID,
 				SenderUserID:      userID,
 				SenderDisplayName: senderName,
-			},
+			}, accepted,
 		); err != nil {
 			return nil, err
 		}

@@ -273,12 +273,12 @@ func TestNotificationSettings(t *testing.T) {
 	if first := types[0].(map[string]any); first["group"] != GroupSharedBill || first["on"] != true || first["mutable"] != true {
 		t.Errorf("first type row = %v", first)
 	}
-	if last := types[len(types)-1].(map[string]any); last["group"] != GroupRequest || last["mutable"] != false || last["on"] != true {
+	if last := types[len(types)-1].(map[string]any); last["group"] != GroupRequest || last["mutable"] != true || last["on"] != true {
 		t.Errorf("request row = %v", last)
 	}
 
 	body := map[string]any{
-		"muted_types":        []string{TypeProjectAdded},
+		"muted_types":        []string{TypeEventCompleted, TypeProjectAdded}, // retired: dropped quietly
 		"auto_sync_events":   false,
 		"default_account_id": acc.String(),
 	}
@@ -288,7 +288,7 @@ func TestNotificationSettings(t *testing.T) {
 	if ref["id"] != acc.String() || ref["name"] != "Test wallet" {
 		t.Errorf("updated = %v", out)
 	}
-	if got := out["muted_types"].([]any); len(got) != 1 || got[0] != TypeProjectAdded {
+	if got := out["muted_types"].([]any); len(got) != 1 || got[0] != TypeEventCompleted {
 		t.Errorf("muted = %v", got)
 	}
 	if out["auto_sync_events"] != false || out["auto_sync_debts"] != true {
@@ -302,7 +302,7 @@ func TestNotificationSettings(t *testing.T) {
 		t.Errorf("auto-accept after set = %v / %v", out["auto_accept_events"], out["auto_accept_debts"])
 	}
 	for _, r := range out["types"].([]any) {
-		if row := r.(map[string]any); row["type"] == TypeProjectAdded && row["on"] != false {
+		if row := r.(map[string]any); row["type"] == TypeEventCompleted && row["on"] != false {
 			t.Errorf("muted row = %v", row)
 		}
 	}
@@ -316,7 +316,11 @@ func TestNotificationSettings(t *testing.T) {
 		t.Errorf("null must clear default_account: %v", out)
 	}
 
-	f.status(t, "PUT", "/api/v1/notifications/settings", map[string]any{"muted_types": []string{TypeAccountInvite}}, http.StatusBadRequest, "")
+	out = f.do(t, "PUT", "/api/v1/notifications/settings", map[string]any{"muted_types": []string{TypeAccountInvite},
+		"auto_accept_event_invites": true}, "updateNotificationSettings", http.StatusOK)
+	if out["auto_accept_event_invites"] != true || out["auto_accept_contact_links"] != false || out["auto_accept_wallet_invites"] != false {
+		t.Errorf("request auto-accept = %v", out)
+	}
 	f.status(t, "PUT", "/api/v1/notifications/settings", map[string]any{"muted_types": []string{"nope"}}, http.StatusBadRequest, "")
 	f.status(t, "PUT", "/api/v1/notifications/settings", map[string]any{"default_account_id": uuid.NewString()}, http.StatusBadRequest, "")
 	f.status(t, "PUT", "/api/v1/notifications/settings", `{"default_account_id": "x"}`, http.StatusBadRequest, "")

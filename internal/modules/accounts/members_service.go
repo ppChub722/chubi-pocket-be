@@ -70,6 +70,17 @@ func (s *Service) InviteMember(
 		return nil, err
 	}
 
+	// The invitee's auto-accept switch (F2): joined at once, the notice (if not muted) already answered.
+	d, err := s.notifs.DeliveryFor(ctx, tx, *targetID, &callerUserID, notifications.TypeAccountInvite)
+	if err != nil {
+		return nil, err
+	}
+	if d.AcceptRequest {
+		if member, err = s.joinTx(ctx, tx, member, *targetID); err != nil {
+			return nil, err
+		}
+	}
+
 	var inviterName string
 	_ = tx.QueryRow(ctx, `SELECT display_name FROM users WHERE id = $1`, callerUserID).Scan(&inviterName)
 	if err := s.notifs.DispatchAccountInvite(ctx, tx, *targetID, callerUserID,
@@ -79,7 +90,7 @@ func (s *Service) InviteMember(
 			AccountName:        a.Name,
 			InviterUserID:      callerUserID,
 			InviterDisplayName: inviterName,
-		}); err != nil {
+		}, d.AcceptRequest); err != nil {
 		return nil, err
 	}
 
@@ -255,19 +266,9 @@ func (s *Service) AcceptInvite(ctx context.Context, userID, notificationID uuid.
 		return s.inviteResult(ctx, userID, notificationID, member.AccountID)
 	}
 
-	activeBefore, err := s.store.CountActiveMembersTx(ctx, tx, member.AccountID)
+	activated, err := s.joinTx(ctx, tx, member, userID)
 	if err != nil {
 		return nil, err
-	}
-	activated, err := s.store.ActivateMemberTx(ctx, tx, member.ID, userID)
-	if err != nil {
-		return nil, err
-	}
-	if activeBefore == 1 {
-		if err := s.store.ResetScopesToNoneTx(ctx, tx, member.AccountID, userID); err != nil {
-			return nil, err
-		}
-		activated.ReportScope = ReportScopeNone
 	}
 	if _, err := s.notifs.MarkActionedTx(ctx, tx, userID, notificationID); err != nil {
 		return nil, err
@@ -372,4 +373,23 @@ func (s *Service) inviteResult(
 		return nil, err
 	}
 	return &AcceptInviteResult{Account: acc, Notification: nv, Badges: badges, Summary: sum}, nil
+}
+
+// joinTx — an invited member joins: a wallet that was mine alone goes back to scope none for everyone.
+func (s *Service) joinTx(ctx context.Context, tx pgx.Tx, member *AccountMember, userID uuid.UUID) (*AccountMember, error) {
+	activeBefore, err := s.store.CountActiveMembersTx(ctx, tx, member.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	activated, err := s.store.ActivateMemberTx(ctx, tx, member.ID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if activeBefore == 1 {
+		if err := s.store.ResetScopesToNoneTx(ctx, tx, member.AccountID, userID); err != nil {
+			return nil, err
+		}
+		activated.ReportScope = ReportScopeNone
+	}
+	return activated, nil
 }

@@ -52,15 +52,14 @@ const (
 	GroupRequest    = "request"
 )
 
-// pageTypes — every type the notification settings page lists, in page order. Request types are
-// never muted (mutable false); every other listed type can be.
+// pageTypes — every type the notification settings page lists, in page order; every one can be
+// muted (requests too since 0.4.2-3 F2, each with its own auto-accept switch).
 var pageTypes = []struct{ Type, Group string }{
 	{TypeSharedBillCreated, GroupSharedBill},
 	{TypeSharedBillDeleted, GroupSharedBill},
 	{TypeSharedBillDisconnected, GroupSharedBill},
 	{TypeDebtDisconnected, GroupSharedBill},
 	{TypeProjectTxChanged, GroupEvent},
-	{TypeProjectAdded, GroupEvent},
 	{TypeEventCompleted, GroupEvent},
 	{TypeEventMemberRemoved, GroupEvent},
 	{TypeRecurringDue, GroupRecurring},
@@ -86,15 +85,13 @@ var (
 	mutableTypes = func() map[string]bool {
 		m := map[string]bool{}
 		for _, t := range pageTypes {
-			if t.Group != GroupRequest {
-				m[t.Type] = true
-			}
+			m[t.Type] = true
 		}
 		return m
 	}()
-	actionTypes = map[string]bool{
-		TypeAccountInvite: true, TypeProjectInvite: true, TypeContactLinkRequest: true,
-	}
+	// retiredTypes — no longer sent (project_added: F2, an invite replaces it); an older app may
+	// still send its mute, which is dropped quietly.
+	retiredTypes = map[string]bool{TypeProjectAdded: true}
 )
 
 var (
@@ -108,8 +105,7 @@ func cleanTypes(in []string, allowed map[string]bool) ([]string, error) {
 	out := make([]string, 0, len(in))
 	for _, t := range in {
 		switch {
-		case actionTypes[t]:
-			return nil, ErrTypeNotMutable
+		case retiredTypes[t]:
 		case !allowed[t]:
 			return nil, ErrUnknownType
 		case !seen[t]:

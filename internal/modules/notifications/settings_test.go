@@ -33,12 +33,12 @@ func TestAutoIndependentOfMute(t *testing.T) {
 }
 
 func TestSettingsCounts(t *testing.T) {
-	on, total := SettingsCounts([]string{TypeProjectAdded, "unknown"})
+	on, total := SettingsCounts([]string{TypeEventCompleted, TypeProjectAdded, "unknown"})
 	if total != len(mutableTypes) || on != total-1 {
 		t.Errorf("counts = %d / %d (mutable %d)", on, total, len(mutableTypes))
 	}
-	if mutableTypes[TypeAccountInvite] {
-		t.Error("invites must not be mutable")
+	if !mutableTypes[TypeAccountInvite] || mutableTypes[TypeProjectAdded] {
+		t.Error("F2: requests are mutable; project_added is retired")
 	}
 }
 

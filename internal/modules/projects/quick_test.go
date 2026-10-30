@@ -303,7 +303,7 @@ func TestQuickCreateHappyPath(t *testing.T) {
 		status string
 	}
 	memberRows, err := f.pool.Query(ctx, `
-		SELECT id, user_id, display_name, role, status
+		SELECT id, COALESCE(user_id, invited_user_id), display_name, role, status
 		FROM project_members WHERE project_id = $1`, resp.Detail.Event.ID)
 	if err != nil {
 		t.Fatalf("members query: %v", err)
@@ -332,10 +332,15 @@ func TestQuickCreateHappyPath(t *testing.T) {
 	}
 	beeMember, ok := members[f.friend.String()]
 	if !ok || beeMember.status != MemberStatusActive || beeMember.role != RoleContributor {
-		t.Errorf("Bee should be an active linked contributor, got %+v", beeMember)
+		t.Errorf("Bee should be an active invited contributor, got %+v", beeMember)
 	}
 	if m, ok := members[f.mate.String()]; !ok || m.status != MemberStatusActive {
-		t.Errorf("shared-wallet mate should be an active linked member, got %+v", m)
+		t.Errorf("shared-wallet mate should be an active invited member, got %+v", m)
+	}
+	// F2: invited people are plain members until they accept.
+	if n := f.countRows(t, `SELECT COUNT(*) FROM project_members WHERE project_id = $1 AND user_id = ANY($2)`,
+		resp.Detail.Event.ID, []uuid.UUID{f.friend, f.mate}); n != 0 {
+		t.Errorf("invited people linked before accepting: %d", n)
 	}
 	grMember, ok := members["grandma"]
 	if !ok || grMember.userID != nil {
@@ -421,15 +426,15 @@ func TestQuickCreateHappyPath(t *testing.T) {
 	for _, uid := range []uuid.UUID{f.friend, f.mate} {
 		if n := f.countRows(t, `
 			SELECT COUNT(*) FROM notifications
-			WHERE type = 'project_added' AND recipient_user_id = $1 AND actor_user_id = $2`,
+			WHERE type = 'project_invite' AND recipient_user_id = $1 AND actor_user_id = $2 AND actioned_at IS NULL`,
 			uid, f.owner); n != 1 {
-			t.Errorf("project_added for %s = %d, want 1", uid, n)
+			t.Errorf("project_invite for %s = %d, want 1", uid, n)
 		}
 	}
 	if n := f.countRows(t, `
 		SELECT COUNT(*) FROM notifications
-		WHERE type = 'project_added' AND recipient_user_id = $1`, f.owner); n != 0 {
-		t.Errorf("owner should not receive project_added, got %d", n)
+		WHERE type IN ('project_invite', 'project_added') AND recipient_user_id = $1`, f.owner); n != 0 {
+		t.Errorf("owner should not receive an invite, got %d", n)
 	}
 }
 
@@ -462,7 +467,7 @@ func TestQuickCreateAtomicRollback(t *testing.T) {
 	snapshot := func() (projects, txs, notifs int, balance float64) {
 		projects = f.countRows(t, `SELECT COUNT(*) FROM projects WHERE owner_user_id = $1`, f.owner)
 		txs = f.countRows(t, `SELECT COUNT(*) FROM transactions WHERE user_id = $1`, f.owner)
-		notifs = f.countRows(t, `SELECT COUNT(*) FROM notifications WHERE type = 'project_added' AND actor_user_id = $1`, f.owner)
+		notifs = f.countRows(t, `SELECT COUNT(*) FROM notifications WHERE type = 'project_invite' AND actor_user_id = $1`, f.owner)
 		balance = f.accountBalance(t, f.acctPersonal)
 		return
 	}

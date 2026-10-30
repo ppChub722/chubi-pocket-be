@@ -23,6 +23,8 @@ type Delivery struct {
 	// (pick by the bill kind, like SyncEvents / SyncDebts).
 	AcceptEvents bool
 	AcceptDebts  bool
+	// AcceptRequest — the recipient's auto-accept switch for this request type (F2).
+	AcceptRequest bool
 	// self — the recipient made the change: never a notice.
 	self bool
 }
@@ -41,9 +43,6 @@ func (s *Service) DeliveryFor(
 	if actorUserID != nil && *actorUserID == recipientUserID {
 		return Delivery{self: true}, nil
 	}
-	if actionTypes[notifType] {
-		return Delivery{Deliver: true}, nil // requests: never muted, never auto
-	}
 	st, err := s.store.GetSettingsTx(ctx, tx, recipientUserID)
 	if err != nil {
 		return Delivery{}, err
@@ -52,6 +51,7 @@ func (s *Service) DeliveryFor(
 		Deliver: st.Deliver(notifType), Auto: st.Auto(notifType),
 		SyncEvents: st.AutoSyncEvents, SyncDebts: st.AutoSyncDebts,
 		AcceptEvents: st.AutoAcceptEvents, AcceptDebts: st.AutoAcceptDebts,
+		AcceptRequest: st.AcceptRequest(notifType),
 	}, nil
 }
 
@@ -93,34 +93,26 @@ func (s *Service) DispatchProjectTxChanged(
 
 func (s *Service) DispatchProjectInvite(
 	ctx context.Context, tx pgx.Tx,
-	recipientUserID uuid.UUID, actorUserID uuid.UUID, p ProjectInvitePayload,
+	recipientUserID uuid.UUID, actorUserID uuid.UUID, p ProjectInvitePayload, accepted bool,
 ) error {
 	deepLink := fmt.Sprintf("/projects/link-requests/%s", p.ProjectMemberID)
-	return s.dispatchTx(ctx, tx, TypeProjectInvite, recipientUserID, &actorUserID, p, &deepLink, false)
+	return s.dispatchTx(ctx, tx, TypeProjectInvite, recipientUserID, &actorUserID, p, &deepLink, accepted)
 }
 
 func (s *Service) DispatchContactLinkRequest(
 	ctx context.Context, tx pgx.Tx,
-	recipientUserID uuid.UUID, actorUserID uuid.UUID, p ContactLinkRequestPayload,
+	recipientUserID uuid.UUID, actorUserID uuid.UUID, p ContactLinkRequestPayload, accepted bool,
 ) error {
 	deepLink := fmt.Sprintf("/contacts/link-requests/%s", p.ContactID)
-	return s.dispatchTx(ctx, tx, TypeContactLinkRequest, recipientUserID, &actorUserID, p, &deepLink, false)
-}
-
-func (s *Service) DispatchProjectAdded(
-	ctx context.Context, tx pgx.Tx,
-	recipientUserID uuid.UUID, actorUserID uuid.UUID, p ProjectAddedPayload,
-) error {
-	deepLink := fmt.Sprintf("/projects/%s", p.ProjectID)
-	return s.dispatchTx(ctx, tx, TypeProjectAdded, recipientUserID, &actorUserID, p, &deepLink, false)
+	return s.dispatchTx(ctx, tx, TypeContactLinkRequest, recipientUserID, &actorUserID, p, &deepLink, accepted)
 }
 
 func (s *Service) DispatchAccountInvite(
 	ctx context.Context, tx pgx.Tx,
-	recipientUserID uuid.UUID, actorUserID uuid.UUID, p AccountInvitePayload,
+	recipientUserID uuid.UUID, actorUserID uuid.UUID, p AccountInvitePayload, accepted bool,
 ) error {
 	deepLink := fmt.Sprintf("/accounts/invites/%s", p.AccountMemberID)
-	return s.dispatchTx(ctx, tx, TypeAccountInvite, recipientUserID, &actorUserID, p, &deepLink, false)
+	return s.dispatchTx(ctx, tx, TypeAccountInvite, recipientUserID, &actorUserID, p, &deepLink, accepted)
 }
 
 // debtDeepLink opens the recipient's own debt row.

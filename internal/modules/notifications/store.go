@@ -279,13 +279,15 @@ func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 }
 
 const settingsColumns = `user_id, muted_types, default_account_id,
-	auto_sync_events, auto_sync_debts, auto_accept_events, auto_accept_debts, created_at, updated_at`
+	auto_sync_events, auto_sync_debts, auto_accept_events, auto_accept_debts,
+	auto_accept_event_invites, auto_accept_contact_links, auto_accept_wallet_invites, created_at, updated_at`
 
 func scanSettings(row pgx.Row) (*Settings, error) {
 	var s Settings
 	err := row.Scan(
 		&s.UserID, &s.MutedTypes, &s.DefaultAccountID,
-		&s.AutoSyncEvents, &s.AutoSyncDebts, &s.AutoAcceptEvents, &s.AutoAcceptDebts, &s.CreatedAt, &s.UpdatedAt,
+		&s.AutoSyncEvents, &s.AutoSyncDebts, &s.AutoAcceptEvents, &s.AutoAcceptDebts,
+		&s.AutoAcceptEventInvites, &s.AutoAcceptContactLinks, &s.AutoAcceptWalletInvites, &s.CreatedAt, &s.UpdatedAt,
 	)
 	return &s, err
 }
@@ -360,6 +362,16 @@ func (s *Store) UpdateSettings(ctx context.Context, userID uuid.UUID, req Update
 	if req.AutoAcceptDebts != nil {
 		args = append(args, *req.AutoAcceptDebts)
 		q += fmt.Sprintf(", auto_accept_debts = $%d", len(args))
+	}
+	for col, v := range map[string]*bool{
+		"auto_accept_event_invites":  req.AutoAcceptEventInvites,
+		"auto_accept_contact_links":  req.AutoAcceptContactLinks,
+		"auto_accept_wallet_invites": req.AutoAcceptWalletInvites,
+	} {
+		if v != nil {
+			args = append(args, *v)
+			q += fmt.Sprintf(", %s = $%d", col, len(args))
+		}
 	}
 	if req.ClearDefaultAccount {
 		q += ", default_account_id = NULL"
