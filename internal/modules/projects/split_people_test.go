@@ -197,3 +197,83 @@ func TestSplitPeopleFollowTheOldRows(t *testing.T) {
 		t.Fatalf("%d bill(s) whose people do not add up", bad)
 	}
 }
+
+// The books' links follow the old pointers (migration 124): a copy that points at a split row
+// carries the bill and the person; a transaction a bill is made from carries the bill; a debt and
+// a lump line too; unlinking clears them.
+func TestSplitLinksFollowTheOldPointers(t *testing.T) {
+	f := newQCFixture(t)
+	ctx := context.Background()
+	h := NewHandler(f.svc)
+	me := evClient{t, apitest.CountedEngine(f.owner, func(g *gin.RouterGroup) {
+		g.POST("/projects", h.Create)
+	})}
+	ev := m(me.do("POST", "/projects", map[string]any{"name": "Links"}, "createProject", http.StatusCreated), "event")
+	id := ev["id"].(string)
+	mine := uuid.MustParse(ev["my_member_id"].(string))
+	lee := uuid.New()
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := f.pool.Exec(ctx, q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec(`INSERT INTO project_members (id, project_id, user_id, display_name, role, status) VALUES ($1, $2, $3, 'Lee', 'contributor', 'active')`,
+		lee, id, f.friend)
+	bill, split := uuid.New(), uuid.New()
+	exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date)
+		VALUES ($1, $2, $3, $4, 'expense', 300, 'THB', '2026-10-30')`, bill, id, mine, f.owner)
+	exec(`INSERT INTO project_transactions (id, project_id, parent_project_transaction_id, transaction_member_id, record_user_id, type, amount, currency, date)
+		VALUES ($1, $2, $3, $4, $5, 'expense', 100, 'THB', '2026-10-30')`, split, id, bill, lee, f.owner)
+
+	var person uuid.UUID
+	if err := f.pool.QueryRow(ctx, `SELECT id FROM split_transaction_people WHERE split_transaction_id = $1 AND event_member_id = $2`, bill, lee).Scan(&person); err != nil {
+		t.Fatal(err)
+	}
+	links := func(txID uuid.UUID) (*uuid.UUID, *uuid.UUID) {
+		t.Helper()
+		var b, p *uuid.UUID
+		if err := f.pool.QueryRow(ctx, `SELECT split_transaction_id, split_person_id FROM transactions WHERE id = $1`, txID).Scan(&b, &p); err != nil {
+			t.Fatal(err)
+		}
+		return b, p
+	}
+
+	// Lee's copy of his share points at the split row
+	copyTx := f.insertCopy(t, f.friend, uuid.MustParse(id), split, 100)
+	if b, p := links(copyTx); b == nil || *b != bill || p == nil || *p != person {
+		t.Fatalf("copy links = %v %v, want bill %s person %s", b, p, bill, person)
+	}
+	// my transaction the bill is made from
+	origin := uuid.New()
+	exec(`INSERT INTO transactions (id, user_id, type, amount, date) VALUES ($1, $2, 'expense', 300, '2026-10-30')`, origin, f.owner)
+	if b, _ := links(origin); b != nil {
+		t.Fatalf("a plain transaction has bill %v", *b)
+	}
+	exec(`UPDATE project_transactions SET linked_transaction_id = $2 WHERE id = $1`, bill, origin)
+	if b, p := links(origin); b == nil || *b != bill || p == nil {
+		t.Fatalf("origin links = %v %v, want bill %s with my person", b, p, bill)
+	}
+	exec(`UPDATE project_transactions SET linked_transaction_id = NULL WHERE id = $1`, bill)
+	if b, _ := links(origin); b != nil {
+		t.Fatalf("unlinked origin still has bill %v", *b)
+	}
+	// unlinking the copy clears it
+	exec(`UPDATE transactions SET project_id = NULL, source_project_transaction_id = NULL WHERE id = $1`, copyTx)
+	if b, p := links(copyTx); b != nil || p != nil {
+		t.Fatalf("unlinked copy links = %v %v, want none", b, p)
+	}
+	// a lump line follows pt_id + member_id
+	debt := uuid.New()
+	exec(`INSERT INTO personal_debts (id, user_id, direction, counterparty_person_name, amount, currency, date, source_kind,
+		source_project_transaction_id, project_id) VALUES ($1, $2, 'paid', 'Lee', 100, 'THB', CURRENT_DATE, 'event', $3, $4)`, debt, f.owner, bill, id)
+	var got uuid.UUID
+	if err := f.pool.QueryRow(ctx, `SELECT split_transaction_id FROM personal_debts WHERE id = $1`, debt).Scan(&got); err != nil || got != bill {
+		t.Fatalf("debt bill = %v (%v), want %s", got, err, bill)
+	}
+	exec(`INSERT INTO personal_debt_bills (debt_id, user_id, pt_id, member_id, amount) VALUES ($1, $2, $3, $4, 100)`, debt, f.owner, bill, lee)
+	var lb, lp uuid.UUID
+	if err := f.pool.QueryRow(ctx, `SELECT split_transaction_id, split_person_id FROM personal_debt_bills WHERE debt_id = $1`, debt).Scan(&lb, &lp); err != nil || lb != bill || lp != person {
+		t.Fatalf("lump line = %v %v (%v), want bill %s person %s", lb, lp, err, bill, person)
+	}
+}
