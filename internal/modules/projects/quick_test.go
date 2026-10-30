@@ -220,6 +220,9 @@ func newQCFixture(t *testing.T) *qcFixture {
 	f.owner = f.newUser(t, "Alice")
 	f.friend = f.newUser(t, "Bee")
 	f.mate = f.newUser(t, "Chai")
+	// Bee and Chai join an event they're added to at once (F2 auto-accept), as these tests
+	// expect; TestQuickCreateHappyPath turns it off to see the invite.
+	f.setAcceptInvites(t, true, f.friend, f.mate)
 
 	f.acctPersonal = f.newAccount(t, f.owner, "Alice personal", 1000)
 	f.addAccountMember(t, f.acctPersonal, f.owner, "owner")
@@ -238,6 +241,19 @@ func newQCFixture(t *testing.T) *qcFixture {
 	f.debtB2 = f.insertDebt(t, f.owner, &f.contactB, "Bee", f.bill2, 50, 0, "open")
 
 	return f
+}
+
+// setAcceptInvites — the users' "เชิญเข้าอีเวนต์" auto-accept switch (F2).
+func (f *qcFixture) setAcceptInvites(t *testing.T, on bool, users ...uuid.UUID) {
+	t.Helper()
+	for _, u := range users {
+		if _, err := f.pool.Exec(context.Background(), `INSERT INTO user_notification_settings
+			(user_id, created_by_user_id, updated_by_user_id, auto_accept_event_invites) VALUES ($1, $1, $1, $2)
+			ON CONFLICT (user_id) DO UPDATE SET auto_accept_event_invites = EXCLUDED.auto_accept_event_invites`,
+			u, on); err != nil {
+			t.Fatalf("accept invites: %v", err)
+		}
+	}
 }
 
 func (f *qcFixture) countRows(t *testing.T, q string, args ...any) int {
@@ -261,6 +277,7 @@ func (f *qcFixture) accountBalance(t *testing.T, accountID uuid.UUID) float64 {
 
 func TestQuickCreateHappyPath(t *testing.T) {
 	f := newQCFixture(t)
+	f.setAcceptInvites(t, false, f.friend, f.mate)
 	ctx := context.Background()
 
 	resp, err := f.svc.QuickCreate(ctx, f.owner, QuickCreateRequest{

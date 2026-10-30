@@ -351,6 +351,7 @@ func TestEventsAPI(t *testing.T) {
 	var beeEmail, chaiEmail string
 	_ = f.pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, f.friend).Scan(&beeEmail)
 	_ = f.pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, f.mate).Scan(&chaiEmail)
+	f.setAcceptInvites(t, false, f.mate) // the invite waits for Chai's answer
 	inv := me.do("POST", "/projects/"+id+"/members", map[string]any{"email": chaiEmail, "display_name": "Chai"},
 		"addProjectMember", http.StatusCreated)
 	var pending string

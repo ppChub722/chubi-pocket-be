@@ -2585,6 +2585,14 @@ paths:
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "description": "CURRENCY_LOCKED (another currency than mine), AVATAR_SOURCE_UNAVAILABLE, EMAIL_EXISTS.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
           }
         }
       }

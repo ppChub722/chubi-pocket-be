@@ -147,10 +147,10 @@ func (s *Service) settingsView(ctx context.Context, st *Settings) (*SettingsView
 		v.MutedTypes = []string{}
 	}
 	for _, t := range pageTypes {
-		mutable := t.Group != GroupRequest
+		// Every listed type can be muted, requests too (F2).
 		v.Types = append(v.Types, TypeSetting{
-			Type: t.Type, Group: t.Group, Mutable: mutable,
-			On: !mutable || st.Deliver(t.Type),
+			Type: t.Type, Group: t.Group, Mutable: mutableTypes[t.Type],
+			On: st.Deliver(t.Type),
 		})
 	}
 	if st.DefaultAccountID != nil {
