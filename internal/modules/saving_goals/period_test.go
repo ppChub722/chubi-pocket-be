@@ -140,3 +140,22 @@ func TestRecurringSavingCappedAtTarget(t *testing.T) {
 		t.Errorf("at the target = %v, want ErrGoalReached", err)
 	}
 }
+
+func TestAddMonthsClampsToMonthEnd(t *testing.T) {
+	cases := []struct {
+		from string
+		n    int
+		want string
+	}{
+		{"2026-10-31", 8, "2027-06-30"},
+		{"2026-01-31", 1, "2026-02-28"},
+		{"2028-01-31", 1, "2028-02-29"},
+		{"2026-10-15", 3, "2027-01-15"},
+		{"2026-12-31", 2, "2027-02-28"},
+	}
+	for _, c := range cases {
+		if got := addMonths(day(c.from), c.n).Format(dateLayout); got != c.want {
+			t.Errorf("addMonths(%s, %d) = %s, want %s", c.from, c.n, got, c.want)
+		}
+	}
+}

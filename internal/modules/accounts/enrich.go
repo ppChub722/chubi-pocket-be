@@ -89,7 +89,7 @@ func nextDayOfMonth(today time.Time, day int) time.Time {
 	}
 	c := pick(today.Year(), today.Month())
 	if c.Before(today) {
-		nm := today.AddDate(0, 1, 0)
+		nm := time.Date(today.Year(), today.Month()+1, 1, 0, 0, 0, 0, time.UTC)
 		c = pick(nm.Year(), nm.Month())
 	}
 	return c

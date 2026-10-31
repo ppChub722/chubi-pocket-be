@@ -157,6 +157,14 @@ func monthsBetween(a, b time.Time) int {
 	return (b.Year()-a.Year())*12 + int(b.Month()) - int(a.Month())
 }
 
+// addMonths keeps the day of month, or the last day of the target month when that is shorter
+// (31 Oct + 8 months is 30 Jun, where AddDate would roll over to 1 Jul).
+func addMonths(t time.Time, n int) time.Time {
+	first := time.Date(t.Year(), t.Month()+time.Month(n), 1, 0, 0, 0, 0, time.UTC)
+	last := first.AddDate(0, 1, -1).Day()
+	return time.Date(first.Year(), first.Month(), min(t.Day(), last), 0, 0, 0, 0, time.UTC)
+}
+
 func goalView(g *Goal, saved float64, nets map[string]float64, today time.Time, currency string) GoalView {
 	v := GoalView{
 		ID: g.ID, Name: g.Name, Description: g.Description, Note: g.Note, IconCode: g.IconCode,
@@ -193,7 +201,7 @@ func goalView(g *Goal, saved float64, nets map[string]float64, today time.Time, 
 			v.NeededMonthly = fptr(math.Ceil(*v.RemainingAmount / months))
 		}
 		if v.PaceMonthly != nil {
-			eta := today.AddDate(0, int(math.Ceil(*v.RemainingAmount / *v.PaceMonthly)), 0)
+			eta := addMonths(today, int(math.Ceil(*v.RemainingAmount / *v.PaceMonthly)))
 			v.EtaDate = dstr(&eta)
 		}
 	}
