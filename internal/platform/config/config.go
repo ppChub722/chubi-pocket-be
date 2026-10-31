@@ -17,6 +17,17 @@ type Config struct {
 	OCR      OCRConfig
 	Version  AppVersionConfig
 	Telegram TelegramConfig
+	LLM      LLMConfig
+}
+
+// LLMConfig: the language model behind the chatbot (0.4.2-4). Empty key = off (the bot answers that
+// the feature is off). The key is never logged.
+type LLMConfig struct {
+	APIKey     string // ANTHROPIC_API_KEY
+	Model      string // LLM_MODEL, default claude-haiku-5-5
+	TimeoutSec int    // LLM_TIMEOUT_SECONDS, one call
+	MonthlyCap int    // LLM_MONTHLY_CAP, calls per user per calendar month (Asia/Bangkok)
+	PerMinute  int    // LLM_PER_MINUTE, calls per user per minute
 }
 
 // TelegramConfig: the bot (0.4.2, modules/telegram). Webhook only; empty token = off. Who may use
@@ -123,6 +134,13 @@ func Load() (*Config, error) {
 			BotToken:      getEnv("TELEGRAM_BOT_TOKEN", ""),
 			WebhookSecret: getEnv("TELEGRAM_WEBHOOK_SECRET", ""),
 			WebhookURL:    getEnv("TELEGRAM_WEBHOOK_URL", ""),
+		},
+		LLM: LLMConfig{
+			APIKey:     getEnv("ANTHROPIC_API_KEY", ""),
+			Model:      getEnv("LLM_MODEL", "claude-haiku-5-5"),
+			TimeoutSec: getEnvAsInt("LLM_TIMEOUT_SECONDS", 20),
+			MonthlyCap: getEnvAsInt("LLM_MONTHLY_CAP", 1000),
+			PerMinute:  getEnvAsInt("LLM_PER_MINUTE", 10),
 		},
 	}
 
