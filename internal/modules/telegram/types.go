@@ -37,15 +37,17 @@ type User struct {
 
 // Message: the media fields are kept raw; only their presence matters (a non-text message).
 type Message struct {
-	MessageID int64           `json:"message_id"`
-	Chat      Chat            `json:"chat"`
-	From      *User           `json:"from,omitempty"`
-	Date      int64           `json:"date"` // unix seconds
-	Text      string          `json:"text"`
-	Photo     json.RawMessage `json:"photo,omitempty"`
-	Document  json.RawMessage `json:"document,omitempty"`
-	Voice     json.RawMessage `json:"voice,omitempty"`
-	Sticker   json.RawMessage `json:"sticker,omitempty"`
+	MessageID int64  `json:"message_id"`
+	Chat      Chat   `json:"chat"`
+	From      *User  `json:"from,omitempty"`
+	Date      int64  `json:"date"` // unix seconds
+	Text      string `json:"text"`
+	// ReplyToMessage — the message this one replies to (a Reply on a chatbot card edits it).
+	ReplyToMessage *Message        `json:"reply_to_message,omitempty"`
+	Photo          json.RawMessage `json:"photo,omitempty"`
+	Document       json.RawMessage `json:"document,omitempty"`
+	Voice          json.RawMessage `json:"voice,omitempty"`
+	Sticker        json.RawMessage `json:"sticker,omitempty"`
 	// WriteAccessAllowed — the service message "You allowed this bot to message you…" (the user
 	// kept "Allow Messages" on when logging in with Telegram).
 	WriteAccessAllowed json.RawMessage `json:"write_access_allowed,omitempty"`
