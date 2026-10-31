@@ -23,7 +23,7 @@ type Config struct {
 // LLMConfig: the language model behind the chatbot (0.4.2-4). Empty key = off (the bot answers that
 // the feature is off). The key is never logged.
 type LLMConfig struct {
-	Provider   string // LLM_PROVIDER: anthropic (default) | fake (keyword answers, not in production)
+	Provider   string // LLM_PROVIDER: anthropic (default) | fake (keyword answers, writes nothing)
 	APIKey     string // ANTHROPIC_API_KEY
 	Model      string // LLM_MODEL, default claude-haiku-5-5
 	TimeoutSec int    // LLM_TIMEOUT_SECONDS, one call

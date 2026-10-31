@@ -38,14 +38,11 @@ const (
 )
 
 // NewRouter builds the default client from LLM_*. An unknown provider is an error; a known one
-// with no key is Off. The fake provider is refused in production.
-func NewRouter(cfg config.LLMConfig, env string) (*Router, error) {
+// with no key is Off. The fake provider writes nothing, so the test server may run it.
+func NewRouter(cfg config.LLMConfig) (*Router, error) {
 	r := &Router{provider: cfg.Provider, model: cfg.Model}
 	switch cfg.Provider {
 	case ProviderFake:
-		if env == "production" {
-			return nil, fmt.Errorf("llm: LLM_PROVIDER=fake is not allowed in production")
-		}
 		r.model, r.client = "keywords", NewKeywordFake()
 	case ProviderAnthropic:
 		if cfg.APIKey == "" {

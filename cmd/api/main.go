@@ -251,7 +251,7 @@ func main() {
 	if telegramWebhook != nil {
 		telegramWebhook.WithAccounts(connectionsService)
 		// 0.4.2-4 chatbot: text → LLM → card. A bad LLM_* setting stops the start.
-		llmRouter, err := llm.NewRouter(cfg.LLM, cfg.App.Env)
+		llmRouter, err := llm.NewRouter(cfg.LLM)
 		if err != nil {
 			log.Error("llm config", "error", err)
 			os.Exit(1)
