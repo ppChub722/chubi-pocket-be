@@ -23,6 +23,7 @@ type Config struct {
 // LLMConfig: the language model behind the chatbot (0.4.2-4). Empty key = off (the bot answers that
 // the feature is off). The key is never logged.
 type LLMConfig struct {
+	Provider   string // LLM_PROVIDER: anthropic (default) | fake (keyword answers, not in production)
 	APIKey     string // ANTHROPIC_API_KEY
 	Model      string // LLM_MODEL, default claude-haiku-5-5
 	TimeoutSec int    // LLM_TIMEOUT_SECONDS, one call
@@ -136,6 +137,7 @@ func Load() (*Config, error) {
 			WebhookURL:    getEnv("TELEGRAM_WEBHOOK_URL", ""),
 		},
 		LLM: LLMConfig{
+			Provider:   getEnv("LLM_PROVIDER", "anthropic"),
 			APIKey:     getEnv("ANTHROPIC_API_KEY", ""),
 			Model:      getEnv("LLM_MODEL", "claude-haiku-5-5"),
 			TimeoutSec: getEnvAsInt("LLM_TIMEOUT_SECONDS", 20),

@@ -89,11 +89,26 @@ type Accounts interface {
 	TelegramLoginConfirm(ctx context.Context, codeID uuid.UUID, chatID int64) (bool, error)
 }
 
+// Chatbot is the chatbot (0.4.2-4): texts of linked chats with the permission on, and taps on its
+// own buttons (Tap false = not its button).
+type Chatbot interface {
+	Text(ctx context.Context, userID uuid.UUID, m *Message)
+	Tap(ctx context.Context, cq *CallbackQuery) bool
+}
+
+// chatTimeout bounds one chatbot turn; it runs after Telegram has its 200 (a model call may take
+// longer than the webhook should wait).
+const chatTimeout = 60 * time.Second
+
+// OutcomeChat — the text went to the chatbot.
+const OutcomeChat Outcome = "chat"
+
 // Handler holds the bot's logic; the webhook only decodes and calls HandleUpdate.
 type Handler struct {
 	send     sender
 	store    saver // nil = texts are not kept
 	accounts Accounts
+	chat     Chatbot // nil = texts get "ได้รับข้อความแล้ว ✓"
 	seen     *seenSet
 	log      *slog.Logger
 }
@@ -110,6 +125,11 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) Outcome {
 		if !h.seen.add(u.UpdateID) {
 			h.logLine(u, cq.Message, false, OutcomeDuplicate)
 			return OutcomeDuplicate
+		}
+		if h.chat != nil && h.chat.Tap(ctx, cq) {
+			h.log.Info("telegram update", "update_id", u.UpdateID, "outcome", string(OutcomeChat),
+				"chat_id", cq.Message.Chat.ID, "kind", "callback")
+			return OutcomeChat
 		}
 		return h.callback(ctx, u, cq)
 	}
@@ -175,6 +195,15 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) Outcome {
 			h.logLine(u, m, true, OutcomeDuplicate)
 			return OutcomeDuplicate
 		}
+	}
+	if h.chat != nil {
+		go func() {
+			cctx, cancel := context.WithTimeout(context.Background(), chatTimeout)
+			defer cancel()
+			h.chat.Text(cctx, userID, m)
+		}()
+		h.logLine(u, m, true, OutcomeChat)
+		return OutcomeChat
 	}
 	return h.reply(ctx, u, m, true, TextReceived, OutcomeReceived)
 }

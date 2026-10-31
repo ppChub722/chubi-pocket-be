@@ -90,6 +90,9 @@ func (w *Webhook) Client() *Client { return w.client }
 // WithAccounts hands the bot the linking (connections.Service); wired after both exist.
 func (w *Webhook) WithAccounts(a Accounts) { w.h.accounts = a }
 
+// WithChat hands the bot the chatbot (0.4.2-4); without it a text gets "ได้รับข้อความแล้ว ✓".
+func (w *Webhook) WithChat(c Chatbot) { w.h.chat = c }
+
 // Start checks the token (getMe) and points Telegram at TELEGRAM_WEBHOOK_URL, in the background:
 // a bad token or Telegram being down is logged, the API runs on.
 func (w *Webhook) Start() {

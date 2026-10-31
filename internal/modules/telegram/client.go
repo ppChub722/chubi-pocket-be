@@ -67,6 +67,30 @@ func (c *Client) SendButtons(ctx context.Context, chatID int64, text string, rep
 	return c.call(ctx, "sendMessage", body, nil)
 }
 
+// SendCard posts text with one row of inline buttons and returns the new message's id (a chatbot
+// card, edited later).
+func (c *Client) SendCard(ctx context.Context, chatID int64, text string, replyTo int64, buttons []Button) (int64, error) {
+	body := map[string]any{"chat_id": chatID, "text": text,
+		"reply_markup": map[string]any{"inline_keyboard": [][]Button{buttons}}}
+	if replyTo > 0 {
+		body["reply_parameters"] = map[string]any{"message_id": replyTo, "allow_sending_without_reply": true}
+	}
+	var sent struct {
+		MessageID int64 `json:"message_id"`
+	}
+	err := c.call(ctx, "sendMessage", body, &sent)
+	return sent.MessageID, err
+}
+
+// EditCard replaces a message's text and its button row; no buttons = the row goes.
+func (c *Client) EditCard(ctx context.Context, chatID, messageID int64, text string, buttons []Button) error {
+	body := map[string]any{"chat_id": chatID, "message_id": messageID, "text": text}
+	if len(buttons) > 0 {
+		body["reply_markup"] = map[string]any{"inline_keyboard": [][]Button{buttons}}
+	}
+	return c.call(ctx, "editMessageText", body, nil)
+}
+
 // AnswerCallback stops the button's spinner; text (optional) shows as a small notice.
 func (c *Client) AnswerCallback(ctx context.Context, callbackID, text string) error {
 	body := map[string]any{"callback_query_id": callbackID}

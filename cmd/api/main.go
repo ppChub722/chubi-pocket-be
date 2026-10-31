@@ -26,6 +26,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/budgets"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/chatbot"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/connections"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/contacts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/dashboard"
@@ -48,6 +49,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/database"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/idempotency"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/llm"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/logger"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
@@ -248,6 +250,15 @@ func main() {
 	connectionsHandler := connections.NewHandler(connectionsService)
 	if telegramWebhook != nil {
 		telegramWebhook.WithAccounts(connectionsService)
+		// 0.4.2-4 chatbot: text → LLM → card. A bad LLM_* setting stops the start.
+		llmRouter, err := llm.NewRouter(cfg.LLM, cfg.App.Env)
+		if err != nil {
+			log.Error("llm config", "error", err)
+			os.Exit(1)
+		}
+		telegramWebhook.WithChat(chatbot.New(telegramWebhook.Client(), chatbot.NewDBLists(dbPool), llmRouter,
+			cfg.LLM.PerMinute, time.Duration(cfg.LLM.TimeoutSec)*time.Second, log))
+		log.Info("chatbot: on", "provider", cfg.LLM.Provider)
 	}
 
 	if cfg.App.Env == "production" {

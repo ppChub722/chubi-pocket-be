@@ -18,6 +18,12 @@ type Request struct {
 	User      string         // the per-call part
 	Schema    map[string]any // JSON schema of the answer
 	MaxTokens int
+
+	// Input is the user's own words and Current the card being edited (answer-shaped JSON, nil
+	// for a new message). Both are already inside User; a real provider ignores them, the fake
+	// provider answers from them.
+	Input   string
+	Current []byte
 }
 
 // Stop tells why the model stopped; anything but StopDone has no usable answer.
