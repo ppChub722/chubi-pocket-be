@@ -21,12 +21,52 @@ type Handler struct {
 	// per-IP limits on the public login routes (1b-2): start / signup 10, exchange 120 (it polls)
 	// per 10 minutes
 	startLimit, exchangeLimit, signupLimit *limiter
+	tokenLimit                             *limiter // 0.4.2-4 POST /auth/telegram/token: 20 per 10 minutes
 }
 
 func NewHandler(s *Service) *Handler {
 	return &Handler{s: s,
 		startLimit: newLimiter(10, 10*time.Minute), exchangeLimit: newLimiter(120, 10*time.Minute),
-		signupLimit: newLimiter(10, 10*time.Minute)}
+		signupLimit: newLimiter(10, 10*time.Minute), tokenLimit: newLimiter(20, 10*time.Minute)}
+}
+
+// LoginToken — POST /auth/telegram/token {id_token}: log in, or sign up at once (0.4.2-4).
+func (h *Handler) LoginToken(c *gin.Context) {
+	if !h.tokenLimit.allow(c.ClientIP()) {
+		rateLimited(c)
+		return
+	}
+	var req struct {
+		IDToken string `json:"id_token"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.IDToken == "" {
+		response.Validation(c, "body must be {id_token}")
+		return
+	}
+	out, err := h.s.TelegramTokenLogin(c.Request.Context(), req.IDToken)
+	if err != nil {
+		h.loginFail(c, err)
+		return
+	}
+	status := http.StatusOK
+	if out.Status == "signup" {
+		status = http.StatusCreated
+	}
+	c.JSON(status, out)
+}
+
+// Link — POST /connections/:provider {id_token}: link the Telegram the id_token names (0.4.2-4).
+func (h *Handler) Link(c *gin.Context) {
+	var req struct {
+		IDToken string `json:"id_token"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.IDToken == "" {
+		response.Validation(c, "body must be {id_token}")
+		return
+	}
+	h.one(c, func(userID uuid.UUID, key string) (any, error) {
+		return h.s.LinkTelegram(c.Request.Context(), userID, key, req.IDToken)
+	})
 }
 
 // ── 1b-2: sign up / log in with Telegram (public) ──
@@ -101,6 +141,8 @@ func (h *Handler) loginFail(c *gin.Context, err error) {
 		response.ValidationErr(c, err)
 	case errors.Is(err, ErrLoginCodeInvalid):
 		response.Fail(c, http.StatusUnauthorized, apierr.LoginCodeInvalid, "The login link is no longer valid, start again", nil)
+	case errors.Is(err, ErrIDTokenInvalid):
+		telegramTokenInvalid(c)
 	case errors.As(err, &taken):
 		response.Fail(c, http.StatusConflict, apierr.UsernameExists, "Username already registered",
 			gin.H{"username_suggestion": taken.Suggestion})
@@ -113,6 +155,10 @@ func (h *Handler) loginFail(c *gin.Context, err error) {
 	default:
 		response.InternalError(c, "Telegram login failed", err)
 	}
+}
+
+func telegramTokenInvalid(c *gin.Context) {
+	response.Fail(c, http.StatusUnauthorized, apierr.TelegramTokenInvalid, "The Telegram login expired, try again", nil)
 }
 
 func rateLimited(c *gin.Context) {
@@ -221,6 +267,8 @@ func (h *Handler) fail(c *gin.Context, err error) {
 		response.NotFound(c, apierr.NotFound, "Unknown provider")
 	case errors.Is(err, ErrBadPermissions):
 		response.ValidationErr(c, err)
+	case errors.Is(err, ErrIDTokenInvalid):
+		telegramTokenInvalid(c)
 	case errors.Is(err, ErrUnavailable):
 		response.Fail(c, http.StatusConflict, apierr.ConnectionUnavailable, "This app can't be linked yet", nil)
 	case errors.Is(err, ErrNotLinked):

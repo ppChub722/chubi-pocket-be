@@ -2791,6 +2791,37 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
       x-breaking: 'New (0.4.2 1b).'
+    post:
+      tags: [Connections]
+      summary: Link with a Telegram login (OIDC id_token)
+      operationId: linkConnection
+      description: |
+        0.4.2-4, Telegram only. The app runs Log In With Telegram and sends the `id_token`; that Telegram becomes mine (permissions {chat: true}) and the bot sends its welcome message. A Telegram linked to another user moves to me (that user must not be left with no way in: 409 LAST_LOGIN_METHOD); my old Telegram is replaced. Already mine → unchanged, no message.
+        Errors: 401 TELEGRAM_TOKEN_INVALID, 409 CONNECTION_UNAVAILABLE (LINE / Google, or the bot is off) / LAST_LOGIN_METHOD, 400 VALIDATION_ERROR.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TelegramIDTokenRequest' }
+      responses:
+        '200':
+          description: The row, linked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Connection' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401':
+          description: 'Unauthorized (no session) / TELEGRAM_TOKEN_INVALID.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'CONNECTION_UNAVAILABLE / LAST_LOGIN_METHOD.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      x-breaking: 'New (0.4.2-4).'
   /connections/{provider}/link:
     parameters: [{ $ref: '#/components/parameters/ProviderPath' }]
     post:
@@ -2931,6 +2962,55 @@ paths:
       x-breaking: 'New (0.4.2 1b).'
 
   # ───────────────────────────── Sign up / log in with Telegram (0.4.2 1b-2) ─────────────────────────────
+  /auth/telegram/token:
+    post:
+      tags: [Auth]
+      summary: Log in or sign up with Telegram (OIDC id_token)
+      operationId: telegramTokenLogin
+      description: |
+        Public (0.4.2-4). The app runs Log In With Telegram (OIDC, PKCE, client_id = the bot id) with Telegram itself and sends the `id_token` it got. The server checks it (RS256 with Telegram's JWKS, iss https://oauth.telegram.org, aud = the bot id, not expired, each token once) and reads the Telegram user id from the `id` claim.
+        - 200 `status: login`: that Telegram is linked to an account → signed in (same answer as POST /auth/login).
+        - 201 `status: signup`: no account yet → one is made at once, no form: no password, username = the Telegram username (lower case; none → from the name; taken → + digits), display name = the Telegram name, currency THB, avatar = the Telegram photo (best effort), the Telegram linked with chat on, and the bot sends its welcome message (if the user kept "Allow Messages" on).
+        Errors: 401 TELEGRAM_TOKEN_INVALID (log in with Telegram again), 403 REGISTRATION_CLOSED, 409 CONNECTION_UNAVAILABLE (the bot is off), 400 VALIDATION_ERROR, 429 RATE_LIMITED.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TelegramIDTokenRequest' }
+      responses:
+        '200':
+          description: Signed in.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TelegramTokenLogin' }
+        '201':
+          description: A new account, signed in.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TelegramTokenLogin' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401':
+          description: 'TELEGRAM_TOKEN_INVALID.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: 'REGISTRATION_CLOSED.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: 'CONNECTION_UNAVAILABLE.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: 'RATE_LIMITED.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      security: []
+      x-breaking: 'New (0.4.2-4).'
   /auth/telegram/start:
     post:
       tags: [Auth]
@@ -6115,7 +6195,7 @@ components:
       description: |
         0.4.2 1b: one outside app (profile → การเชื่อมต่อ, and the connection page). Logos, brand colours and availability come from here.
         `available` false = "เร็วๆ นี้" (LINE, Google; Telegram while the bot is off on the server).
-      required: [provider, name, brand_color, logo_url, available, linked, account, linked_at, photo, permissions]
+      required: [provider, name, brand_color, logo_url, available, linked, account, linked_at, photo, permissions, bot_url]
       properties:
         provider: { type: string, enum: [telegram, line, google] }
         name: { type: string, description: 'Telegram / LINE / Google.' }
@@ -6132,6 +6212,7 @@ components:
           type: array
           items: { $ref: '#/components/schemas/ConnectionPermission' }
           description: 'In display order. Telegram: chat (live), ask, slip, notify (available false). LINE: the same keys. Google: login, sheets, calendar.'
+        bot_url: { type: [string, 'null'], description: '0.4.2-4: Telegram while available: `https://t.me/<bot>` (the "open the bot" row, shown linked or not). Null for LINE / Google and while the bot is off.' }
       example:
         provider: telegram
         name: Telegram
@@ -6147,6 +6228,7 @@ components:
           - { key: ask, available: false, on: false }
           - { key: slip, available: false, on: false }
           - { key: notify, available: false, on: false }
+        bot_url: https://t.me/chubiPocket_bot
     ConnectionPermission:
       type: object
       required: [key, available, on]
@@ -6167,6 +6249,17 @@ components:
         url: { type: string, description: 'Open it in the outside app, e.g. `https://t.me/chubiPocket_bot?start=<code>` (code: 128-bit random, URL-safe, single use).' }
         expires_at: { $ref: '#/components/schemas/DateTime', description: '10 minutes from now. A newer link call cancels older unused codes.' }
     # ───────── Sign up / log in with Telegram (0.4.2 1b-2) ─────────
+    TelegramIDTokenRequest:
+      type: object
+      required: [id_token]
+      properties:
+        id_token: { type: string, description: 'The id_token from https://oauth.telegram.org/token (Log In With Telegram, OIDC). Lives 30 s: send it right away.' }
+    TelegramTokenLogin:
+      type: object
+      required: [status, auth]
+      properties:
+        status: { type: string, enum: [login, signup], description: 'signup = the account was made by this call (a new member).' }
+        auth: { $ref: '#/components/schemas/AuthResponse' }
     TelegramLoginStartRequest:
       type: object
       required: [code_challenge]

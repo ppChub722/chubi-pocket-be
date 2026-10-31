@@ -67,6 +67,8 @@ type Connection struct {
 	LinkedAt    *time.Time   `json:"linked_at"`
 	Photo       *Photo       `json:"photo"`
 	Permissions []Permission `json:"permissions"`
+	// BotURL — Telegram: `https://t.me/<bot>` ("open the bot"); null for other apps / bot off.
+	BotURL *string `json:"bot_url"`
 }
 
 type Photo struct {

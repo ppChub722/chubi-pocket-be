@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -25,6 +26,16 @@ type TelegramConfig struct {
 	BotToken      string // TELEGRAM_BOT_TOKEN — from @BotFather; never logged
 	WebhookSecret string // TELEGRAM_WEBHOOK_SECRET — 1-256 chars A-Za-z0-9_-, checked on every call
 	WebhookURL    string // TELEGRAM_WEBHOOK_URL — set with setWebhook on start (empty = not set)
+}
+
+// BotID — the number before ":" in the token; it is also the bot's OIDC client_id (Log In With
+// Telegram). "" = no token.
+func (c TelegramConfig) BotID() string {
+	id, _, ok := strings.Cut(c.BotToken, ":")
+	if !ok {
+		return ""
+	}
+	return id
 }
 
 type AppConfig struct {

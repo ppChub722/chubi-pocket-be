@@ -248,6 +248,14 @@ func main() {
 	connectionsHandler := connections.NewHandler(connectionsService)
 	if telegramWebhook != nil {
 		telegramWebhook.WithAccounts(connectionsService)
+		// 0.4.2-4: Log In With Telegram (OIDC); the bot id is the client_id
+		client := telegramWebhook.Client()
+		connectionsService.WithTelegramLogin(connections.NewIDTokenVerifier(cfg.Telegram.BotID()),
+			func(ctx context.Context, chatID int64) {
+				if err := client.SendMessage(ctx, chatID, telegram.TextWelcome, 0); err != nil {
+					log.Warn("telegram: welcome not sent", "chat_id", chatID, "error", err)
+				}
+			})
 	}
 
 	if cfg.App.Env == "production" {
@@ -258,7 +266,8 @@ func main() {
 	// bodies never logged: message texts (webhook), link / login codes and PKCE verifiers
 	r.Use(logger.GinLoggerMiddleware(log, cfg.App.LogBodies, telegram.Path,
 		"/api/v1/connections/telegram/link", "/api/v1/auth/telegram/start",
-		"/api/v1/auth/telegram/exchange", "/api/v1/auth/telegram/signup"))
+		"/api/v1/auth/telegram/exchange", "/api/v1/auth/telegram/signup",
+		"/api/v1/auth/telegram/token", "/api/v1/connections/telegram"))
 	// Same semantics as gin.Recovery() (500 + abort), but the panic is logged through slog with the
 	// request_id instead of gin's raw writer.
 	r.Use(gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, err any) {
@@ -322,6 +331,7 @@ func main() {
 		api.POST("/auth/telegram/start", connectionsHandler.LoginStart)
 		api.POST("/auth/telegram/exchange", connectionsHandler.LoginExchange)
 		api.POST("/auth/telegram/signup", connectionsHandler.LoginSignup)
+		api.POST("/auth/telegram/token", connectionsHandler.LoginToken) // 0.4.2-4 OIDC id_token
 
 		protected := api.Group("/")
 		protected.Use(auth.Middleware(cfg, authStore))
@@ -355,6 +365,7 @@ func main() {
 			protected.GET("/connections", connectionsHandler.List)
 			protected.GET("/connections/:provider", connectionsHandler.Get)
 			protected.DELETE("/connections/:provider", connectionsHandler.Unlink)
+			protected.POST("/connections/:provider", connectionsHandler.Link) // 0.4.2-4 OIDC id_token
 			protected.POST("/connections/:provider/link", connectionsHandler.StartLink)
 			protected.PATCH("/connections/:provider/permissions", connectionsHandler.UpdatePermissions)
 			protected.POST("/connections/:provider/photo", connectionsHandler.ImportPhoto)

@@ -46,6 +46,9 @@ type Message struct {
 	Document  json.RawMessage `json:"document,omitempty"`
 	Voice     json.RawMessage `json:"voice,omitempty"`
 	Sticker   json.RawMessage `json:"sticker,omitempty"`
+	// WriteAccessAllowed — the service message "You allowed this bot to message you…" (the user
+	// kept "Allow Messages" on when logging in with Telegram).
+	WriteAccessAllowed json.RawMessage `json:"write_access_allowed,omitempty"`
 }
 
 // Kind names what a message holds, for the log line (never the text itself).

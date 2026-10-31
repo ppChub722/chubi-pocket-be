@@ -26,6 +26,15 @@ const (
 	TextUnlinked  = "ยกเลิกการเชื่อมแล้ว"
 	TextLastLogin = "ตั้งรหัสผ่านในแอปก่อน ไม่งั้นจะเข้าบัญชีไม่ได้"
 
+	// TextWelcome — sent once a Telegram is linked (0.4.2-4 OIDC login / sign-up / link) and as the
+	// answer to a plain /start from a linked chat.
+	TextWelcome = "สวัสดีครับ เชื่อม Telegram กับ chubiPocket แล้ว ✓\n\n" +
+		"พิมพ์รายการมาได้เลย เช่น\n" +
+		"ข้าวมันไก่ 60\n" +
+		"กาแฟ 55 บัตรเครดิต\n" +
+		"เงินเดือน 30000\n\n" +
+		"เปิด / ปิดการจดผ่านแชทได้ในแอป: โปรไฟล์ → Telegram"
+
 	// 1b-2 sign up / log in with Telegram
 	TextLoginAsk       = "เข้าสู่ระบบ chubi-pocket เป็น %s ไหมครับ?"
 	TextLoginNoAccount = "Telegram นี้ยังไม่มีบัญชี chubi-pocket"
@@ -60,6 +69,7 @@ const (
 	OutcomeLoginAsk  Outcome = "login_ask"  // /start login_<code>: the confirm / sign-up button sent
 	OutcomeLoginBad  Outcome = "login_bad"  // /start login_<code> or a button: code gone / not this chat's
 	OutcomeLoginOK   Outcome = "login_ok"   // a button tapped: confirmed
+	OutcomeWriteOK   Outcome = "write_ok"   // "Allow Messages" granted at a Telegram login: no reply
 	OutcomeError     Outcome = "error"      // a lookup failed: no reply
 )
 
@@ -122,6 +132,11 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) Outcome {
 		h.logLine(u, m, false, OutcomeDuplicate)
 		return OutcomeDuplicate
 	}
+	// it usually comes before the app has sent us the login, so the chat is not linked yet
+	if len(m.WriteAccessAllowed) > 0 {
+		h.logLine(u, m, false, OutcomeWriteOK)
+		return OutcomeWriteOK
+	}
 
 	if code, ok := command(m.Text, "/start"); ok && strings.HasPrefix(code, loginPrefix) {
 		return h.loginOpen(ctx, u, m, strings.TrimPrefix(code, loginPrefix))
@@ -158,7 +173,7 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) Outcome {
 	case !linked:
 		return h.reply(ctx, u, m, false, TextLinkFirst, OutcomeLinkFirst)
 	case isCommand(m.Text, "/start"):
-		return h.reply(ctx, u, m, true, TextHello, OutcomeStart)
+		return h.reply(ctx, u, m, true, TextWelcome, OutcomeStart)
 	case !chatOn:
 		return h.reply(ctx, u, m, true, TextChatOff, OutcomeChatOff)
 	case m.Text == "":

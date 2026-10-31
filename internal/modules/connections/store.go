@@ -129,44 +129,57 @@ func (s *Store) bind(ctx context.Context, provider string, hash []byte, external
 	if err != nil {
 		return uuid.Nil, "", false, fmt.Errorf("use code: %w", err)
 	}
+	if err := linkTx(ctx, tx, userID, provider, externalID, account, perms); err != nil {
+		return uuid.Nil, "", false, err
+	}
+	if err := tx.QueryRow(ctx, `SELECT display_name FROM users WHERE id = $1`, userID).Scan(&displayName); err != nil {
+		return uuid.Nil, "", false, fmt.Errorf("user: %w", err)
+	}
+	return userID, displayName, true, tx.Commit(ctx)
+}
+
+// linkTx makes externalID the user's account in that app. The account leaves any other user it
+// was linked to, and the user's old account in that app is replaced.
+func linkTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, provider, externalID, account string,
+	perms map[string]bool) error {
 	// the chat may belong to another account; moving it must not lock that account out (1b-2)
 	var owner uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT user_id FROM user_connections WHERE provider = $1 AND external_id = $2`,
+	err := tx.QueryRow(ctx, `SELECT user_id FROM user_connections WHERE provider = $1 AND external_id = $2`,
 		provider, externalID).Scan(&owner)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, "", false, fmt.Errorf("chat owner: %w", err)
+		return fmt.Errorf("chat owner: %w", err)
 	}
 	if err == nil && owner != userID {
 		if last, err := lastLoginMethod(ctx, tx, owner); err != nil {
-			return uuid.Nil, "", false, err
+			return err
 		} else if last {
-			return uuid.Nil, "", false, shared.ErrLastLoginMethod
+			return shared.ErrLastLoginMethod
 		}
 	}
 	rows, err := tx.Query(ctx, `DELETE FROM user_connections WHERE provider = $1 AND (external_id = $2 OR user_id = $3)
 		RETURNING user_id`, provider, externalID, userID)
 	if err != nil {
-		return uuid.Nil, "", false, fmt.Errorf("old links: %w", err)
+		return fmt.Errorf("old links: %w", err)
 	}
 	touched := []uuid.UUID{userID}
 	for rows.Next() {
 		var id uuid.UUID
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return uuid.Nil, "", false, err
+			return err
 		}
 		touched = append(touched, id)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return uuid.Nil, "", false, err
+		return err
 	}
 	if err := touchUsers(ctx, tx, touched...); err != nil {
-		return uuid.Nil, "", false, err
+		return err
 	}
 	pj, err := json.Marshal(perms)
 	if err != nil {
-		return uuid.Nil, "", false, err
+		return err
 	}
 	var label *string
 	if account != "" {
@@ -174,12 +187,9 @@ func (s *Store) bind(ctx context.Context, provider string, hash []byte, external
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO user_connections (user_id, provider, external_id, account_label, permissions)
 		VALUES ($1, $2, $3, $4, $5::jsonb)`, userID, provider, externalID, label, pj); err != nil {
-		return uuid.Nil, "", false, fmt.Errorf("link: %w", err)
+		return fmt.Errorf("link: %w", err)
 	}
-	if err := tx.QueryRow(ctx, `SELECT display_name FROM users WHERE id = $1`, userID).Scan(&displayName); err != nil {
-		return uuid.Nil, "", false, fmt.Errorf("user: %w", err)
-	}
-	return userID, displayName, true, tx.Commit(ctx)
+	return nil
 }
 
 // unlink — shared.ErrLastLoginMethod when it is the passwordless account's only linked app.

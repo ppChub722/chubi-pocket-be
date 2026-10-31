@@ -216,6 +216,7 @@ const (
 
 	// connections / Telegram login (0.4.2 1b-2)
 	LoginCodeInvalid      Code = "LOGIN_CODE_INVALID"
+	TelegramTokenInvalid  Code = "TELEGRAM_TOKEN_INVALID"
 	TelegramAlreadyLinked Code = "TELEGRAM_ALREADY_LINKED"
 	RegistrationClosed    Code = "REGISTRATION_CLOSED"
 	ConnectionUnavailable Code = "CONNECTION_UNAVAILABLE"
@@ -414,6 +415,7 @@ var registry = []Def{
 
 	// connections / Telegram login (0.4.2 1b-2)
 	{LoginCodeInvalid, []int{401}, InEnvelope, "Telegram login: the login link expired or was already used; start again."},
+	{TelegramTokenInvalid, []int{401}, InEnvelope, "Telegram login (OIDC): the id_token is not Telegram's, not for this app, expired (30 s) or already used; log in with Telegram again."},
 	{TelegramAlreadyLinked, []int{409}, InEnvelope, "Telegram sign-up: this Telegram already has an account; log in instead."},
 	{RegistrationClosed, []int{403}, InEnvelope, "Sign-up is closed."},
 	{ConnectionUnavailable, []int{409}, InEnvelope, "The app (provider) can't be linked or used for login yet."},

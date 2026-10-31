@@ -46,6 +46,9 @@ type Service struct {
 	bot   Bot
 	auth  *auth.Service // 1b-2 log in / sign up with Telegram (nil = off)
 	now   func() time.Time
+
+	idTokens *IDTokenVerifier // 0.4.2-4 Telegram OIDC (nil = off)
+	welcome  Welcomer
 }
 
 func NewService(store *Store, bot Bot) *Service {
@@ -63,7 +66,9 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID) (ConnectionList, e
 	}
 	out := ConnectionList{Data: make([]Connection, 0, len(providers))}
 	for _, p := range providers {
-		out.Data = append(out.Data, s.view(p, links, photos))
+		c := s.view(p, links, photos)
+		s.withBotURL(ctx, &c)
+		out.Data = append(out.Data, c)
 	}
 	out.Count = len(out.Data)
 	return out, nil
@@ -79,7 +84,19 @@ func (s *Service) Get(ctx context.Context, userID uuid.UUID, key string) (*Conne
 		return nil, err
 	}
 	c := s.view(p, links, photos)
+	s.withBotURL(ctx, &c)
 	return &c, nil
+}
+
+// withBotURL — Telegram's "open the bot" link (the bot's username is cached; a getMe error = none).
+func (s *Service) withBotURL(ctx context.Context, c *Connection) {
+	if c.Provider != ProviderTelegram || !c.Available {
+		return
+	}
+	if u, err := s.bot.Username(ctx); err == nil && u != "" {
+		url := "https://t.me/" + u
+		c.BotURL = &url
+	}
 }
 
 func (s *Service) load(ctx context.Context, userID uuid.UUID) (map[string]link, map[string]photoRow, error) {
