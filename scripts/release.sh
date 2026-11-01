@@ -10,15 +10,18 @@
 #
 # Steps: resolve tag v<version> in be/app/docs → check the be and app tags out
 # into clean worktrees (the team's main trees are never touched) → checks →
-# backup → migrate → deploy BE from the tag → APK from the tag → prod .env →
+# backup → migrate → deploy BE from the tag → APK from the tag → server .env →
 # verify → offsite backup copy → release entry in the MAIN docs tree
 # (uncommitted: Lead commits it) → summary.
 #
+# Target: the ppForge VPS = the test server (owner + testers). Not production:
+# production starts at 1.0.
+#
 # Redeploy / rollback = the same command with an older VERSION. Migrations are
-# never rolled back: a tag older than prod's migration level is refused.
+# never rolled back: a tag older than the server's migration level is refused.
 #
 # Stops at the first problem. Safe to re-run after a failure: every step first
-# looks at whether it is already done (prod image label, LATEST_APP_BUILD,
+# looks at whether it is already done (server image label, LATEST_APP_BUILD,
 # the entry file) and skips it. Facts it can't re-read (check results, APK
 # upload, backup name) live in <brief-dir>/.state; logs in <brief-dir>/logs/;
 # the final summary in <brief-dir>/summary.txt.
@@ -55,7 +58,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY=true ;;
     --skip-checks) SKIP_CHECKS=true ;;
     --keep-worktrees) KEEP=true ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) BRIEF="$1" ;;
   esac
@@ -105,8 +108,8 @@ state_set() {
 
 short() { g "$1" rev-parse --short "$2"; }
 
-# key=value lines about prod, in one ssh round trip.
-read_prod() {
+# key=value lines about the test server, in one ssh round trip.
+read_srv() {
   ssh_vps 'bash -s' <<'REMOTE'
 echo "label=$(sudo docker image inspect chubi-be:prod --format '{{index .Config.Labels "commit"}}' 2>/dev/null)"
 sudo grep -E '^(LATEST|MIN)_APP_BUILD=' /srv/chubi/.env
@@ -117,8 +120,8 @@ echo "errors=$(sudo docker logs chubi_app 2>&1 | grep -ciE '"level":"ERROR"|pani
 echo "envbak=$(ls /srv/chubi/.env.bak-* 2>/dev/null | sed 's|.*/||' | tr '\n' ' ')"
 REMOTE
 }
-PROD=""
-prod() { printf '%s\n' "$PROD" | grep -m1 "^$1=" | cut -d= -f2- || true; }
+SRV=""
+srv() { printf '%s\n' "$SRV" | grep -m1 "^$1=" | cut -d= -f2- || true; }
 
 http_code() { curl -s -o /dev/null -m 10 -w '%{http_code}' "$1" || true; }
 
@@ -180,31 +183,31 @@ if $HAS_APP; then
   ok "app build will be $BUILD (Firebase $((2000 + BUILD)))"
 fi
 
-PROD="$(read_prod)" || die "cannot reach the VPS over ssh"
-[[ "$(http_code "$API/health")" == 200 ]] || die "prod /health is not 200"
-ok "prod: BE $(prod label) · migration $(prod migration) · LATEST $(prod LATEST_APP_BUILD) · MIN $(prod MIN_APP_BUILD) · health 200"
-[[ "$(prod migration)" != *DIRTY* ]] || die "prod migration state is DIRTY"
-CUR_LATEST="$(prod LATEST_APP_BUILD)"
+SRV="$(read_srv)" || die "cannot reach the VPS over ssh"
+[[ "$(http_code "$API/health")" == 200 ]] || die "test server /health is not 200"
+ok "test server: BE $(srv label) · migration $(srv migration) · LATEST $(srv LATEST_APP_BUILD) · MIN $(srv MIN_APP_BUILD) · health 200"
+[[ "$(srv migration)" != *DIRTY* ]] || die "test server migration state is DIRTY"
+CUR_LATEST="$(srv LATEST_APP_BUILD)"
 
 BE_DEPLOYED=false
 new_migs=none
 tag_newest=""
 if $HAS_BE; then
-  [[ "$(prod label)" == "$BE_SHORT" ]] && BE_DEPLOYED=true
+  [[ "$(srv label)" == "$BE_SHORT" ]] && BE_DEPLOYED=true
   tag_migs="$(g "$BE_DIR" ls-tree --name-only "$BE_COMMIT:migrations" | sed -n 's/^0*\([0-9][0-9]*\)_.*\.up\.sql$/\1/p')"
   tag_newest="$(printf '%s\n' $tag_migs | sort -n | tail -1)"
-  prod_mig="$(prod migration)"; prod_mig="${prod_mig%% *}"
-  if ! $BE_DEPLOYED && [[ "$prod_mig" =~ ^[0-9]+$ ]] && (( prod_mig > tag_newest )); then
-    die "prod migration $prod_mig is newer than the tag's newest ($tag_newest): migrations are not rolled back — restore from a dump, or pick a newer tag"
+  srv_mig="$(srv migration)"; srv_mig="${srv_mig%% *}"
+  if ! $BE_DEPLOYED && [[ "$srv_mig" =~ ^[0-9]+$ ]] && (( srv_mig > tag_newest )); then
+    die "test server migration $srv_mig is newer than the tag's newest ($tag_newest): migrations are not rolled back — restore from a dump, or pick a newer tag"
   fi
-  # New migrations = files in the tag that prod doesn't have yet.
+  # New migrations = files in the tag that the server doesn't have yet.
   new_migs=""
   for m in $tag_migs; do
-    [[ " $(prod migration_files) " == *" $m "* ]] || new_migs="$new_migs $m"
+    [[ " $(srv migration_files) " == *" $m "* ]] || new_migs="$new_migs $m"
   done
   new_migs="${new_migs# }"; [[ -n "$new_migs" ]] || new_migs=none
   if $BE_DEPLOYED; then
-    skip "migrations: BE already deployed (prod at $(prod migration))"
+    skip "migrations: BE already deployed (test server at $(srv migration))"
   elif [[ "$new_migs" == "$EXPECT_MIGRATIONS" ]]; then
     ok "new migrations: $new_migs (as briefed)"
   else
@@ -215,7 +218,7 @@ fi
 # LATEST only ever goes up: a redeploy / rollback to an older tag keeps it.
 WANT_LATEST="$CUR_LATEST"
 if $HAS_APP && (( BUILD > CUR_LATEST )); then WANT_LATEST="$BUILD"; fi
-WANT_MIN="$(prod MIN_APP_BUILD)"; [[ "$MIN_APP_BUILD" == unchanged ]] || WANT_MIN="$MIN_APP_BUILD"
+WANT_MIN="$(srv MIN_APP_BUILD)"; [[ "$MIN_APP_BUILD" == unchanged ]] || WANT_MIN="$MIN_APP_BUILD"
 
 # ── worktrees ───────────────────────────────────────────────────────────
 say "worktrees (clean checkouts of the tags)"
@@ -315,8 +318,8 @@ say "deploy BE"
 if ! $HAS_BE; then
   skip "BE skipped (SKIP_BE=y)"
 elif $BE_DEPLOYED; then
-  skip "prod already runs $(prod label)"
-  $DRY || [[ -n "$(state_get backup)" ]] || state_set backup "$(prod dump) (newest; deploy ran earlier)"
+  skip "test server already runs $(srv label)"
+  $DRY || [[ -n "$(state_get backup)" ]] || state_set backup "$(srv dump) (newest; deploy ran earlier)"
 elif $DRY; then
   plan "run deploy.sh --skip-apk --dir $BE_WT (backup → migrate → swap → health; new migrations: $new_migs)"
 else
@@ -336,7 +339,7 @@ elif [[ "$(state_get apk)" == "$BUILD" ]]; then
 elif (( CUR_LATEST >= BUILD )); then
   # LATEST is only raised after the upload, so the APK went out earlier
   # (or this tag is older than what testers already have: redeploy / rollback).
-  skip "prod LATEST_APP_BUILD=$CUR_LATEST ≥ $BUILD — APK already out (or older); LATEST is never lowered"
+  skip "test server LATEST_APP_BUILD=$CUR_LATEST ≥ $BUILD — APK already out (or older); LATEST is never lowered"
   $DRY || [[ -n "$(state_get firebase)" ]] || state_set firebase "$((2000 + BUILD))"
 elif $DRY; then
   plan "run release-apk.sh --dir $APP_WT → build $BUILD to firsttester (Firebase $((2000 + BUILD)))"
@@ -349,9 +352,9 @@ else
   ok "APK build $BUILD uploaded (Firebase ${fb:-?})"
 fi
 
-# ── prod .env ───────────────────────────────────────────────────────────
-say "prod .env"
-if [[ "$(prod LATEST_APP_BUILD)" == "$WANT_LATEST" && "$(prod MIN_APP_BUILD)" == "$WANT_MIN" ]]; then
+# ── server .env ─────────────────────────────────────────────────────────
+say "server .env"
+if [[ "$(srv LATEST_APP_BUILD)" == "$WANT_LATEST" && "$(srv MIN_APP_BUILD)" == "$WANT_MIN" ]]; then
   skip "already LATEST_APP_BUILD=$WANT_LATEST · MIN_APP_BUILD=$WANT_MIN"
 elif $DRY; then
   plan "back up .env → .env.bak-$VERSION; set LATEST_APP_BUILD=$WANT_LATEST · MIN_APP_BUILD=$WANT_MIN; recreate app"
@@ -374,10 +377,10 @@ fi
 # ── verify ──────────────────────────────────────────────────────────────
 say "verify"
 if $DRY; then
-  plan "check /health 200 · app/version min $WANT_MIN latest $WANT_LATEST · unauthenticated /transactions 401 · app log errors 0 · prod label = $BE_SHORT"
+  plan "check /health 200 · app/version min $WANT_MIN latest $WANT_LATEST · unauthenticated /transactions 401 · app log errors 0 · server label = $BE_SHORT"
   VERIFY="(dry-run)"
 else
-  PROD="$(read_prod)"
+  SRV="$(read_srv)"
   h="$(http_code "$API/health")"
   ver="$(curl -s -m 10 "$API/api/v1/app/version" || true)"
   u="$(http_code "$API/api/v1/transactions")"
@@ -387,11 +390,11 @@ else
   [[ "$h" == 200 ]] || problems+=" health=$h"
   [[ "$vmin" == "$WANT_MIN" && "$vlat" == "$WANT_LATEST" ]] || problems+=" app/version=$vmin/$vlat"
   [[ "$u" == 401 ]] || problems+=" unauth=$u"
-  [[ "$(prod errors)" == 0 ]] || problems+=" log-errors=$(prod errors)"
-  if $HAS_BE; then [[ "$(prod label)" == "$BE_SHORT" ]] || problems+=" label=$(prod label)"; fi
-  [[ "$(prod migration)" != *DIRTY* ]] || problems+=" migration=$(prod migration)"
+  [[ "$(srv errors)" == 0 ]] || problems+=" log-errors=$(srv errors)"
+  if $HAS_BE; then [[ "$(srv label)" == "$BE_SHORT" ]] || problems+=" label=$(srv label)"; fi
+  [[ "$(srv migration)" != *DIRTY* ]] || problems+=" migration=$(srv migration)"
   [[ -z "$problems" ]] || die "verify failed:$problems"
-  VERIFY="/health 200 · app/version min $vmin latest $vlat · unauthenticated /transactions 401 · app log errors 0 · migration $(prod migration)"
+  VERIFY="/health 200 · app/version min $vmin latest $vlat · unauthenticated /transactions 401 · app log errors 0 · migration $(srv migration)"
   state_set verify "$VERIFY"
   ok "$VERIFY"
 fi
@@ -423,7 +426,7 @@ make_entry() {
     echo "- **app** \`$APP_SHORT\` $APP_SUBJ"
     echo "  - build **$BUILD** (Firebase $(state_get firebase)) sent to \`firsttester\`"
   fi
-  echo "- **prod \`.env\`:** \`LATEST_APP_BUILD=$WANT_LATEST\` · \`MIN_APP_BUILD=$WANT_MIN\` · backup copy \`.env.bak-$VERSION\`"
+  echo "- **server \`.env\`:** \`LATEST_APP_BUILD=$WANT_LATEST\` · \`MIN_APP_BUILD=$WANT_MIN\` · backup copy \`.env.bak-$VERSION\`"
   echo "- **verify:** ${VERIFY}"
   echo "- tag \`$TAG\`: be \`$BE_SHORT\` · app \`$APP_SHORT\` · docs \`$(short "$DOCS_DIR" "$DOCS_COMMIT")\`"
   echo

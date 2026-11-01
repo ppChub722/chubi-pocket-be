@@ -204,8 +204,9 @@ func TestTelegramTokenSignupUsernames(t *testing.T) {
 	ctx := context.Background()
 	base := time.Now().UnixNano() % 1e9
 	taken := testdb.User(t, o.pool)
-	var takenName string
-	if err := o.pool.QueryRow(ctx, `SELECT username FROM users WHERE id = $1`, taken).Scan(&takenName); err != nil {
+	// testdb usernames hold a UUID with dashes, which usernameBase strips.
+	takenName := "taken_" + strconv.FormatInt(base, 10)
+	if _, err := o.pool.Exec(ctx, `UPDATE users SET username = $2 WHERE id = $1`, taken, takenName); err != nil {
 		t.Fatal(err)
 	}
 
