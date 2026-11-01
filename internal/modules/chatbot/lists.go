@@ -44,7 +44,7 @@ func (d *DBLists) Lists(ctx context.Context, userID uuid.UUID) (Lists, error) {
 	rows, err = d.db.Query(ctx, `
 		SELECT c.id, c.name, c.type, COALESCE(p.name, '')
 		  FROM categories c LEFT JOIN categories p ON p.id = c.parent_id
-		 WHERE c.user_id = $1 AND c.status = 'active' AND c.is_system = FALSE
+		 WHERE c.user_id = $1 AND c.is_system = FALSE
 		 ORDER BY c.type, c.sort_order, c.created_at`, userID)
 	if err != nil {
 		return l, fmt.Errorf("categories: %w", err)
