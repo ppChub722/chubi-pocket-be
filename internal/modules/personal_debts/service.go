@@ -270,9 +270,6 @@ func (s *Service) createEntryTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID
 	if req.CreateTransaction == nil && req.AccountID == nil && req.LinkTransactionID == nil && len(req.TagIDs) > 0 {
 		return nil, nil, ErrTagsNeedWallet // the old contract, for clients that don't send create_transaction
 	}
-	if req.BillID != nil || req.EventID != nil {
-		return nil, nil, ErrUseClaim // 0.4.1-2 V8 / V9
-	}
 	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
 	if err != nil {
 		return nil, nil, err
@@ -287,7 +284,7 @@ func (s *Service) createEntryTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID
 		Kind: KindDebt, Direction: req.Direction, ContactID: contactID, PersonName: name,
 		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note, DueDate: req.DueDate,
 		CreateTransaction: wantsTx(req.CreateTransaction, req.AccountID), AccountID: req.AccountID, TagIDs: req.TagIDs,
-		LinkTransactionID: req.LinkTransactionID, BillID: req.BillID, EventID: req.EventID,
+		LinkTransactionID: req.LinkTransactionID,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -414,9 +411,6 @@ func (s *Service) LinkTx(ctx context.Context, userID, id, txID uuid.UUID) (*Writ
 	if err != nil {
 		return nil, err
 	}
-	if e.SourceKind != nil && *e.SourceKind != SourceEvent {
-		return nil, ErrManagedBySource
-	}
 	own, err := entryTxID(ctx, tx, e.ID)
 	if err != nil {
 		return nil, err
@@ -487,15 +481,11 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 	if err != nil {
 		return nil, err
 	}
-	// 0.4.1-2 S9 / S11: a row of a shared bill follows the bill; only paid / due_date / private_note
-	// are mine.
-	if err := billRowGuardTx(ctx, tx, userID, id, &req); err != nil {
-		return nil, err
-	}
-	// A split-sourced entry's money belongs to its source; an event-resolve debt (source event) is
-	// my own record of the bill and stays editable.
-	if e.SourceKind != nil && *e.SourceKind != SourceEvent && req.moneyChange() {
-		return nil, ErrManagedBySource
+	// My debt of a paper is mine to edit (one way: the paper never follows; it may show "ไม่ตรง").
+	if note, ok := req.PrivateNoteChange(); ok {
+		if err := setDebtPrivateNoteTx(ctx, tx, userID, e, note); err != nil {
+			return nil, err
+		}
 	}
 	if e.Kind == KindRepayment && (req.Paid != nil || req.has("due_date")) {
 		return nil, invalid("a repayment has no paid label or due_date")
@@ -596,7 +586,7 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 			return nil, err
 		}
 		touched = nonNil(acc)
-	case txID != nil && (e.SourceKind == nil || *e.SourceKind == SourceEvent):
+	case txID != nil:
 		if touched, err = s.txs.SyncDebtTxInTx(ctx, tx, userID, *txID, in); err != nil {
 			return nil, err
 		}
@@ -634,9 +624,6 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, id uuid.UUID) (*Delet
 	if err != nil {
 		return nil, err
 	}
-	if e.SourceKind != nil && *e.SourceKind == SourcePaidBy {
-		return nil, ErrManagedByTx
-	}
 	txID, err := entryTxID(ctx, tx, e.ID)
 	if err != nil {
 		return nil, err
@@ -666,17 +653,6 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, id uuid.UUID) (*Delet
 		}
 		touched = nonNil(acc)
 		t.removedTxs = []uuid.UUID{*txID}
-	}
-	if e.PaidForTransactionID != nil {
-		// A partner's split on me: my expense of it goes with it (it has no wallet).
-		acc, err := s.txs.DeleteInTx(ctx, tx, userID, *e.PaidForTransactionID)
-		if err != nil && !errors.Is(err, transactions.ErrTxNotFound) {
-			return nil, err
-		}
-		touched = append(touched, acc...)
-		if err == nil {
-			t.removedTxs = append(t.removedTxs, *e.PaidForTransactionID)
-		}
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM personal_debts WHERE id = $1`, e.ID); err != nil {
 		return nil, fmt.Errorf("delete entry: %w", err)
@@ -738,9 +714,6 @@ func repayDirection(kind string) string {
 }
 
 func (s *Service) createRepaymentTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, rawKey string, req RepaymentRequest) (*Entry, []uuid.UUID, error) {
-	if req.BillID != nil {
-		return nil, nil, ErrUseClaim // 0.4.1-2 V9: a payback is claimed through POST /projects/{id}/claim
-	}
 	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
 	if err != nil {
 		return nil, nil, err
@@ -755,7 +728,7 @@ func (s *Service) createRepaymentTx(ctx context.Context, tx pgx.Tx, userID uuid.
 		Kind: KindRepayment, Direction: repayDirection(req.Kind), ContactID: contactID, PersonName: strings.TrimSpace(name),
 		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note,
 		CreateTransaction: wantsTx(req.CreateTransaction, req.AccountID), AccountID: req.AccountID, TagIDs: req.TagIDs,
-		LinkTransactionID: req.LinkTransactionID, BillID: req.BillID,
+		LinkTransactionID: req.LinkTransactionID,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -830,47 +803,6 @@ func (s *Service) PersonBalanceByKey(ctx context.Context, userID uuid.UUID, key 
 }
 
 var _ transactions.DebtLinks = (*Service)(nil)
-
-func (s *Service) CreateForTransactionTx(
-	ctx context.Context, tx pgx.Tx,
-	parentTxID, userID uuid.UUID,
-	parentType, parentCurrency string, parentDescription *string,
-	inputs []transactions.SplitInput,
-) error {
-	if len(inputs) == 0 {
-		return nil
-	}
-	direction := DirectionPaid
-	if parentType == "income" {
-		direction = DirectionReceived
-	}
-	// Every split contact must be one of the splitter's own contacts — otherwise a foreign contact
-	// id would mirror a debt into a stranger's account.
-	for i := range inputs {
-		if err := assertContactOwned(ctx, tx, userID, inputs[i].ContactID); err != nil {
-			if errors.Is(err, ErrContactNotFound) {
-				return transactions.ErrSplitContactNotFound
-			}
-			return err
-		}
-	}
-	var date string
-	if err := tx.QueryRow(ctx, `SELECT to_char(date, 'YYYY-MM-DD') FROM transactions WHERE id = $1`, parentTxID).Scan(&date); err != nil {
-		return fmt.Errorf("bill date: %w", err)
-	}
-	kind := SourceTransaction
-	for i := range inputs {
-		in := inputs[i]
-		if _, err := insertEntryTx(ctx, tx, &Entry{
-			UserID: userID, Direction: direction, ContactID: in.ContactID, PersonName: in.PersonName,
-			SourceTransactionID: &parentTxID, Amount: in.OwedAmount,
-			Date: date, SourceKind: &kind, Description: parentDescription,
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 func (s *Service) UnlinkedNames(ctx context.Context, userID uuid.UUID) ([]contacts.UnlinkedName, error) {
 	rows, err := s.store.UnlinkedNames(ctx, userID)

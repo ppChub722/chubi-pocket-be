@@ -40,20 +40,12 @@ func (s *Service) Disconnect(ctx context.Context, userID, id uuid.UUID) (*WriteR
 		ids = append(ids, other.ID)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE personal_debts
-		SET counterpart_debt_id = NULL, disconnected_at = NOW(), updated_by_user_id = user_id,
-		    source_kind = CASE WHEN source_kind = 'partner'
-		                       THEN CASE WHEN paid_for_transaction_id IS NOT NULL THEN 'paid_by' END
-		                       ELSE source_kind END
+		SET counterpart_debt_id = NULL, disconnected_at = NOW(), updated_by_user_id = user_id
 		WHERE id = ANY($1)`, ids); err != nil {
 		return nil, fmt.Errorf("disconnect: %w", err)
 	}
 	if other != nil && s.notifs != nil {
-		// The split notices carry the splitter's entry id (the side that isn't the mirror).
-		splitID := e.ID
-		if e.SourceKind != nil && *e.SourceKind == SourcePartner {
-			splitID = other.ID
-		}
-		if err := s.notifs.DispatchDebtDisconnected(ctx, tx, other.UserID, userID, splitID, notifications.DebtDisconnectedPayload{
+		if err := s.notifs.DispatchDebtDisconnected(ctx, tx, other.UserID, userID, e.ID, notifications.DebtDisconnectedPayload{
 			DebtID: other.ID, Key: other.Key(), PersonName: other.PersonName, Amount: other.Amount,
 			Direction: other.Direction, Description: other.Description,
 		}); err != nil {

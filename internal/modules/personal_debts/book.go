@@ -45,15 +45,8 @@ type EntryInput struct {
 	AccountID         *uuid.UUID
 	TagIDs            []uuid.UUID
 	LinkTransactionID *uuid.UUID
-	// BillID — the event bill the row records (source event; the link sits on the row, not on its
-	// transaction). EventID without BillID — an event's จัดการ line.
-	BillID  *uuid.UUID
-	EventID *uuid.UUID
-	// MemberID (0.4.1-2 V5) — with BillID on a debt: the other person of that bill; the debt gets
-	// its bill part (personal_debt_bills), with BillTransactionID = my tx of that bill (my "จ่ายโดย X"
-	// copy, or my origin when I paid).
-	MemberID          *uuid.UUID
-	BillTransactionID *uuid.UUID
+	// ProjectID — the event a payback paper's repayment row belongs to (lump bookkeeping).
+	ProjectID *uuid.UUID
 }
 
 // CreateEntryTx writes the row (and its transaction) inside the caller's DB transaction and answers
@@ -101,19 +94,11 @@ func (s *Service) insertRowTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, 
 	entry := &Entry{
 		UserID: userID, Kind: in.Kind, Direction: in.Direction, ContactID: in.ContactID, PersonName: in.PersonName,
 		Amount: in.Amount, Date: in.Date, Description: in.Description, Note: in.Note, DueDate: in.DueDate,
-	}
-	if err := eventSourceTx(ctx, tx, userID, entry, in.BillID, in.EventID); err != nil {
-		return nil, nil, err
+		ProjectID: in.ProjectID,
 	}
 	e, err := insertEntryTx(ctx, tx, entry)
 	if err != nil {
 		return nil, nil, err
-	}
-	if in.BillID != nil && in.MemberID != nil && e.Kind == KindDebt { // V5: a lump of one
-		if err := s.LinkBillPartTx(ctx, tx, userID, e.ID, BillPartInput{PtID: *in.BillID, MemberID: *in.MemberID,
-			TransactionID: in.BillTransactionID, Amount: e.Amount}); err != nil {
-			return nil, nil, err
-		}
 	}
 	var wallets []uuid.UUID
 	switch {
@@ -131,40 +116,6 @@ func (s *Service) insertRowTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, 
 		}
 	}
 	return e, wallets, nil
-}
-
-// eventSourceTx — a bill / event the row records: source event + the bill + its event (I must be an
-// active member).
-func eventSourceTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, e *Entry, billID, eventID *uuid.UUID) error {
-	kind := SourceEvent
-	switch {
-	case billID != nil:
-		var projectID *uuid.UUID // nil: a split bill (no event)
-		err := tx.QueryRow(ctx, `SELECT pt.project_id FROM project_transactions pt
-			JOIN project_members pm ON pm.scope_id = pt.scope_id AND pm.user_id = $2 AND pm.status = 'active'
-			WHERE pt.id = $1`, *billID, userID).Scan(&projectID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrBillNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("entry bill: %w", err)
-		}
-		e.SourceKind, e.SourceProjectTransactionID, e.ProjectID = &kind, billID, projectID
-	case eventID != nil:
-		var ok bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM project_members
-			WHERE scope_id = $1 AND user_id = $2 AND status = 'active')`, *eventID, userID).Scan(&ok); err != nil {
-			return fmt.Errorf("entry event: %w", err)
-		}
-		if !ok {
-			return ErrBillNotFound
-		}
-		e.SourceKind = &kind
-		if err := tx.QueryRow(ctx, `SELECT event_or_null($1)`, *eventID).Scan(&e.ProjectID); err != nil {
-			return fmt.Errorf("entry event: %w", err)
-		}
-	}
-	return nil
 }
 
 func firstText(a, b *string) *string {
@@ -193,10 +144,8 @@ func linkableTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID, directio
 	)
 	err := tx.QueryRow(ctx, `SELECT t.amount::float8, to_char(t.date, 'YYYY-MM-DD'), t.description, t.note, t.type,
 		t.source_personal_debt_id IS NOT NULL,
-		t.transfer_group_id IS NULL AND t.project_id IS NULL AND t.source_project_transaction_id IS NULL
-		AND t.paid_by_amount IS NULL
+		t.transfer_group_id IS NULL AND t.split_transaction_id IS NULL
 		AND NOT EXISTS (SELECT 1 FROM categories c WHERE c.id = t.category_id AND c.is_system)
-		AND NOT EXISTS (SELECT 1 FROM personal_debts d WHERE d.source_transaction_id = t.id OR d.paid_for_transaction_id = t.id)
 		AND NOT EXISTS (SELECT 1 FROM recurring_items ri WHERE ri.transaction_id = t.id)
 		FROM transactions t WHERE t.id = $1 AND t.user_id = $2 FOR UPDATE OF t`, txID, userID).
 		Scan(&l.Amount, &l.Date, &l.Description, &l.Note, &typ, &taken, &plain)

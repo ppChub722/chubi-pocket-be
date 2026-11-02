@@ -21,37 +21,27 @@ const (
 	KindRepayment = "repayment"
 )
 
-const (
-	SourceTransaction = "transaction" // a split on my bill (source_transaction_id)
-	SourceEvent       = "event"       // a split on an event board
-	SourcePartner     = "partner"     // another user's split on me (the mirror)
-	SourcePaidBy      = "paid_by"     // someone paid (part of) my expense, or received (part of) my income (paid_for_transaction_id)
-)
-
 type Entry struct {
-	ID                         uuid.UUID
-	UserID                     uuid.UUID
-	Kind                       string // debt | repayment
-	Direction                  string
-	ContactID                  *uuid.UUID // counterparty_contact_id
-	PersonName                 string     // counterparty_person_name (typed snapshot)
-	SourceTransactionID        *uuid.UUID
-	SourceProjectTransactionID *uuid.UUID
-	ProjectID                  *uuid.UUID
-	Amount                     float64
-	Currency                   string
-	Date                       string
-	Paid                       bool
-	SourceKind                 *string
-	Description                *string
-	Note                       *string
-	CreatedAt                  time.Time
-	UpdatedAt                  time.Time
-	CounterpartDebtID          *uuid.UUID
-	// PaidForTransactionID — the expense this debt is the "someone paid for me" part of (0.4.0-3):
-	// my own paid_by (source paid_by) or a partner's split mirrored into my book (source partner).
-	PaidForTransactionID *uuid.UUID
-	DueDate              *string // YYYY-MM-DD; "กำหนดจ่าย" (0.4.0-3)
+	ID         uuid.UUID
+	UserID     uuid.UUID
+	Kind       string // debt | repayment
+	Direction  string
+	ContactID  *uuid.UUID // counterparty_contact_id
+	PersonName string     // counterparty_person_name (typed snapshot)
+	// ProjectID — an event lump (a debt booked from an event's summary).
+	ProjectID   *uuid.UUID
+	Amount      float64
+	Currency    string
+	Date        string
+	Paid        bool
+	SourceKind  *string // paper = made from papers (personal_debt_bills)
+	Description *string
+	Note        *string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	// CounterpartDebtID — my partner debt in the other person's book (same paper, same pair).
+	CounterpartDebtID *uuid.UUID
+	DueDate           *string // YYYY-MM-DD; "กำหนดจ่าย" (0.4.0-3)
 	// DisconnectedAt (0.4.1-1 D9) — the cross-user pair was disconnected (either side).
 	DisconnectedAt *time.Time
 }
@@ -107,19 +97,21 @@ type DebtEntry struct {
 	InCurrentCycle *bool       `json:"in_current_cycle"`
 	UpdatedAt      time.Time   `json:"updated_at"`
 	Origin         *DebtOrigin `json:"origin"`
-	// Bills (0.4.1-2 V5) — the shared bills this debt books (one = per-bill, several = a lump).
+	// Bills — the papers this debt books (one = a split bill's debt, several = an event lump).
 	Bills []DebtBillPart `json:"bills"`
+	// InSync — every part holds what its paper says now.
+	InSync *bool `json:"in_sync"`
 }
 
-// DebtBillPart — one bill's part of a debt, as my book holds it, against the bill now.
+// DebtBillPart — one paper's part of a debt, as my book holds it, against the paper now.
 type DebtBillPart struct {
-	PtID        uuid.UUID               `json:"pt_id"`
-	Event       shared.EventRef         `json:"event"`
-	Description *string                 `json:"description"`
-	Amount      float64                 `json:"amount"`
-	InSync      bool                    `json:"in_sync"`
-	Differences []shared.BillDifference `json:"differences"`
-	EditInBill  bool                    `json:"edit_in_bill"`
+	PaperID     uuid.UUID        `json:"paper_id"`
+	Event       *shared.EventRef `json:"event"`
+	Description *string          `json:"description"`
+	Amount      float64          `json:"amount"`
+	// Now — what the paper says this pair is now.
+	Now    float64 `json:"now"`
+	InSync bool    `json:"in_sync"`
 }
 
 type DebtPerson struct {
@@ -236,7 +228,7 @@ type StatementDay struct {
 type DebtOrigin struct {
 	Kind          string             `json:"kind"`
 	TransactionID *uuid.UUID         `json:"transaction_id"`
-	BillID        *uuid.UUID         `json:"bill_id"`
+	PaperID       *uuid.UUID         `json:"paper_id"`
 	EventID       *uuid.UUID         `json:"event_id"`
 	Title         *string            `json:"title"`
 	Amount        *float64           `json:"amount"`
@@ -263,8 +255,8 @@ type RepaymentRequest struct {
 	// MarkAllPaid (0.4.1-1 D10 "ปิดหนี้") — label every open debt this repayment pays down paid.
 	MarkAllPaid bool    `json:"mark_all_paid"`
 	PersonName  *string `json:"person_name"  binding:"omitempty,min=1,max=100"`
-	// BillID (0.4.0-3) — an event payback row this repayment records in my books (the row keeps it).
-	BillID *uuid.UUID `json:"bill_id"`
+	// Notify — tell the partner (the other book of a paper debt) that I paid / got paid back.
+	Notify bool `json:"notify"`
 }
 
 // DebtPreview — POST …/entries or …/repayments with ?preview=true (the debt quick create's result
@@ -339,12 +331,6 @@ type CreateEntryRequest struct {
 	MarkPaidIDs       []uuid.UUID `json:"mark_paid_ids"`
 	PersonName        *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
 	DueDate           *string     `json:"due_date"     binding:"omitempty,datetime=2006-01-02"`
-	// BillID (0.4.0-3) — the event bill this debt settles a share of (the resolve sheet's "as
-	// debt"): the entry keeps source event + the bill + its event.
-	BillID *uuid.UUID `json:"bill_id"`
-	// EventID (0.4.0-4) — without bill_id: the debt records an event's จัดการ line (what one
-	// member still owes another over the whole event); the entry keeps source event + the event.
-	EventID *uuid.UUID `json:"event_id"`
 }
 
 type UpdateEntryRequest struct {

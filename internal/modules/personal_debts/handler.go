@@ -349,18 +349,12 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, apierr.EntryNotFound, err.Error(), nil)
 	case errors.Is(err, ErrManagedBySource):
 		response.Fail(c, http.StatusConflict, apierr.EntryManagedBySource, err.Error(), nil)
-	case errors.As(err, new(*transactions.SharedBillFieldError)):
-		var f *transactions.SharedBillFieldError
-		errors.As(err, &f)
-		response.Fail(c, http.StatusConflict, apierr.SharedBillField, err.Error(), map[string]any{"fields": f.Fields})
 	case errors.Is(err, transactions.ErrPrivateNoteNotShared):
 		response.BadRequest(c, apierr.PrivateNoteNotShared, err.Error(), nil)
 	case errors.Is(err, transactions.ErrPrivateNoteTooLong):
 		response.ValidationErr(c, err)
 	case errors.Is(err, ErrBillNotFound):
 		response.BadRequest(c, apierr.BillNotFound, err.Error(), nil)
-	case errors.Is(err, ErrUseClaim):
-		response.BadRequest(c, apierr.UseClaim, err.Error(), nil)
 	case errors.Is(err, ErrBillAlreadyBooked):
 		response.Fail(c, http.StatusConflict, apierr.BillAlreadyBooked, err.Error(), nil)
 	case errors.Is(err, ErrManagedByTx):

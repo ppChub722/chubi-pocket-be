@@ -66,20 +66,18 @@ func assertContactOwned(ctx context.Context, q querier, userID uuid.UUID, contac
 }
 
 const entryColumns = `id, user_id, kind, direction,
-	counterparty_contact_id, counterparty_person_name,
-	source_transaction_id, source_project_transaction_id, project_id,
+	counterparty_contact_id, counterparty_person_name, project_id,
 	amount, currency, to_char(date, 'YYYY-MM-DD'), paid, source_kind, description, note,
-	created_at, updated_at, counterpart_debt_id, paid_for_transaction_id, to_char(due_date, 'YYYY-MM-DD'),
+	created_at, updated_at, counterpart_debt_id, to_char(due_date, 'YYYY-MM-DD'),
 	disconnected_at`
 
 func scanEntry(row pgx.Row) (*Entry, error) {
 	var e Entry
 	err := row.Scan(
 		&e.ID, &e.UserID, &e.Kind, &e.Direction,
-		&e.ContactID, &e.PersonName,
-		&e.SourceTransactionID, &e.SourceProjectTransactionID, &e.ProjectID,
+		&e.ContactID, &e.PersonName, &e.ProjectID,
 		&e.Amount, &e.Currency, &e.Date, &e.Paid, &e.SourceKind, &e.Description, &e.Note,
-		&e.CreatedAt, &e.UpdatedAt, &e.CounterpartDebtID, &e.PaidForTransactionID, &e.DueDate,
+		&e.CreatedAt, &e.UpdatedAt, &e.CounterpartDebtID, &e.DueDate,
 		&e.DisconnectedAt,
 	)
 	return &e, err
@@ -123,16 +121,14 @@ func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 		e.Kind = KindDebt
 	}
 	row, err := scanEntry(tx.QueryRow(ctx, `INSERT INTO personal_debts
-		(id, user_id, direction, counterparty_contact_id, counterparty_person_name,
-		 source_transaction_id, source_project_transaction_id, project_id,
+		(id, user_id, direction, counterparty_contact_id, counterparty_person_name, project_id,
 		 amount, currency, date, paid, source_kind, description, note,
-		 created_by_user_id, updated_by_user_id, paid_for_transaction_id, due_date, kind)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::date, $12, $13, $14, $15, $2, $2, $16, $17::date, $18)
+		 created_by_user_id, updated_by_user_id, due_date, kind)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13, $2, $2, $14::date, $15)
 		RETURNING `+entryColumns,
-		id, e.UserID, e.Direction, e.ContactID, strings.TrimSpace(e.PersonName),
-		e.SourceTransactionID, e.SourceProjectTransactionID, e.ProjectID,
+		id, e.UserID, e.Direction, e.ContactID, strings.TrimSpace(e.PersonName), e.ProjectID,
 		e.Amount, strings.ToUpper(e.Currency), e.Date, e.Paid, e.SourceKind,
-		shared.CleanText(e.Description), shared.CleanText(e.Note), e.PaidForTransactionID, e.DueDate, e.Kind))
+		shared.CleanText(e.Description), shared.CleanText(e.Note), e.DueDate, e.Kind))
 	if err != nil {
 		return nil, fmt.Errorf("insert entry: %w", err)
 	}
@@ -344,47 +340,27 @@ func (s *Store) personBalance(ctx context.Context, q shared.Querier, userID uuid
 
 const entryViewSQL = `SELECT pd.id, pd.kind, pd.direction, pd.counterparty_contact_id, pd.counterparty_person_name,
 		pd.amount, to_char(pd.date, 'YYYY-MM-DD'), pd.description, pd.note, pd.private_note, pd.paid, pd.source_kind,
-		CASE pd.source_kind WHEN 'transaction' THEN pd.source_transaction_id
-		                    WHEN 'event' THEN pd.project_id
-		                    WHEN 'paid_by' THEN pd.paid_for_transaction_id
-		                    WHEN 'partner' THEN pd.paid_for_transaction_id END,
-		CASE pd.source_kind WHEN 'transaction' THEN COALESCE(st.description, sc.name)
-		                    WHEN 'event' THEN sp.name
-		                    WHEN 'paid_by' THEN COALESCE(ft.description, fc.name)
-		                    WHEN 'partner' THEN ou.display_name END,
+		CASE WHEN pd.source_kind = 'paper' THEN COALESCE(pd.project_id, fp.id) END,
+		CASE WHEN pd.source_kind = 'paper' THEN COALESCE(ev.name, fp.description) END,
 		t.id, t.account_id, COALESCE(t.debt_connected, FALSE), pd.created_at, pd.updated_at,
 		to_char(pd.due_date, 'YYYY-MM-DD'), pd.counterpart_debt_id IS NOT NULL, pd.disconnected_at,
-		-- origin (the มาจาก card, debts only): kind, transaction, bill, event, title, amount, date, wallet
+		-- origin (the มาจาก card, debts only): kind, transaction, paper, event, title, amount, date, wallet
 		CASE WHEN pd.kind = 'debt' THEN
-		  CASE pd.source_kind WHEN 'transaction' THEN 'split' WHEN 'paid_by' THEN 'paid_by'
-		                      WHEN 'partner' THEN 'partner' WHEN 'event' THEN 'event'
-		                      ELSE CASE WHEN t.id IS NOT NULL THEN 'cash' END END END,
-		CASE pd.source_kind WHEN 'transaction' THEN st.id WHEN 'paid_by' THEN ft.id WHEN 'partner' THEN ft.id
-		                    WHEN 'event' THEN NULL ELSE t.id END,
-		CASE WHEN pd.source_kind = 'event' THEN pd.source_project_transaction_id END,
-		CASE WHEN pd.source_kind = 'event' THEN pd.project_id END,
-		CASE pd.source_kind WHEN 'transaction' THEN COALESCE(st.description, sc.name)
-		                    WHEN 'paid_by' THEN COALESCE(ft.description, fc.name)
-		                    WHEN 'partner' THEN COALESCE(ft.description, fc.name, ou.display_name)
-		                    WHEN 'event' THEN COALESCE(bp.description, sp.name)
-		                    ELSE COALESCE(t.description, tc.name) END,
-		(CASE pd.source_kind WHEN 'transaction' THEN st.amount WHEN 'paid_by' THEN ft.amount WHEN 'partner' THEN ft.amount
-		                     WHEN 'event' THEN bp.amount ELSE t.amount END)::float8,
-		to_char(CASE pd.source_kind WHEN 'transaction' THEN st.date WHEN 'paid_by' THEN ft.date WHEN 'partner' THEN ft.date
-		                            WHEN 'event' THEN bp.date ELSE t.date END, 'YYYY-MM-DD'),
-		CASE pd.source_kind WHEN 'transaction' THEN st.account_id WHEN 'paid_by' THEN ft.account_id
-		                    WHEN 'partner' THEN ft.account_id WHEN 'event' THEN NULL ELSE t.account_id END
+		  CASE WHEN pd.source_kind = 'paper' THEN 'paper' WHEN t.id IS NOT NULL THEN 'cash' END END,
+		CASE WHEN pd.source_kind = 'paper' THEN fb.transaction_id ELSE t.id END,
+		CASE WHEN pd.source_kind = 'paper' THEN fp.id END,
+		pd.project_id,
+		CASE WHEN pd.source_kind = 'paper' THEN COALESCE(ev.name, fp.description) ELSE COALESCE(t.description, tc.name) END,
+		(CASE WHEN pd.source_kind = 'paper' THEN fp.amount ELSE t.amount END)::float8,
+		to_char(CASE WHEN pd.source_kind = 'paper' THEN fp.date ELSE t.date END, 'YYYY-MM-DD'),
+		CASE WHEN pd.source_kind = 'paper' THEN NULL ELSE t.account_id END
 	FROM personal_debts pd
 	LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id
 	LEFT JOIN categories tc ON tc.id = t.category_id
-	LEFT JOIN transactions st ON st.id = pd.source_transaction_id
-	LEFT JOIN categories sc ON sc.id = st.category_id
-	LEFT JOIN transactions ft ON ft.id = pd.paid_for_transaction_id
-	LEFT JOIN categories fc ON fc.id = ft.category_id
-	LEFT JOIN project_transactions bp ON bp.id = pd.source_project_transaction_id
-	LEFT JOIN scopes sp ON sp.id = COALESCE(pd.project_id, bp.scope_id)
-	LEFT JOIN personal_debts op ON op.id = pd.counterpart_debt_id
-	LEFT JOIN users ou ON ou.id = op.user_id`
+	LEFT JOIN LATERAL (SELECT b.split_transaction_id, b.transaction_id FROM personal_debt_bills b
+	                   WHERE b.debt_id = pd.id ORDER BY b.created_at, b.id LIMIT 1) fb ON TRUE
+	LEFT JOIN project_transactions fp ON fp.id = fb.split_transaction_id
+	LEFT JOIN projects ev ON ev.id = pd.project_id`
 
 func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) ([]DebtEntry, error) {
 	rows, err := q.Query(ctx, entryViewSQL+" "+tail, args...)
@@ -421,7 +397,7 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 		)
 		if err := rows.Scan(&v.ID, &v.Kind, &v.Direction, &cid, &name, &v.Amount, &v.Date, &v.Description, &v.Note, &v.PrivateNote,
 			&v.Paid, &kind, &sourceID, &title, &txID, &accID, &connected, &v.CreatedAt, &v.UpdatedAt, &v.DueDate, &v.PartnerLinked, &v.DisconnectedAt,
-			&oKind, &o.TransactionID, &o.BillID, &o.EventID, &o.Title, &o.Amount, &o.Date, &oAccount); err != nil {
+			&oKind, &o.TransactionID, &o.PaperID, &o.EventID, &o.Title, &o.Amount, &o.Date, &oAccount); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("entries scan: %w", err)
 		}
@@ -469,8 +445,8 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 	return out, loadBillParts(ctx, q, out)
 }
 
-// loadBillParts fills DebtEntry.bills (0.4.1-2 V5): each part with its bill's event, and whether it
-// still matches the bill (my pair with that member on it now; a completed event no longer syncs).
+// loadBillParts fills DebtEntry.bills: each part with its paper's event, what the paper says the
+// pair is now, and whether my part still matches (a completed event no longer syncs).
 func loadBillParts(ctx context.Context, q shared.Querier, out []DebtEntry) error {
 	at := map[uuid.UUID]int{}
 	ids := make([]uuid.UUID, 0, len(out))
@@ -482,62 +458,65 @@ func loadBillParts(ctx context.Context, q shared.Querier, out []DebtEntry) error
 	if len(ids) == 0 {
 		return nil
 	}
-	rows, err := q.Query(ctx, `
-		SELECT b.debt_id, b.pt_id, p.scope_id, p.description, b.amount::float8, pr.status, pr.completed_at IS NOT NULL,
-		       COALESCE((SELECT SUM(c.share) FROM split_transaction_people c WHERE c.split_transaction_id = p.id
-		           AND c.event_member_id = CASE WHEN p.transaction_member_id = me.id THEN b.member_id ELSE me.id END
-		           AND c.event_member_id IS DISTINCT FROM p.transaction_member_id
-		           AND p.transaction_member_id IN (me.id, b.member_id)), 0)::float8
-		FROM personal_debt_bills b
-		JOIN project_transactions p ON p.id = b.pt_id
-		JOIN scopes pr ON pr.id = p.scope_id
-		LEFT JOIN project_members me ON me.scope_id = p.scope_id AND me.user_id = b.user_id
-		WHERE b.debt_id = ANY($1)
-		ORDER BY b.created_at, b.id`, ids)
-	if err != nil {
-		return fmt.Errorf("bill parts: %w", err)
+	parts, err := queryPaperParts(ctx, q, `WHERE debt_id = ANY($1) ORDER BY created_at, id`, ids)
+	if err != nil || len(parts) == 0 {
+		return err
 	}
-	var events []uuid.UUID
-	type link struct {
-		i     int
-		event uuid.UUID
+	byUser := map[uuid.UUID][]uuid.UUID{}
+	for _, p := range parts {
+		byUser[p.UserID] = append(byUser[p.UserID], p.PaperID)
 	}
-	var links []link
-	for rows.Next() {
-		var (
-			debtID, eventID uuid.UUID
-			p               DebtBillPart
-			status          string
-			completed       bool
-			live            float64
-		)
-		if err := rows.Scan(&debtID, &p.PtID, &eventID, &p.Description, &p.Amount, &status, &completed, &live); err != nil {
-			rows.Close()
+	papers := map[uuid.UUID]shared.Paper{}
+	for user, paperIDs := range byUser {
+		m, err := shared.LoadPapers(ctx, q, user, paperIDs)
+		if err != nil {
 			return err
 		}
-		p.Differences = []shared.BillDifference{}
-		p.InSync = completed || math.Abs(live-p.Amount) <= 0.005
-		if !p.InSync {
-			p.Differences = append(p.Differences, shared.BillDifference{Field: "amount", Mine: p.Amount, Event: round2(live)})
+		for k, v := range m {
+			papers[k] = v
 		}
-		p.EditInBill = !completed && status == "active"
-		i := at[debtID]
-		out[i].Bills = append(out[i].Bills, p)
-		links = append(links, link{i, eventID})
-		events = append(events, eventID)
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
+	var eventIDs []uuid.UUID
+	for _, p := range papers {
+		if p.ProjectID != nil {
+			eventIDs = append(eventIDs, *p.ProjectID)
+		}
 	}
-	refs, err := shared.LoadEventRefs(ctx, q, events)
+	events, err := shared.LoadEventRefs(ctx, q, eventIDs)
 	if err != nil {
 		return err
 	}
-	n := map[int]int{}
-	for _, l := range links {
-		out[l.i].Bills[n[l.i]].Event = refs[l.event]
-		n[l.i]++
+	for _, part := range parts {
+		i, ok := at[part.DebtID]
+		if !ok {
+			continue
+		}
+		bp := DebtBillPart{PaperID: part.PaperID, Amount: part.Amount}
+		if paper, ok := papers[part.PaperID]; ok {
+			bp.Description = paper.Description
+			completed := false
+			if paper.ProjectID != nil {
+				if e, ok := events[*paper.ProjectID]; ok {
+					bp.Event = &e
+					completed = e.Status == "completed"
+				}
+			}
+			if me := paper.PersonOfUser(part.UserID); me != nil {
+				bp.Now = math.Abs(paper.NetOf(me.ID)[part.PersonID])
+			}
+			bp.InSync = completed || math.Abs(bp.Now-bp.Amount) <= 0.005
+		}
+		out[i].Bills = append(out[i].Bills, bp)
+	}
+	for i := range out {
+		if len(out[i].Bills) == 0 {
+			continue
+		}
+		ok := true
+		for _, b := range out[i].Bills {
+			ok = ok && b.InSync
+		}
+		out[i].InSync = &ok
 	}
 	return nil
 }
