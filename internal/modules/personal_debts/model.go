@@ -105,7 +105,7 @@ type DebtEntry struct {
 
 // DebtBillPart — one paper's part of a debt, as my book holds it, against the paper now.
 type DebtBillPart struct {
-	PaperID     uuid.UUID        `json:"paper_id"`
+	PaperID     uuid.UUID        `json:"split_transaction_id"`
 	Event       *shared.EventRef `json:"event"`
 	Description *string          `json:"description"`
 	Amount      float64          `json:"amount"`
@@ -221,14 +221,13 @@ type StatementDay struct {
 	lastSeen     *time.Time // the day's latest line so far (created_at)
 }
 
-// DebtOrigin — where a debt came from, for the debt detail's "มาจาก" card (0.4.0-3):
-// split = a split on my bill, paid_by = someone paid (part of) my expense, partner = another user's
-// split on me (my expense of it), event = an event bill (resolve "as debt"), cash = a loan / borrow
-// with its own wallet transaction. Null for a ledger-only debt.
+// DebtOrigin — where a debt came from, for the debt detail's "มาจาก" card: paper = made from a
+// paper (its first one), cash = a loan / borrow with its own wallet transaction. Null for a
+// ledger-only debt.
 type DebtOrigin struct {
 	Kind          string             `json:"kind"`
 	TransactionID *uuid.UUID         `json:"transaction_id"`
-	PaperID       *uuid.UUID         `json:"paper_id"`
+	PaperID       *uuid.UUID         `json:"split_transaction_id"`
 	EventID       *uuid.UUID         `json:"event_id"`
 	Title         *string            `json:"title"`
 	Amount        *float64           `json:"amount"`

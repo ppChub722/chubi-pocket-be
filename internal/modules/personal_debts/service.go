@@ -18,7 +18,7 @@ import (
 type Service struct {
 	store  *Store
 	txs    *transactions.Service
-	notifs *notifications.Service // optional — see split_flow.go
+	notifs *notifications.Service // optional — paper debts' notices
 	// recurringFor — the person's "หนี้" recurring settings for the person page (0.4.1-2 K13;
 	// a hook: recurring imports this module).
 	recurringFor func(ctx context.Context, userID uuid.UUID, key string) ([]shared.PersonRecurring, error)
@@ -738,6 +738,11 @@ func (s *Service) createRepaymentTx(ctx context.Context, tx pgx.Tx, userID uuid.
 	}
 	if req.MarkAllPaid {
 		if err := markAllPaidTx(ctx, tx, userID, e.Key(), e.Direction); err != nil {
+			return nil, nil, err
+		}
+	}
+	if req.Notify {
+		if err := s.tellPartnerTx(ctx, tx, userID, e); err != nil {
 			return nil, nil, err
 		}
 	}

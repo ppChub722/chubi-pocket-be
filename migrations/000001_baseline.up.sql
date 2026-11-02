@@ -561,7 +561,7 @@ CREATE TABLE public.personal_debt_bills (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     split_transaction_id uuid NOT NULL,
-    split_person_id uuid NOT NULL,
+    split_person_id uuid,
     CONSTRAINT personal_debt_bills_amount_check CHECK ((amount >= (0)::numeric))
 );
 

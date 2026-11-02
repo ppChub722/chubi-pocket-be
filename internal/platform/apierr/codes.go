@@ -87,26 +87,11 @@ const (
 
 	// transactions
 	TransactionNotFound        Code = "TRANSACTION_NOT_FOUND"
-	TxNotFound                 Code = "TX_NOT_FOUND"
 	TransferSameAccount        Code = "TRANSFER_SAME_ACCOUNT"
 	TransferNeedsWallets       Code = "TRANSFER_NEEDS_WALLETS"
 	SystemTransactionImmutable Code = "SYSTEM_TRANSACTION_IMMUTABLE"
-	SplitsNotSupportedYet      Code = "SPLITS_NOT_SUPPORTED_YET"
-	SplitsOnTransfer           Code = "SPLITS_ON_TRANSFER"
-	SplitsAuthorOnly           Code = "SPLITS_AUTHOR_ONLY"
-	SplitsExceedAmount         Code = "SPLITS_EXCEED_AMOUNT"
-	SplitsExceedShare          Code = "SPLITS_EXCEED_SHARE"
 	SplitMismatch              Code = "SPLIT_MISMATCH"
-	InvalidSplit               Code = "INVALID_SPLIT"
-	PaidByExpenseOnly          Code = "PAID_BY_EXPENSE_ONLY"
-	PaidByExceedsAmount        Code = "PAID_BY_EXCEEDS_AMOUNT"
-	InvalidPaidBy              Code = "INVALID_PAID_BY"
-	LinkModeConflict           Code = "LINK_MODE_CONFLICT"
-	LinkModeInput              Code = "LINK_MODE_INPUT"
-	SharedBillField            Code = "SHARED_BILL_FIELD"
 	PrivateNoteNotShared       Code = "PRIVATE_NOTE_NOT_SHARED"
-	SourcePtNotFound           Code = "SOURCE_PT_NOT_FOUND"
-	SourcePtNotForUser         Code = "SOURCE_PT_NOT_FOR_USER"
 	InvalidPersonKey           Code = "INVALID_PERSON_KEY"
 
 	// debts
@@ -123,7 +108,6 @@ const (
 	TagsNeedWallet       Code = "TAGS_NEED_WALLET"
 	LedgerOnlyNoWallet   Code = "LEDGER_ONLY_NO_WALLET"
 	BillNotFound         Code = "BILL_NOT_FOUND"
-	UseClaim             Code = "USE_CLAIM"
 	DebtNotFound         Code = "DEBT_NOT_FOUND"
 
 	// contacts
@@ -145,46 +129,23 @@ const (
 	TypeNotMutable            Code = "TYPE_NOT_MUTABLE"
 
 	// events (projects)
-	ProjectNotFound     Code = "PROJECT_NOT_FOUND"
 	ProjectNotActive    Code = "PROJECT_NOT_ACTIVE"
 	ProjectLocked       Code = "PROJECT_LOCKED"
-	ProjectNotMember    Code = "PROJECT_NOT_MEMBER"
-	ProjectReadOnly     Code = "PROJECT_READ_ONLY"
 	EventCompleted      Code = "EVENT_COMPLETED"
 	EventNotCompleted   Code = "EVENT_NOT_COMPLETED"
 	EventHasEmptyPerson Code = "EVENT_HAS_EMPTY_PERSON"
 	UseCompleteEndpoint Code = "USE_COMPLETE_ENDPOINT"
 	AlreadyMember       Code = "ALREADY_MEMBER"
 	MemberNotInProject  Code = "MEMBER_NOT_IN_PROJECT"
-	MemberNotRemoved    Code = "MEMBER_NOT_REMOVED"
-	NotPending          Code = "NOT_PENDING"
 	CannotChangeOwner   Code = "CANNOT_CHANGE_OWNER"
 	CannotRemoveOwner   Code = "CANNOT_REMOVE_OWNER"
 	OwnerCannotLeave    Code = "OWNER_CANNOT_LEAVE"
 	ForbiddenRole       Code = "FORBIDDEN_ROLE"
-	PtIsChild           Code = "PT_IS_CHILD"
-	SelfSplit           Code = "SELF_SPLIT"
 	NotInBill           Code = "NOT_IN_BILL"
 	BillAlreadyBooked   Code = "BILL_ALREADY_BOOKED"
 	BillChanged         Code = "BILL_CHANGED"
-	BillDisconnected    Code = "BILL_DISCONNECTED"
-	BillGone            Code = "BILL_GONE"
-	MoveTarget          Code = "MOVE_TARGET"
-	PayersSum           Code = "PAYERS_SUM"
-	PayerFixed          Code = "PAYER_FIXED"
-	BadPayback          Code = "BAD_PAYBACK"
-	PaybackNotCopyable  Code = "PAYBACK_NOT_COPYABLE"
-	NoShareToCopy       Code = "NO_SHARE_TO_COPY"
-	NoShare             Code = "NO_SHARE"
 	SettleBooked        Code = "SETTLE_BOOKED"
-	SettleLines         Code = "SETTLE_LINES"
-	ClaimMixedDirection Code = "CLAIM_MIXED_DIRECTION"
-	TxAlreadyInProject  Code = "TX_ALREADY_IN_PROJECT"
-	TxNotBillable       Code = "TX_NOT_BILLABLE"
-	TxNotInProject      Code = "TX_NOT_IN_PROJECT"
-	TxSplitPaid         Code = "TX_SPLIT_PAID"
 	InvalidDateRange    Code = "INVALID_DATE_RANGE"
-	InvalidBillPeople   Code = "INVALID_BILL_PEOPLE"
 	NothingToClaim      Code = "NOTHING_TO_CLAIM"
 	AlreadyClaimed      Code = "ALREADY_CLAIMED"
 	NotBillOwner        Code = "NOT_BILL_OWNER"
@@ -291,26 +252,11 @@ var registry = []Def{
 
 	// transactions
 	{TransactionNotFound, []int{404}, InEnvelope | InPendingLastError, "The transaction does not exist or is not the caller's."},
-	{TxNotFound, []int{404}, InEnvelope, "Events quick-create: the transaction does not exist or is not the caller's."},
 	{TransferSameAccount, []int{400}, InEnvelope | InPendingLastError, "A transfer's source and destination wallets must differ."},
 	{TransferNeedsWallets, nil, InPendingLastError, "Pending: a transfer needs both wallets."},
 	{SystemTransactionImmutable, []int{400}, InEnvelope, "A system transaction (opening balance, adjustment) can't be edited or deleted directly."},
-	{SplitsNotSupportedYet, []int{400}, InEnvelope, "Splits are not supported on this operation."},
-	{SplitsOnTransfer, []int{400}, InEnvelope | InPendingLastError, "A transfer can't have splits."},
-	{SplitsAuthorOnly, []int{403}, InEnvelope, "Only the transaction's author can change its splits."},
-	{SplitsExceedAmount, []int{400}, InEnvelope | InPendingLastError, "The splits add up to more than the amount."},
-	{SplitsExceedShare, []int{400}, InEnvelope, "The splits add up to more than the caller's share of the event bill."},
 	{SplitMismatch, []int{400}, InEnvelope, "Savings: the wallet splits must add up to the amount."},
-	{InvalidSplit, nil, InPendingLastError, "Pending: a split needs a person name and an amount above 0."},
-	{PaidByExpenseOnly, []int{400}, InEnvelope | InPendingLastError, "paid_by is only for an expense or an income."},
-	{PaidByExceedsAmount, []int{400}, InEnvelope | InPendingLastError, "paid_by.amount is more than the bill."},
-	{InvalidPaidBy, nil, InPendingLastError, "Pending: paid_by needs a person and an amount above 0."},
-	{LinkModeConflict, []int{400}, InEnvelope | InPendingLastError, "A bill is shared one way at a time: splits, paid_by or an event."},
-	{LinkModeInput, []int{400}, InEnvelope, "link_mode is missing its data (split -> splits, paid -> paid_by, event -> event.project_id)."},
-	{SharedBillField, []int{409}, InEnvelope, "A copy of a shared bill: this field is edited in the bill form (details.fields)."},
 	{PrivateNoteNotShared, []int{400}, InEnvelope, "private_note is only for a copy of a shared bill."},
-	{SourcePtNotFound, []int{404}, InEnvelope, "Copy from event: the source event row was not found."},
-	{SourcePtNotForUser, []int{403}, InEnvelope, "Copy from event: the caller is not a member of the source event."},
 	{InvalidPersonKey, []int{400}, InEnvelope, "A person key must be c:<contact_id> or n:<name>."},
 
 	// debts
@@ -327,7 +273,6 @@ var registry = []Def{
 	{TagsNeedWallet, []int{400}, InEnvelope, "Tags go on the wallet transaction; pick a wallet first."},
 	{LedgerOnlyNoWallet, []int{400}, InEnvelope, "A ledger-only entry has no wallet or tags; turn create_transaction on."},
 	{BillNotFound, []int{400}, InEnvelope, "The bill is not in an event the caller is a member of."},
-	{UseClaim, []int{400}, InEnvelope, "bill_id / event_id are retired here; claim the bills on the event."},
 	{DebtNotFound, nil, InPendingLastError, "Pending: the target debt entry was not found."},
 
 	// contacts
@@ -349,25 +294,18 @@ var registry = []Def{
 	{TypeNotMutable, []int{400}, InEnvelope, "Invites and link requests can't be muted."},
 
 	// events (projects)
-	{ProjectNotFound, nil, InPendingLastError, "Pending: the event was not found."},
 	{ProjectNotActive, []int{409}, InEnvelope | InPendingLastError, "The event is not active."},
 	{ProjectLocked, []int{409}, InEnvelope | InPendingLastError, "The event is cancelled or archived; writes are blocked."},
-	{ProjectNotMember, nil, InPendingLastError, "Pending: a member is not in the event."},
-	{ProjectReadOnly, nil, InPendingLastError, "Pending: viewers can't change event rows."},
 	{EventCompleted, []int{409}, InEnvelope, "The event is completed; it can't be changed any more."},
 	{EventNotCompleted, []int{409}, InEnvelope, "Settle lines can be booked only after the event is completed."},
 	{EventHasEmptyPerson, []int{409}, InEnvelope, "A bill still has an empty person to assign (details.bill_ids)."},
 	{UseCompleteEndpoint, []int{400}, InEnvelope, "Complete an event with POST /projects/{id}/complete."},
 	{AlreadyMember, []int{409}, InEnvelope, "The user is already a member of the event."},
 	{MemberNotInProject, []int{400}, InEnvelope, "The member does not belong to this event."},
-	{MemberNotRemoved, []int{409}, InEnvelope, "Only a removed member's spots can be assigned."},
-	{NotPending, []int{409}, InEnvelope, "The member isn't waiting for an invite."},
 	{CannotChangeOwner, []int{409}, InEnvelope, "The owner's role can't be changed here; use transfer-ownership."},
 	{CannotRemoveOwner, []int{400}, InEnvelope, "The owner can't be removed; transfer ownership first."},
 	{OwnerCannotLeave, []int{409}, InEnvelope, "The owner can't leave; transfer ownership first."},
 	{ForbiddenRole, []int{403}, InEnvelope, "The caller's event role can't do this."},
-	{PtIsChild, []int{409}, InEnvelope, "A split-child row can't be changed directly; edit its parent."},
-	{SelfSplit, []int{400}, InEnvelope, "A split's member must differ from the payer."},
 	{NotInBill, []int{400}, InEnvelope, "Claim: no pair with that member on the bill (details.bill_ids)."},
 	{BillAlreadyBooked, []int{409}, InEnvelope, "The bill is already booked with that person (details.bill_ids on claim)."},
 	{BillChanged, []int{409}, InEnvelope, "The bill changed since it was opened; reload (details.bill)."},
@@ -377,24 +315,8 @@ var registry = []Def{
 	{MergeTwoUsers, []int{409}, InEnvelope, "Two different users can't be merged into one member."},
 	{SettleNothing, []int{422}, InEnvelope, "Nothing left to book with that member."},
 	{NotPaperBook, []int{400}, InEnvelope, "This transaction / debt is not linked to a bill."},
-	{BillDisconnected, []int{409}, InEnvelope, "The caller disconnected their copy of this bill."},
-	{BillGone, []int{410}, InEnvelope, "The bill was deleted."},
-	{MoveTarget, []int{400}, InEnvelope, "Move: exactly one of project_id, new_event or split."},
-	{PayersSum, []int{400}, InEnvelope, "The payers must add up to the bill."},
-	{PayerFixed, []int{400}, InEnvelope, "A bill's payer can't change."},
-	{BadPayback, []int{400}, InEnvelope, "A payback has exactly one split: the receiver, for the whole amount."},
-	{PaybackNotCopyable, []int{422}, InEnvelope, "A payback can't be copied as an expense."},
-	{NoShareToCopy, []int{422}, InEnvelope, "The caller has no part in this event row to copy."},
-	{NoShare, nil, InPendingLastError, "Pending: the caller has no part in the event row to copy."},
 	{SettleBooked, []int{409}, InEnvelope, "The caller already booked this event's settle."},
-	{SettleLines, []int{400}, InEnvelope, "lines must list each of the caller's fewest-transfers lines once."},
-	{ClaimMixedDirection, []int{400}, InEnvelope, "The bills of one claim must all go the same way."},
-	{TxAlreadyInProject, []int{409}, InEnvelope, "The transaction is already in an event."},
-	{TxNotBillable, []int{422}, InEnvelope | InPendingLastError, "Only expense and income transactions (not system rows or repayments) can be pulled into an event."},
-	{TxNotInProject, []int{404}, InEnvelope, "The transaction is not in this event."},
-	{TxSplitPaid, []int{422}, InEnvelope, "A split on this transaction is labelled paid."},
 	{InvalidDateRange, []int{400}, InEnvelope, "end_date must not be before start_date."},
-	{InvalidBillPeople, nil, InPendingLastError, "Pending: payer / members are invalid."},
 
 	// recurring / budgets / saving goals
 	{InvalidRule, []int{400}, InEnvelope, "The recurrence / budget period rule is invalid."},

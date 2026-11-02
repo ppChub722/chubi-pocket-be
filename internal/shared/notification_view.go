@@ -48,12 +48,12 @@ func AwaitsAnswer(typ string, actionedAt, dismissedAt *time.Time, payload json.R
 	switch typ {
 	case "contact_link_request", "account_invite", "project_invite", "recurring_ending":
 		return true
-	case "split_created", "split_changed":
-		return !has("superseded")
-	case "project_tx_recorded_for_you":
+	case "bill_invite":
 		return true
-	case "project_tx_changed":
-		return has("personal_transaction_id") && has("suggested")
+	case "bill_new", "bill_changed", "bill_removed": // my switch did not do it: join / claim / update / keep-or-delete
+		return !has("applied")
+	case "debt_repaid":
+		return !has("repayment_id")
 	}
 	return false
 }

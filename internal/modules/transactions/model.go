@@ -150,8 +150,7 @@ type DeleteResult struct {
 	DebtEntryID     *uuid.UUID             `json:"debt_entry_id"`
 	PersonBalance   any                    `json:"person_balance"`
 	RecurringItemID *uuid.UUID             `json:"recurring_item_id"`
-	BillID          *uuid.UUID             `json:"bill_id"`
-	Effects         shared.Effects         `json:"effects"` // 0.4.1-1 B2
+	Effects        shared.Effects         `json:"effects"` // 0.4.1-1 B2
 }
 
 type CreateRequest struct {
@@ -177,8 +176,6 @@ type UpdateRequest struct {
 	AccountID           *uuid.UUID  `json:"account_id"              binding:"omitempty"`
 	TransferToAccountID *uuid.UUID  `json:"transfer_to_account_id"  binding:"omitempty"`
 	TagIDs              []uuid.UUID `json:"tag_ids"                 binding:"omitempty"`
-	// AlsoUpdateLink — the edit also reaches the linked recurring item.
-	AlsoUpdateLink bool `json:"also_update_link"`
 	// PrivateNote (0.4.1-2 S11) — only on my book of a paper; null / "" clears.
 	PrivateNote *string `json:"private_note"`
 

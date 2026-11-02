@@ -164,7 +164,7 @@ func (s *Service) DeleteDebtTxInTx(ctx context.Context, tx pgx.Tx, userID, txID 
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
+	if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
 		return nil, err
 	}
 	return current.AccountID, nil
@@ -262,7 +262,7 @@ func (s *Service) DeleteInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUI
 			return nil, err
 		}
 	}
-	if _, err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
+	if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
 		return nil, err
 	}
 	if current.SourcePersonalDebtID != nil && s.debtLinks != nil {
@@ -271,17 +271,4 @@ func (s *Service) DeleteInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUI
 		}
 	}
 	return nonNilIDs(current.AccountID), nil
-}
-
-// debtsTouched — the person-book rows a transaction delete took along (removed) or changed, and
-// their people (0.4.1-2 X4: the delete's effects list them).
-type debtsTouched struct {
-	removed, changed []uuid.UUID
-	keys             []string
-}
-
-func (d *debtsTouched) add(o debtsTouched) {
-	d.removed = append(d.removed, o.removed...)
-	d.changed = append(d.changed, o.changed...)
-	d.keys = append(d.keys, o.keys...)
 }

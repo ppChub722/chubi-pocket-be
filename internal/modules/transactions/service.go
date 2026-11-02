@@ -854,7 +854,7 @@ func (s *Service) updateTransferInTx(
 }
 
 func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) error {
-	_, err := s.delete(ctx, userID, id, false)
+	_, err := s.delete(ctx, userID, id)
 	return err
 }
 
@@ -863,14 +863,11 @@ type deleted struct {
 	debtEntry *uuid.UUID
 	debtKey   string
 	item      *uuid.UUID
-	bill      *uuid.UUID
-	debts     debtsTouched // split / paid-by debts the delete took along or unlinked (X4)
 }
 
-// DeleteWrite deletes a transaction. alsoDeleteLink also deletes the event bill made from it. The
-// recurring occurrence it fills is always skipped (0.4.1-1 R2).
-func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID, alsoDeleteLink bool) (*DeleteResult, error) {
-	d, err := s.delete(ctx, userID, id, alsoDeleteLink)
+// DeleteWrite deletes a transaction. The recurring occurrence it fills is always skipped (0.4.1-1 R2).
+func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID) (*DeleteResult, error) {
+	d, err := s.delete(ctx, userID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -879,21 +876,19 @@ func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID, alsoDel
 		return nil, err
 	}
 	out := &DeleteResult{ID: id, AccountBalances: balances, DebtEntryID: d.debtEntry,
-		RecurringItemID: d.item, BillID: d.bill}
+		RecurringItemID: d.item}
 	if d.debtKey != "" && s.debtLinks != nil {
 		if out.PersonBalance, err = s.debtLinks.PersonBalanceByKey(ctx, userID, d.debtKey); err != nil {
 			return nil, err
 		}
 	}
-	debtIDs := append([]uuid.UUID{}, d.debts.changed...) // a partner's paid-by mirror, unlinked
+	var debtIDs []uuid.UUID
 	if d.debtEntry != nil {
 		debtIDs = append(debtIDs, *d.debtEntry) // kept, ledger-only (D1)
 	}
-	keys := append([]string{d.debtKey}, d.debts.keys...)
-	if out.Effects, err = s.rowEffects(ctx, userID, nil, []uuid.UUID{id}, debtIDs, unionKeys(keys, nil), out.AccountBalances); err != nil {
+	if out.Effects, err = s.rowEffects(ctx, userID, nil, []uuid.UUID{id}, debtIDs, unionKeys([]string{d.debtKey}, nil), out.AccountBalances); err != nil {
 		return nil, err
 	}
-	out.Effects.RemovedDebtIDs = append(out.Effects.RemovedDebtIDs, d.debts.removed...) // X4
 	if d.item != nil && s.recurring != nil {                                            // the occurrence it filled, now skipped (R2)
 		if slot, err := s.recurring.SlotView(ctx, *d.item); err == nil {
 			out.Effects.Slots = append(out.Effects.Slots, slot)
@@ -902,7 +897,7 @@ func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID, alsoDel
 	return out, nil
 }
 
-func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLink bool) (*deleted, error) {
+func (s *Service) delete(ctx context.Context, userID, id uuid.UUID) (*deleted, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -921,7 +916,6 @@ func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLi
 		return nil, err
 	}
 	// Deleting my book of a paper leaves the paper as it is (one way); I can claim it again.
-	_ = alsoDeleteLink
 	if current.Type == TypeTransfer {
 		if out.touched, err = s.deleteTransferInTx(ctx, tx, userID, current); err != nil {
 			return nil, err
@@ -937,11 +931,9 @@ func (s *Service) delete(ctx context.Context, userID, id uuid.UUID, alsoDeleteLi
 		if err := s.checkLinkedEdit(ctx, userID, current, UpdateRequest{}, true); err != nil {
 			return nil, err
 		}
-		removed, err := s.deleteSingleInTx(ctx, tx, userID, current)
-		if err != nil {
+		if err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
 			return nil, err
 		}
-		out.debts.add(removed)
 		if current.SourcePersonalDebtID != nil && s.debtLinks != nil {
 			key, err := s.debtLinks.TxDeletedTx(ctx, tx, userID, *current.SourcePersonalDebtID)
 			if err != nil {
@@ -1007,21 +999,20 @@ func (s *Service) checkNotSystemRow(ctx context.Context, current *Transaction) e
 	return nil
 }
 
-func (s *Service) deleteSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) (debtsTouched, error) {
-	var out debtsTouched
+func (s *Service) deleteSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) error {
 	if current.AccountID != nil {
 		if err := s.store.LockAccountsForUpdate(ctx, tx, []uuid.UUID{*current.AccountID}); err != nil {
-			return out, err
+			return err
 		}
 		delta := signedDelta(current.Type, current.Cash(), false)
 		if _, err := s.store.ApplyBalanceDeltaTx(ctx, tx, userID, *current.AccountID, -delta); err != nil {
-			return out, err
+			return err
 		}
 	}
 	if _, err := s.recurringDeletingTx(ctx, tx, current.ID); err != nil {
-		return out, err
+		return err
 	}
-	return out, s.store.DeleteRowTx(ctx, tx, current.ID)
+	return s.store.DeleteRowTx(ctx, tx, current.ID)
 }
 
 func (s *Service) deleteTransferInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) ([]uuid.UUID, error) {

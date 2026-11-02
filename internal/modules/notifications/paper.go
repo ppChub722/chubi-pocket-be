@@ -22,7 +22,7 @@ const (
 // BillPayload — what every bill notice carries: the paper, its event (nil = a split bill), and
 // what happened to my books.
 type BillPayload struct {
-	PaperID     uuid.UUID  `json:"paper_id"`
+	PaperID     uuid.UUID  `json:"split_transaction_id"`
 	ProjectID   *uuid.UUID `json:"project_id"`
 	ProjectName *string    `json:"project_name"`
 	Description *string    `json:"description"`
@@ -76,7 +76,7 @@ func (s *Service) SupersedePaperNoticesTx(ctx context.Context, tx pgx.Tx, recipi
 	_, err := tx.Exec(ctx, `UPDATE notifications SET actioned_at = NOW()
 		WHERE recipient_user_id = $1 AND actioned_at IS NULL
 		  AND type IN ('bill_invite', 'bill_new', 'bill_changed')
-		  AND payload->>'paper_id' = $2`, recipientUserID, paperID.String())
+		  AND payload->>'split_transaction_id' = $2`, recipientUserID, paperID.String())
 	if err != nil {
 		return fmt.Errorf("supersede paper notices: %w", err)
 	}

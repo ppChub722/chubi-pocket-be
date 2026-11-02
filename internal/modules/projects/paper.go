@@ -661,7 +661,7 @@ func (s *Service) booksOutTx(ctx context.Context, tx pgx.Tx, userID, actor, pape
 			eff.RemovedDebtIDs = append(eff.RemovedDebtIDs, debtIDs...)
 		}
 	}
-	if notify && userID != actor && (txID != nil || len(debtIDs) > 0 || true) {
+	if notify && userID != actor {
 		paper, ok, err := shared.LoadPaper(ctx, tx, userID, paperID)
 		if err != nil {
 			return err
@@ -781,6 +781,7 @@ func (s *Service) leave(ctx context.Context, userID, paperID uuid.UUID, eventID 
 		return nil, fmt.Errorf("leave: %w", err)
 	}
 	out := &PaperDeleteResult{ID: paperID, Effects: eff}
+	out.Effects.RemovedBillIDs = append(out.Effects.RemovedBillIDs, paperID)
 	if a.isOwner(userID) {
 		var next uuid.UUID
 		err := tx.QueryRow(ctx, `SELECT user_id FROM split_transaction_people
@@ -1055,6 +1056,9 @@ func (s *Service) finishWrite(ctx context.Context, tx pgx.Tx, userID, paperID uu
 	out := &PaperWriteResult{Effects: eff}
 	if len(views) == 1 {
 		out.Paper = &views[0]
+		out.Effects.Bills = append(out.Effects.Bills, views[0])
+	} else {
+		out.Effects.RemovedBillIDs = append(out.Effects.RemovedBillIDs, paperID)
 	}
 	var wallets []uuid.UUID
 	for _, t := range eff.Transactions {

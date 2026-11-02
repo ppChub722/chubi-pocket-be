@@ -27,6 +27,55 @@ var ErrBillAlreadyBooked = errors.New("this bill is already booked with that per
 
 func (s *Service) WithNotifications(n *notifications.Service) { s.notifs = n }
 
+// tellPartnerTx — my repayment r with a person I share paper debts with: the partner gets
+// debt_repaid. Their auto_accept_repayments on = the mirrored repayment is written in their book now
+// (no wallet; they pick it later); off = the notice asks and the app opens their repayment sheet.
+// No partner debt with that person = nothing to tell.
+func (s *Service) tellPartnerTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, r *Entry) error {
+	if s.notifs == nil {
+		return nil
+	}
+	var partnerUser, partnerDebt uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT p.user_id, p.id FROM personal_debts d
+		JOIN personal_debts p ON p.id = d.counterpart_debt_id
+		WHERE d.user_id = $1 AND d.kind = 'debt' AND `+shared.DebtKeySQL("d")+` = $2
+		ORDER BY d.date DESC, d.created_at DESC LIMIT 1`, userID, r.Key()).Scan(&partnerUser, &partnerDebt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("repayment partner: %w", err)
+	}
+	theirs, err := getEntry(ctx, tx, partnerUser, partnerDebt, false)
+	if err != nil {
+		return err
+	}
+	kind, direction := RepayReceive, DirectionReceived
+	if r.Direction == DirectionReceived {
+		kind, direction = RepayPay, DirectionPaid
+	}
+	p := notifications.DebtRepaidPayload{
+		DebtID: partnerDebt, Key: theirs.Key(), PersonName: theirs.PersonName, Amount: r.Amount,
+		Direction: direction, Date: r.Date, Description: r.Description,
+	}
+	st, err := s.notifs.SettingsTx(ctx, tx, partnerUser)
+	if err != nil {
+		return err
+	}
+	if st.AutoAcceptRepayments {
+		no := false
+		mine, _, err := s.createRepaymentTx(ctx, tx, partnerUser, theirs.Key(), RepaymentRequest{
+			Kind: kind, Amount: r.Amount, Date: &r.Date, Description: r.Description,
+			CreateTransaction: &no, PersonName: &theirs.PersonName,
+		})
+		if err != nil {
+			return err
+		}
+		p.RepaymentID = &mine.ID
+	}
+	return s.notifs.DispatchDebtRepaid(ctx, tx, partnerUser, userID, p)
+}
+
 // PaperPart — one paper's part of a debt.
 type PaperPart struct {
 	ID            uuid.UUID
@@ -38,7 +87,10 @@ type PaperPart struct {
 	Amount        float64
 }
 
-const paperPartColumns = `id, debt_id, user_id, split_transaction_id, split_person_id, transaction_id, amount::float8`
+// A part whose person was taken off the paper reads as uuid.Nil: nothing is owed to it any more, so
+// it shows out of sync until "อัปเดต" drops it.
+const paperPartColumns = `id, debt_id, user_id, split_transaction_id,
+	COALESCE(split_person_id, '00000000-0000-0000-0000-000000000000'::uuid), transaction_id, amount::float8`
 
 func scanPaperPart(row pgx.Row) (*PaperPart, error) {
 	var p PaperPart
