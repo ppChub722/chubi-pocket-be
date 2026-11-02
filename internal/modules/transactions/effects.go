@@ -46,14 +46,6 @@ func (s *Service) rowEffects(ctx context.Context, userID uuid.UUID, rows []Trans
 		if r.Counterparty != nil {
 			debtIDs = append(debtIDs, r.Counterparty.EntryID)
 		}
-		if r.PaidBy != nil {
-			debtIDs, keys = append(debtIDs, r.PaidBy.DebtID), append(keys, r.PaidBy.Key)
-		}
-		if r.Splits != nil {
-			for _, sp := range *r.Splits {
-				debtIDs, keys = append(debtIDs, sp.DebtID), append(keys, sp.Key)
-			}
-		}
 	}
 	out.RemovedTransactionIDs = append(out.RemovedTransactionIDs, removedTxs...)
 	if balances != nil {

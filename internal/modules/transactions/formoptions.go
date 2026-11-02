@@ -256,7 +256,7 @@ func formEvents(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]shar
 			e    shared.EventRef
 			icon []byte
 		)
-		if err := rows.Scan(&e.ID, &e.Name, &icon, &e.Status, &e.Kind); err != nil {
+		if err := rows.Scan(&e.ID, &e.Name, &icon, &e.Status); err != nil {
 			return nil, fmt.Errorf("form events scan: %w", err)
 		}
 		e.IconCode = shared.IconFromJSON(icon)

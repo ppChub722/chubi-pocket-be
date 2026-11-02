@@ -25,19 +25,6 @@ type DebtLinks interface {
 	TxDeletedTx(ctx context.Context, tx pgx.Tx, userID, entryID uuid.UUID) (key string, err error)
 	PersonBalanceByEntry(ctx context.Context, userID, entryID uuid.UUID) (any, error)
 	PersonBalanceByKey(ctx context.Context, userID uuid.UUID, key string) (any, error)
-	// SetPaidByTx — writes the paid-by debt of row (in nil = remove it); returns the person's key.
-	SetPaidByTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, row *Transaction, in *PaidByInput) (key string, err error)
-	// PaidByDeletingTx — row txID (with a paid-by debt) is about to be deleted: my own paid-by debt
-	// goes with it (the partner is told); a partner's mirrored debt stays, unlinked. debtID = that
-	// debt (nil = none), gone = it was deleted (else it was kept, unlinked).
-	PaidByDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (key string, debtID *uuid.UUID, gone bool, err error)
-	// SplitsFollowTxTx — 0.4.1-1 D8: row (a bill) was edited: its split debts take its date;
-	// checkAmount (an amount-only edit) refuses an amount below their sum (ErrSplitsExceedAmount).
-	SplitsFollowTxTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, row *Transaction, checkAmount bool) error
-	// SplitsDeletingTx — 0.4.1-1 D8: bill txID is about to be deleted: its split debts go with it
-	// and linked partners are told (split_changed removed). It answers the deleted debts and their
-	// people's keys (0.4.1-2 X4: the delete's effects list them).
-	SplitsDeletingTx(ctx context.Context, tx pgx.Tx, userID, txID uuid.UUID) (removed []uuid.UUID, keys []string, err error)
 	// DebtEffects — the person-book rows (DebtEntry views) and people's balances for a write's
 	// effects (0.4.1-1 B2).
 	DebtEffects(ctx context.Context, userID uuid.UUID, ids []uuid.UUID, keys []string) (debts, persons []any, err error)
@@ -275,9 +262,6 @@ func (s *Service) DeleteInTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUI
 			return nil, err
 		}
 	}
-	if _, err := s.paidByDeletingTx(ctx, tx, userID, current); err != nil {
-		return nil, err
-	}
 	if _, err := s.deleteSingleInTx(ctx, tx, userID, current); err != nil {
 		return nil, err
 	}
@@ -300,23 +284,4 @@ func (d *debtsTouched) add(o debtsTouched) {
 	d.removed = append(d.removed, o.removed...)
 	d.changed = append(d.changed, o.changed...)
 	d.keys = append(d.keys, o.keys...)
-}
-
-// paidByDeletingTx — the paid-by debt of a row about to go (nothing when it has none).
-func (s *Service) paidByDeletingTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, current *Transaction) (debtsTouched, error) {
-	var out debtsTouched
-	if current.PaidByAmount == nil || s.debtLinks == nil {
-		return out, nil
-	}
-	key, id, gone, err := s.debtLinks.PaidByDeletingTx(ctx, tx, userID, current.ID)
-	if err != nil || id == nil {
-		return out, err
-	}
-	out.keys = []string{key}
-	if gone {
-		out.removed = []uuid.UUID{*id}
-	} else {
-		out.changed = []uuid.UUID{*id}
-	}
-	return out, nil
 }

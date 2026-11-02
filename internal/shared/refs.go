@@ -49,8 +49,6 @@ type EventRef struct {
 	Name     string    `json:"name"`
 	IconCode *IconCode `json:"icon_code"`
 	Status   string    `json:"status"`
-	// Kind (0.4.1-2 S1) — event | split (the hidden one-bill "event" of a split bill).
-	Kind string `json:"kind"`
 }
 
 type TagRef struct {
@@ -244,7 +242,7 @@ func LoadEventRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UU
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := q.Query(ctx, `SELECT id, name, icon_code, status, kind FROM scopes WHERE id = ANY($1)`, ids)
+	rows, err := q.Query(ctx, `SELECT id, name, icon_code, status FROM projects WHERE id = ANY($1)`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("event refs: %w", err)
 	}
@@ -254,7 +252,7 @@ func LoadEventRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UU
 			r    EventRef
 			icon []byte
 		)
-		if err := rows.Scan(&r.ID, &r.Name, &icon, &r.Status, &r.Kind); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &icon, &r.Status); err != nil {
 			return nil, err
 		}
 		r.IconCode = IconFromJSON(icon)

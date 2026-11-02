@@ -151,7 +151,6 @@ func (h *Handler) List(c *gin.Context) {
 	if c.Query("no_wallet") == "true" {
 		f.NoWallet = true
 	}
-	f.CanJoinEvent = c.Query("can_join_event") == "true"
 	if v := c.Query("counterparty_key"); v != "" {
 		k, err := shared.ParseDebtKey(v)
 		if err != nil {
@@ -241,29 +240,6 @@ func (h *Handler) Delete(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, res)
-}
-
-func (h *Handler) EditSplits(c *gin.Context) {
-	userID, ok := auth.UserIDFromContext(c)
-	if !ok {
-		response.Fail(c, http.StatusUnauthorized, apierr.Unauthorized, "Unauthorized", nil)
-		return
-	}
-	id, ok := parseIDParam(c)
-	if !ok {
-		return
-	}
-	var req EditSplitsRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BindError(c, err)
-		return
-	}
-	out, err := h.service.EditSplits(c.Request.Context(), userID, id, *req.Splits)
-	if err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
 }
 
 func (h *Handler) SetTags(c *gin.Context) {
@@ -393,20 +369,10 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, apierr.CategoryTypeMismatch, err.Error(), nil)
 	case errors.Is(err, ErrTagNotFound):
 		response.BadRequest(c, apierr.TagNotFound, "Tag not found", nil)
-	case errors.Is(err, ErrSplitContactNotFound):
-		response.BadRequest(c, apierr.ContactNotFound, "Split contact not found", nil)
 	case errors.Is(err, ErrTransferSameAccount):
 		response.BadRequest(c, apierr.TransferSameAccount, err.Error(), nil)
 	case errors.Is(err, ErrSystemCategoryNotAllowed):
 		response.BadRequest(c, apierr.SystemCategoryNotAllowed, err.Error(), nil)
-	case errors.Is(err, ErrSplitsNotSupportedYet):
-		response.BadRequest(c, apierr.SplitsNotSupportedYet, err.Error(), nil)
-	case errors.Is(err, ErrProjectIDNotAllowed):
-		response.ValidationErr(c, err)
-	case errors.Is(err, ErrSourcePTNotFound):
-		response.NotFound(c, apierr.SourcePtNotFound, err.Error())
-	case errors.Is(err, ErrSourcePTNotForUser):
-		response.Fail(c, http.StatusForbidden, apierr.SourcePtNotForUser, err.Error(), nil)
 	case errors.Is(err, ErrTransferToAccountRequired),
 		errors.Is(err, ErrTransferFieldsOnNonTransfer),
 		errors.Is(err, ErrCategoryRequiredForTransfer),
@@ -423,30 +389,8 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, apierr.DebtTxNeedsWallet, err.Error(), nil)
 	case errors.Is(err, ErrRowLocked):
 		response.Fail(c, http.StatusForbidden, apierr.RowLocked, err.Error(), nil)
-	case errors.Is(err, ErrSplitsOnTransfer):
-		response.BadRequest(c, apierr.SplitsOnTransfer, err.Error(), nil)
-	case errors.Is(err, ErrSplitsAuthorOnly):
-		response.Fail(c, http.StatusForbidden, apierr.SplitsAuthorOnly, err.Error(), nil)
-	case errors.Is(err, ErrSplitsExceedAmount):
-		response.BadRequest(c, apierr.SplitsExceedAmount, err.Error(), nil)
-	case errors.Is(err, ErrSplitUnknownDebt), errors.Is(err, ErrSplitPersonRequired):
+	case errors.Is(err, ErrAmountInvalid):
 		response.ValidationErr(c, err)
-	case errors.Is(err, ErrSplitsExceedShare):
-		response.BadRequest(c, apierr.SplitsExceedShare, err.Error(), nil)
-	case errors.Is(err, ErrAmountInvalid), errors.Is(err, ErrPaidByPersonRequired):
-		response.ValidationErr(c, err)
-	case errors.Is(err, ErrPaidByExpenseOnly):
-		response.BadRequest(c, apierr.PaidByExpenseOnly, err.Error(), nil)
-	case errors.Is(err, ErrPaidByExceedsAmount):
-		response.BadRequest(c, apierr.PaidByExceedsAmount, err.Error(), nil)
-	case errors.Is(err, ErrLinkModeConflict):
-		response.BadRequest(c, apierr.LinkModeConflict, err.Error(), nil)
-	case errors.Is(err, ErrLinkModeInput):
-		response.BadRequest(c, apierr.LinkModeInput, err.Error(), nil)
-	case errors.As(err, new(*SharedBillFieldError)):
-		var f *SharedBillFieldError
-		errors.As(err, &f)
-		response.Fail(c, http.StatusConflict, apierr.SharedBillField, err.Error(), map[string]any{"fields": f.Fields})
 	case errors.Is(err, ErrPrivateNoteNotShared):
 		response.BadRequest(c, apierr.PrivateNoteNotShared, err.Error(), nil)
 	case errors.Is(err, ErrPrivateNoteTooLong):

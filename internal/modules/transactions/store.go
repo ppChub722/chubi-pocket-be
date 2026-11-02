@@ -23,54 +23,18 @@ func NewStore(db *pgxpool.Pool) *Store {
 
 func (s *Store) Pool() *pgxpool.Pool { return s.db }
 
-var (
-	ErrTxNotFound         = errors.New("transaction not found")
-	ErrSourcePTNotFound   = errors.New("source project transaction not found")
-	ErrSourcePTNotForUser = errors.New("caller is not a member of the source project")
-)
-
-// LookupSourcePTTx — the event of a bill a new transaction copies (nil: a split bill), when the user
-// is one of its active members.
-func (s *Store) LookupSourcePTTx(
-	ctx context.Context, tx pgx.Tx, ptID, userID uuid.UUID,
-) (*uuid.UUID, error) {
-	var (
-		scope     uuid.UUID
-		projectID *uuid.UUID
-	)
-	err := tx.QueryRow(ctx,
-		`SELECT scope_id, project_id FROM project_transactions WHERE id = $1`, ptID,
-	).Scan(&scope, &projectID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrSourcePTNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("source PT lookup: %w", err)
-	}
-	var n int
-	if err := tx.QueryRow(ctx,
-		`SELECT COUNT(*) FROM project_members
-		WHERE scope_id = $1 AND user_id = $2 AND status = 'active'`,
-		scope, userID,
-	).Scan(&n); err != nil {
-		return nil, fmt.Errorf("source PT membership: %w", err)
-	}
-	if n == 0 {
-		return nil, ErrSourcePTNotForUser
-	}
-	return projectID, nil
-}
+var ErrTxNotFound = errors.New("transaction not found")
 
 const txColumns = `id, user_id, account_id, type, amount, category_id,
 	to_char(date, 'YYYY-MM-DD') AS date, description, note, transfer_group_id,
-	source_personal_debt_id, source_project_transaction_id, project_id,
-	debt_connected, debt_prev_category_id, paid_by_amount, private_note,
+	source_personal_debt_id, split_transaction_id, split_person_id, my_share,
+	debt_connected, debt_prev_category_id, private_note,
 	created_at, updated_at`
 
 const txColumnsT = `t.id, t.user_id, t.account_id, t.type, t.amount, t.category_id,
 	to_char(t.date, 'YYYY-MM-DD') AS date, t.description, t.note, t.transfer_group_id,
-	t.source_personal_debt_id, t.source_project_transaction_id, t.project_id,
-	t.debt_connected, t.debt_prev_category_id, t.paid_by_amount, t.private_note,
+	t.source_personal_debt_id, t.split_transaction_id, t.split_person_id, t.my_share,
+	t.debt_connected, t.debt_prev_category_id, t.private_note,
 	t.created_at, t.updated_at`
 
 func scanTx(row pgx.Row) (*Transaction, error) {
@@ -78,11 +42,29 @@ func scanTx(row pgx.Row) (*Transaction, error) {
 	err := row.Scan(
 		&t.ID, &t.UserID, &t.AccountID, &t.Type, &t.Amount, &t.CategoryID,
 		&t.Date, &t.Description, &t.Note, &t.TransferGroupID,
-		&t.SourcePersonalDebtID, &t.SourceProjectTransactionID, &t.ProjectID,
-		&t.DebtConnected, &t.DebtPrevCategoryID, &t.PaidByAmount, &t.PrivateNote,
+		&t.SourcePersonalDebtID, &t.SplitTransactionID, &t.SplitPersonID, &t.MyShare,
+		&t.DebtConnected, &t.DebtPrevCategoryID, &t.PrivateNote,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
 	return &t, err
+}
+
+// reloadTx — a row by id inside a transaction.
+func reloadTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*Transaction, error) {
+	t, err := scanTx(tx.QueryRow(ctx, `SELECT `+txColumns+` FROM transactions WHERE id = $1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTxNotFound
+	}
+	return t, err
+}
+
+// GetForUpdateTx — my row by id, locked.
+func (s *Store) GetForUpdateTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID) (*Transaction, error) {
+	t, err := scanTx(tx.QueryRow(ctx, `SELECT `+txColumns+` FROM transactions WHERE id = $1 AND user_id = $2 FOR UPDATE`, id, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTxNotFound
+	}
+	return t, err
 }
 
 // reportableRow — the row's category counts in reports (shared.ReportableCategoryPredicate; no
@@ -234,21 +216,16 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 		args = append(args, *f.AmountMax)
 		whereClauses = append(whereClauses, fmt.Sprintf("t.amount <= $%d", len(args)))
 	}
-	if f.CanJoinEvent {
-		whereClauses = append(whereClauses, `t.user_id = $1 AND t.type IN ('expense', 'income')
-			AND t.project_id IS NULL AND t.source_personal_debt_id IS NULL AND t.source_project_transaction_id IS NULL
-			AND t.paid_by_amount IS NULL
-			AND NOT EXISTS (SELECT 1 FROM categories jc WHERE jc.id = t.category_id AND jc.is_system)
-			AND NOT EXISTS (SELECT 1 FROM personal_debts jd WHERE jd.source_transaction_id = t.id AND jd.user_id = t.user_id AND jd.paid)`)
-	}
 	if f.CounterpartyKey != "" {
 		args = append(args, f.CounterpartyKey)
 		// The person's money: the transactions of their person-book rows (debts and repayments,
-		// connected ones included), the bills split with them, the bills they paid / received for me.
+		// connected ones included) and my books of the papers my debts with them came from.
 		whereClauses = append(whereClauses, fmt.Sprintf(`t.user_id = $1 AND EXISTS (SELECT 1 FROM personal_debts kd
 			WHERE kd.user_id = t.user_id AND %[1]s = $%[2]d
 			  AND (kd.id = t.source_personal_debt_id
-			       OR t.id IN (kd.source_transaction_id, kd.paid_for_transaction_id)))`, shared.DebtKeySQL("kd"), len(args)))
+			       OR EXISTS (SELECT 1 FROM personal_debt_bills kb
+			                  WHERE kb.debt_id = kd.id AND kb.split_transaction_id = t.split_transaction_id)))`,
+			shared.DebtKeySQL("kd"), len(args)))
 	}
 
 	where := strings.Join(whereClauses, " AND ")
@@ -318,19 +295,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Tra
 	return out, total, totals, daily, nil
 }
 
-func (s *Store) EventSplitsTotal(ctx context.Context, txID uuid.UUID) (float64, error) {
-	var total float64
-	err := s.db.QueryRow(ctx, `
-		SELECT CASE WHEN `+shared.EventBillPredicate("t")+` THEN COALESCE((
-			SELECT SUM(sp.share) FROM split_transaction_people sp
-			JOIN project_transactions pb ON pb.id = sp.split_transaction_id
-			WHERE sp.split_transaction_id = t.split_transaction_id
-			  AND sp.event_member_id IS DISTINCT FROM pb.transaction_member_id), 0)
-		ELSE 0 END
-		FROM transactions t WHERE t.id = $1`, txID).Scan(&total)
-	return total, err
-}
-
 func (s *Store) LockAccountsForUpdate(ctx context.Context, tx pgx.Tx, ids []uuid.UUID) error {
 	for _, id := range ids {
 		if _, err := tx.Exec(ctx,
@@ -384,15 +348,15 @@ func (s *Store) InsertRowTx(ctx context.Context, tx pgx.Tx, t *Transaction) (*Tr
 
 	q := `INSERT INTO transactions
 		(id, user_id, account_id, type, amount, category_id, date, note,
-		 transfer_group_id, source_personal_debt_id, source_project_transaction_id, project_id,
-		 description, debt_connected, debt_prev_category_id, paid_by_amount, created_by_user_id)
+		 transfer_group_id, source_personal_debt_id, split_transaction_id, split_person_id, my_share,
+		 description, debt_connected, debt_prev_category_id, created_by_user_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16, $2)
 		RETURNING ` + txColumns
 	created, err := scanTx(tx.QueryRow(ctx, q,
 		t.ID, t.UserID, t.AccountID, string(t.Type), t.Amount, t.CategoryID,
 		t.Date, shared.CleanText(t.Note), t.TransferGroupID,
-		t.SourcePersonalDebtID, t.SourceProjectTransactionID, t.ProjectID, shared.CleanText(t.Description),
-		t.DebtConnected, t.DebtPrevCategoryID, t.PaidByAmount))
+		t.SourcePersonalDebtID, t.SplitTransactionID, t.SplitPersonID, t.MyShare, shared.CleanText(t.Description),
+		t.DebtConnected, t.DebtPrevCategoryID))
 	if err != nil {
 		return nil, fmt.Errorf("insert tx: %w", err)
 	}
@@ -406,14 +370,9 @@ func (s *Store) UpdateRowTx(
 	description *string, descriptionChange bool,
 	note *string, noteChange bool,
 	accountID *uuid.UUID, accountIDChange bool,
-	paidBy *float64, paidByChange bool,
 ) (*Transaction, error) {
 	q := `UPDATE transactions SET updated_by_user_id = $1`
 	args := []any{userID}
-	if paidByChange {
-		args = append(args, paidBy)
-		q += fmt.Sprintf(", paid_by_amount = $%d", len(args))
-	}
 	if amount != nil {
 		args = append(args, *amount)
 		q += fmt.Sprintf(", amount = $%d", len(args))
