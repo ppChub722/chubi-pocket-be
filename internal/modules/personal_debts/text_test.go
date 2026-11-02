@@ -17,7 +17,6 @@ func TestUpdateTextFields(t *testing.T) {
 	cats := categories.NewService(categories.NewStore(pool))
 	txs := transactions.NewService(transactions.NewStore(pool), cats)
 	svc := NewService(NewStore(pool), txs)
-	txs.WithDebtsCreator(svc.CreateForTransactionTx)
 	txs.WithDebtLinks(svc)
 	seed, err := pool.Begin(ctx)
 	if err != nil {
@@ -57,18 +56,4 @@ func TestUpdateTextFields(t *testing.T) {
 		testdb.CheckText(t, body, got.Entry.Description, got.Entry.Note, st.WantD, st.WantN)
 		testdb.CheckText(t, body+" (tx)", got.Transaction.Description, got.Transaction.Note, st.WantD, st.WantN)
 	}
-
-	if _, err := txs.Create(ctx, uid, transactions.CreateRequest{
-		Type: transactions.TypeExpense, AccountID: &wallet, Amount: 200, Date: "2026-10-10",
-		Description: testdb.Str("Dinner"),
-		Splits:      []transactions.SplitInput{{PersonName: "Beam", OwedAmount: 100}},
-	}); err != nil {
-		t.Fatalf("create split bill: %v", err)
-	}
-	var desc *string
-	if err := pool.QueryRow(ctx, `SELECT description FROM personal_debts
-		WHERE user_id = $1 AND counterparty_person_name = 'Beam'`, uid).Scan(&desc); err != nil {
-		t.Fatalf("read split entry: %v", err)
-	}
-	testdb.CheckText(t, "split entry", desc, nil, "Dinner", "")
 }

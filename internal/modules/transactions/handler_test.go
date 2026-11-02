@@ -47,7 +47,6 @@ func routes(h *transactions.Handler) func(g *gin.RouterGroup) {
 		g.GET("/transactions/:id", h.Get)
 		g.PUT("/transactions/:id", h.Update)
 		g.DELETE("/transactions/:id", h.Delete)
-		g.PUT("/transactions/:id/splits", h.EditSplits)
 		g.PUT("/transactions/:id/tags", h.SetTags)
 	}
 }
@@ -73,8 +72,6 @@ func newHFix(t *testing.T, seed bool) *hfix {
 	}
 	f.svc = transactions.NewService(transactions.NewStore(pool), cats)
 	debts := personal_debts.NewService(personal_debts.NewStore(pool), f.svc)
-	f.svc.WithDebtsCreator(debts.CreateForTransactionTx)
-	f.svc.WithSplitsEditor(debts.EditForTransactionTx)
 	f.svc.WithDebtLinks(debts)
 	f.h = transactions.NewHandler(f.svc)
 	f.r = apitest.Engine(f.me, routes(f.h))
@@ -178,26 +175,12 @@ func tagNames(d transactions.TransactionDetail) []string {
 	return out
 }
 
-func splitByName(d transactions.TransactionDetail) map[string]transactions.SplitRef {
-	out := map[string]transactions.SplitRef{}
-	if d.Splits != nil {
-		for _, s := range *d.Splits {
-			out[s.DisplayName] = s
-		}
-	}
-	return out
-}
-
 func TestCreateGetListHandlers(t *testing.T) {
 	f := newHFix(t, true)
 
 	body := map[string]any{
 		"type": "expense", "account_id": f.walletA, "category_id": f.food, "amount": 300,
 		"date": "2026-10-12", "description": "Dinner", "tag_ids": []uuid.UUID{f.tagA},
-		"splits": []map[string]any{
-			{"person_name": "Typed", "contact_id": f.beeID, "owed_amount": 100},
-			{"person_name": "Aom", "owed_amount": 50},
-		},
 	}
 	apitest.ConformRequest(t, "createTransaction", body)
 	res := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", body, http.StatusCreated))
@@ -215,35 +198,16 @@ func TestCreateGetListHandlers(t *testing.T) {
 	if got := tagNames(bill); len(got) != 1 || got[0] != "alpha" {
 		t.Errorf("tags = %v, want [alpha]", got)
 	}
-	if bill.MyShare == nil || *bill.MyShare != 150 || bill.SplitCount != 2 || bill.Counterparty != nil || bill.EventBill != nil {
-		t.Errorf("my_share=%v split_count=%d counterparty=%v", bill.MyShare, bill.SplitCount, bill.Counterparty)
+	if bill.MyShare == nil || *bill.MyShare != 300 || bill.Counterparty != nil || bill.EventBill != nil || bill.SplitBill != nil {
+		t.Errorf("my_share=%v counterparty=%v event_bill=%v", bill.MyShare, bill.Counterparty, bill.EventBill)
 	}
-	if !bill.CanSplit || !bill.CanEditSplits || !bill.CanJoinEvent || !bill.CanEditCategory || bill.IsLocked ||
-		bill.CreatedBy != nil || bill.TransferPeer != nil {
+	if !bill.CanEditCategory || bill.IsLocked || bill.CreatedBy != nil || bill.TransferPeer != nil {
 		t.Errorf("flags: %+v", bill)
 	}
-	splits := splitByName(bill)
-	bee, ok := splits["Partner Live"]
-	if !ok || bee.Person.ContactID == nil || *bee.Person.ContactID != f.beeID || !bee.Person.Linked ||
-		bee.Person.LinkedUserID == nil || *bee.Person.LinkedUserID != f.partner || bee.Amount != 100 {
-		t.Errorf("linked split = %+v (all %v), want the linked user's live name", bee, splits)
-	}
-	if aom, ok := splits["Aom"]; !ok || aom.Person.ContactID != nil || aom.Person.Linked {
-		t.Errorf("free-name split = %+v", aom)
-	}
-
-	f.exec(`UPDATE contacts SET nickname = 'Beebee', show_nickname = TRUE WHERE id = $1`, f.beeID)
 	got := decode[transactions.TransactionDetail](t,
 		f.call("getTransaction", "GET", "/api/v1/transactions/"+bill.ID.String(), nil, http.StatusOK))
-	if _, ok := splitByName(got)["Beebee"]; !ok {
-		t.Errorf("after nickname: splits %v, want Beebee", splitByName(got))
-	}
-	f.exec(`UPDATE contacts SET show_nickname = FALSE WHERE id = $1`, f.beeID)
-	f.exec(`UPDATE users SET display_name = 'Partner Renamed' WHERE id = $1`, f.partner)
-	got = decode[transactions.TransactionDetail](t,
-		f.call("getTransaction", "GET", "/api/v1/transactions/"+bill.ID.String(), nil, http.StatusOK))
-	if s, ok := splitByName(got)["Partner Renamed"]; !ok || s.Person.Name != "Partner Renamed" {
-		t.Errorf("after profile rename: splits %v, want Partner Renamed", splitByName(got))
+	if got.ID != bill.ID {
+		t.Errorf("get = %+v", got)
 	}
 
 	tr := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
@@ -262,9 +226,9 @@ func TestCreateGetListHandlers(t *testing.T) {
 		in.TransferPeer.Account.ID != f.walletA {
 		t.Errorf("IN row peer = %+v", in.TransferPeer)
 	}
-	if out.MyShare != nil || out.CanSplit || out.CanEditCategory || out.Category == nil || !out.Category.IsSystem {
-		t.Errorf("transfer row: my_share=%v can_split=%v can_edit_category=%v category=%+v",
-			out.MyShare, out.CanSplit, out.CanEditCategory, out.Category)
+	if out.MyShare != nil || out.CanEditCategory || out.Category == nil || !out.Category.IsSystem {
+		t.Errorf("transfer row: my_share=%v can_edit_category=%v category=%+v",
+			out.MyShare, out.CanEditCategory, out.Category)
 	}
 	if len(out.Tags) != 1 || len(in.Tags) != 0 {
 		t.Errorf("transfer tags: out %v in %v, want the tag on the OUT row only", tagNames(out), tagNames(in))
@@ -275,7 +239,7 @@ func TestCreateGetListHandlers(t *testing.T) {
 		t.Errorf("transfer balances = %+v, want A -350 / B 50", tr.AccountBalances)
 	}
 
-	// Errors: someone else's tag (nothing is written), project_id, a transfer without a destination.
+	// Errors: someone else's tag (nothing is written), a transfer without a destination.
 	e := f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
 		"type": "expense", "account_id": f.walletA, "amount": 10, "date": "2026-10-12",
 		"tag_ids": []uuid.UUID{f.otherTag},
@@ -284,33 +248,15 @@ func TestCreateGetListHandlers(t *testing.T) {
 		t.Errorf("foreign tag: code %s, balance %v (want TAG_NOT_FOUND, -350)", errCode(t, e), f.balance(f.walletA))
 	}
 	f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
-		"type": "expense", "amount": 10, "date": "2026-10-12", "project_id": uuid.New(),
-	}, http.StatusBadRequest)
-	f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
 		"type": "transfer", "account_id": f.walletA, "amount": 10, "date": "2026-10-12",
 	}, http.StatusBadRequest)
 
-	raw := f.call("listTransactions", "GET", "/api/v1/transactions?per_page=2", nil, http.StatusOK)
-	var page struct {
-		Data []map[string]json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &page); err != nil {
-		t.Fatal(err)
-	}
-	if len(page.Data) != 2 {
-		t.Fatalf("list page rows = %d, want 2", len(page.Data))
-	}
-	for _, row := range page.Data {
-		if string(row["splits"]) != "null" {
-			t.Errorf("list row splits = %s, want null", row["splits"])
-		}
-	}
 	list := decode[transactions.ListResponse](t, f.call("listTransactions", "GET", "/api/v1/transactions", nil, http.StatusOK))
-	if list.Pagination.Total != 3 || list.Totals.Expense != 150 || list.Totals.Count != 1 {
-		t.Errorf("list: total %d totals %+v, want 3 rows, expense 150 (my share), count 1", list.Pagination.Total, list.Totals)
+	if list.Pagination.Total != 3 || list.Totals.Expense != 300 || list.Totals.Count != 1 {
+		t.Errorf("list: total %d totals %+v, want 3 rows, expense 300, count 1", list.Pagination.Total, list.Totals)
 	}
 	for _, r := range list.Data {
-		if r.ID == bill.ID && (r.SplitCount != 2 || r.MyShare == nil || *r.MyShare != 150 || len(r.Tags) != 1) {
+		if r.ID == bill.ID && (r.MyShare == nil || *r.MyShare != 300 || len(r.Tags) != 1) {
 			t.Errorf("list bill row = %+v", r)
 		}
 		if r.Type == transactions.TypeTransfer && r.TransferPeer == nil {
@@ -347,8 +293,8 @@ func TestUpdateDeleteHandlers(t *testing.T) {
 		t.Errorf("move balances = %+v, want A 0 / B -120", res.AccountBalances)
 	}
 	row := res.Rows[0]
-	if row.Account == nil || row.Account.ID != f.walletB || row.Amount != 120 || row.Splits == nil {
-		t.Errorf("edited row = account %+v amount %v splits %v", row.Account, row.Amount, row.Splits)
+	if row.Account == nil || row.Account.ID != f.walletB || row.Amount != 120 {
+		t.Errorf("edited row = account %+v amount %v", row.Account, row.Amount)
 	}
 	if got := tagNames(row); len(got) != 2 || got[0] != "beta" || got[1] != "gamma" {
 		t.Errorf("tags after replace = %v, want [beta gamma]", got)
@@ -399,89 +345,6 @@ func TestUpdateDeleteHandlers(t *testing.T) {
 	f.call("deleteTransaction", "DELETE", path, nil, http.StatusNotFound)
 }
 
-func TestEditSplitsHandler(t *testing.T) {
-	f := newHFix(t, true)
-	created := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
-		"type": "expense", "account_id": f.walletA, "amount": 300, "date": "2026-10-12",
-		"splits": []map[string]any{
-			{"person_name": "Typed", "contact_id": f.beeID, "owed_amount": 100},
-			{"person_name": "Aom", "owed_amount": 50},
-		},
-	}, http.StatusCreated))
-	bill := created.Rows[0]
-	s := splitByName(bill)
-	beeDebt, aomDebt := s["Partner Live"].DebtID, s["Aom"].DebtID
-	path := "/api/v1/transactions/" + bill.ID.String() + "/splits"
-
-	body := map[string]any{"splits": []map[string]any{
-		{"debt_id": beeDebt, "person_name": "Hacked", "owed_amount": 120},
-		{"debt_id": aomDebt, "person_name": "Aommy", "owed_amount": 50},
-		{"contact_id": f.ceeID, "owed_amount": 30},
-	}}
-	apitest.ConformRequest(t, "editSplits", body)
-	got := decode[transactions.TransactionDetail](t, f.call("editSplits", "PUT", path, body, http.StatusOK))
-	s = splitByName(got)
-	if _, hacked := s["Hacked"]; hacked || s["Partner Live"].DebtID != beeDebt || s["Partner Live"].Amount != 120 {
-		t.Errorf("linked split after edit = %v, want the contact's name and 120", s)
-	}
-	if r, ok := s["Aommy"]; !ok || r.DebtID != aomDebt {
-		t.Errorf("free-name rename = %v", s)
-	}
-	cee, ok := s["Cee"]
-	if !ok || cee.Amount != 30 || cee.Person.ContactID == nil || *cee.Person.ContactID != f.ceeID || cee.Person.Linked {
-		t.Errorf("new contact split = %+v", cee)
-	}
-	if got.MyShare == nil || *got.MyShare != 100 || got.SplitCount != 3 {
-		t.Errorf("my_share = %v split_count = %d, want 100 / 3", got.MyShare, got.SplitCount)
-	}
-	var beeSnap, ceeSnap string
-	_ = f.pool.QueryRow(f.ctx, `SELECT counterparty_person_name FROM personal_debts WHERE id = $1`, beeDebt).Scan(&beeSnap)
-	_ = f.pool.QueryRow(f.ctx, `SELECT counterparty_person_name FROM personal_debts WHERE id = $1`, cee.DebtID).Scan(&ceeSnap)
-	if beeSnap != "Typed" || ceeSnap != "Cee" {
-		t.Errorf("stored snapshots = %q / %q, want Typed (unchanged) / Cee (the contact's name)", beeSnap, ceeSnap)
-	}
-	f.exec(`UPDATE contacts SET nickname = 'C-nick' WHERE id = $1`, f.ceeID)
-	got = decode[transactions.TransactionDetail](t,
-		f.call("getTransaction", "GET", "/api/v1/transactions/"+bill.ID.String(), nil, http.StatusOK))
-	if _, ok := splitByName(got)["C-nick"]; !ok {
-		t.Errorf("after nickname: %v", splitByName(got))
-	}
-
-	// Back to a free name without a name: keeps the name the contact showed.
-	got = decode[transactions.TransactionDetail](t, f.call("editSplits", "PUT", path, map[string]any{"splits": []map[string]any{
-		{"debt_id": beeDebt, "owed_amount": 120},
-		{"debt_id": aomDebt, "owed_amount": 50},
-		{"debt_id": cee.DebtID, "contact_id": nil, "owed_amount": 30},
-	}}, http.StatusOK))
-	if r, ok := splitByName(got)["C-nick"]; !ok || r.Person.ContactID != nil || r.DebtID != cee.DebtID {
-		t.Errorf("dropped contact = %v, want a free name C-nick on the same debt", splitByName(got))
-	}
-
-	e := f.call("editSplits", "PUT", path, map[string]any{"splits": []map[string]any{
-		{"person_name": "Big", "owed_amount": 400},
-	}}, http.StatusBadRequest)
-	if errCode(t, e) != "SPLITS_EXCEED_AMOUNT" {
-		t.Errorf("over the amount: %s", errCode(t, e))
-	}
-	f.call("editSplits", "PUT", "/api/v1/transactions/"+uuid.New().String()+"/splits",
-		map[string]any{"splits": []any{}}, http.StatusNotFound)
-	mid, _ := uuid.NewV7()
-	f.exec(`INSERT INTO account_members (id, account_id, user_id, role, report_scope, joined_at)
-		VALUES ($1, $2, $3, 'member', 'none', NOW())`, mid, f.walletA, f.partner)
-	other := apitest.Engine(f.partner, routes(f.h))
-	seen := decode[transactions.TransactionDetail](t, callAs(t, other, "getTransaction", "GET",
-		"/api/v1/transactions/"+bill.ID.String(), nil, http.StatusOK))
-	if seen.CreatedBy == nil || seen.CreatedBy.UserID != f.me || seen.CanEditSplits || seen.CanEditCategory ||
-		seen.Splits == nil || len(*seen.Splits) != 0 || seen.SplitCount != 3 {
-		t.Errorf("co-member view: created_by=%+v can_edit_splits=%v splits=%v split_count=%d",
-			seen.CreatedBy, seen.CanEditSplits, seen.Splits, seen.SplitCount)
-	}
-	e = callAs(t, other, "editSplits", "PUT", path, map[string]any{"splits": []any{}}, http.StatusForbidden)
-	if errCode(t, e) != "SPLITS_AUTHOR_ONLY" {
-		t.Errorf("co-member edit: %s", errCode(t, e))
-	}
-}
-
 func TestSetTagsHandler(t *testing.T) {
 	f := newHFix(t, true)
 	created := decode[writeResult](t, f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
@@ -503,7 +366,7 @@ func TestSetTagsHandler(t *testing.T) {
 	body := map[string]any{"tag_ids": []uuid.UUID{f.tagC, f.tagB}}
 	apitest.ConformRequest(t, "setTransactionTags", body)
 	got := decode[transactions.TransactionDetail](t, f.call("setTransactionTags", "PUT", path, body, http.StatusOK))
-	if names := tagNames(got); len(names) != 2 || names[0] != "beta" || names[1] != "gamma" || got.Splits == nil {
+	if names := tagNames(got); len(names) != 2 || names[0] != "beta" || names[1] != "gamma" {
 		t.Errorf("tags = %v, want [beta gamma]", names)
 	}
 	got = decode[transactions.TransactionDetail](t, f.call("setTransactionTags", "PUT", path,

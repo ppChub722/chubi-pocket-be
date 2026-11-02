@@ -61,9 +61,10 @@ func (s *Store) UpcomingItems(ctx context.Context, userID uuid.UUID, today, unti
 	return out, rows.Err()
 }
 
+// attentionTypes — the types shared.AwaitsAnswer can say yes for (a read one still needs me).
 var attentionTypes = []string{
-	"contact_link_request", "account_invite", "project_invite", "recurring_ending", "split_created", "split_changed",
-	"project_tx_recorded_for_you", "project_tx_changed",
+	"contact_link_request", "account_invite", "project_invite", "recurring_ending",
+	"bill_invite", "bill_new", "bill_changed", "bill_removed", "debt_repaid",
 }
 
 func (s *Store) AttentionIDs(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {

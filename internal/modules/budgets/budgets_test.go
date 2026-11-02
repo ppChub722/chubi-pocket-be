@@ -275,6 +275,42 @@ func TestBudgetFutureTransactionIsExpected(t *testing.T) {
 	}
 }
 
+// tripEvent — an event "CNX" (me + Bee) with the event tag "trip".
+func (f *budFix) tripEvent() (ev, tag, meM, beeM uuid.UUID) {
+	ev, tag, meM, beeM = uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	f.exec(`INSERT INTO projects (id, owner_user_id, name, status) VALUES ($1, $2, 'CNX', 'active')`, ev, f.me)
+	f.exec(`INSERT INTO project_members (id, project_id, user_id, display_name, role, status) VALUES
+		($1, $2, $3, 'Me', 'owner', 'active'), ($4, $2, NULL, 'Bee', 'contributor', 'active')`, meM, ev, f.me, beeM)
+	f.exec(`INSERT INTO event_tags (id, project_id, name) VALUES ($1, $2, 'trip')`, tag, ev)
+	return
+}
+
+// claimedBill — an event bill of amount (Bee paid it unless iPaid) with my share, tagged with the
+// event tag, and my claim of it: a transaction of my share (or, when I paid, of the whole bill with
+// my_share). Answers my transaction.
+func (f *budFix) claimedBill(ev, tag, meM, beeM uuid.UUID, amount, share float64, iPaid bool, date string, tags ...string) uuid.UUID {
+	f.t.Helper()
+	bill, me := uuid.New(), uuid.New()
+	f.exec(`INSERT INTO project_transactions (id, project_id, owner_user_id, type, amount, date)
+		VALUES ($1, $2, $3, 'expense', $4, $5)`, bill, ev, f.me, amount, date)
+	myPaid, beePaid := 0.0, amount
+	if iPaid {
+		myPaid, beePaid = amount, 0
+	}
+	f.exec(`INSERT INTO split_transaction_people (id, split_transaction_id, user_id, project_member_id, name, share, paid, sort)
+		VALUES ($1, $2, $3, $4, 'Me', $5, $6, 0), (gen_random_uuid(), $2, NULL, $7, 'Bee', $8, $9, 1)`,
+		me, bill, f.me, meM, share, myPaid, beeM, amount-share, beePaid)
+	f.exec(`INSERT INTO project_transaction_tags (project_transaction_id, event_tag_id) VALUES ($1, $2)`, bill, tag)
+	txAmount := share
+	if iPaid {
+		txAmount = amount
+	}
+	id := f.tx(txAmount, &f.food, date, tags...)
+	f.exec(`UPDATE transactions SET split_transaction_id = $2, split_person_id = $3,
+		my_share = CASE WHEN $4 THEN $5::numeric END WHERE id = $1`, id, bill, me, iPaid, share)
+	return id
+}
+
 // An event bill dated after today is not "used" yet either: it is expected until its day.
 func TestBudgetFutureEventBillIsExpected(t *testing.T) {
 	f := newBudFix(t)
@@ -284,22 +320,9 @@ func TestBudgetFutureEventBillIsExpected(t *testing.T) {
 		"scope": map[string]any{"tags": []string{"Trip"}},
 	}, http.StatusCreated, &d)
 	id := d.Budget.ID.String()
-
-	ev, meM, beeM := uuid.New(), uuid.New(), uuid.New()
-	f.exec(`INSERT INTO projects (id, owner_user_id, name, status) VALUES ($1, $2, 'CNX', 'active')`, ev, f.me)
-	f.exec(`INSERT INTO project_members (id, project_id, user_id, display_name, role, status) VALUES
-		($1, $2, $3, 'Me', 'owner', 'active'), ($4, $2, NULL, 'Bee', 'contributor', 'active')`, meM, ev, f.me, beeM)
-	tag := uuid.New()
-	f.exec(`INSERT INTO event_tags (id, project_id, name) VALUES ($1, $2, 'trip')`, tag, ev)
-	bill := func(date string, share float64) {
-		b := uuid.New()
-		f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date) VALUES
-			($1, $2, $3, $4, 'expense', $5, 'THB', $6)`, b, ev, beeM, f.me, share*3, date)
-		f.splitPeople(b, beeM, share*3, meM, share)
-		f.exec(`INSERT INTO project_transaction_tags (project_transaction_id, event_tag_id) VALUES ($1, $2)`, b, tag)
-	}
-	bill(f.day(-1), 100) // past: used
-	bill(f.day(2), 70)   // future: expected
+	ev, tag, meM, beeM := f.tripEvent()
+	f.claimedBill(ev, tag, meM, beeM, 300, 100, false, f.day(-1)) // past: used
+	f.claimedBill(ev, tag, meM, beeM, 210, 70, false, f.day(2))   // future: expected
 
 	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
 	if p := d.Budget.Period; p.Used != 100 || p.Expected != 70 {
@@ -307,8 +330,7 @@ func TestBudgetFutureEventBillIsExpected(t *testing.T) {
 	}
 }
 
-// V4 / X5: my copy of a bill unlinked from it counts as a plain tx; the bill's share doesn't count
-// again.
+// My claimed copy counts once; unlinked from the bill it is a plain tx (its own tags only).
 func TestBudgetUnlinkedBillCountsOnce(t *testing.T) {
 	f := newBudFix(t)
 	var d Detail
@@ -317,28 +339,14 @@ func TestBudgetUnlinkedBillCountsOnce(t *testing.T) {
 		"scope": map[string]any{"tags": []string{"Trip"}},
 	}, http.StatusCreated, &d)
 	id := d.Budget.ID.String()
-
-	ev, meM, beeM := uuid.New(), uuid.New(), uuid.New()
-	f.exec(`INSERT INTO projects (id, owner_user_id, name, status) VALUES ($1, $2, 'CNX', 'active')`, ev, f.me)
-	f.exec(`INSERT INTO project_members (id, project_id, user_id, display_name, role, status) VALUES
-		($1, $2, $3, 'Me', 'owner', 'active'), ($4, $2, NULL, 'Bee', 'contributor', 'active')`, meM, ev, f.me, beeM)
-	tag := uuid.New()
-	f.exec(`INSERT INTO event_tags (id, project_id, name) VALUES ($1, $2, 'trip')`, tag, ev)
-	b := uuid.New()
-	f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date) VALUES
-		($1, $2, $3, $4, 'expense', 300, 'THB', $5)`, b, ev, beeM, f.me, f.day(-1))
-	f.splitPeople(b, beeM, 300, meM, 100)
-	f.exec(`INSERT INTO project_transaction_tags (project_transaction_id, event_tag_id) VALUES ($1, $2)`, b, tag)
-	copyTx := f.tx(100, &f.food, f.day(-1), "trip")
-	f.exec(`UPDATE transactions SET project_id = $2, source_project_transaction_id = $3 WHERE id = $1`, copyTx, ev, b)
+	ev, tag, meM, beeM := f.tripEvent()
+	copyTx := f.claimedBill(ev, tag, meM, beeM, 300, 100, false, f.day(-1), "trip")
 
 	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
 	if p := d.Budget.Period; p.Used != 100 {
 		t.Fatalf("linked: used %v, want 100; sources %+v", p.Used, d.BySource)
 	}
-	// "ลงบัญชีของฉัน" off / a tx-detail disconnect: the tx remembers the bill it left.
-	f.exec(`UPDATE transactions SET project_id = NULL, source_project_transaction_id = NULL,
-		unlinked_project_transaction_id = $2 WHERE id = $1`, copyTx, b)
+	f.exec(`UPDATE transactions SET split_transaction_id = NULL, split_person_id = NULL WHERE id = $1`, copyTx)
 	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
 	if p := d.Budget.Period; p.Used != 100 || src(d, SourceEvent) != nil {
 		t.Fatalf("unlinked: used %v, want 100 (the tx only); sources %+v", p.Used, d.BySource)
@@ -355,27 +363,13 @@ func TestBudgetTagRangeWithEvent(t *testing.T) {
 	id := d.Budget.ID.String()
 	f.tx(100, &f.travel, f.day(0), "trip")
 	f.tx(50, &f.travel, f.day(0), "other")
-
-	ev, meM, beeM := uuid.New(), uuid.New(), uuid.New()
-	f.exec(`INSERT INTO projects (id, owner_user_id, name, status) VALUES ($1, $2, 'CNX', 'active')`, ev, f.me)
-	f.exec(`INSERT INTO project_members (id, project_id, user_id, display_name, role, status) VALUES
-		($1, $2, $3, 'Me', 'owner', 'active'), ($4, $2, NULL, 'Bee', 'contributor', 'active')`, meM, ev, f.me, beeM)
-	tag := uuid.New()
-	f.exec(`INSERT INTO event_tags (id, project_id, name) VALUES ($1, $2, 'trip')`, tag, ev)
-	b1 := uuid.New()
-	f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date) VALUES
-		($1, $2, $3, $4, 'expense', 300, 'THB', $5)`, b1, ev, beeM, f.me, f.day(-1))
-	f.splitPeople(b1, beeM, 300, meM, 100)
-	f.exec(`INSERT INTO project_transaction_tags (project_transaction_id, event_tag_id) VALUES ($1, $2)`, b1, tag)
-	mine := f.tx(200, &f.food, f.day(-2), "trip")
-	b2 := uuid.New()
-	f.exec(`INSERT INTO project_transactions (id, project_id, transaction_member_id, record_user_id, type, amount, currency, date, linked_transaction_id) VALUES
-		($1, $2, $3, $4, 'expense', 200, 'THB', $5, $6)`, b2, ev, meM, f.me, f.day(-2), mine)
-	f.splitPeople(b2, meM, 200, beeM, 80)
+	ev, tag, meM, beeM := f.tripEvent()
+	f.claimedBill(ev, tag, meM, beeM, 300, 100, false, f.day(-1)) // Bee paid: my share 100
+	f.claimedBill(ev, tag, meM, beeM, 200, 120, true, f.day(-2))  // I paid 200, my share 120
 
 	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
 	p := d.Budget.Period
-	if p.Used != 320 { // 100 (tx) + 100 (Bee's bill) + 120 (my bill, not my 200 tx)
+	if p.Used != 320 { // 100 (tx) + 100 (Bee's bill) + 120 (my bill: my share, not the 200)
 		t.Fatalf("used = %v, want 320; sources %+v", p.Used, d.BySource)
 	}
 	if s := src(d, SourceEvent); s == nil || s.Count != 2 || s.Amount != 220 {
@@ -551,15 +545,4 @@ func TestBudgetScopeListsAreAnd(t *testing.T) {
 	if d.Budget.Period.Used != 100 {
 		t.Fatalf("used = %v, want 100 (only rows matching every picked list)", d.Budget.Period.Used)
 	}
-}
-
-// splitPeople writes a bill's people (split phase A): the payer paid it all and carries the rest,
-// member has share.
-func (f *budFix) splitPeople(bill, payer uuid.UUID, amount float64, member uuid.UUID, share float64) {
-	f.exec(`INSERT INTO split_transaction_people (split_transaction_id, user_id, event_member_id, name, share, paid, sort)
-		SELECT $1, pm.user_id, pm.id, pm.display_name,
-		       CASE WHEN pm.id = $2 THEN $3::numeric - $5::numeric ELSE $5::numeric END,
-		       CASE WHEN pm.id = $2 THEN $3::numeric ELSE 0 END,
-		       CASE WHEN pm.id = $2 THEN 0 ELSE 1 END
-		FROM project_members pm WHERE pm.id IN ($2, $4)`, bill, payer, amount, member, share)
 }

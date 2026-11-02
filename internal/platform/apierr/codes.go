@@ -95,20 +95,19 @@ const (
 	InvalidPersonKey           Code = "INVALID_PERSON_KEY"
 
 	// debts
-	EntryNotFound        Code = "ENTRY_NOT_FOUND"
-	EntryManagedBySource Code = "ENTRY_MANAGED_BY_SOURCE"
-	EntryHasTransaction  Code = "ENTRY_HAS_TRANSACTION"
-	DebtManagedByTx      Code = "DEBT_MANAGED_BY_TX"
-	DebtNotLinked        Code = "DEBT_NOT_LINKED"
-	DebtTxAlreadyLinked  Code = "DEBT_TX_ALREADY_LINKED"
-	DebtTxAuthorOnly     Code = "DEBT_TX_AUTHOR_ONLY"
-	DebtTxNeedsWallet    Code = "DEBT_TX_NEEDS_WALLET"
-	TxNotLinkable        Code = "TX_NOT_LINKABLE"
-	TxNotDisconnectable  Code = "TX_NOT_DISCONNECTABLE"
-	TagsNeedWallet       Code = "TAGS_NEED_WALLET"
-	LedgerOnlyNoWallet   Code = "LEDGER_ONLY_NO_WALLET"
-	BillNotFound         Code = "BILL_NOT_FOUND"
-	DebtNotFound         Code = "DEBT_NOT_FOUND"
+	EntryNotFound       Code = "ENTRY_NOT_FOUND"
+	EntryHasTransaction Code = "ENTRY_HAS_TRANSACTION"
+	DebtManagedByTx     Code = "DEBT_MANAGED_BY_TX"
+	DebtNotLinked       Code = "DEBT_NOT_LINKED"
+	DebtTxAlreadyLinked Code = "DEBT_TX_ALREADY_LINKED"
+	DebtTxAuthorOnly    Code = "DEBT_TX_AUTHOR_ONLY"
+	DebtTxNeedsWallet   Code = "DEBT_TX_NEEDS_WALLET"
+	TxNotLinkable       Code = "TX_NOT_LINKABLE"
+	TxNotDisconnectable Code = "TX_NOT_DISCONNECTABLE"
+	TagsNeedWallet      Code = "TAGS_NEED_WALLET"
+	LedgerOnlyNoWallet  Code = "LEDGER_ONLY_NO_WALLET"
+	BillNotFound        Code = "BILL_NOT_FOUND"
+	DebtNotFound        Code = "DEBT_NOT_FOUND"
 
 	// contacts
 	ContactNotFound Code = "CONTACT_NOT_FOUND"
@@ -260,8 +259,7 @@ var registry = []Def{
 	{InvalidPersonKey, []int{400}, InEnvelope, "A person key must be c:<contact_id> or n:<name>."},
 
 	// debts
-	{EntryNotFound, []int{400}, InEnvelope, "A debt entry in the body is not one of this person's."},
-	{EntryManagedBySource, []int{409}, InEnvelope, "The entry comes from a split; only description, note and the paid label can change here."},
+	{EntryNotFound, []int{400, 404}, InEnvelope, "A debt entry in the body is not one of this person's (404: the debt of a paper sync / unlink is not mine)."},
 	{EntryHasTransaction, []int{409}, InEnvelope, "The entry already has a transaction; delete or disconnect it first."},
 	{DebtManagedByTx, []int{409}, InEnvelope, "The debt is the paid-by part of a transaction; edit the transaction instead."},
 	{DebtNotLinked, []int{409}, InEnvelope, "The debt has no copy in another user's book."},
@@ -272,7 +270,7 @@ var registry = []Def{
 	{TxNotDisconnectable, []int{409}, InEnvelope, "Only a transaction connected later can be disconnected; delete it instead."},
 	{TagsNeedWallet, []int{400}, InEnvelope, "Tags go on the wallet transaction; pick a wallet first."},
 	{LedgerOnlyNoWallet, []int{400}, InEnvelope, "A ledger-only entry has no wallet or tags; turn create_transaction on."},
-	{BillNotFound, []int{400}, InEnvelope, "The bill is not in an event the caller is a member of."},
+	{BillNotFound, []int{404}, InEnvelope, "No such split / event bill for the caller (not on it, not invited, or the other kind of route)."},
 	{DebtNotFound, nil, InPendingLastError, "Pending: the target debt entry was not found."},
 
 	// contacts

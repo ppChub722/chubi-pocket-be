@@ -6197,19 +6197,19 @@ components:
                 CATEGORY_NAME_DUPLICATE, INVALID_PARENT, CYCLE_DETECTED, MAX_DEPTH_EXCEEDED, SYSTEM_CATEGORY_IMMUTABLE, SYSTEM_CATEGORY_NOT_ALLOWED,
                 CATEGORY_TYPE_MISMATCH, CATEGORY_AUTHOR_ONLY, INVALID_CATEGORY, TAG_NOT_FOUND, TAG_EXISTS, TAG_NAME_TAKEN,
                 TRANSACTION_NOT_FOUND, TRANSFER_SAME_ACCOUNT, SYSTEM_TRANSACTION_IMMUTABLE, SPLIT_MISMATCH, PRIVATE_NOTE_NOT_SHARED, INVALID_PERSON_KEY,
-                ENTRY_NOT_FOUND, ENTRY_MANAGED_BY_SOURCE, ENTRY_HAS_TRANSACTION, DEBT_MANAGED_BY_TX, DEBT_NOT_LINKED, DEBT_TX_ALREADY_LINKED,
-                DEBT_TX_AUTHOR_ONLY, DEBT_TX_NEEDS_WALLET, TX_NOT_LINKABLE, TX_NOT_DISCONNECTABLE, TAGS_NEED_WALLET, LEDGER_ONLY_NO_WALLET,
-                BILL_NOT_FOUND, CONTACT_NOT_FOUND, CONTACT_ARCHIVED, ALREADY_ARCHIVED, NOT_ARCHIVED, ALREADY_LINKED,
-                NOT_LINKED, CANNOT_LINK_SELF, REQUEST_REJECTED, NOT_ACCEPTED, STATE_CONFLICT, NOT_FOR_YOU,
-                NOTIFICATION_STATE_CONFLICT, NOT_PROJECT_INVITE, TYPE_NOT_MUTABLE, PROJECT_NOT_ACTIVE, PROJECT_LOCKED, EVENT_COMPLETED,
-                EVENT_NOT_COMPLETED, EVENT_HAS_EMPTY_PERSON, USE_COMPLETE_ENDPOINT, ALREADY_MEMBER, MEMBER_NOT_IN_PROJECT, CANNOT_CHANGE_OWNER,
-                CANNOT_REMOVE_OWNER, OWNER_CANNOT_LEAVE, FORBIDDEN_ROLE, NOT_IN_BILL, BILL_ALREADY_BOOKED, BILL_CHANGED,
-                NOTHING_TO_CLAIM, ALREADY_CLAIMED, NOT_BILL_OWNER, MERGE_TWO_USERS, SETTLE_NOTHING, NOT_PAPER_BOOK,
-                SETTLE_BOOKED, INVALID_DATE_RANGE, INVALID_RULE, INVALID_TRANSITION, END_TOO_FAR, AMOUNT_REQUIRED,
-                ALREADY_RECORDED, NOTHING_OWED, ITEM_ALREADY_LINKED, SAVING_NEEDS_WALLET, INSUFFICIENT_SAVING, GOAL_NOT_ACTIVE,
-                GOAL_REACHED, GOAL_HAS_SAVINGS, UNSUPPORTED_IMAGE, OCR_UNAVAILABLE, OCR_TIMEOUT, TELEGRAM_TOKEN_INVALID,
-                TELEGRAM_ALREADY_LINKED, REGISTRATION_CLOSED, CONNECTION_UNAVAILABLE, RATE_LIMITED, PERMISSION_UNAVAILABLE, NO_PHOTO,
-                LAST_LOGIN_METHOD, PROVIDER_ERROR, IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_IN_PROGRESS
+                ENTRY_NOT_FOUND, ENTRY_HAS_TRANSACTION, DEBT_MANAGED_BY_TX, DEBT_NOT_LINKED, DEBT_TX_ALREADY_LINKED, DEBT_TX_AUTHOR_ONLY,
+                DEBT_TX_NEEDS_WALLET, TX_NOT_LINKABLE, TX_NOT_DISCONNECTABLE, TAGS_NEED_WALLET, LEDGER_ONLY_NO_WALLET, BILL_NOT_FOUND,
+                CONTACT_NOT_FOUND, CONTACT_ARCHIVED, ALREADY_ARCHIVED, NOT_ARCHIVED, ALREADY_LINKED, NOT_LINKED,
+                CANNOT_LINK_SELF, REQUEST_REJECTED, NOT_ACCEPTED, STATE_CONFLICT, NOT_FOR_YOU, NOTIFICATION_STATE_CONFLICT,
+                NOT_PROJECT_INVITE, TYPE_NOT_MUTABLE, PROJECT_NOT_ACTIVE, PROJECT_LOCKED, EVENT_COMPLETED, EVENT_NOT_COMPLETED,
+                EVENT_HAS_EMPTY_PERSON, USE_COMPLETE_ENDPOINT, ALREADY_MEMBER, MEMBER_NOT_IN_PROJECT, CANNOT_CHANGE_OWNER, CANNOT_REMOVE_OWNER,
+                OWNER_CANNOT_LEAVE, FORBIDDEN_ROLE, NOT_IN_BILL, BILL_ALREADY_BOOKED, BILL_CHANGED, NOTHING_TO_CLAIM,
+                ALREADY_CLAIMED, NOT_BILL_OWNER, MERGE_TWO_USERS, SETTLE_NOTHING, NOT_PAPER_BOOK, SETTLE_BOOKED,
+                INVALID_DATE_RANGE, INVALID_RULE, INVALID_TRANSITION, END_TOO_FAR, AMOUNT_REQUIRED, ALREADY_RECORDED,
+                NOTHING_OWED, ITEM_ALREADY_LINKED, SAVING_NEEDS_WALLET, INSUFFICIENT_SAVING, GOAL_NOT_ACTIVE, GOAL_REACHED,
+                GOAL_HAS_SAVINGS, UNSUPPORTED_IMAGE, OCR_UNAVAILABLE, OCR_TIMEOUT, TELEGRAM_TOKEN_INVALID, TELEGRAM_ALREADY_LINKED,
+                REGISTRATION_CLOSED, CONNECTION_UNAVAILABLE, RATE_LIMITED, PERMISSION_UNAVAILABLE, NO_PHOTO, LAST_LOGIN_METHOD,
+                PROVIDER_ERROR, IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_IN_PROGRESS
               ]
             message: { type: string, description: 'Safe human-readable English (never raw Go / DB text: that is logged server-side). Never parse it; the app shows its own text for the code.' }
             details:
@@ -6537,7 +6537,7 @@ components:
         tag_ids: { $ref: '#/components/schemas/Ids' }
     DeleteTransactionResult:
       type: object
-      required: [id, account_balances, debt_entry_id, person_balance, recurring_item_id, bill_id, effects]
+      required: [id, account_balances, debt_entry_id, person_balance, recurring_item_id, effects]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         account_balances:
@@ -6548,7 +6548,6 @@ components:
         debt_entry_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.1-1 D1: the person-book entry (debt or repayment) whose transaction this was. The entry STAYS, ledger-only; the person''s balance does not change.' }
         person_balance: { oneOf: [{ $ref: '#/components/schemas/DebtPerson' }, { type: 'null' }], description: 'That person''s balance after the delete (null when the row touched no person).' }
         recurring_item_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The recurring occurrence it filled, now skipped with its last values (0.4.1-1 R2); null when it filled none.' }
-        bill_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The event bill deleted with it (also_delete_link).' }
         effects: { $ref: '#/components/schemas/Effects', description: '0.4.1-1 B2: everything the delete changed (the row itself as transactions[] deleted, the entry that lost it, the slot, the bill, balances).' }
     # ───────── pending ─────────
     Draft:
@@ -6880,7 +6879,7 @@ components:
             required: [type, group, on, mutable]
             properties:
               type: { type: string }
-              group: { type: string, enum: [shared_bill, event, recurring, request] }
+              group: { type: string, enum: [bill, debt, event, recurring, request], description: 'bill = split / event bill papers, debt = partner debts (repaid / disconnected).' }
               on: { type: boolean }
               mutable: { type: boolean }
         auto_sync_events: { type: boolean, description: 'Auto sync for event bills: another member''s save changes my copy (tx + debts) at once; off = a notice asks "อัปเดตตาม". Default true.' }
@@ -11603,7 +11602,7 @@ components:
     RecurringItem:
       type: object
       description: 'One occurrence of a setting, COMPUTED from its rule or STORED (a row exists only when it was edited, recorded, paid or skipped; id null = computed). Its address is rule_id + slot either way. status: upcoming (dated after today) | due (today or before, not recorded) | done (a transaction) | paid (settled without one) | skipped | pending (a legacy draft still waiting). A slot before the setting''s tracked_from (its creation day) is paid implicitly.'
-      required: [id, rule_id, slot, stored, auto_created, needs_amount, recurring, seq, total, date, days_until, status, edited, manual, type, amount, account, to_account, category, goal_id, goal, tags, description, note, splits, project, pending_id, transaction, saving_entry_id, person, debt_entry, debt_kind, direction, created_at, updated_at]
+      required: [id, rule_id, slot, stored, auto_created, needs_amount, recurring, seq, total, date, days_until, status, edited, manual, type, amount, account, to_account, category, goal_id, goal, tags, description, note, pending_id, transaction, saving_entry_id, person, debt_entry, debt_kind, direction, created_at, updated_at]
       properties:
         id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The stored row; null while only computed.' }
         rule_id: { $ref: '#/components/schemas/Uuid' }
@@ -11646,16 +11645,6 @@ components:
         tags: { type: array, items: { $ref: '#/components/schemas/TagRef' } }
         description: { type: [string, 'null'], description: 'The occurrence name ("Netflix ประจำเดือน ต.ค. 2026", the tx description), unless the user typed one.' }
         note: { type: [string, 'null'] }
-        splits:
-          type: array
-          description: 'Legacy rows only; [] otherwise.'
-          items:
-            type: object
-            required: [person, owed_amount]
-            properties:
-              person: { $ref: '#/components/schemas/PersonRef' }
-              owed_amount: { type: number }
-        project: { oneOf: [{ $ref: '#/components/schemas/EventRef' }, { type: 'null' }] }
         pending_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Legacy.' }
         transaction: { oneOf: [{ $ref: '#/components/schemas/RecurringItemTx' }, { type: 'null' }] }
         created_at: { oneOf: [{ $ref: '#/components/schemas/DateTime' }, { type: 'null' }], description: 'null while only computed.' }

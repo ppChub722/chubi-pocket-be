@@ -773,19 +773,18 @@ func TestWalletFlowCashAndDebtCategories(t *testing.T) {
 	bank := dec[aJSON](t, e.call(r, "createAccount", "POST", "/api/v1/accounts",
 		map[string]any{"name": "Bank", "type": "bank", "balance": 1000}, http.StatusCreated)).ID
 	today := time.Now().UTC().Format("2006-01-02")
-	ins := func(typ string, amount float64, paidBy *float64, kind string) {
+	ins := func(typ string, amount float64, kind string) {
 		t.Helper()
-		if _, err := e.pool.Exec(ctx, `INSERT INTO transactions (id, user_id, account_id, type, amount, date, paid_by_amount, category_id, created_by_user_id)
-			VALUES ($1, $2, $3, $4, $5, $6::date, $7, (SELECT id FROM categories WHERE user_id = $2 AND system_kind = NULLIF($8, '')), $2)`,
-			uuid.New(), owner, bank, typ, amount, today, paidBy, kind); err != nil {
+		if _, err := e.pool.Exec(ctx, `INSERT INTO transactions (id, user_id, account_id, type, amount, date, category_id, created_by_user_id)
+			VALUES ($1, $2, $3, $4, $5, $6::date, (SELECT id FROM categories WHERE user_id = $2 AND system_kind = NULLIF($7, '')), $2)`,
+			uuid.New(), owner, bank, typ, amount, today, kind); err != nil {
 			t.Fatal(err)
 		}
 	}
-	lee := 13.0
-	ins("expense", 123, &lee, "")         // the wallet paid 110
-	ins("expense", 400, nil, "DEBT_PAID") // a repayment: not spending
-	ins("income", 30, nil, "DEBT_RECEIVED")
-	ins("income", 50, nil, "")
+	ins("expense", 110, "")
+	ins("expense", 400, "DEBT_PAID") // a repayment: not spending
+	ins("income", 30, "DEBT_RECEIVED")
+	ins("income", 50, "")
 
 	var list struct {
 		Data []struct {

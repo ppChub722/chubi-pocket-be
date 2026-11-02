@@ -60,8 +60,6 @@ func newDebtHFix(t *testing.T) *debtHFix {
 	}
 	f.txs = transactions.NewService(transactions.NewStore(pool), cats)
 	f.svc = NewService(NewStore(pool), f.txs)
-	f.txs.WithDebtsCreator(f.svc.CreateForTransactionTx)
-	f.txs.WithSplitsEditor(f.svc.EditForTransactionTx)
 	f.txs.WithDebtLinks(f.svc)
 	h := NewHandler(f.svc)
 	f.r = apitest.CountedEngine(f.me, func(g *gin.RouterGroup) {
@@ -362,7 +360,7 @@ func TestDebtLedgerFlow(t *testing.T) {
 		"direction": "paid", "amount": 40, "account_id": f.wallet,
 	}, "createDebtEntry", http.StatusCreated)
 	againTx := uuid.MustParse(obj(again, "transaction")["id"].(string))
-	dr, err := f.txs.DeleteWrite(f.ctx, f.me, againTx, false)
+	dr, err := f.txs.DeleteWrite(f.ctx, f.me, againTx)
 	if err != nil || dr.DebtEntryID == nil || dr.DebtEntryID.String() != obj(again, "entry")["id"] {
 		t.Fatalf("delete the wallet side: %+v, %v", dr, err)
 	}
@@ -370,94 +368,6 @@ func TestDebtLedgerFlow(t *testing.T) {
 	kept := f.call("GET", "/api/v1/personal-debts/"+dr.DebtEntryID.String(), nil, "getDebtEntry", http.StatusOK)
 	if kept["transaction"] != nil || num(kept, "person_balance", "net") != 40 {
 		t.Errorf("the entry after its tx went = %v", kept)
-	}
-}
-
-func TestSplitSourcedEntries(t *testing.T) {
-	f := newDebtHFix(t)
-	created, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
-		Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: 300, Date: "2026-10-05",
-		Description: testdb.Str("Dinner"),
-		Splits:      []transactions.SplitInput{{PersonName: "Grandma", OwedAmount: 100}},
-	})
-	if err != nil {
-		t.Fatalf("split bill: %v", err)
-	}
-	bill := created.(*transactions.TransactionDetail)
-	split := (*bill.Splits)[0]
-	if split.Key != "n:grandma" || split.Direction != DirectionPaid {
-		t.Fatalf("split = %+v", split)
-	}
-	id := split.DebtID.String()
-	d := f.call("GET", "/api/v1/personal-debts/"+id, nil, "getDebtEntry", http.StatusOK)
-	src := obj(d, "entry", "source")
-	if src["kind"] != "transaction" || src["id"] != bill.ID.String() || src["title"] != "Dinner" || d["transaction"] != nil {
-		t.Errorf("split entry = %v", d)
-	}
-	f.code("PUT", "/api/v1/personal-debts/"+id, map[string]any{"amount": 50}, http.StatusConflict, "ENTRY_MANAGED_BY_SOURCE")
-	f.code("PUT", "/api/v1/personal-debts/"+id, map[string]any{"account_id": f.wallet}, http.StatusConflict, "ENTRY_MANAGED_BY_SOURCE")
-	ok := f.call("PUT", "/api/v1/personal-debts/"+id, map[string]any{"paid": true, "note": "cash at home"}, "updateDebtEntry", http.StatusOK)
-	if obj(ok, "entry")["paid"] != true || obj(ok, "entry")["note"] != "cash at home" || num(ok, "entry", "amount") != 100 {
-		t.Errorf("label + note = %v", ok["entry"])
-	}
-	f.call("DELETE", "/api/v1/personal-debts/"+id, nil, "deleteDebtEntry", http.StatusOK)
-	after, _ := f.txs.Get(f.ctx, f.me, bill.ID)
-	if after.SplitCount != 0 || after.MyShare == nil || *after.MyShare != 300 {
-		t.Errorf("bill after deleting its split: count %d share %v", after.SplitCount, after.MyShare)
-	}
-}
-
-func TestSplitIdentityRuleInHook(t *testing.T) {
-	f := newSplitEditFixture(t)
-	s := f.splits(t)
-	beam := s["Beam"].DebtID
-	partner := s["Partner"]
-	if partner.PersonName != "Partner" {
-		t.Fatalf("a linked split shows the contact's resolved name, got %q", partner.PersonName)
-	}
-	storedName := func(id uuid.UUID) string {
-		t.Helper()
-		var n string
-		if err := f.pool.QueryRow(f.ctx, `SELECT counterparty_person_name FROM personal_debts WHERE id = $1`, id).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		return n
-	}
-
-	e := keep(partner, 100)
-	e.PersonName, e.ContactID, e.ContactIDSet = "Hacked", &f.partnerContact, true
-	if err := f.edit(t, keep(s["Beam"], 100), e); err != nil {
-		t.Fatalf("edit: %v", err)
-	}
-	if n := storedName(partner.DebtID); n != "Partner" {
-		t.Errorf("stored name = %q, want it unchanged", n)
-	}
-
-	zed := uuid.New()
-	if _, err := f.pool.Exec(f.ctx, `INSERT INTO contacts (id, user_id, display_name, status) VALUES ($1, $2, 'Zed', 'active')`, zed, f.me); err != nil {
-		t.Fatal(err)
-	}
-	be := keep(s["Beam"], 100)
-	be.PersonName, be.ContactID, be.ContactIDSet = "Other", &zed, true
-	if err := f.edit(t, be, keep(partner, 100)); err != nil {
-		t.Fatalf("switch contact: %v", err)
-	}
-	if n := storedName(beam); n != "Zed" {
-		t.Errorf("new contact's name = %q, want Zed (the sent name is ignored)", n)
-	}
-
-	back := keep(s["Beam"], 100)
-	back.PersonName, back.ContactID, back.ContactIDSet = "Beam", nil, true
-	if err := f.edit(t, back, keep(partner, 100)); err != nil {
-		t.Fatalf("drop contact: %v", err)
-	}
-	ren := keep(s["Beam"], 100)
-	ren.PersonName = "Beamy"
-	if err := f.edit(t, ren, keep(partner, 100)); err != nil {
-		t.Fatalf("free rename: %v", err)
-	}
-	if n := storedName(beam); n != "Beamy" {
-		t.Errorf("free-name rename = %q, want Beamy", n)
 	}
 }
 
@@ -471,13 +381,6 @@ func TestTransactionFilters(t *testing.T) {
 	}
 	plain, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
 		Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: 10, Date: "2026-10-05",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	split, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
-		Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: 90, Date: "2026-10-05",
-		Splits: []transactions.SplitInput{{PersonName: "Aom", OwedAmount: 30}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -499,15 +402,7 @@ func TestTransactionFilters(t *testing.T) {
 		t.Errorf("counterparty_key=n:mom = %v, want only the entry's tx", got)
 	}
 	plainID := plain.(*transactions.TransactionDetail).ID
-	splitBill := split.(*transactions.TransactionDetail)
-	// the person's bills too: the one split with Aom, the one Aom paid for me, the one linked to her debt
-	paidFor, err := f.txs.Create(f.ctx, f.me, transactions.CreateRequest{
-		Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: 50, Date: "2026-10-06",
-		PaidBy: &transactions.PaidByInput{PersonName: "Aom", Amount: 20},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// a transaction connected to her debt is her money too
 	aomDebt, err := f.svc.CreateEntry(f.ctx, f.me, "n:aom", CreateEntryRequest{Direction: DirectionPaid, Amount: 15})
 	if err != nil {
 		t.Fatal(err)
@@ -515,20 +410,14 @@ func TestTransactionFilters(t *testing.T) {
 	if _, err := f.svc.LinkTx(f.ctx, f.me, aomDebt.Entry.ID, plainID); err != nil {
 		t.Fatal(err)
 	}
-	got := ids(transactions.ListFilter{CounterpartyKey: "n:aom"})
-	if len(got) != 3 || !got[splitBill.ID] || !got[paidFor.(*transactions.TransactionDetail).ID] || !got[plainID] {
-		t.Errorf("counterparty_key=n:aom = %v, want the split bill, the paid-by bill and the linked tx", got)
+	if got := ids(transactions.ListFilter{CounterpartyKey: "n:aom"}); len(got) != 1 || !got[plainID] {
+		t.Errorf("counterparty_key=n:aom = %v, want the linked tx", got)
 	}
 	if _, err := f.svc.UnlinkTx(f.ctx, f.me, aomDebt.Entry.ID); err != nil {
 		t.Fatal(err)
 	}
-	got = ids(transactions.ListFilter{CanJoinEvent: true})
-	if !got[plainID] || !got[splitBill.ID] || got[entry.Transaction.ID] {
-		t.Errorf("can_join_event = %v, want the plain + split bills, not the debt tx", got)
-	}
-	f.exec(`UPDATE personal_debts SET paid = TRUE WHERE id = $1`, (*splitBill.Splits)[0].DebtID)
-	if got := ids(transactions.ListFilter{CanJoinEvent: true}); got[splitBill.ID] {
-		t.Errorf("a bill with a split labelled paid can't join an event")
+	if got := ids(transactions.ListFilter{CounterpartyKey: "n:aom"}); len(got) != 0 {
+		t.Errorf("counterparty_key=n:aom after unlink = %v, want none", got)
 	}
 }
 

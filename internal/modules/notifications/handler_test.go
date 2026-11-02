@@ -81,9 +81,9 @@ func num(m map[string]any, path ...string) float64 {
 func TestListNotifications(t *testing.T) {
 	f := newFix(t)
 	actor := testdb.User(t, f.pool)
-	oldest := f.add(t, TypeProjectAdded, nil, `{"project_name":"Trip"}`, 3*time.Hour)
+	oldest := f.add(t, TypeEventCompleted, nil, `{"project_name":"Trip"}`, 3*time.Hour)
 	mid := f.add(t, TypeContactLinkRequest, &actor, `{"contact_id":"`+uuid.NewString()+`"}`, 2*time.Hour)
-	newest := f.add(t, TypeSplitCreated, &actor, `{"amount":10,"superseded":true}`, time.Hour)
+	newest := f.add(t, TypeBillChanged, &actor, `{"amount":10,"applied":true}`, time.Hour)
 
 	out := f.do(t, "GET", "/api/v1/notifications", nil, "listNotifications", http.StatusOK)
 	data := out["data"].([]any)
@@ -121,7 +121,7 @@ func TestListNotifications(t *testing.T) {
 	if len(out["data"].([]any)) != 2 || num(out, "unread_count") != 2 {
 		t.Errorf("read=false = %v", out)
 	}
-	out = f.do(t, "GET", "/api/v1/notifications?type=project_added&read=all", nil, "listNotifications", http.StatusOK)
+	out = f.do(t, "GET", "/api/v1/notifications?type=event_completed&read=all", nil, "listNotifications", http.StatusOK)
 	if len(out["data"].([]any)) != 1 {
 		t.Errorf("type filter = %v", out)
 	}
@@ -143,8 +143,8 @@ func TestListNotificationsEmpty(t *testing.T) {
 
 func TestUnreadCount(t *testing.T) {
 	f := newFix(t)
-	f.add(t, TypeProjectAdded, nil, `{}`, time.Hour)
-	f.add(t, TypeProjectAdded, nil, `{}`, time.Minute)
+	f.add(t, TypeEventCompleted, nil, `{}`, time.Hour)
+	f.add(t, TypeEventCompleted, nil, `{}`, time.Minute)
 	out := f.do(t, "GET", "/api/v1/notifications/unread-count", nil, "getUnreadCount", http.StatusOK)
 	if num(out, "unread_count") != 2 {
 		t.Errorf("unread = %v", out)
@@ -153,8 +153,8 @@ func TestUnreadCount(t *testing.T) {
 
 func TestMarkReadActionedDismiss(t *testing.T) {
 	f := newFix(t)
-	a := f.add(t, TypeProjectTxRecordedForYou, nil, `{}`, time.Hour)
-	b := f.add(t, TypeProjectTxRecordedForYou, nil, `{}`, 2*time.Hour)
+	a := f.add(t, TypeBillNew, nil, `{}`, time.Hour)
+	b := f.add(t, TypeBillNew, nil, `{}`, 2*time.Hour)
 	c := f.add(t, TypeAccountInvite, nil, `{}`, 3*time.Hour)
 
 	out := f.do(t, "POST", "/api/v1/notifications/"+a.String()+"/read", nil, "markNotificationRead", http.StatusOK)
@@ -216,7 +216,7 @@ func TestMarkReadActionedDismiss(t *testing.T) {
 	other := testdb.User(t, f.pool)
 	oid, _ := uuid.NewV7()
 	if _, err := f.pool.Exec(context.Background(),
-		`INSERT INTO notifications (id, recipient_user_id, type, payload) VALUES ($1, $2, 'project_added', '{}')`, oid, other); err != nil {
+		`INSERT INTO notifications (id, recipient_user_id, type, payload) VALUES ($1, $2, 'event_completed', '{}')`, oid, other); err != nil {
 		t.Fatal(err)
 	}
 	f.do(t, "POST", "/api/v1/notifications/"+oid.String()+"/read", nil, "markNotificationRead", http.StatusNotFound)
@@ -224,9 +224,9 @@ func TestMarkReadActionedDismiss(t *testing.T) {
 
 func TestReadAllAndDelete(t *testing.T) {
 	f := newFix(t)
-	a := f.add(t, TypeProjectAdded, nil, `{}`, time.Hour)
-	f.add(t, TypeProjectAdded, nil, `{}`, 2*time.Hour)
-	f.add(t, TypeProjectAdded, nil, `{}`, 3*time.Hour)
+	a := f.add(t, TypeEventCompleted, nil, `{}`, time.Hour)
+	f.add(t, TypeEventCompleted, nil, `{}`, 2*time.Hour)
+	f.add(t, TypeEventCompleted, nil, `{}`, 3*time.Hour)
 	if _, err := f.pool.Exec(context.Background(), `
 		INSERT INTO pending_transactions (id, user_id, source)
 		VALUES (gen_random_uuid(), $1, 'text')`, f.uid); err != nil {
@@ -270,7 +270,7 @@ func TestNotificationSettings(t *testing.T) {
 	if len(types) != len(pageTypes) {
 		t.Fatalf("types = %d rows, want %d", len(types), len(pageTypes))
 	}
-	if first := types[0].(map[string]any); first["group"] != GroupSharedBill || first["on"] != true || first["mutable"] != true {
+	if first := types[0].(map[string]any); first["group"] != GroupBill || first["on"] != true || first["mutable"] != true {
 		t.Errorf("first type row = %v", first)
 	}
 	if last := types[len(types)-1].(map[string]any); last["group"] != GroupRequest || last["mutable"] != true || last["on"] != true {
@@ -278,7 +278,7 @@ func TestNotificationSettings(t *testing.T) {
 	}
 
 	body := map[string]any{
-		"muted_types":        []string{TypeEventCompleted, TypeProjectAdded}, // retired: dropped quietly
+		"muted_types":        []string{TypeEventCompleted, "project_added"}, // retired: dropped quietly
 		"auto_sync_events":   false,
 		"default_account_id": acc.String(),
 	}
@@ -347,8 +347,8 @@ func TestInboxSummaryAndAwaitsAnswer(t *testing.T) {
 	f := newFix(t)
 	f.add(t, TypeProjectInvite, nil, `{}`, time.Hour)
 	f.add(t, TypeRecurringEnding, nil, `{"left":2}`, 2*time.Hour)
-	info := f.add(t, TypeProjectAdded, nil, `{}`, 3*time.Hour)
-	hidden := f.add(t, TypeProjectAdded, nil, `{}`, 4*time.Hour)
+	info := f.add(t, TypeEventCompleted, nil, `{}`, 3*time.Hour)
+	hidden := f.add(t, TypeEventCompleted, nil, `{}`, 4*time.Hour)
 	f.do(t, "POST", "/api/v1/notifications/"+hidden.String()+"/dismiss", nil, "dismissNotification", http.StatusOK)
 	f.do(t, "POST", "/api/v1/notifications/"+info.String()+"/read", nil, "markNotificationRead", http.StatusOK)
 
@@ -356,7 +356,7 @@ func TestInboxSummaryAndAwaitsAnswer(t *testing.T) {
 	if num(out, "summary", "needs_answer") != 2 || num(out, "summary", "unread") != 2 || num(out, "summary", "dismissed") != 1 {
 		t.Errorf("summary = %v", out["summary"])
 	}
-	out = f.do(t, "GET", "/api/v1/notifications?type=project_added&read=all", nil, "listNotifications", http.StatusOK)
+	out = f.do(t, "GET", "/api/v1/notifications?type=event_completed&read=all", nil, "listNotifications", http.StatusOK)
 	if num(out, "summary", "needs_answer") != 2 {
 		t.Errorf("filtered summary = %v", out["summary"])
 	}
@@ -491,7 +491,7 @@ func TestRecurringDueDeepLink(t *testing.T) {
 	}
 }
 
-// Owner 2026-10-30 F1 (DB): with shared_bill_created muted, no notice is written, applied or not;
+// Owner 2026-10-30 F1 (DB): with bill_new muted, no notice is written, applied or not;
 // my own: nothing; an info type keeps its mute.
 func TestMutedNoticeIsNeverWritten(t *testing.T) {
 	f := newFix(t)
@@ -499,7 +499,7 @@ func TestMutedNoticeIsNeverWritten(t *testing.T) {
 	actor := testdb.User(t, f.pool)
 	if _, err := f.pool.Exec(context.Background(), `UPDATE user_notification_settings
 		SET muted_types = ARRAY[$2, $3] WHERE user_id = $1`,
-		f.uid, TypeSharedBillCreated, TypeDebtDisconnected); err != nil {
+		f.uid, TypeBillNew, TypeDebtDisconnected); err != nil {
 		t.Fatal(err)
 	}
 	count := func(typ string) int {
@@ -514,24 +514,23 @@ func TestMutedNoticeIsNeverWritten(t *testing.T) {
 	}
 	created := func(from uuid.UUID, applied bool) {
 		t.Helper()
-		pt, _ := uuid.NewV7()
+		paper, _ := uuid.NewV7()
 		f.inTx(t, func(ctx context.Context, tx pgx.Tx) error {
-			return svc.DispatchSharedBillCreated(ctx, tx, f.uid, from, SharedBillCreatedPayload{
-				ProjectTransactionID: pt, ProjectID: pt, ProjectKind: "split", Amount: 100,
-				MyRole: "debtor", MyAmount: 50, PayerName: "A", Applied: applied,
+			return svc.DispatchBill(ctx, tx, TypeBillNew, f.uid, from, BillPayload{
+				PaperID: paper, Amount: 100, MyShare: 50, Applied: applied, MyDebtIDs: []uuid.UUID{},
 			})
 		})
 	}
 	created(actor, false)
-	if n := count(TypeSharedBillCreated); n != 0 {
+	if n := count(TypeBillNew); n != 0 {
 		t.Fatalf("muted + not applied wrote %d rows, want 0 (F1: the mute wins)", n)
 	}
 	created(actor, true)
-	if n := count(TypeSharedBillCreated); n != 0 {
+	if n := count(TypeBillNew); n != 0 {
 		t.Errorf("muted + applied wrote a row (want silent): %d", n)
 	}
 	created(f.uid, false)
-	if n := count(TypeSharedBillCreated); n != 0 {
+	if n := count(TypeBillNew); n != 0 {
 		t.Errorf("my own change notified me: %d", n)
 	}
 	// An info type keeps its mute.

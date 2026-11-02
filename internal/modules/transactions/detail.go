@@ -160,8 +160,11 @@ func buildDetails(
 			}
 		}
 		d.Currency = f.currency
-		if r.MyShare != nil {
-			share := *r.MyShare
+		if r.Type != TypeTransfer { // my part: the share of a paper I paid, else the amount
+			share := r.Amount
+			if r.MyShare != nil {
+				share = *r.MyShare
+			}
 			d.MyShare = &share
 		}
 		own := r.UserID == callerID

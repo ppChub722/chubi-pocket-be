@@ -10,13 +10,10 @@ import (
 )
 
 // Delivery — how a notice reaches its recipient: Deliver = not muted (Insert says whether it is
-// written: a notice that still asks comes even when muted); Auto = apply it
-// at once by the type's auto-sync switch, muted or not (0.4.1-2 S4: a muted auto type is applied
-// silently). SyncEvents / SyncDebts are the recipient's two switches, for types whose switch
-// depends on the bill kind (shared bills).
+// written). SyncEvents / SyncDebts are the recipient's auto-sync switches for event bills / split
+// bills (a muted paper notice is still applied, silently).
 type Delivery struct {
 	Deliver    bool
-	Auto       bool
 	SyncEvents bool
 	SyncDebts  bool
 	// AcceptEvents / AcceptDebts — the recipient's auto-accept switches for a NEW shared bill
@@ -48,7 +45,7 @@ func (s *Service) DeliveryFor(
 		return Delivery{}, err
 	}
 	return Delivery{
-		Deliver: st.Deliver(notifType), Auto: st.Auto(notifType),
+		Deliver: st.Deliver(notifType),
 		SyncEvents: st.AutoSyncEvents, SyncDebts: st.AutoSyncDebts,
 		AcceptEvents: st.AutoAcceptEvents, AcceptDebts: st.AutoAcceptDebts,
 		AcceptRequest: st.AcceptRequest(notifType),

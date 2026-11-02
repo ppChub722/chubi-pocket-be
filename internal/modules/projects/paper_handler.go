@@ -448,8 +448,6 @@ func mapServiceError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusForbidden, apierr.ForbiddenRole, "Only the event owner can do this", nil)
 	case errors.Is(err, ErrProjectLocked):
 		response.Fail(c, http.StatusConflict, apierr.ProjectLocked, "The event is cancelled or archived; writes are blocked", nil)
-	case errors.Is(err, ErrProjectNotActive):
-		response.Fail(c, http.StatusConflict, apierr.ProjectLocked, "The event is not active", nil)
 	case errors.Is(err, ErrMemberAlreadyExists):
 		response.Fail(c, http.StatusConflict, apierr.AlreadyMember, "Already a member", nil)
 	case errors.Is(err, ErrCannotRemoveOwner):

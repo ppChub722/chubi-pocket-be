@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
 // TestDebtPagesAPI — 0.4.0-3 debt pages: the people row's last activity / side / first date and the
@@ -29,13 +28,9 @@ func TestDebtPagesAPI(t *testing.T) {
 	}
 	f.call("POST", repayPath("n:lee"), map[string]any{"kind": "pay", "amount": 400, "date": day(-2), "account_id": f.wallet},
 		"createDebtRepayment", http.StatusCreated)
-	// Bee: a split on my bill (they owe me 100).
-	if _, err := f.txs.CreateWrite(f.ctx, f.me, transactions.CreateRequest{
-		Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: 300, Date: day(-1), Description: strp("Dinner"),
-		Splits: []transactions.SplitInput{{PersonName: "Bee", OwedAmount: 100}},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	// Bee: they owe me 100 (a ledger-only debt).
+	f.call("POST", entriesPath("n:Bee"), map[string]any{"direction": "paid", "amount": 100, "date": day(-1),
+		"description": "Dinner"}, "createDebtEntry", http.StatusCreated)
 
 	// 1. People list.
 	people := f.call("GET", "/api/v1/personal-debts/people", nil, "listDebtPeople", http.StatusOK)
@@ -83,11 +78,10 @@ func TestDebtPagesAPI(t *testing.T) {
 		t.Errorf("share texts = %v", msg)
 	}
 
-	// 3. A split debt's origin (the มาจาก card).
+	// 3. A ledger-only debt has no origin card.
 	bee := f.call("GET", personPath("n:bee", ""), nil, "getDebtPerson", http.StatusOK)
-	o := obj(bee["items"].([]any)[0].(map[string]any), "origin")
-	if o["kind"] != "split" || num(o, "amount") != 300 || o["title"] != "Dinner" || o["date"] != day(-1) || o["transaction_id"] == nil {
-		t.Errorf("split origin = %v", o)
+	if o := obj(bee["items"].([]any)[0].(map[string]any), "origin"); o != nil {
+		t.Errorf("ledger-only origin = %v, want none", o)
 	}
 
 	// 4. Quick-create preview: record with a transaction, then an overpaid settle.

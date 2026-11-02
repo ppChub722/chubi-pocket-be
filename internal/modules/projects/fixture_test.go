@@ -121,6 +121,7 @@ func (f *fx) cleanup() {
 	for _, q := range []string{
 		`DELETE FROM personal_debts WHERE user_id = ANY($1)`,
 		`DELETE FROM transactions WHERE user_id = ANY($1)`,
+		`UPDATE projects SET completed_at = NULL WHERE owner_user_id = ANY($1)`, // a completed event's bills are locked
 		`DELETE FROM project_transactions WHERE owner_user_id = ANY($1)`,
 		`DELETE FROM projects WHERE owner_user_id = ANY($1)`,
 		`DELETE FROM notifications WHERE recipient_user_id = ANY($1) OR actor_user_id = ANY($1)`,

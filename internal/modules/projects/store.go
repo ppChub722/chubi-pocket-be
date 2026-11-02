@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -28,7 +29,6 @@ var (
 	ErrProjectNotFound      = errors.New("project not found")
 	ErrNotOwner             = errors.New("only the project owner can perform this action")
 	ErrProjectLocked        = errors.New("project is cancelled or archived; writes are blocked")
-	ErrProjectNotActive     = errors.New("project is not active")
 	ErrMemberNotFound       = errors.New("member not found")
 	ErrMemberAlreadyExists  = errors.New("user is already a member of this project")
 	ErrCannotRemoveOwner    = errors.New("cannot remove the project owner; transfer ownership first")
@@ -39,7 +39,7 @@ var (
 	ErrCannotChangeOwner    = errors.New("the owner's role can't be changed here; use transfer-ownership")
 	ErrViewerReadOnly       = errors.New("viewers can't change the event's bills")
 	ErrInvalidDateRange     = errors.New("end_date must not be before start_date")
-	ErrBadMemberRequest     = errors.New("add a member with ad_hoc + display_name, contact_id, or email + display_name")
+	ErrBadMemberRequest     = apierr.Invalid("add a member with ad_hoc + display_name, contact_id, or email + display_name", "display_name", apierr.FieldRequired)
 	// A completed event is locked for good.
 	ErrEventCompleted      = errors.New("the event is completed: it can't be changed any more")
 	ErrUseCompleteEndpoint = errors.New("complete an event with POST /projects/{id}/complete")

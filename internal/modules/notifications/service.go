@@ -75,15 +75,6 @@ var pageTypes = []struct{ Type, Group string }{
 	{TypeAccountInvite, GroupRequest},
 }
 
-const (
-	syncEvents = "events"
-	syncDebts  = "debts"
-)
-
-// syncSwitch — the auto-sync switch a notice's "apply" follows. Bill types are not here: their
-// switch depends on the paper (split bill or event bill), callers read Delivery.SyncEvents / SyncDebts.
-var syncSwitch = map[string]string{}
-
 var (
 	mutableTypes = func() map[string]bool {
 		m := map[string]bool{}
@@ -94,7 +85,8 @@ var (
 	}()
 	// retiredTypes — no longer sent; an older app may still send their mutes, dropped quietly.
 	retiredTypes = map[string]bool{"project_added": true, "shared_bill_created": true, "shared_bill_deleted": true,
-		"shared_bill_disconnected": true, "project_tx_changed": true}
+		"shared_bill_disconnected": true, "project_tx_changed": true, "project_tx_recorded_for_you": true,
+		"split_created": true, "split_changed": true}
 )
 
 var (

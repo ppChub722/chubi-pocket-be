@@ -34,8 +34,6 @@ func newAPIEnv(t *testing.T) *apiEnv {
 	catSvc := categories.NewService(categories.NewStore(pool))
 	txSvc := transactions.NewService(transactions.NewStore(pool), catSvc)
 	pdSvc := personal_debts.NewService(personal_debts.NewStore(pool), txSvc)
-	txSvc.WithDebtsCreator(pdSvc.CreateForTransactionTx)
-	txSvc.WithSplitsEditor(pdSvc.EditForTransactionTx)
 	txSvc.WithDebtLinks(pdSvc)
 	prj := projects.NewService(projects.NewStore(pool))
 	prj.WithTransactionsService(txSvc)
@@ -128,12 +126,9 @@ func TestCreateAndListResolved(t *testing.T) {
 	e := newAPIEnv(t)
 	tagID := uuid.New()
 	e.exec(t, `INSERT INTO tags (id, user_id, name) VALUES ($1, $2, 'trip')`, tagID, e.uid)
-	contact := uuid.New()
-	e.exec(t, `INSERT INTO contacts (id, user_id, display_name) VALUES ($1, $2, 'Aom')`, contact, e.uid)
 
 	d := e.expense(120)
 	d["tag_ids"] = []uuid.UUID{tagID}
-	d["splits"] = []map[string]any{{"person_name": "Aom typed", "contact_id": contact, "owed_amount": 40}}
 	created := e.create(t, d)
 	if len(created) != 1 {
 		t.Fatalf("created %d", len(created))
@@ -145,32 +140,23 @@ func TestCreateAndListResolved(t *testing.T) {
 	if len(c.Resolved.Tags) != 1 || c.Resolved.Tags[0].Name != "trip" {
 		t.Fatalf("resolved tags: %+v", c.Resolved.Tags)
 	}
-	if len(c.Resolved.Splits) != 1 || c.Resolved.Splits[0].Person.Name != "Aom" || c.Resolved.Splits[0].OwedAmount != 40 {
-		t.Fatalf("resolved splits: %+v", c.Resolved.Splits)
-	}
 	if len(c.Resolved.Missing) != 0 {
 		t.Fatalf("missing: %v", c.Resolved.Missing)
 	}
 
-	e.exec(t, `UPDATE contacts SET nickname = 'Mimi', show_nickname = TRUE WHERE id = $1`, contact)
 	var list PendingList
-	e.call(t, "listPending", "GET", "/pending-transactions", nil, http.StatusOK, &list)
-	if list.Count != 1 || list.Data[0].Resolved.Splits[0].Person.Name != "Mimi" {
-		t.Fatalf("nickname not followed: %+v", list.Data)
-	}
 
 	e.exec(t, `DELETE FROM categories WHERE id = $1`, e.cat)
 	e.exec(t, `DELETE FROM tags WHERE id = $1`, tagID)
-	e.exec(t, `DELETE FROM contacts WHERE id = $1`, contact)
 	e.call(t, "listPending", "GET", "/pending-transactions", nil, http.StatusOK, &list)
 	r := list.Data[0].Resolved
-	if r.Category != nil || !has(r.Missing, "category_id") || !has(r.Missing, "tag_ids") || !has(r.Missing, "contact_id") {
+	if r.Category != nil || !has(r.Missing, "category_id") || !has(r.Missing, "tag_ids") {
 		t.Fatalf("dangling: %+v", r)
 	}
 	if r.Account == nil || has(r.Missing, "account_id") {
 		t.Fatalf("account should still resolve: %+v", r)
 	}
-	if len(r.Tags) != 0 || len(r.Splits) != 1 || r.Splits[0].Person.Name != "Aom typed" {
+	if len(r.Tags) != 0 {
 		t.Fatalf("fallback: %+v", r)
 	}
 }

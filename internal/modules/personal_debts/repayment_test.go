@@ -169,7 +169,7 @@ func TestRepaymentLeeScenario(t *testing.T) {
 	}
 
 	// Deleting the repayment's tx keeps the repayment (D1): balance unchanged, wallet back.
-	del, err := f.txs.DeleteWrite(f.ctx, f.me, w.Rows[0].ID, false)
+	del, err := f.txs.DeleteWrite(f.ctx, f.me, w.Rows[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,5 +273,31 @@ func TestRepayEntryMakesRepaymentTx(t *testing.T) {
 	var rows int
 	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1`, f.me).Scan(&rows); err != nil || rows != 2 {
 		t.Errorf("personal_debts rows = %d (%v), want 2 (the debt + the repayment row)", rows, err)
+	}
+}
+
+// TestListTotalsSkipDebtCategories — the tx list totals leave out Debt Paid / Received like reports.
+func TestListTotalsSkipDebtCategories(t *testing.T) {
+	f := newDebtHFix(t)
+	if _, err := f.txs.CreateWrite(f.ctx, f.me, transactions.CreateRequest{
+		Type: transactions.TypeExpense, AccountID: &f.wallet, Amount: 70, Date: "2026-10-12"}); err != nil {
+		t.Fatal(err)
+	}
+	f.call("POST", repayPath("n:lee"), map[string]any{"kind": "pay", "amount": 400, "date": "2026-10-12", "account_id": f.wallet},
+		"createDebtRepayment", http.StatusCreated)
+	f.call("POST", repayPath("n:lee"), map[string]any{"kind": "receive", "amount": 30, "date": "2026-10-12", "account_id": f.wallet},
+		"createDebtRepayment", http.StatusCreated)
+	from, to := "2026-10-01", "2026-10-31"
+	res, err := f.txs.List(f.ctx, f.me, transactions.ListFilter{From: &from, To: &to, Page: 1, PerPage: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Totals.Expense != 70 || res.Totals.Income != 0 || res.Totals.Count != 3 || len(res.Data) != 3 {
+		t.Errorf("totals = %+v (%d rows), want expense 70, income 0, count 3", res.Totals, len(res.Data))
+	}
+	for _, d := range res.Daily {
+		if d.Date == "2026-10-12" && (d.Expense != 70 || d.Income != 0) {
+			t.Errorf("daily 12th = %+v, want expense 70", d)
+		}
 	}
 }

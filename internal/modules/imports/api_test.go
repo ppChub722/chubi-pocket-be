@@ -94,7 +94,7 @@ func TestScanSlipConformsAndResolves(t *testing.T) {
 	if first.Resolved.Account == nil || first.Resolved.Account.ID != wallet {
 		t.Fatalf("resolved account: %+v", first.Resolved)
 	}
-	if len(first.Resolved.Missing) != 0 || first.Resolved.Tags == nil || first.Resolved.Splits == nil {
+	if len(first.Resolved.Missing) != 0 || first.Resolved.Tags == nil {
 		t.Fatalf("resolved: %+v", first.Resolved)
 	}
 

@@ -32,8 +32,6 @@ var (
 	ErrTagsNeedWallet     = errors.New("tags go on the wallet transaction: pick a wallet first")
 	ErrLedgerOnlyNoWallet = errors.New("a ledger-only entry has no wallet or tags: turn create_transaction on to use them")
 	ErrMarkPaidNotFound   = errors.New("an entry to mark paid is not one of this person's")
-	ErrManagedBySource    = errors.New("this entry comes from a split: only its description, note and paid label can change here")
-	ErrBillNotFound       = errors.New("bill not found in an event you are a member of")
 	// ErrManagedByTx — a paid-by debt is one record with its expense: edit or delete the transaction.
 	ErrManagedByTx   = errors.New("this debt is the paid-by part of a transaction: edit or delete the transaction instead")
 	ErrDueBeforeDate = apierr.Invalid("due_date can't be before the entry's date", "due_date", apierr.FieldOutOfRange)

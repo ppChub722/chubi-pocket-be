@@ -77,18 +77,6 @@ func (s *Settings) AcceptRequest(notifType string) bool {
 
 func (s *Settings) Deliver(notifType string) bool { return !contains(s.MutedTypes, notifType) }
 
-// Auto — the type's auto-sync switch (syncSwitch); a muted type still auto-applies (silently).
-// Types whose switch depends on the bill kind (shared bills) read AutoSyncEvents / AutoSyncDebts.
-func (s *Settings) Auto(notifType string) bool {
-	switch syncSwitch[notifType] {
-	case syncEvents:
-		return s.AutoSyncEvents
-	case syncDebts:
-		return s.AutoSyncDebts
-	}
-	return false
-}
-
 func contains(list []string, v string) bool {
 	for _, x := range list {
 		if x == v {

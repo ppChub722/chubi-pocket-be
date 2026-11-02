@@ -7,7 +7,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 )
 
 // TestSubmitSettleDebtMakesRepaymentTx — a settle_debt draft submits as a repayment to the debt's
@@ -40,35 +39,6 @@ func TestSubmitSettleDebtMakesRepaymentTx(t *testing.T) {
 	if e.balance(t, e.acct) != 1060 {
 		t.Errorf("wallet = %v, want 1060", e.balance(t, e.acct))
 	}
-	// A paid_by draft (0.4.0-3) submits as one expense + the debt "I owe them".
-	bill, lee := 123.0, 13.0
-	expense := "expense"
-	pb, err := NewStore(e.pool).Insert(context.Background(), e.uid, SourceManual, KindCreate,
-		Draft{Type: &expense, Amount: &bill, AccountID: &e.acct, Date: &date,
-			PaidBy: &transactions.PaidByInput{PersonName: "Lee", Amount: lee}}, nil, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var list ListResponse
-	e.call(t, "listPending", "GET", "/pending-transactions", nil, http.StatusOK, &list)
-	for _, d := range list.Data {
-		if d.ID == pb.ID && (d.Resolved.LinkMode != transactions.LinkPaid || d.Resolved.PaidBy == nil ||
-			d.Resolved.PaidBy.Person.Name != "Lee" || d.Resolved.PaidBy.MyPaid == nil || *d.Resolved.PaidBy.MyPaid != 110) {
-			t.Errorf("resolved paid_by draft = %+v / %+v", d.Resolved, d.Resolved.PaidBy)
-		}
-	}
-	var sub2 SubmitResponse
-	e.call(t, "submitPending", "POST", "/pending-transactions/submit", map[string]any{"ids": []uuid.UUID{pb.ID}}, http.StatusOK, &sub2)
-	if len(sub2.Submitted) != 1 || sub2.Submitted[0].Rows[0].PaidBy == nil || sub2.Submitted[0].Rows[0].WalletAmount != 110 {
-		t.Fatalf("submit paid_by draft: %+v", sub2)
-	}
-	if e.balance(t, e.acct) != 950 {
-		t.Errorf("wallet = %v, want 950 (1060 − 110)", e.balance(t, e.acct))
-	}
-	if _, err := e.pool.Exec(context.Background(), `DELETE FROM personal_debts WHERE source_kind = 'paid_by' AND user_id = $1`, e.uid); err != nil {
-		t.Fatal(err)
-	}
-
 	var debts int
 	var paid bool
 	if err := e.pool.QueryRow(context.Background(), `SELECT COUNT(*), BOOL_OR(paid) FROM personal_debts WHERE user_id = $1`, e.uid).

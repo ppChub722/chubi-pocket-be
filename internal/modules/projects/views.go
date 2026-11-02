@@ -569,13 +569,22 @@ func missingBooks(p shared.Paper, me uuid.UUID, hasTx bool, parts []personal_deb
 // listPaperIDs — papers matching f: an event's board (projectID), or my split bills.
 func (s *Service) listPaperIDs(ctx context.Context, userID uuid.UUID, projectID *uuid.UUID, f PaperFilter) ([]uuid.UUID, int, error) {
 	where := []string{}
-	args := []any{userID}
+	args := []any{}
+	me := func() string { // the caller's id, added when a condition uses it
+		for i, a := range args {
+			if a == any(userID) {
+				return fmt.Sprintf("$%d", i+1)
+			}
+		}
+		args = append(args, userID)
+		return fmt.Sprintf("$%d", len(args))
+	}
 	if projectID != nil {
 		args = append(args, *projectID)
 		where = append(where, fmt.Sprintf("b.project_id = $%d", len(args)))
 		if f.Mine {
 			where = append(where, `EXISTS (SELECT 1 FROM split_transaction_people mp WHERE mp.split_transaction_id = b.id
-				AND mp.user_id = $1 AND (mp.share > 0 OR mp.paid > 0))`)
+				AND mp.user_id = `+me()+` AND (mp.share > 0 OR mp.paid > 0))`)
 		}
 	} else {
 		st := []string{"'invited'", "'joined'"}
@@ -586,7 +595,7 @@ func (s *Service) listPaperIDs(ctx context.Context, userID uuid.UUID, projectID 
 			st = []string{"'joined'"}
 		}
 		where = append(where, `b.project_id IS NULL`, `EXISTS (SELECT 1 FROM split_transaction_people mp
-			WHERE mp.split_transaction_id = b.id AND mp.user_id = $1 AND mp.status IN (`+strings.Join(st, ", ")+`))`)
+			WHERE mp.split_transaction_id = b.id AND mp.user_id = `+me()+` AND mp.status IN (`+strings.Join(st, ", ")+`))`)
 	}
 	if f.Type != "" {
 		args = append(args, f.Type)

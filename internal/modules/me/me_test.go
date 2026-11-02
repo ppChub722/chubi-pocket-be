@@ -81,7 +81,7 @@ func TestMyCounts(t *testing.T) {
 		(gen_random_uuid(), $1, gen_random_uuid(), 'save', $2, 'available', 'goal', $4, 200, CURRENT_DATE),
 		(gen_random_uuid(), $1, gen_random_uuid(), 'save', $2, 'available', 'spare', NULL, 100, CURRENT_DATE)`, uid, acc, goalA, goalB)
 
-	exec(`INSERT INTO notifications (id, recipient_user_id, type, payload) VALUES (gen_random_uuid(), $1, 'project_added', '{}')`, uid)
+	exec(`INSERT INTO notifications (id, recipient_user_id, type, payload) VALUES (gen_random_uuid(), $1, 'event_completed', '{}')`, uid)
 	exec(`INSERT INTO pending_transactions (id, user_id, source) VALUES (gen_random_uuid(), $1, 'text')`, uid)
 
 	got := get()
