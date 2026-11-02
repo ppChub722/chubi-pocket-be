@@ -46,22 +46,27 @@ func (s *Service) GetSettings(ctx context.Context, userID uuid.UUID) (*Settings,
 
 // Notification-page groups (0.4.1-2 P7).
 const (
-	GroupSharedBill = "shared_bill"
-	GroupEvent      = "event"
-	GroupRecurring  = "recurring"
-	GroupRequest    = "request"
+	GroupBill      = "bill"
+	GroupDebt      = "debt"
+	GroupEvent     = "event"
+	GroupRecurring = "recurring"
+	GroupRequest   = "request"
 )
 
 // pageTypes — every type the notification settings page lists, in page order; every one can be
-// muted (requests too since 0.4.2-3 F2, each with its own auto-accept switch).
+// muted (requests too, each with its own auto-accept switch).
 var pageTypes = []struct{ Type, Group string }{
-	{TypeSharedBillCreated, GroupSharedBill},
-	{TypeSharedBillDeleted, GroupSharedBill},
-	{TypeSharedBillDisconnected, GroupSharedBill},
-	{TypeDebtDisconnected, GroupSharedBill},
-	{TypeProjectTxChanged, GroupEvent},
+	{TypeBillInvite, GroupBill},
+	{TypeBillNew, GroupBill},
+	{TypeBillChanged, GroupBill},
+	{TypeBillRemoved, GroupBill},
+	{TypeBillOwnerChanged, GroupBill},
+	{TypeBillMoved, GroupBill},
+	{TypeDebtRepaid, GroupDebt},
+	{TypeDebtDisconnected, GroupDebt},
 	{TypeEventCompleted, GroupEvent},
 	{TypeEventMemberRemoved, GroupEvent},
+	{TypeEventDeleted, GroupEvent},
 	{TypeRecurringDue, GroupRecurring},
 	{TypeRecurringEnding, GroupRecurring},
 	{TypeRecurringAutoCreated, GroupRecurring},
@@ -75,11 +80,9 @@ const (
 	syncDebts  = "debts"
 )
 
-// syncSwitch — the auto-sync switch a notice's "apply" follows (S4). Shared-bill types are not
-// here: their switch depends on the bill kind (callers read Delivery.SyncEvents / SyncDebts).
-var syncSwitch = map[string]string{
-	TypeProjectTxChanged: syncEvents, // update my copy to match (shared-bill callers pick by kind)
-}
+// syncSwitch — the auto-sync switch a notice's "apply" follows. Bill types are not here: their
+// switch depends on the paper (split bill or event bill), callers read Delivery.SyncEvents / SyncDebts.
+var syncSwitch = map[string]string{}
 
 var (
 	mutableTypes = func() map[string]bool {
@@ -89,9 +92,9 @@ var (
 		}
 		return m
 	}()
-	// retiredTypes — no longer sent (project_added: F2, an invite replaces it); an older app may
-	// still send its mute, which is dropped quietly.
-	retiredTypes = map[string]bool{TypeProjectAdded: true}
+	// retiredTypes — no longer sent; an older app may still send their mutes, dropped quietly.
+	retiredTypes = map[string]bool{"project_added": true, "shared_bill_created": true, "shared_bill_deleted": true,
+		"shared_bill_disconnected": true, "project_tx_changed": true}
 )
 
 var (

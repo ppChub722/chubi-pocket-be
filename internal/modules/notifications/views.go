@@ -45,6 +45,8 @@ type SettingsView struct {
 	AutoAcceptEventInvites  bool               `json:"auto_accept_event_invites"`
 	AutoAcceptContactLinks  bool               `json:"auto_accept_contact_links"`
 	AutoAcceptWalletInvites bool               `json:"auto_accept_wallet_invites"`
+	AutoAcceptRepayments    bool               `json:"auto_accept_repayments"`
+	OnSplitRemoved          string             `json:"on_split_removed"`
 	DefaultAccount          *shared.AccountRef `json:"default_account"`
 	UpdatedAt               time.Time          `json:"updated_at"`
 }
@@ -141,6 +143,8 @@ func (s *Service) settingsView(ctx context.Context, st *Settings) (*SettingsView
 		AutoAcceptEventInvites:  st.AutoAcceptEventInvites,
 		AutoAcceptContactLinks:  st.AutoAcceptContactLinks,
 		AutoAcceptWalletInvites: st.AutoAcceptWalletInvites,
+		AutoAcceptRepayments:    st.AutoAcceptRepayments,
+		OnSplitRemoved:          st.OnSplitRemoved,
 		UpdatedAt:               st.UpdatedAt,
 	}
 	if v.MutedTypes == nil {

@@ -8,19 +8,13 @@ import (
 )
 
 const (
-	TypeSplitCreated            = "split_created"
-	TypeSplitReceived           = "split_received"
-	TypeProjectTxRecordedForYou = "project_tx_recorded_for_you"
-	TypeProjectTxChanged        = "project_tx_changed"
-	TypeProjectInvite           = "project_invite"
-	TypeContactLinkRequest      = "contact_link_request"
-	TypeAccountInvite           = "account_invite"
-	TypeProjectAdded            = "project_added"
-	TypeSplitChanged            = "split_changed"
-	TypeRecurringDue            = "recurring_due"
-	TypeRecurringEnding         = "recurring_ending"
-	TypeRecurringAutoCreated    = "recurring_auto_created"
-	TypeDebtDisconnected        = "debt_disconnected" // 0.4.1-1 D9
+	TypeProjectInvite        = "project_invite"
+	TypeContactLinkRequest   = "contact_link_request"
+	TypeAccountInvite        = "account_invite"
+	TypeRecurringDue         = "recurring_due"
+	TypeRecurringEnding      = "recurring_ending"
+	TypeRecurringAutoCreated = "recurring_auto_created"
+	TypeDebtDisconnected     = "debt_disconnected" // 0.4.1-1 D9
 )
 
 type Notification struct {
@@ -53,10 +47,20 @@ type Settings struct {
 	// The three requests' own auto-accept switches (0.4.2-3 F2, migration 125, default off).
 	AutoAcceptEventInvites  bool      `json:"auto_accept_event_invites"`
 	AutoAcceptContactLinks  bool      `json:"auto_accept_contact_links"`
-	AutoAcceptWalletInvites bool      `json:"auto_accept_wallet_invites"`
-	CreatedAt               time.Time `json:"created_at"`
-	UpdatedAt               time.Time `json:"updated_at"`
+	AutoAcceptWalletInvites bool `json:"auto_accept_wallet_invites"`
+	// OnSplitRemoved — removed from a bill (or leaving it): ask | keep | delete my books of it.
+	OnSplitRemoved string `json:"on_split_removed"`
+	// AutoAcceptRepayments — a partner's "I paid you back" lands in my book at once.
+	AutoAcceptRepayments bool      `json:"auto_accept_repayments"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
+
+const (
+	OnRemovedAsk    = "ask"
+	OnRemovedKeep   = "keep"
+	OnRemovedDelete = "delete"
+)
 
 // AcceptRequest — the request type's auto-accept switch (F2); false for every other type.
 func (s *Settings) AcceptRequest(notifType string) bool {
@@ -103,6 +107,8 @@ type UpdateSettingsRequest struct {
 	AutoAcceptEventInvites  *bool      `json:"auto_accept_event_invites"`
 	AutoAcceptContactLinks  *bool      `json:"auto_accept_contact_links"`
 	AutoAcceptWalletInvites *bool      `json:"auto_accept_wallet_invites"`
+	AutoAcceptRepayments    *bool      `json:"auto_accept_repayments"`
+	OnSplitRemoved          *string    `json:"on_split_removed" binding:"omitempty,oneof=ask keep delete"`
 	DefaultAccountID        *uuid.UUID `json:"default_account_id"`
 	ClearDefaultAccount     bool       `json:"-"`
 }
@@ -131,24 +137,6 @@ type ListResponse struct {
 	Data        []Notification `json:"data"`
 	UnreadCount int            `json:"unread_count"`
 	Pagination  Pagination     `json:"pagination"`
-}
-
-// (SplitCreatedPayload / SplitChangedPayload / ProjectTxRecordedPayload went with the one-way mirror,
-// 0.4.1-2 S16; old rows were wiped by migration 094.)
-
-type ProjectTxChangedPayload struct {
-	ProjectTransactionID  uuid.UUID                 `json:"project_transaction_id"`
-	ProjectID             uuid.UUID                 `json:"project_id"`
-	EditorUserID          uuid.UUID                 `json:"editor_user_id"`
-	EditorDisplayName     string                    `json:"editor_display_name"`
-	ChangeKind            string                    `json:"change_kind"` // "edited" | "deleted"
-	Diff                  map[string][2]interface{} `json:"diff,omitempty"`
-	PersonalTransactionID *uuid.UUID                `json:"personal_transaction_id"`
-	Suggested             *PersonalUpdate           `json:"suggested,omitempty"`
-	// ProjectKind / Applied (0.4.1-2): event | split; true = my auto-sync switch applied the edit to
-	// my copy, false = "อัปเดตตาม" (POST /event-bills/{id}/apply).
-	ProjectKind string `json:"project_kind,omitempty"`
-	Applied     bool   `json:"applied"`
 }
 
 type ProjectInvitePayload struct {

@@ -77,20 +77,6 @@ func (s *Service) dispatchTx(
 	return err
 }
 
-// (DispatchSplitCreated / DispatchSplitChanged / DispatchProjectTxRecorded, the one-way mirror's
-// notices, were retired in 0.4.1-2 S16: shared bills notify through shared_bill.go.)
-
-func (s *Service) DispatchProjectTxChanged(
-	ctx context.Context, tx pgx.Tx,
-	recipientUserID uuid.UUID, actorUserID uuid.UUID, p ProjectTxChangedPayload, actioned bool,
-) error {
-	deepLink := fmt.Sprintf("/projects/%s", p.ProjectID) // the app has no per-bill route: open the event
-	if p.ChangeKind == "deleted" {
-		deepLink = fmt.Sprintf("/projects/%s", p.ProjectID)
-	}
-	return s.dispatchTx(ctx, tx, TypeProjectTxChanged, recipientUserID, &actorUserID, p, &deepLink, actioned)
-}
-
 func (s *Service) DispatchProjectInvite(
 	ctx context.Context, tx pgx.Tx,
 	recipientUserID uuid.UUID, actorUserID uuid.UUID, p ProjectInvitePayload, accepted bool,
