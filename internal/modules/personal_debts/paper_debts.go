@@ -46,26 +46,38 @@ func (s *Service) tellPartnerTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID
 	if err != nil {
 		return fmt.Errorf("repayment partner: %w", err)
 	}
-	theirs, err := getEntry(ctx, tx, partnerUser, partnerDebt, false)
+	return s.TellRepaidTx(ctx, tx, userID, partnerUser, partnerDebt, r.Amount, r.Date, r.Description)
+}
+
+// TellRepaidTx — actor settled amount of the pair behind theirDebt (the other user's debt): that
+// user gets debt_repaid, with the repayment already in their book when auto_accept_repayments is on
+// (no wallet: they pick it later). Their debt's direction says which way the money went.
+func (s *Service) TellRepaidTx(ctx context.Context, tx pgx.Tx, actor, theirUser, theirDebt uuid.UUID, amount float64,
+	date string, description *string) error {
+	if s.notifs == nil || theirUser == actor {
+		return nil
+	}
+	theirs, err := getEntry(ctx, tx, theirUser, theirDebt, false)
 	if err != nil {
 		return err
 	}
+	// their debt "paid" = they paid for the actor: the actor's money comes in (received)
 	kind, direction := RepayReceive, DirectionReceived
-	if r.Direction == DirectionReceived {
+	if theirs.Direction == DirectionReceived {
 		kind, direction = RepayPay, DirectionPaid
 	}
 	p := notifications.DebtRepaidPayload{
-		DebtID: partnerDebt, Key: theirs.Key(), PersonName: theirs.PersonName, Amount: r.Amount,
-		Direction: direction, Date: r.Date, Description: r.Description,
+		DebtID: theirDebt, Key: theirs.Key(), PersonName: theirs.PersonName, Amount: amount,
+		Direction: direction, Date: date, Description: description,
 	}
-	st, err := s.notifs.SettingsTx(ctx, tx, partnerUser)
+	st, err := s.notifs.SettingsTx(ctx, tx, theirUser)
 	if err != nil {
 		return err
 	}
 	if st.AutoAcceptRepayments {
 		no := false
-		mine, _, err := s.createRepaymentTx(ctx, tx, partnerUser, theirs.Key(), RepaymentRequest{
-			Kind: kind, Amount: r.Amount, Date: &r.Date, Description: r.Description,
+		mine, _, err := s.createRepaymentTx(ctx, tx, theirUser, theirs.Key(), RepaymentRequest{
+			Kind: kind, Amount: amount, Date: &date, Description: description,
 			CreateTransaction: &no, PersonName: &theirs.PersonName,
 		})
 		if err != nil {
@@ -73,7 +85,7 @@ func (s *Service) tellPartnerTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID
 		}
 		p.RepaymentID = &mine.ID
 	}
-	return s.notifs.DispatchDebtRepaid(ctx, tx, partnerUser, userID, p)
+	return s.notifs.DispatchDebtRepaid(ctx, tx, theirUser, actor, p)
 }
 
 // PaperPart — one paper's part of a debt.

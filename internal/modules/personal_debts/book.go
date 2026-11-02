@@ -263,8 +263,13 @@ var _ interface {
 // DebtEffects — for a transaction write's effects: the rows (as DebtEntry) and every person's new
 // balance (the rows' people + keys). Unknown ids are skipped (a row the write removed).
 func (s *Service) DebtEffects(ctx context.Context, userID uuid.UUID, ids []uuid.UUID, keys []string) ([]any, []any, error) {
+	return s.DebtEffectsTx(ctx, s.store.db, userID, ids, keys)
+}
+
+// DebtEffectsTx — DebtEffects read inside the write's own transaction (rows it has not committed).
+func (s *Service) DebtEffectsTx(ctx context.Context, q shared.Querier, userID uuid.UUID, ids []uuid.UUID, keys []string) ([]any, []any, error) {
 	debts, persons := []any{}, []any{}
-	views, err := loadViews(ctx, s.store.db, `WHERE pd.user_id = $1 AND pd.id = ANY($2) ORDER BY pd.date, pd.created_at, pd.id`,
+	views, err := loadViews(ctx, q, `WHERE pd.user_id = $1 AND pd.id = ANY($2) ORDER BY pd.date, pd.created_at, pd.id`,
 		userID, uniqueIDs(ids))
 	if err != nil {
 		return nil, nil, err
@@ -280,7 +285,7 @@ func (s *Service) DebtEffects(ctx context.Context, userID uuid.UUID, ids []uuid.
 			continue
 		}
 		seen[k] = true
-		b, err := s.balanceOfKey(ctx, s.store.db, userID, k)
+		b, err := s.balanceOfKey(ctx, q, userID, k)
 		if err != nil {
 			return nil, nil, err
 		}

@@ -276,7 +276,7 @@ func (s *Service) BookSettle(ctx context.Context, userID, id uuid.UUID, req Sett
 		}
 	}
 	if len(debtIDs) > 0 {
-		debts, people, err := s.debts.DebtEffects(ctx, userID, debtIDs, nil)
+		debts, people, err := s.debts.DebtEffectsTx(ctx, tx, userID, debtIDs, nil)
 		if err == nil {
 			eff.Debts, eff.PersonBalances = debts, people
 		}

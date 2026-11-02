@@ -436,6 +436,11 @@ func (s *Service) claimTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, pape
 			return 0, err
 		}
 		txID = &row.ID
+		if !payDebt && event == nil {
+			if err := s.tellPaidTx(ctx, tx, userID, paper, me.ID); err != nil {
+				return 0, err
+			}
+		}
 		if in.PrivateNote != nil {
 			if _, err := tx.Exec(ctx, `UPDATE transactions SET private_note = $2 WHERE id = $1`, row.ID,
 				shared.CleanText(in.PrivateNote)); err != nil {
@@ -500,7 +505,7 @@ func (s *Service) claimTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, pape
 		wrote++
 	}
 	if eff != nil && len(debtIDs) > 0 {
-		debts, people, err := s.debts.DebtEffects(ctx, userID, debtIDs, nil)
+		debts, people, err := s.debts.DebtEffectsTx(ctx, tx, userID, debtIDs, nil)
 		if err != nil {
 			return 0, err
 		}
@@ -519,6 +524,31 @@ func (s *Service) claimTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, pape
 		}
 	}
 	return wrote, nil
+}
+
+// tellPaidTx — I claimed a split bill as paid from my wallet: every payer I owed who already holds
+// the debt "I owe them" in their book hears that I paid (debt_repaid).
+func (s *Service) tellPaidTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, paper shared.Paper, me uuid.UUID) error {
+	for id, v := range paper.NetOf(me) {
+		other := paper.Person(id)
+		if v < 0.005 || other == nil || other.UserID == nil {
+			continue
+		}
+		var debtID uuid.UUID
+		err := tx.QueryRow(ctx, `SELECT b.debt_id FROM personal_debt_bills b JOIN personal_debts d ON d.id = b.debt_id
+			WHERE b.user_id = $1 AND b.split_transaction_id = $2 AND b.split_person_id = $3 AND d.kind = 'debt'
+			LIMIT 1`, *other.UserID, paper.ID, me).Scan(&debtID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("payer's debt: %w", err)
+		}
+		if err := s.debts.TellRepaidTx(ctx, tx, userID, *other.UserID, debtID, v, paper.Date, paper.Description); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // partnerTx — the other person's debt of the same pair on this paper (their book) becomes my debt's
@@ -575,10 +605,29 @@ func (s *Service) syncBooksTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, 
 		}
 	}
 	net := paper.NetOf(me.ID)
-	var touched []uuid.UUID
+	var (
+		touched, removed []uuid.UUID
+		keys             []string
+	)
 	for _, p := range parts {
 		now := math.Abs(net[p.PersonID])
 		if now < 0.005 {
+			// nothing owed on this pair any more; a debt left with no paper goes (its amount would be 0)
+			var left int
+			if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM personal_debt_bills WHERE debt_id = $1`, p.DebtID).Scan(&left); err != nil {
+				return fmt.Errorf("debt parts: %w", err)
+			}
+			if left == 1 {
+				e, err := personal_debts.GetEntryTx(ctx, tx, userID, p.DebtID)
+				if err != nil {
+					return err
+				}
+				if _, err := s.debts.DeleteEntryTx(ctx, tx, userID, p.DebtID); err != nil {
+					return err
+				}
+				removed, keys = append(removed, p.DebtID), append(keys, e.Key())
+				continue
+			}
 			if _, err := s.debts.DropPaperPartTx(ctx, tx, userID, p.ID); err != nil {
 				return err
 			}
@@ -591,13 +640,14 @@ func (s *Service) syncBooksTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, 
 		}
 		touched = append(touched, p.DebtID)
 	}
-	if eff != nil && len(touched) > 0 {
-		debts, people, err := s.debts.DebtEffects(ctx, userID, uniqueIDs(touched), nil)
+	if eff != nil && len(touched)+len(removed) > 0 {
+		debts, people, err := s.debts.DebtEffectsTx(ctx, tx, userID, uniqueIDs(touched), keys)
 		if err != nil {
 			return err
 		}
 		eff.Debts = append(eff.Debts, debts...)
 		eff.PersonBalances = append(eff.PersonBalances, people...)
+		eff.RemovedDebtIDs = append(eff.RemovedDebtIDs, removed...)
 	}
 	return nil
 }

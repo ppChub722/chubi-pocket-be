@@ -11297,14 +11297,14 @@ components:
         tags: { type: array, items: { $ref: '#/components/schemas/EventTag' }, description: 'The event tags, `mine` updated.' }
     DebtBillPart:
       type: object
-      description: '0.4.1-2 V5 — one bill''s part of a debt (personal_debt_bills): the bill, my amount with this person on it as my book holds it, and whether it still matches the bill.'
+      description: 'One paper''s part of a debt (personal_debt_bills): the paper, my amount with this person on it as my book holds it, and what the paper says now.'
       required: [split_transaction_id, event, description, amount, now, in_sync]
       properties:
         split_transaction_id: { $ref: '#/components/schemas/Uuid' }
-        event: { $ref: '#/components/schemas/EventRef' }
-        description: { type: [string, 'null'], description: 'The bill''s description (live).' }
+        event: { oneOf: [{ $ref: '#/components/schemas/EventRef' }, { type: 'null' }], description: 'null = a split bill.' }
+        description: { type: [string, 'null'], description: 'The paper''s description (live).' }
         amount: { $ref: '#/components/schemas/Money', description: 'This bill''s part of the debt, as my book holds it.' }
-        now: { $ref: '#/components/schemas/Money' }
+        now: { $ref: '#/components/schemas/Money', description: 'What the paper says this part is now (0 = the pair is gone: "อัปเดต" drops it).' }
         in_sync: { type: boolean, description: 'The part matches the bill now (false = "ไม่ตรง": the bill changed while my auto sync was off, or I answered no). Always true on a completed event (no sync any more).' }
     ProjectCreateRequest:
       type: object
