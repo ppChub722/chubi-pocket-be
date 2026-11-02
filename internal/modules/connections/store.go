@@ -91,53 +91,6 @@ func (s *Store) photos(ctx context.Context, userID uuid.UUID) (map[string]photoR
 	return out, rows.Err()
 }
 
-// newCode stores a link code (its hash); the user's older unused codes for the app stop working.
-func (s *Store) newCode(ctx context.Context, userID uuid.UUID, provider string, hash []byte, expires time.Time) error {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `DELETE FROM connection_link_codes
-		WHERE user_id = $1 AND provider = $2 AND purpose = 'link' AND used_at IS NULL`,
-		userID, provider); err != nil {
-		return fmt.Errorf("old codes: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO connection_link_codes (code_hash, user_id, provider, expires_at)
-		VALUES ($1, $2, $3, $4)`, hash, userID, provider, expires); err != nil {
-		return fmt.Errorf("new code: %w", err)
-	}
-	return tx.Commit(ctx)
-}
-
-// bind uses a code: the account in that app (externalID) becomes the code owner's. The account
-// leaves any other user it was linked to, and the owner's old account in that app is replaced.
-// ok false = no such code, used, or expired.
-func (s *Store) bind(ctx context.Context, provider string, hash []byte, externalID, account string,
-	perms map[string]bool) (userID uuid.UUID, displayName string, ok bool, err error) {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return uuid.Nil, "", false, err
-	}
-	defer tx.Rollback(ctx)
-	err = tx.QueryRow(ctx, `UPDATE connection_link_codes SET used_at = NOW()
-		WHERE code_hash = $1 AND provider = $2 AND purpose = 'link' AND used_at IS NULL AND expires_at > NOW()
-		RETURNING user_id`, hash, provider).Scan(&userID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, "", false, nil
-	}
-	if err != nil {
-		return uuid.Nil, "", false, fmt.Errorf("use code: %w", err)
-	}
-	if err := linkTx(ctx, tx, userID, provider, externalID, account, perms); err != nil {
-		return uuid.Nil, "", false, err
-	}
-	if err := tx.QueryRow(ctx, `SELECT display_name FROM users WHERE id = $1`, userID).Scan(&displayName); err != nil {
-		return uuid.Nil, "", false, fmt.Errorf("user: %w", err)
-	}
-	return userID, displayName, true, tx.Commit(ctx)
-}
-
 // linkTx makes externalID the user's account in that app. The account leaves any other user it
 // was linked to, and the user's old account in that app is replaced.
 func linkTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, provider, externalID, account string,

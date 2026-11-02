@@ -76,38 +76,11 @@ type fakeLink struct {
 	chatOn bool
 }
 
-// fakeAccounts: linked chats + one-time codes (a code binds once).
+// fakeAccounts: linked chats.
 type fakeAccounts struct {
-	chats      map[int64]fakeLink
-	codes      map[string]uuid.UUID
-	names      map[uuid.UUID]string
-	accounts   map[int64]string // the account label each bind got
-	loginCodes map[string]uuid.UUID
-	loginChat  map[uuid.UUID]int64 // which chat opened a login code
-	confirmed  map[uuid.UUID]bool
-	lastLogin  map[int64]bool // chats whose account would be locked out
-	err        error
-}
-
-func (f *fakeAccounts) TelegramLoginOpen(_ context.Context, code string, chatID int64, _, _ string) (uuid.UUID, string, bool, error) {
-	id, ok := f.loginCodes[code]
-	if !ok {
-		return uuid.Nil, "", false, nil
-	}
-	f.loginChat[id] = chatID
-	name := ""
-	if l, linked := f.chats[chatID]; linked {
-		name = f.names[l.user]
-	}
-	return id, name, true, nil
-}
-
-func (f *fakeAccounts) TelegramLoginConfirm(_ context.Context, id uuid.UUID, chatID int64) (bool, error) {
-	if f.loginChat[id] != chatID {
-		return false, nil
-	}
-	f.confirmed[id] = true
-	return true, nil
+	chats     map[int64]fakeLink
+	lastLogin map[int64]bool // chats whose account would be locked out
+	err       error
 }
 
 func (f *fakeAccounts) TelegramUser(_ context.Context, chatID int64) (uuid.UUID, bool, bool, error) {
@@ -116,23 +89,6 @@ func (f *fakeAccounts) TelegramUser(_ context.Context, chatID int64) (uuid.UUID,
 	}
 	l, ok := f.chats[chatID]
 	return l.user, l.chatOn, ok, nil
-}
-
-func (f *fakeAccounts) TelegramBind(_ context.Context, code string, chatID int64, account string) (string, bool, error) {
-	if f.err != nil {
-		return "", false, f.err
-	}
-	user, ok := f.codes[code]
-	if !ok {
-		return "", false, nil
-	}
-	if f.lastLogin[chatID] {
-		return "", false, shared.ErrLastLoginMethod
-	}
-	delete(f.codes, code)
-	f.chats[chatID] = fakeLink{user: user, chatOn: true}
-	f.accounts[chatID] = account
-	return f.names[user], true, nil
 }
 
 func (f *fakeAccounts) TelegramUnlink(_ context.Context, chatID int64) (bool, error) {
@@ -153,85 +109,29 @@ const linkedChat, offChat, strangerChat = int64(1001), int64(1002), int64(2002)
 
 func newAccounts() *fakeAccounts {
 	return &fakeAccounts{
-		chats:      map[int64]fakeLink{linkedChat: {nongID, true}, offChat: {otherID, false}},
-		codes:      map[string]uuid.UUID{"GoodCode_123": nongID},
-		names:      map[uuid.UUID]string{nongID: "น้อง", otherID: "Beam"},
-		accounts:   map[int64]string{},
-		loginCodes: map[string]uuid.UUID{"LoginCode_1": loginCodeID},
-		loginChat:  map[uuid.UUID]int64{},
-		confirmed:  map[uuid.UUID]bool{},
-		lastLogin:  map[int64]bool{},
+		chats:     map[int64]fakeLink{linkedChat: {nongID, true}, offChat: {otherID, false}},
+		lastLogin: map[int64]bool{},
 	}
 }
-
-var loginCodeID = uuid.MustParse("0191c2a0-0000-7000-8000-0000000000c1")
 
 func callback(updateID, chatID, fromID int64, data string) Update {
 	return Update{UpdateID: updateID, CallbackQuery: &CallbackQuery{ID: "cb1", From: User{ID: fromID}, Data: data,
 		Message: &Message{MessageID: 90, Chat: Chat{ID: chatID, Type: "private"}}}}
 }
 
-func TestLoginWithTelegram(t *testing.T) {
+// A tap on an old login button (a message sent before 0.4.2-4) is answered and nothing else.
+func TestOldButtonsAreJustAnswered(t *testing.T) {
 	ctx := context.Background()
-
-	// a linked chat: asked to confirm as its account, then taps ✓ ยืนยัน
-	h, s, _, acc, logs := newTestHandler(t)
-	if got := h.HandleUpdate(ctx, Update{UpdateID: 1, Message: msg(linkedChat, "private", "/start login_LoginCode_1")}); got != OutcomeLoginAsk {
-		t.Fatalf("open = %s", got)
+	h, s, _, _, _ := newTestHandler(t)
+	if got := h.HandleUpdate(ctx, callback(1, linkedChat, linkedChat, "li:0191c2a0-0000-7000-8000-0000000000c1")); got != OutcomeIgnored {
+		t.Errorf("old button = %s", got)
 	}
-	if len(s.sent) != 1 || s.sent[0].text != "เข้าสู่ระบบ chubi-pocket เป็น น้อง ไหมครับ?" ||
-		len(s.sent[0].buttons) != 1 || s.sent[0].buttons[0].Text != ButtonConfirm ||
-		s.sent[0].buttons[0].Data != "li:"+loginCodeID.String() {
-		t.Fatalf("ask = %+v", s.sent)
+	if len(s.answered) != 1 || s.answered[0] != "" || len(s.edits) != 0 || len(s.sent) != 0 {
+		t.Errorf("answered %v, edits %v, sent %v", s.answered, s.edits, s.sent)
 	}
-	if got := h.HandleUpdate(ctx, callback(2, linkedChat, linkedChat, s.sent[0].buttons[0].Data)); got != OutcomeLoginOK {
-		t.Errorf("confirm = %s", got)
-	}
-	if !acc.confirmed[loginCodeID] || len(s.edits) != 1 || s.edits[0] != TextLoginDone || s.answered[0] != "" {
-		t.Errorf("after confirm: confirmed %v edits %v answers %v", acc.confirmed, s.edits, s.answered)
-	}
-	if strings.Contains(logs.String(), "LoginCode_1") {
-		t.Errorf("the code is in the log")
-	}
-
-	// an unlinked chat: offered sign-up
-	h, s, _, acc, _ = newTestHandler(t)
-	h.HandleUpdate(ctx, Update{UpdateID: 3, Message: msg(strangerChat, "private", "/start login_LoginCode_1")})
-	if len(s.sent) != 1 || s.sent[0].text != TextLoginNoAccount || s.sent[0].buttons[0].Text != ButtonSignup ||
-		s.sent[0].buttons[0].Data != "su:"+loginCodeID.String() {
-		t.Fatalf("signup offer = %+v", s.sent)
-	}
-	h.HandleUpdate(ctx, callback(4, strangerChat, strangerChat, s.sent[0].buttons[0].Data))
-	if !acc.confirmed[loginCodeID] || s.edits[0] != TextSignupDone {
-		t.Errorf("signup tap: %v %v", acc.confirmed, s.edits)
-	}
-
-	// a bad code; a tap from another chat / with junk data / twice
-	h, s, _, acc, _ = newTestHandler(t)
-	if got := h.HandleUpdate(ctx, Update{UpdateID: 5, Message: msg(linkedChat, "private", "/start login_nope")}); got != OutcomeLoginBad ||
-		s.sent[0].text != TextLoginExpired {
-		t.Errorf("bad login code = %s %+v", got, s.sent)
-	}
-	h.HandleUpdate(ctx, Update{UpdateID: 6, Message: msg(linkedChat, "private", "/start login_LoginCode_1")})
-	if got := h.HandleUpdate(ctx, callback(7, strangerChat, strangerChat, "li:"+loginCodeID.String())); got != OutcomeLoginBad {
-		t.Errorf("another chat's tap = %s", got)
-	}
-	if got := h.HandleUpdate(ctx, callback(8, linkedChat, linkedChat, "li:not-a-uuid")); got != OutcomeLoginBad {
-		t.Errorf("junk data = %s", got)
-	}
-	if got := h.HandleUpdate(ctx, callback(8, linkedChat, linkedChat, "li:"+loginCodeID.String())); got != OutcomeDuplicate {
-		t.Errorf("a resent tap = %s", got)
-	}
-	if acc.confirmed[loginCodeID] {
-		t.Errorf("confirmed by a bad tap")
-	}
-	if s.answered[0] != TextLoginExpired || s.edits[0] != TextLoginExpired {
-		t.Errorf("bad tap notice = %v / %v", s.answered, s.edits)
-	}
-	// a callback in a group is ignored
-	cb := callback(9, linkedChat, linkedChat, "li:"+loginCodeID.String())
+	cb := callback(2, linkedChat, linkedChat, "li:x")
 	cb.CallbackQuery.Message.Chat.Type = "group"
-	if got := h.HandleUpdate(ctx, cb); got != OutcomeIgnored {
+	if got := h.HandleUpdate(ctx, cb); got != OutcomeIgnored || len(s.answered) != 1 {
 		t.Errorf("group callback = %s", got)
 	}
 }
@@ -246,9 +146,6 @@ func TestLastLoginMethodGuard(t *testing.T) {
 	}
 	if _, ok := acc.chats[linkedChat]; !ok {
 		t.Errorf("unlinked anyway")
-	}
-	if got := h.HandleUpdate(ctx, Update{UpdateID: 2, Message: msg(linkedChat, "private", "/start GoodCode_123")}); got != OutcomeLastLogin {
-		t.Errorf("moving the only way in = %s", got)
 	}
 }
 
@@ -287,12 +184,10 @@ func TestHandleUpdateTable(t *testing.T) {
 			OutcomeWriteOK, "", false},
 		{"start unlinked", Update{UpdateID: 5, Message: msg(strangerChat, "private", "/start")},
 			OutcomeLinkFirst, TextLinkFirst, false},
-		{"start good code", Update{UpdateID: 6, Message: msg(strangerChat, "private", "/start GoodCode_123")},
-			OutcomeLinked, "เชื่อมกับบัญชี น้อง แล้ว ✓", false},
-		{"start@bot good code", Update{UpdateID: 7, Message: msg(strangerChat, "private", "/start@chubiPocket_bot GoodCode_123")},
-			OutcomeLinked, "เชื่อมกับบัญชี น้อง แล้ว ✓", false},
-		{"start bad code", Update{UpdateID: 8, Message: msg(strangerChat, "private", "/start nope")},
-			OutcomeBadCode, TextBadCode, false},
+		{"start old code, unlinked", Update{UpdateID: 6, Message: msg(strangerChat, "private", "/start GoodCode_123")},
+			OutcomeLinkFirst, TextLinkFirst, false},
+		{"start@bot old code, linked", Update{UpdateID: 7, Message: msg(linkedChat, "private", "/start@chubiPocket_bot login_x")},
+			OutcomeStart, TextWelcome, false},
 		{"chat permission off", Update{UpdateID: 9, Message: msg(offChat, "private", "ข้าว 60")},
 			OutcomeChatOff, TextChatOff, false},
 		{"unlink linked", Update{UpdateID: 10, Message: msg(linkedChat, "private", "/unlink")},
@@ -332,38 +227,21 @@ func TestHandleUpdateTable(t *testing.T) {
 	}
 }
 
-func TestLinkThenUseThenUnlink(t *testing.T) {
-	h, s, st, acc, _ := newTestHandler(t)
+func TestUseThenUnlink(t *testing.T) {
+	h, s, st, _, _ := newTestHandler(t)
 	ctx := context.Background()
-	h.HandleUpdate(ctx, Update{UpdateID: 1, Message: msg(strangerChat, "private", "/start GoodCode_123")})
-	if acc.accounts[strangerChat] != "@nong" {
-		t.Errorf("account label = %q, want @nong", acc.accounts[strangerChat])
-	}
-	// the code is single use
-	if got := h.HandleUpdate(ctx, Update{UpdateID: 2, Message: msg(3003, "private", "/start GoodCode_123")}); got != OutcomeBadCode {
-		t.Errorf("reused code = %s", got)
-	}
-	if got := h.HandleUpdate(ctx, Update{UpdateID: 3, Message: msg(strangerChat, "private", "กาแฟ 45")}); got != OutcomeReceived {
-		t.Errorf("after linking = %s", got)
+	if got := h.HandleUpdate(ctx, Update{UpdateID: 3, Message: msg(linkedChat, "private", "กาแฟ 45")}); got != OutcomeReceived {
+		t.Errorf("linked = %s", got)
 	}
 	if r := st.rows[3]; r.UserID == nil || *r.UserID != nongID {
 		t.Errorf("kept for %v", r.UserID)
 	}
-	h.HandleUpdate(ctx, Update{UpdateID: 4, Message: msg(strangerChat, "private", "/unlink")})
-	if got := h.HandleUpdate(ctx, Update{UpdateID: 5, Message: msg(strangerChat, "private", "กาแฟ 45")}); got != OutcomeLinkFirst {
+	h.HandleUpdate(ctx, Update{UpdateID: 4, Message: msg(linkedChat, "private", "/unlink")})
+	if got := h.HandleUpdate(ctx, Update{UpdateID: 5, Message: msg(linkedChat, "private", "กาแฟ 45")}); got != OutcomeLinkFirst {
 		t.Errorf("after unlink = %s", got)
 	}
-	if len(s.sent) != 5 {
-		t.Errorf("replies = %d, want 5", len(s.sent))
-	}
-
-	// no username → the first name
-	acc.codes["Second_Code"] = otherID
-	m := msg(4004, "private", "/start Second_Code")
-	m.From = &User{ID: 4004, FirstName: "Beam"}
-	h.HandleUpdate(ctx, Update{UpdateID: 6, Message: m})
-	if acc.accounts[4004] != "Beam" {
-		t.Errorf("account label = %q, want Beam", acc.accounts[4004])
+	if len(s.sent) != 3 {
+		t.Errorf("replies = %d, want 3", len(s.sent))
 	}
 }
 
@@ -421,13 +299,13 @@ func TestLogLinesNeverHoldTheText(t *testing.T) {
 	h.HandleUpdate(context.Background(), Update{UpdateID: 70, Message: msg(linkedChat, "private", secretText)})
 	h.HandleUpdate(context.Background(), Update{UpdateID: 71, Message: msg(strangerChat, "private", secretText)})
 	h.HandleUpdate(context.Background(), Update{UpdateID: 70, Message: msg(linkedChat, "private", secretText)})
-	h.HandleUpdate(context.Background(), Update{UpdateID: 72, Message: msg(strangerChat, "private", "/start GoodCode_123")})
+	h.HandleUpdate(context.Background(), Update{UpdateID: 72, Message: msg(linkedChat, "private", "/start GoodCode_123")})
 	out := logs.String()
 	if strings.Contains(out, "9988") || strings.Contains(out, "ค่าเช่า") || strings.Contains(out, "GoodCode") {
 		t.Errorf("log holds the text or a code: %s", out)
 	}
 	for _, want := range []string{`"update_id":70`, `"chat_id":1001`, `"linked":true`, `"kind":"text"`,
-		`"text_len":26`, `"outcome":"received"`, `"outcome":"link_first"`, `"outcome":"duplicate"`, `"outcome":"linked"`} {
+		`"text_len":26`, `"outcome":"received"`, `"outcome":"link_first"`, `"outcome":"duplicate"`, `"outcome":"start"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log misses %s: %s", want, out)
 		}

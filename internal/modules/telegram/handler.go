@@ -19,8 +19,6 @@ const (
 	TextReceived  = "ได้รับข้อความแล้ว ✓"
 	TextNotText   = "ตอนนี้รับแค่ข้อความตัวอักษรนะครับ"
 	TextHello     = "สวัสดีครับ ส่งข้อความมาได้เลย"
-	TextLinked    = "เชื่อมกับบัญชี %s แล้ว ✓" // %s = the user's ชื่อที่แสดง
-	TextBadCode   = "ลิงก์หมดอายุ กดเชื่อมใหม่จากแอป"
 	TextLinkFirst = "เชื่อมบัญชีก่อนนะครับ: แอป → โปรไฟล์ → Telegram"
 	TextChatOff   = "ปิดการจดรายการไว้ เปิดได้ในแอป"
 	TextUnlinked  = "ยกเลิกการเชื่อมแล้ว"
@@ -35,20 +33,6 @@ const (
 		"เงินเดือน 30000\n\n" +
 		"เปิด / ปิดการจดผ่านแชทได้ในแอป: โปรไฟล์ → Telegram"
 
-	// 1b-2 sign up / log in with Telegram
-	TextLoginAsk       = "เข้าสู่ระบบ chubi-pocket เป็น %s ไหมครับ?"
-	TextLoginNoAccount = "Telegram นี้ยังไม่มีบัญชี chubi-pocket"
-	ButtonConfirm      = "✓ ยืนยัน"
-	ButtonSignup       = "สร้างบัญชีใหม่"
-	TextLoginExpired   = "ลิงก์หมดอายุ ลองใหม่จากแอป"
-	TextLoginDone      = "ยืนยันแล้ว ✓ กลับไปที่แอปได้เลย"
-	TextSignupDone     = "กลับไปที่แอปเพื่อสร้างบัญชีต่อได้เลย"
-
-	// loginPrefix — the start payload of a login code (`/start login_<code>`).
-	loginPrefix = "login_"
-	// callback data: "li:<code id>" (log in as the linked account) / "su:<code id>" (sign up)
-	cbLogin  = "li:"
-	cbSignup = "su:"
 )
 
 // Outcome is what HandleUpdate did with an update (the log line's "outcome").
@@ -61,14 +45,9 @@ const (
 	OutcomeNotText   Outcome = "not_text"   // linked, photo / voice / sticker …
 	OutcomeLinkFirst Outcome = "link_first" // the chat isn't linked to a user
 	OutcomeChatOff   Outcome = "chat_off"   // linked, the chat permission is off
-	OutcomeStart     Outcome = "start"      // /start without a code from a linked chat
-	OutcomeLinked    Outcome = "linked"     // /start <code>: bound
-	OutcomeBadCode   Outcome = "bad_code"   // /start <code>: no such / used / expired code
+	OutcomeStart     Outcome = "start"      // /start from a linked chat
 	OutcomeUnlinked  Outcome = "unlinked"   // /unlink from a linked chat
-	OutcomeLastLogin Outcome = "last_login" // /unlink or a move refused: the account's only way in
-	OutcomeLoginAsk  Outcome = "login_ask"  // /start login_<code>: the confirm / sign-up button sent
-	OutcomeLoginBad  Outcome = "login_bad"  // /start login_<code> or a button: code gone / not this chat's
-	OutcomeLoginOK   Outcome = "login_ok"   // a button tapped: confirmed
+	OutcomeLastLogin Outcome = "last_login" // /unlink refused: the account's only way in
 	OutcomeWriteOK   Outcome = "write_ok"   // "Allow Messages" granted at a Telegram login: no reply
 	OutcomeError     Outcome = "error"      // a lookup failed: no reply
 )
@@ -88,15 +67,8 @@ type saver interface {
 type Accounts interface {
 	// TelegramUser — who a chat is linked to; linked false = nobody.
 	TelegramUser(ctx context.Context, chatID int64) (userID uuid.UUID, chatOn, linked bool, err error)
-	// TelegramBind — use a link code for this chat; ok false = bad, used or expired.
-	TelegramBind(ctx context.Context, code string, chatID int64, account string) (displayName string, ok bool, err error)
 	// TelegramUnlink — the chat unlinks itself; false = it wasn't linked.
 	TelegramUnlink(ctx context.Context, chatID int64) (bool, error)
-	// TelegramLoginOpen — /start login_<code> (1b-2): the chat takes the login code. linkedName =
-	// the account this chat is linked to ("" = none: sign up). ok false = bad / used / expired.
-	TelegramLoginOpen(ctx context.Context, code string, chatID int64, account, name string) (codeID uuid.UUID, linkedName string, ok bool, err error)
-	// TelegramLoginConfirm — the chat tapped the button; ok false = gone or not this chat's.
-	TelegramLoginConfirm(ctx context.Context, codeID uuid.UUID, chatID int64) (bool, error)
 }
 
 // Chatbot is the chatbot (0.4.2-4): texts of linked chats with the permission on, and taps on its
@@ -158,23 +130,6 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) Outcome {
 		return OutcomeWriteOK
 	}
 
-	if code, ok := command(m.Text, "/start"); ok && strings.HasPrefix(code, loginPrefix) {
-		return h.loginOpen(ctx, u, m, strings.TrimPrefix(code, loginPrefix))
-	}
-	if code, ok := command(m.Text, "/start"); ok && code != "" {
-		name, bound, err := h.accounts.TelegramBind(ctx, code, m.Chat.ID, accountLabel(m.From))
-		if errors.Is(err, shared.ErrLastLoginMethod) {
-			return h.reply(ctx, u, m, true, TextLastLogin, OutcomeLastLogin)
-		}
-		if err != nil {
-			return h.failed(u, m, "link", err)
-		}
-		if !bound {
-			return h.reply(ctx, u, m, false, TextBadCode, OutcomeBadCode)
-		}
-		return h.reply(ctx, u, m, true, strings.Replace(TextLinked, "%s", name, 1), OutcomeLinked)
-	}
-
 	userID, chatOn, linked, err := h.accounts.TelegramUser(ctx, m.Chat.ID)
 	if err != nil {
 		return h.failed(u, m, "lookup", err)
@@ -223,63 +178,14 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) Outcome {
 	return h.reply(ctx, u, m, true, TextReceived, OutcomeReceived)
 }
 
-// loginOpen — /start login_<code> (1b-2): ask to confirm (linked chat) or offer sign-up.
-func (h *Handler) loginOpen(ctx context.Context, u Update, m *Message, code string) Outcome {
-	name := ""
-	if m.From != nil {
-		name = strings.TrimSpace(m.From.FirstName + " " + m.From.LastName)
-	}
-	codeID, linkedName, ok, err := h.accounts.TelegramLoginOpen(ctx, code, m.Chat.ID, accountLabel(m.From), name)
-	if err != nil {
-		return h.failed(u, m, "login open", err)
-	}
-	if !ok {
-		return h.reply(ctx, u, m, false, TextLoginExpired, OutcomeLoginBad)
-	}
-	text, button := TextLoginNoAccount, Button{Text: ButtonSignup, Data: cbSignup + codeID.String()}
-	if linkedName != "" {
-		text, button = strings.Replace(TextLoginAsk, "%s", linkedName, 1), Button{Text: ButtonConfirm, Data: cbLogin + codeID.String()}
-	}
-	if err := h.send.SendButtons(ctx, m.Chat.ID, text, m.MessageID, []Button{button}); err != nil {
-		h.log.Error("telegram: reply failed", "update_id", u.UpdateID, "chat_id", m.Chat.ID, "error", err)
-	}
-	h.logLine(u, m, linkedName != "", OutcomeLoginAsk)
-	return OutcomeLoginAsk
-}
-
-// callback — a tap on [✓ ยืนยัน] / [สร้างบัญชีใหม่]: confirm the login code, edit the message.
+// callback — a tap on a button that is not the chatbot's (old login buttons): just answered.
 func (h *Handler) callback(ctx context.Context, u Update, cq *CallbackQuery) Outcome {
-	m := cq.Message
-	done := ""
-	var raw string
-	switch {
-	case strings.HasPrefix(cq.Data, cbLogin):
-		done, raw = TextLoginDone, strings.TrimPrefix(cq.Data, cbLogin)
-	case strings.HasPrefix(cq.Data, cbSignup):
-		done, raw = TextSignupDone, strings.TrimPrefix(cq.Data, cbSignup)
-	}
-	codeID, perr := uuid.Parse(raw)
-	ok := false
-	if done != "" && perr == nil && cq.From.ID == m.Chat.ID {
-		var err error
-		if ok, err = h.accounts.TelegramLoginConfirm(ctx, codeID, m.Chat.ID); err != nil {
-			_ = h.send.AnswerCallback(ctx, cq.ID, "")
-			return h.failed(u, m, "login confirm", err)
-		}
-	}
-	out, notice, edit := OutcomeLoginOK, "", done
-	if !ok {
-		out, notice, edit = OutcomeLoginBad, TextLoginExpired, TextLoginExpired
-	}
-	if err := h.send.AnswerCallback(ctx, cq.ID, notice); err != nil {
+	if err := h.send.AnswerCallback(ctx, cq.ID, ""); err != nil {
 		h.log.Error("telegram: answer callback failed", "update_id", u.UpdateID, "error", err)
 	}
-	if err := h.send.EditText(ctx, m.Chat.ID, m.MessageID, edit); err != nil {
-		h.log.Error("telegram: edit failed", "update_id", u.UpdateID, "error", err)
-	}
-	h.log.Info("telegram update", "update_id", u.UpdateID, "outcome", string(out), "chat_id", m.Chat.ID,
-		"chat_type", m.Chat.Type, "kind", "callback")
-	return out
+	h.log.Info("telegram update", "update_id", u.UpdateID, "outcome", string(OutcomeIgnored),
+		"chat_id", cq.Message.Chat.ID, "kind", "callback")
+	return OutcomeIgnored
 }
 
 func (h *Handler) reply(ctx context.Context, u Update, m *Message, linked bool, text string, out Outcome) Outcome {
@@ -314,17 +220,6 @@ func received(updateID int64, m *Message) Received {
 		r.FromUsername = m.From.Username
 	}
 	return r
-}
-
-// accountLabel — how the linked account shows in the app: "@username", else the first name.
-func accountLabel(u *User) string {
-	switch {
-	case u == nil:
-		return ""
-	case u.Username != "":
-		return "@" + u.Username
-	}
-	return u.FirstName
 }
 
 // command — text is name ("/start", "/start@bot", "/start <arg>"); arg = what follows, trimmed.

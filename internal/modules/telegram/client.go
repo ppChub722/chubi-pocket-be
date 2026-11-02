@@ -115,17 +115,6 @@ func (c *Client) SetWebhook(ctx context.Context, webhookURL, secret string) erro
 	}, nil)
 }
 
-// HasProfilePhoto — whether the user has a profile photo the bot may see (sign-up prefill).
-func (c *Client) HasProfilePhoto(ctx context.Context, userID int64) (bool, error) {
-	var photos struct {
-		TotalCount int `json:"total_count"`
-	}
-	if err := c.call(ctx, "getUserProfilePhotos", map[string]any{"user_id": userID, "limit": 1}, &photos); err != nil {
-		return false, err
-	}
-	return photos.TotalCount > 0, nil
-}
-
 func (c *Client) GetWebhookInfo(ctx context.Context) (WebhookInfo, error) {
 	var info WebhookInfo
 	err := c.call(ctx, "getWebhookInfo", nil, &info)

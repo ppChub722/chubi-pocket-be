@@ -274,10 +274,8 @@ func main() {
 	}
 	r := gin.New()
 	r.Use(logger.RequestIDMiddleware())
-	// bodies never logged: message texts (webhook), link / login codes and PKCE verifiers
+	// bodies never logged: message texts (webhook) and Telegram id_tokens
 	r.Use(logger.GinLoggerMiddleware(log, cfg.App.LogBodies, telegram.Path,
-		"/api/v1/connections/telegram/link", "/api/v1/auth/telegram/start",
-		"/api/v1/auth/telegram/exchange", "/api/v1/auth/telegram/signup",
 		"/api/v1/auth/telegram/token", "/api/v1/connections/telegram"))
 	// Same semantics as gin.Recovery() (500 + abort), but the panic is logged through slog with the
 	// request_id instead of gin's raw writer.
@@ -338,11 +336,8 @@ func main() {
 
 		api.POST("/auth/register", authHandler.Register)
 		api.POST("/auth/login", authHandler.Login)
-		// 0.4.2 1b-2: sign up / log in with Telegram (public, PKCE, rate-limited per IP)
-		api.POST("/auth/telegram/start", connectionsHandler.LoginStart)
-		api.POST("/auth/telegram/exchange", connectionsHandler.LoginExchange)
-		api.POST("/auth/telegram/signup", connectionsHandler.LoginSignup)
-		api.POST("/auth/telegram/token", connectionsHandler.LoginToken) // 0.4.2-4 OIDC id_token
+		// log in / sign up with Telegram: an OIDC id_token (public, rate-limited per IP)
+		api.POST("/auth/telegram/token", connectionsHandler.LoginToken)
 
 		protected := api.Group("/")
 		protected.Use(auth.Middleware(cfg, authStore))
@@ -377,7 +372,6 @@ func main() {
 			protected.GET("/connections/:provider", connectionsHandler.Get)
 			protected.DELETE("/connections/:provider", connectionsHandler.Unlink)
 			protected.POST("/connections/:provider", connectionsHandler.Link) // 0.4.2-4 OIDC id_token
-			protected.POST("/connections/:provider/link", connectionsHandler.StartLink)
 			protected.PATCH("/connections/:provider/permissions", connectionsHandler.UpdatePermissions)
 			protected.POST("/connections/:provider/photo", connectionsHandler.ImportPhoto)
 			protected.GET("/avatars/:id", connectionsHandler.Image)

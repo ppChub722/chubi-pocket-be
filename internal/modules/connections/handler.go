@@ -17,17 +17,12 @@ import (
 )
 
 type Handler struct {
-	s *Service
-	// per-IP limits on the public login routes (1b-2): start / signup 10, exchange 120 (it polls)
-	// per 10 minutes
-	startLimit, exchangeLimit, signupLimit *limiter
-	tokenLimit                             *limiter // 0.4.2-4 POST /auth/telegram/token: 20 per 10 minutes
+	s          *Service
+	tokenLimit *limiter // POST /auth/telegram/token, per IP: 20 per 10 minutes
 }
 
 func NewHandler(s *Service) *Handler {
-	return &Handler{s: s,
-		startLimit: newLimiter(10, 10*time.Minute), exchangeLimit: newLimiter(120, 10*time.Minute),
-		signupLimit: newLimiter(10, 10*time.Minute), tokenLimit: newLimiter(20, 10*time.Minute)}
+	return &Handler{s: s, tokenLimit: newLimiter(20, 10*time.Minute)}
 }
 
 // LoginToken — POST /auth/telegram/token {id_token}: log in, or sign up at once (0.4.2-4).
@@ -69,83 +64,10 @@ func (h *Handler) Link(c *gin.Context) {
 	})
 }
 
-// ── 1b-2: sign up / log in with Telegram (public) ──
-
-func (h *Handler) LoginStart(c *gin.Context) {
-	if !h.startLimit.allow(c.ClientIP()) {
-		rateLimited(c)
-		return
-	}
-	var req struct {
-		CodeChallenge string `json:"code_challenge"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Validation(c, "body must be {code_challenge}")
-		return
-	}
-	out, err := h.s.StartLogin(c.Request.Context(), req.CodeChallenge)
-	if err != nil {
-		h.loginFail(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}
-
-func (h *Handler) LoginExchange(c *gin.Context) {
-	if !h.exchangeLimit.allow(c.ClientIP()) {
-		rateLimited(c)
-		return
-	}
-	var req struct {
-		Code         string `json:"code"`
-		CodeVerifier string `json:"code_verifier"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Validation(c, "body must be {code, code_verifier}")
-		return
-	}
-	out, err := h.s.Exchange(c.Request.Context(), req.Code, req.CodeVerifier)
-	if err != nil {
-		h.loginFail(c, err)
-		return
-	}
-	status := http.StatusOK
-	if out.Status == "pending" {
-		status = http.StatusAccepted
-	}
-	c.JSON(status, out)
-}
-
-func (h *Handler) LoginSignup(c *gin.Context) {
-	if !h.signupLimit.allow(c.ClientIP()) {
-		rateLimited(c)
-		return
-	}
-	var req SignupRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Validation(c, "invalid body")
-		return
-	}
-	out, err := h.s.Signup(c.Request.Context(), req)
-	if err != nil {
-		h.loginFail(c, err)
-		return
-	}
-	c.JSON(http.StatusCreated, out)
-}
-
 func (h *Handler) loginFail(c *gin.Context, err error) {
-	var taken *UsernameTakenError
 	switch {
-	case errors.Is(err, ErrBadLoginRequest):
-		response.ValidationErr(c, err)
-	case errors.Is(err, ErrLoginCodeInvalid):
-		response.Fail(c, http.StatusUnauthorized, apierr.LoginCodeInvalid, "The login link is no longer valid, start again", nil)
 	case errors.Is(err, ErrIDTokenInvalid):
 		telegramTokenInvalid(c)
-	case errors.As(err, &taken):
-		response.Fail(c, http.StatusConflict, apierr.UsernameExists, "Username already registered",
-			gin.H{"username_suggestion": taken.Suggestion})
 	case errors.Is(err, ErrAlreadyLinked):
 		response.Fail(c, http.StatusConflict, apierr.TelegramAlreadyLinked, "This Telegram has an account: log in instead", nil)
 	case errors.Is(err, ErrRegistrationClosed):
@@ -222,12 +144,6 @@ func (h *Handler) Get(c *gin.Context) {
 
 func (h *Handler) Unlink(c *gin.Context) {
 	h.one(c, func(userID uuid.UUID, key string) (any, error) { return h.s.Unlink(c.Request.Context(), userID, key) })
-}
-
-func (h *Handler) StartLink(c *gin.Context) {
-	h.one(c, func(userID uuid.UUID, key string) (any, error) {
-		return h.s.StartLink(c.Request.Context(), userID, key)
-	})
 }
 
 func (h *Handler) ImportPhoto(c *gin.Context) {

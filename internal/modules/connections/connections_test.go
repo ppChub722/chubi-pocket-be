@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -52,7 +52,6 @@ func (e *env) router(uid uuid.UUID) *gin.Engine {
 		g.GET("/connections", h.List)
 		g.GET("/connections/:provider", h.Get)
 		g.DELETE("/connections/:provider", h.Unlink)
-		g.POST("/connections/:provider/link", h.StartLink)
 		g.PATCH("/connections/:provider/permissions", h.UpdatePermissions)
 		g.POST("/connections/:provider/photo", h.ImportPhoto)
 		g.GET("/avatars/:id", h.Image)
@@ -66,14 +65,20 @@ func call(t *testing.T, r http.Handler, method, path string, body any) (int, []b
 	return apitest.Do(t, r, method, "/api/v1"+path, body)
 }
 
-// codeOf takes the code out of a link URL.
-func codeOf(t *testing.T, link string) string {
+// linkChat links a Telegram chat to user (what the OIDC link does after the token check).
+func (e *env) linkChat(t *testing.T, user uuid.UUID, chat int64, account string) error {
 	t.Helper()
-	u, err := url.Parse(link)
-	if err != nil || u.Host != "t.me" || u.Path != "/chubiPocket_bot" {
-		t.Fatalf("link url = %q", link)
+	ctx := context.Background()
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return u.Query().Get("start")
+	defer tx.Rollback(ctx)
+	if err := linkTx(ctx, tx, user, ProviderTelegram, strconv.FormatInt(chat, 10), account,
+		map[string]bool{PermChat: true}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func decode[T any](t *testing.T, raw []byte) T {
@@ -109,31 +114,8 @@ func TestListAndLinkFlow(t *testing.T) {
 		t.Errorf("telegram permissions = %+v", p)
 	}
 
-	// start linking
-	code, body = call(t, r, http.MethodPost, "/connections/telegram/link", nil)
-	apitest.Conform(t, "startConnectionLink", code, body)
-	start := decode[LinkStart](t, body)
-	c := codeOf(t, start.URL)
-	if len(c) != 22 || !codeFormat.MatchString(c) {
-		t.Errorf("code %q: want 22 URL-safe chars (128 bits)", c)
-	}
-	if d := time.Until(start.ExpiresAt); d < 9*time.Minute || d > 10*time.Minute+time.Second {
-		t.Errorf("expires in %v", d)
-	}
-	var stored int
-	_ = e.pool.QueryRow(ctx, `SELECT count(*) FROM connection_link_codes WHERE user_id = $1 AND code_hash = $2`,
-		me, hashCode(c)).Scan(&stored)
-	if stored != 1 {
-		t.Errorf("code hash rows = %d", stored)
-	}
-
-	// the bot binds it
-	name, ok, err := e.svc.TelegramBind(ctx, c, 555001, "@nong")
-	if err != nil || !ok || name != "Test user" {
-		t.Fatalf("bind = %q %v %v", name, ok, err)
-	}
-	if _, ok, _ := e.svc.TelegramBind(ctx, c, 555002, "@x"); ok {
-		t.Errorf("a used code bound again")
+	if err := e.linkChat(t, me, 555001, "@nong"); err != nil {
+		t.Fatal(err)
 	}
 	uid, chatOn, linked, err := e.svc.TelegramUser(ctx, 555001)
 	if err != nil || !linked || uid != me || !chatOn {
@@ -176,10 +158,6 @@ func TestListAndLinkFlow(t *testing.T) {
 	if code, _ := call(t, r, http.MethodGet, "/connections/myspace", nil); code != 404 {
 		t.Errorf("unknown provider = %d", code)
 	}
-	if code, body := call(t, r, http.MethodPost, "/connections/line/link", nil); code != 409 ||
-		!strings.Contains(string(body), "CONNECTION_UNAVAILABLE") {
-		t.Errorf("line link = %d %s", code, body)
-	}
 
 	// unlink (also from the app)
 	code, body = call(t, r, http.MethodDelete, "/connections/telegram", nil)
@@ -196,18 +174,14 @@ func TestListAndLinkFlow(t *testing.T) {
 	}
 }
 
-func TestBindMovesAndReplaces(t *testing.T) {
+func TestLinkMovesAndReplaces(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 	a, b := testdb.User(t, e.pool), testdb.User(t, e.pool)
 	link := func(user uuid.UUID, chat int64) {
 		t.Helper()
-		start, err := e.svc.StartLink(ctx, user, ProviderTelegram)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, ok, err := e.svc.TelegramBind(ctx, codeOf(t, start.URL), chat, "@x"); err != nil || !ok {
-			t.Fatalf("bind: %v %v", ok, err)
+		if err := e.linkChat(t, user, chat, "@x"); err != nil {
+			t.Fatalf("link: %v", err)
 		}
 	}
 	link(a, 777001)
@@ -224,23 +198,6 @@ func TestBindMovesAndReplaces(t *testing.T) {
 	}
 	if uid, _, ok, _ := e.svc.TelegramUser(ctx, 777002); !ok || uid != b {
 		t.Errorf("new chat owner = %v", uid)
-	}
-
-	// a newer link call cancels the older unused code; an expired code fails
-	s1, _ := e.svc.StartLink(ctx, a, ProviderTelegram)
-	s2, _ := e.svc.StartLink(ctx, a, ProviderTelegram)
-	if _, ok, _ := e.svc.TelegramBind(ctx, codeOf(t, s1.URL), 777003, ""); ok {
-		t.Errorf("an older code still works")
-	}
-	if _, err := e.pool.Exec(ctx, `UPDATE connection_link_codes SET expires_at = NOW() - INTERVAL '1 second'
-		WHERE code_hash = $1`, hashCode(codeOf(t, s2.URL))); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok, _ := e.svc.TelegramBind(ctx, codeOf(t, s2.URL), 777003, ""); ok {
-		t.Errorf("an expired code works")
-	}
-	if _, ok, err := e.svc.TelegramBind(ctx, "not a code!", 777003, ""); ok || err != nil {
-		t.Errorf("a malformed code = %v %v", ok, err)
 	}
 
 	// /unlink from the chat
@@ -262,9 +219,8 @@ func TestPhotoImportAndAvatar(t *testing.T) {
 		!strings.Contains(string(body), "NOT_LINKED") {
 		t.Errorf("import while unlinked = %d %s", code, body)
 	}
-	start, _ := e.svc.StartLink(ctx, me, ProviderTelegram)
-	if _, ok, _ := e.svc.TelegramBind(ctx, codeOf(t, start.URL), 888001, "@nong"); !ok {
-		t.Fatal("bind")
+	if err := e.linkChat(t, me, 888001, "@nong"); err != nil {
+		t.Fatal(err)
 	}
 
 	var before time.Time
@@ -327,8 +283,9 @@ func TestPhotoImportAndAvatar(t *testing.T) {
 	}
 
 	// no photo / Telegram error
-	start, _ = e.svc.StartLink(ctx, me, ProviderTelegram)
-	e.svc.TelegramBind(ctx, codeOf(t, start.URL), 888001, "@nong")
+	if err := e.linkChat(t, me, 888001, "@nong"); err != nil {
+		t.Fatal(err)
+	}
 	e.bot.photo = nil
 	if code, body := call(t, r, http.MethodPost, "/connections/telegram/photo", nil); code != 404 ||
 		!strings.Contains(string(body), "NO_PHOTO") {
@@ -349,7 +306,7 @@ func TestBotOffAndLogos(t *testing.T) {
 	if err != nil || list.Data[0].Available || list.Data[0].Permissions[0].Available {
 		t.Errorf("bot off: telegram row = %+v, %v", list.Data[0], err)
 	}
-	if _, err := svc.StartLink(context.Background(), me, ProviderTelegram); !errors.Is(err, ErrUnavailable) {
+	if _, err := svc.LinkTelegram(context.Background(), me, ProviderTelegram, "x"); !errors.Is(err, ErrUnavailable) {
 		t.Errorf("link with the bot off = %v", err)
 	}
 

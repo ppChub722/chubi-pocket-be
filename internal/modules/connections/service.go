@@ -2,12 +2,8 @@ package connections
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"time"
 
@@ -37,9 +33,6 @@ var (
 
 // maxPhotoBytes — a picture larger than this is refused (Telegram's 160 px JPEG is ~10 KB).
 const maxPhotoBytes = 1 << 20
-
-// codeFormat — the start payload Telegram allows: 1-64 chars of A-Z a-z 0-9 _ -.
-var codeFormat = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type Service struct {
 	store *Store
@@ -129,36 +122,6 @@ func (s *Service) view(p provider, links map[string]link, photos map[string]phot
 			On: avail && linked && l.Permissions[d.key]})
 	}
 	return c
-}
-
-// StartLink makes a one-time code (10 min) and the URL that opens the app with it.
-func (s *Service) StartLink(ctx context.Context, userID uuid.UUID, key string) (*LinkStart, error) {
-	p, ok := providerOf(key)
-	if !ok {
-		return nil, ErrUnknownProvider
-	}
-	if !s.available(p) {
-		return nil, ErrUnavailable
-	}
-	bot, err := s.bot.Username(ctx)
-	if err != nil || bot == "" {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
-	}
-	raw := make([]byte, 16) // 128 bits
-	if _, err := rand.Read(raw); err != nil {
-		return nil, fmt.Errorf("code: %w", err)
-	}
-	code := base64.RawURLEncoding.EncodeToString(raw)
-	expires := s.now().Add(LinkCodeTTL).UTC().Truncate(time.Second)
-	if err := s.store.newCode(ctx, userID, p.key, hashCode(code), expires); err != nil {
-		return nil, err
-	}
-	return &LinkStart{URL: "https://t.me/" + bot + "?start=" + code, ExpiresAt: expires}, nil
-}
-
-func hashCode(code string) []byte {
-	h := sha256.Sum256([]byte(code))
-	return h[:]
 }
 
 // Unlink — the imported picture stays (an avatar picking it falls back to the icon while unlinked).
@@ -256,17 +219,6 @@ func (s *Service) TelegramUser(ctx context.Context, chatID int64) (userID uuid.U
 		return uuid.Nil, false, false, err
 	}
 	return id, perms[PermChat], true, nil
-}
-
-// TelegramBind — /start <code>: the chat becomes the code owner's. account = "@username" or the
-// first name. ok false = bad, used or expired code.
-func (s *Service) TelegramBind(ctx context.Context, code string, chatID int64, account string) (displayName string, ok bool, err error) {
-	if !codeFormat.MatchString(code) {
-		return "", false, nil
-	}
-	_, name, ok, err := s.store.bind(ctx, ProviderTelegram, hashCode(code), strconv.FormatInt(chatID, 10), account,
-		map[string]bool{PermChat: true})
-	return name, ok, err
 }
 
 // TelegramUnlink — /unlink in the chat; false = the chat wasn't linked.

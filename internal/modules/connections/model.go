@@ -1,5 +1,5 @@
 // Package connections is the outside apps a user links (0.4.2 1b: Telegram now, LINE / Google
-// later) and the profile pictures they give: GET /connections, link codes, permissions, photo
+// later) and the profile pictures they give: GET /connections, Telegram OIDC linking, permissions, photo
 // import, the stored pictures behind avatar.photo_url and the brand logos.
 package connections
 
@@ -15,9 +15,6 @@ const (
 	ProviderGoogle   = "google"
 
 	PermChat = "chat"
-
-	// LinkCodeTTL — how long a link code works (single use).
-	LinkCodeTTL = 10 * time.Minute
 
 	// logoVersion is the ?v= of every logo_url; bump it when a logo file changes.
 	logoVersion = 1
@@ -88,7 +85,3 @@ type ConnectionList struct {
 	Count int          `json:"count"`
 }
 
-type LinkStart struct {
-	URL       string    `json:"url"`
-	ExpiresAt time.Time `json:"expires_at"`
-}

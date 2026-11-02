@@ -134,7 +134,7 @@ type strErr struct{ s string }
 
 func (e *strErr) Error() string { return e.s }
 
-func TestClientButtonsCallbackEditPhotoCheck(t *testing.T) {
+func TestClientButtonsCallbackEdit(t *testing.T) {
 	srv, calls := fakeBotAPI(t, 200, `{"ok":true,"result":{"total_count":2}}`)
 	c := NewClient(testToken, srv.URL, srv.Client())
 	ctx := context.Background()
@@ -153,8 +153,5 @@ func TestClientButtonsCallbackEditPhotoCheck(t *testing.T) {
 	if err := c.EditText(ctx, 7, 90, "done"); err != nil || (*calls)[2].path != "/bot"+testToken+"/editMessageText" ||
 		(*calls)[2].body["message_id"] != float64(90) {
 		t.Errorf("edit = %v %v", (*calls)[2], err)
-	}
-	if has, err := c.HasProfilePhoto(ctx, 7); err != nil || !has {
-		t.Errorf("has photo = %v %v", has, err)
 	}
 }

@@ -2776,7 +2776,7 @@ paths:
       tags: [Connections]
       summary: Unlink (ยกเลิกการเชื่อม)
       operationId: unlinkConnection
-      description: 'The imported picture is kept (the row''s `photo`), but while unlinked it is not used: an avatar whose source is this app falls back to the icon. Idempotent: not linked → the same 200. Telegram: the chat gets no message; from then on it gets "เชื่อมบัญชีก่อนนะครับ: แอป → โปรไฟล์ → Telegram". 0.4.2 1b-2: an account with no password can''t unlink its last linked app → 409 LAST_LOGIN_METHOD (app: "ตั้งรหัสผ่านก่อน ไม่งั้นจะเข้าบัญชีไม่ได้"); changing the account (POST …/link) stays allowed.'
+      description: 'The imported picture is kept (the row''s `photo`), but while unlinked it is not used: an avatar whose source is this app falls back to the icon. Idempotent: not linked → the same 200. Telegram: the chat gets no message; from then on it gets "เชื่อมบัญชีก่อนนะครับ: แอป → โปรไฟล์ → Telegram". 0.4.2 1b-2: an account with no password can''t unlink its last linked app → 409 LAST_LOGIN_METHOD (app: "ตั้งรหัสผ่านก่อน ไม่งั้นจะเข้าบัญชีไม่ได้"); linking another Telegram (POST /connections/telegram) stays allowed.'
       responses:
         '200':
           description: The row, now unlinked.
@@ -2822,29 +2822,6 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
       x-breaking: 'New (0.4.2-4).'
-  /connections/{provider}/link:
-    parameters: [{ $ref: '#/components/parameters/ProviderPath' }]
-    post:
-      tags: [Connections]
-      summary: Start linking (เชื่อม / เปลี่ยนบัญชี)
-      operationId: startConnectionLink
-      description: |
-        Returns the URL to open in the outside app; the user types nothing. Telegram: `https://t.me/<bot>?start=<code>`; the bot's `/start <code>` binds the chat to me ("เชื่อมกับบัญชี <ชื่อที่แสดง> แล้ว ✓"). A chat linked to another user moves to me; my old Telegram is replaced (เปลี่ยนบัญชี uses this same call). The app re-reads GET /connections/{provider} on resume.
-        Errors: 409 CONNECTION_UNAVAILABLE (LINE / Google, or the bot is off on the server).
-      responses:
-        '200':
-          description: The link.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ConnectionLinkStart' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: 'CONNECTION_UNAVAILABLE.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-      x-breaking: 'New (0.4.2 1b).'
   /connections/{provider}/permissions:
     parameters: [{ $ref: '#/components/parameters/ProviderPath' }]
     patch:
@@ -3011,122 +2988,6 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
       security: []
       x-breaking: 'New (0.4.2-4).'
-  /auth/telegram/start:
-    post:
-      tags: [Auth]
-      summary: Start "เข้าสู่ระบบด้วย Telegram" (PKCE)
-      operationId: startTelegramLogin
-      description: |
-        Public. The app makes a random `code_verifier` (43–128 chars of `A-Z a-z 0-9 - . _ ~`), keeps it, and sends `code_challenge` = base64url(SHA-256(verifier)) without padding (S256). The answer's `url` (`https://t.me/<bot>?start=login_<code>`) opens Telegram; the user confirms in the chat:
-        - a chat linked to an account → "เข้าสู่ระบบ chubi-pocket เป็น <ชื่อที่แสดง> ไหมครับ?" [✓ ยืนยัน];
-        - an unlinked chat → "Telegram นี้ยังไม่มีบัญชี chubi-pocket" [สร้างบัญชีใหม่].
-        Then the app calls POST /auth/telegram/exchange (on resume, and again while it answers 202). Codes: single use, 5 minutes. Rate-limited per IP (429 RATE_LIMITED). Errors: 400 VALIDATION_ERROR (bad challenge), 409 CONNECTION_UNAVAILABLE (the bot is off).
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/TelegramLoginStartRequest' }
-      responses:
-        '200':
-          description: The link.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TelegramLoginStart' }
-        '400': { $ref: '#/components/responses/ValidationError' }
-        '409':
-          description: 'CONNECTION_UNAVAILABLE.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-        '429':
-          description: 'RATE_LIMITED.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-      security: []
-      x-breaking: 'New (0.4.2 1b-2).'
-  /auth/telegram/exchange:
-    post:
-      tags: [Auth]
-      summary: Finish "เข้าสู่ระบบด้วย Telegram" (poll until confirmed)
-      operationId: exchangeTelegramLogin
-      description: |
-        Public. `{code, code_verifier}`; the verifier must match the start's challenge.
-        - 202 `status: pending`: not confirmed in Telegram yet (app: "รอยืนยันใน Telegram" + retry).
-        - 200 `status: login`: confirmed by a linked chat → `auth` = the same answer as POST /auth/login. The code is used up.
-        - 200 `status: signup`: the chat has no account and the user tapped [สร้างบัญชีใหม่] → `signup` prefills the sign-up page; the code stays valid (until it expires) for POST /auth/telegram/signup.
-        Errors: 401 LOGIN_CODE_INVALID (unknown, used, expired, or a wrong verifier: one answer), 400 VALIDATION_ERROR, 429 RATE_LIMITED.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/TelegramLoginCodeRequest' }
-      responses:
-        '200':
-          description: login or signup.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TelegramExchange' }
-        '202':
-          description: pending.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TelegramExchange' }
-        '400': { $ref: '#/components/responses/ValidationError' }
-        '401':
-          description: 'LOGIN_CODE_INVALID.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-        '429':
-          description: 'RATE_LIMITED.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-      security: []
-      x-breaking: 'New (0.4.2 1b-2).'
-  /auth/telegram/signup:
-    post:
-      tags: [Auth]
-      summary: Create an account from Telegram (no password)
-      operationId: signupWithTelegram
-      description: |
-        Public. After exchange answered `signup`. Creates the account WITHOUT a password (only accounts made through an outside app may have none; password login is refused for them until PUT /auth/password sets one), links that Telegram chat at once (permissions {chat: true}), and imports the Telegram photo and picks it as the avatar when there is one (best effort: a failed import leaves the icon / initials). Returns the same answer as POST /auth/register. The code is used up.
-        Errors: 401 LOGIN_CODE_INVALID, 400 VALIDATION_ERROR (display_name 1–100, username 3–50, currency 3 letters), 409 USERNAME_EXISTS (`details.username_suggestion` = a free one), 409 TELEGRAM_ALREADY_LINKED (that chat was linked to an account meanwhile: start again to log in), 403 REGISTRATION_CLOSED, 429 RATE_LIMITED.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/TelegramSignupRequest' }
-      responses:
-        '201':
-          description: The new account, signed in.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AuthResponse' }
-        '400': { $ref: '#/components/responses/ValidationError' }
-        '401':
-          description: 'LOGIN_CODE_INVALID.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-        '403':
-          description: 'REGISTRATION_CLOSED.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-        '409':
-          description: 'USERNAME_EXISTS (details.username_suggestion) / TELEGRAM_ALREADY_LINKED.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-        '429':
-          description: 'RATE_LIMITED.'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-      security: []
-      x-breaking: 'New (0.4.2 1b-2).'
 
   # ───────────────────────────── v2: reached pages (target shapes) ─────────────────────────────
   /pending-transactions/scan-slip:
@@ -6242,13 +6103,7 @@ components:
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/Connection' } }
         count: { type: integer }
-    ConnectionLinkStart:
-      type: object
-      required: [url, expires_at]
-      properties:
-        url: { type: string, description: 'Open it in the outside app, e.g. `https://t.me/chubiPocket_bot?start=<code>` (code: 128-bit random, URL-safe, single use).' }
-        expires_at: { $ref: '#/components/schemas/DateTime', description: '10 minutes from now. A newer link call cancels older unused codes.' }
-    # ───────── Sign up / log in with Telegram (0.4.2 1b-2) ─────────
+    # ───────── Log in / sign up with Telegram (0.4.2-4, OIDC) ─────────
     TelegramIDTokenRequest:
       type: object
       required: [id_token]
@@ -6260,51 +6115,6 @@ components:
       properties:
         status: { type: string, enum: [login, signup], description: 'signup = the account was made by this call (a new member).' }
         auth: { $ref: '#/components/schemas/AuthResponse' }
-    TelegramLoginStartRequest:
-      type: object
-      required: [code_challenge]
-      properties:
-        code_challenge: { type: string, pattern: '^[A-Za-z0-9_-]{43}$', description: 'base64url(SHA-256(code_verifier)), no padding (PKCE S256).' }
-    TelegramLoginStart:
-      type: object
-      required: [code, url, expires_at]
-      properties:
-        code: { type: string, description: 'Send it back to exchange / signup (with the verifier). 22 chars, single use.' }
-        url: { type: string, description: '`https://t.me/<bot>?start=login_<code>`: open it in Telegram.' }
-        expires_at: { $ref: '#/components/schemas/DateTime', description: '5 minutes from now.' }
-    TelegramLoginCodeRequest:
-      type: object
-      required: [code, code_verifier]
-      properties:
-        code: { type: string }
-        code_verifier: { type: string, minLength: 43, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' }
-    TelegramExchange:
-      type: object
-      required: [status, auth, signup]
-      properties:
-        status: { type: string, enum: [pending, login, signup] }
-        auth:
-          description: 'status login: the signed-in answer (as POST /auth/login); else null.'
-          oneOf: [{ $ref: '#/components/schemas/AuthResponse' }, { type: 'null' }]
-        signup:
-          description: 'status signup: the sign-up page prefill; else null.'
-          oneOf: [{ $ref: '#/components/schemas/TelegramSignupInfo' }, { type: 'null' }]
-    TelegramSignupInfo:
-      type: object
-      required: [display_name, username_suggestion, has_photo]
-      properties:
-        display_name: { type: string, description: 'The Telegram name (first + last).' }
-        username_suggestion: { type: string, description: 'The Telegram @username (lower case) when free, else a free variant (name + digits).' }
-        has_photo: { type: boolean, description: 'Telegram gives a profile photo: it becomes the avatar on sign-up.' }
-    TelegramSignupRequest:
-      type: object
-      required: [code, code_verifier, display_name, username]
-      properties:
-        code: { type: string }
-        code_verifier: { type: string, minLength: 43, maxLength: 128 }
-        display_name: { type: string, minLength: 1, maxLength: 100 }
-        username: { type: string, minLength: 3, maxLength: 50 }
-        currency: { type: string, minLength: 3, maxLength: 3, description: 'Default THB.' }
     # ───────── Telegram (0.4.2, sent BY Telegram; only the fields the bot reads) ─────────
     TelegramUpdate:
       type: object
@@ -6428,7 +6238,7 @@ components:
                 TX_SPLIT_PAID, INVALID_DATE_RANGE, INVALID_RULE, INVALID_TRANSITION, END_TOO_FAR,
                 AMOUNT_REQUIRED, ALREADY_RECORDED, NOTHING_OWED, ITEM_ALREADY_LINKED,
                 SAVING_NEEDS_WALLET, INSUFFICIENT_SAVING, GOAL_NOT_ACTIVE, GOAL_REACHED,
-                GOAL_HAS_SAVINGS, UNSUPPORTED_IMAGE, OCR_UNAVAILABLE, OCR_TIMEOUT, LOGIN_CODE_INVALID,
+                GOAL_HAS_SAVINGS, UNSUPPORTED_IMAGE, OCR_UNAVAILABLE, OCR_TIMEOUT,
                 TELEGRAM_TOKEN_INVALID, TELEGRAM_ALREADY_LINKED, REGISTRATION_CLOSED, CONNECTION_UNAVAILABLE, RATE_LIMITED,
                 PERMISSION_UNAVAILABLE, NO_PHOTO, LAST_LOGIN_METHOD, PROVIDER_ERROR,
                 IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_IN_PROGRESS
