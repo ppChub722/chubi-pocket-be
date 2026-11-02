@@ -55,6 +55,18 @@ func newFx(t *testing.T) *fx {
 	t.Cleanup(f.cleanup)
 
 	f.a, f.b, f.c = f.user("Alice"), f.user("Bee"), f.user("Chai")
+	seed, err := pool.Begin(context.Background()) // the system categories a real user has (Debt Paid / Received)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []uuid.UUID{f.a, f.b, f.c} {
+		if err := catSvc.SeedForUser(context.Background(), seed, u); err != nil {
+			t.Fatalf("seed categories: %v", err)
+		}
+	}
+	if err := seed.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	f.walletA, f.walletB = f.wallet(f.a, 1000), f.wallet(f.b, 1000)
 	f.catA, f.catB = f.category(f.a, "Food"), f.category(f.b, "Food")
 	f.contactB = f.contact(f.a, "Bee", &f.b)

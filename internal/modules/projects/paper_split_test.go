@@ -121,7 +121,7 @@ func TestSplitBillLife(t *testing.T) {
 func TestSplitBillWalletClaimTellsPayer(t *testing.T) {
 	f := newFx(t)
 	f.settings(f.b, map[string]any{"auto_accept_debts": true, "auto_sync_debts": true})
-	f.settings(f.a, map[string]any{"auto_accept_repayments": true})
+	f.settings(f.a, map[string]any{"auto_accept_repayments": true, "default_account_id": f.walletA})
 	// Bee auto-joins but claims by hand: turn the auto claim off by joining later.
 	f.settings(f.b, map[string]any{"auto_accept_debts": false})
 	A, B := f.as(f.a), f.as(f.b)
@@ -141,6 +141,9 @@ func TestSplitBillWalletClaimTellsPayer(t *testing.T) {
 	}
 	if v := f.personNet(f.a, "Bee"); !near(v, 0) {
 		t.Errorf("A's book: Bee still owes %v, want 0 (repayment auto-accepted)", v)
+	}
+	if b := f.balance(f.walletA); !near(b, 900) {
+		t.Errorf("A's main wallet %v, want 900 (800 + Bee's 100)", b)
 	}
 	if f.count(`SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1 AND type = 'debt_repaid'
 		AND payload->>'repayment_id' IS NOT NULL`, f.a) != 1 {

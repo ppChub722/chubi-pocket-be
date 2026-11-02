@@ -50,8 +50,8 @@ func (s *Service) tellPartnerTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID
 }
 
 // TellRepaidTx — actor settled amount of the pair behind theirDebt (the other user's debt): that
-// user gets debt_repaid, with the repayment already in their book when auto_accept_repayments is on
-// (no wallet: they pick it later). Their debt's direction says which way the money went.
+// user gets debt_repaid, with the repayment already in their book when auto_accept_repayments is on.
+// Their debt's direction says which way the money went.
 func (s *Service) TellRepaidTx(ctx context.Context, tx pgx.Tx, actor, theirUser, theirDebt uuid.UUID, amount float64,
 	date string, description *string) error {
 	if s.notifs == nil || theirUser == actor {
@@ -75,13 +75,33 @@ func (s *Service) TellRepaidTx(ctx context.Context, tx pgx.Tx, actor, theirUser,
 		return err
 	}
 	if st.AutoAcceptRepayments {
-		no := false
-		mine, _, err := s.createRepaymentTx(ctx, tx, theirUser, theirs.Key(), RepaymentRequest{
-			Kind: kind, Amount: amount, Date: &date, Description: description,
-			CreateTransaction: &no, PersonName: &theirs.PersonName,
-		})
-		if err != nil {
-			return err
+		// into their main wallet when it takes it, else ledger-only (they pick the wallet later); their
+		// settings never fail my write
+		req := RepaymentRequest{Kind: kind, Amount: amount, Date: &date, Description: description,
+			PersonName: &theirs.PersonName}
+		var mine *Entry
+		if st.DefaultAccountID != nil {
+			sp, err := tx.Begin(ctx)
+			if err != nil {
+				return fmt.Errorf("savepoint: %w", err)
+			}
+			yes := true
+			withWallet := req
+			withWallet.CreateTransaction, withWallet.AccountID = &yes, st.DefaultAccountID
+			if mine, _, err = s.createRepaymentTx(ctx, sp, theirUser, theirs.Key(), withWallet); err != nil {
+				_ = sp.Rollback(ctx)
+				mine = nil
+			} else if err := sp.Commit(ctx); err != nil {
+				return fmt.Errorf("release savepoint: %w", err)
+			}
+		}
+		if mine == nil {
+			no := false
+			req.CreateTransaction = &no
+			var err error
+			if mine, _, err = s.createRepaymentTx(ctx, tx, theirUser, theirs.Key(), req); err != nil {
+				return err
+			}
 		}
 		p.RepaymentID = &mine.ID
 	}
