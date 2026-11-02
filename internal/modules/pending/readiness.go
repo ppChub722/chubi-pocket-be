@@ -11,6 +11,7 @@ const (
 	NeedWallet   = "wallet"    // a bill without a wallet is valid, so soft; hard for a transfer
 	NeedWalletTo = "wallet_to" // a transfer's destination: hard
 	NeedCategory = "category"  // soft: an uncategorized bill is valid
+	NeedPeople   = "people"    // a shared-bill draft with nobody on it: hard
 )
 
 func readiness(p *PendingTransaction) (missing []string, canConfirm bool) {
@@ -53,6 +54,9 @@ func readiness(p *PendingTransaction) (missing []string, canConfirm bool) {
 					add(NeedCategory, false)
 				}
 			}
+			if d.Paper != nil && len(d.Paper.People) == 0 {
+				add(NeedPeople, true)
+			}
 		}
 	}
 	return missing, !hard
@@ -68,11 +72,15 @@ func summarize(rows []PendingTransaction) ListSummary {
 			s.ReadyCount++
 		}
 		if p.Kind == KindCreate && p.Draft.Amount != nil && p.Draft.Type != nil {
+			amount := *p.Draft.Amount
+			if p.Draft.Paper != nil {
+				amount = p.Draft.Paper.MyShare(amount)
+			}
 			switch *p.Draft.Type {
 			case "expense":
-				s.ExpenseTotal += *p.Draft.Amount
+				s.ExpenseTotal += amount
 			case "income":
-				s.IncomeTotal += *p.Draft.Amount
+				s.IncomeTotal += amount
 			}
 		}
 		switch strings.ToLower(p.Source) {

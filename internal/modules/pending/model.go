@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
@@ -31,6 +32,34 @@ type Draft struct {
 	TransferToAccountID *uuid.UUID  `json:"transfer_to_account_id,omitempty"`
 	TagIDs              []uuid.UUID `json:"tag_ids,omitempty"`
 	GoalID              *uuid.UUID  `json:"goal_id,omitempty"`
+	Paper               *DraftPaper `json:"paper,omitempty"`
+}
+
+// DraftPaper — the draft is a shared bill: confirming it creates the paper (a split bill, or an
+// event bill with ProjectID) and my books of it from the draft's wallet, category and tags.
+type DraftPaper struct {
+	ProjectID   *uuid.UUID                  `json:"project_id,omitempty"`
+	SplitMode   string                      `json:"split_mode,omitempty"`
+	People      []projects.PaperPersonInput `json:"people"`
+	EventTagIDs []uuid.UUID                 `json:"event_tag_ids,omitempty"`
+	Pay         string                      `json:"pay,omitempty"`
+}
+
+// MyShare — my part of amount on the paper (all of it while nobody is on it, 0 when I'm not).
+func (p *DraftPaper) MyShare(amount float64) float64 {
+	if len(p.People) == 0 {
+		return amount
+	}
+	for _, x := range p.People {
+		if !x.Me {
+			continue
+		}
+		if p.SplitMode == "equal" && len(p.People) > 0 {
+			return round2(amount / float64(len(p.People)))
+		}
+		return x.Share
+	}
+	return 0
 }
 
 type SubmitError struct {

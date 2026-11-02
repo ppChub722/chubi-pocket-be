@@ -176,56 +176,66 @@ func (s *Service) createPaper(ctx context.Context, writer uuid.UUID, projectID *
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	eff := shared.NewEffects()
+	id, err := s.CreatePaperTx(ctx, tx, writer, projectID, req, &eff)
+	if err != nil {
+		return nil, err
+	}
+	return s.finishWrite(ctx, tx, writer, id, eff)
+}
+
+// CreatePaperTx — createPaper inside the caller's transaction (a confirmed draft); answers the paper id.
+func (s *Service) CreatePaperTx(ctx context.Context, tx pgx.Tx, writer uuid.UUID, projectID *uuid.UUID, req CreatePaperRequest, eff *shared.Effects) (uuid.UUID, error) {
 	var event *Project
+	var err error
 	if projectID != nil {
 		if event, err = s.store.GetByID(ctx, *projectID); err != nil {
-			return nil, err
+			return uuid.Nil, err
 		}
 		if err := writable(event.Status, "create_pt"); err != nil {
-			return nil, err
+			return uuid.Nil, err
 		}
 		m, err := s.store.MemberByUserIDTx(ctx, tx, *projectID, writer)
 		if err != nil || m.Status != MemberStatusActive {
-			return nil, ErrProjectNotFound
+			return uuid.Nil, ErrProjectNotFound
 		}
 		if m.Role == RoleViewer {
-			return nil, ErrViewerReadOnly
+			return uuid.Nil, ErrViewerReadOnly
 		}
 	}
 	id, err := uuid.NewV7()
 	if err != nil {
-		return nil, fmt.Errorf("uuid: %w", err)
+		return uuid.Nil, fmt.Errorf("uuid: %w", err)
 	}
 	if err := insertPaperTx(ctx, tx, id, projectID, writer, req.Paper); err != nil {
-		return nil, err
+		return uuid.Nil, err
 	}
 	_, added, err := s.writePeopleTx(ctx, tx, writer, id, writer, event, req.Paper)
 	if err != nil {
-		return nil, err
+		return uuid.Nil, err
 	}
 	if event != nil {
 		if err := setPaperTagsTx(ctx, tx, id, event.ID, req.Paper.TagIDs); err != nil {
-			return nil, err
+			return uuid.Nil, err
 		}
 	}
-	eff := shared.NewEffects()
 	paper, _, err := shared.LoadPaper(ctx, tx, writer, id)
 	if err != nil {
-		return nil, err
+		return uuid.Nil, err
 	}
 	if paper.PersonOfUser(writer) != nil {
 		claim := ClaimInput{Pay: "debt"}
 		if req.MyBooks != nil {
 			claim = *req.MyBooks
 		}
-		if _, err := s.claimTx(ctx, tx, writer, paper, event, claim, req.MyBooks == nil, &eff); err != nil {
-			return nil, err
+		if _, err := s.claimTx(ctx, tx, writer, paper, event, claim, req.MyBooks == nil, eff); err != nil {
+			return uuid.Nil, err
 		}
 	}
 	if err := s.welcomeTx(ctx, tx, writer, paper, event, added); err != nil {
-		return nil, err
+		return uuid.Nil, err
 	}
-	return s.finishWrite(ctx, tx, writer, id, eff)
+	return id, nil
 }
 
 // welcomeTx — the people new on a paper hear about it: a split bill invites (or, auto-accepted,

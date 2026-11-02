@@ -6565,6 +6565,17 @@ components:
         transfer_to_account_id: { $ref: '#/components/schemas/Uuid' }
         tag_ids: { $ref: '#/components/schemas/Ids' }
         goal_id: { $ref: '#/components/schemas/Uuid', description: 'kind saving: the goal (absent = spare).' }
+        paper: { $ref: '#/components/schemas/DraftPaper' }
+    DraftPaper:
+      type: object
+      description: 'The draft is a shared bill (expense or income). Confirming it creates the paper (a split bill; an event bill with project_id) from the draft''s type / amount / date / description / note and these people, then my books of it from the draft''s wallet, category and tags (`pay`, default debt). Paper errors land in last_error. The summary and budgets count my share only.'
+      required: [people]
+      properties:
+        project_id: { $ref: '#/components/schemas/Uuid' }
+        split_mode: { type: string, enum: [equal, custom] }
+        people: { type: array, items: { $ref: '#/components/schemas/PaperPersonInput' } }
+        event_tag_ids: { $ref: '#/components/schemas/Ids' }
+        pay: { type: string, enum: [debt, wallet] }
     DraftResolved:
       type: object
       description: 'Read-only; the draft''s ids resolved so the page renders without other calls. A dangling id (deleted account / category / event …) is `null` here and listed in `missing`.'
@@ -6589,7 +6600,8 @@ components:
             NOT_FOUND, ACCOUNT_NOT_FOUND, ACCOUNT_ARCHIVED, WALLET_NOT_TRACKED, CATEGORY_TYPE_MISMATCH, CATEGORY_NOT_FOUND,
             TAG_NOT_FOUND, TRANSACTION_NOT_FOUND, TRANSFER_SAME_ACCOUNT, TRANSFER_NEEDS_WALLETS, DEBT_NOT_FOUND, CONTACT_NOT_FOUND,
             PROJECT_NOT_ACTIVE, PROJECT_LOCKED, GOAL_NOT_ACTIVE, MISSING_TYPE, MISSING_AMOUNT, MISSING_DATE,
-            SUBMIT_FAILED, MISSING_ACCOUNT, DEBT_ALREADY_SETTLED, OVERPAYMENT
+            SUBMIT_FAILED, MISSING_ACCOUNT, DEBT_ALREADY_SETTLED, OVERPAYMENT,
+            VALIDATION_ERROR, EVENT_COMPLETED, MEMBER_NOT_IN_PROJECT, FORBIDDEN_ROLE
           ]
         message: { type: string }
     PendingTransaction:
@@ -6605,7 +6617,7 @@ components:
         target_transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         source_ref: { type: [object, 'null'], description: 'What to show for a non-manual source ("Aom paid ฿300", a scanned slip …). `source` recurring | upcoming (a draft the recurring due check produced): `{item_id, recurring: {id, name, icon_code} | null, seq, total}` → the chip "🔁 Netflix · 3/12" / "ล่วงหน้า". Submitting it links the new transaction to the item; discarding it leaves the item "ยังไม่สร้าง".'}
         last_error: { oneOf: [{ $ref: '#/components/schemas/SubmitError' }, { type: 'null' }] }
-        needs_input: { type: array, items: { type: string, enum: [amount, type, date, wallet, wallet_to, category] }, description: 'What the draft still misses; empty = ready. amount / type / date / wallet_to (and a transfer''s wallet) are hard; wallet and category of an expense / income are soft (an uncategorized, wallet-less bill is valid). An amount-less เตือนจ่าย draft is valid: it just needs the amount.' }
+        needs_input: { type: array, items: { type: string, enum: [amount, type, date, wallet, wallet_to, category, people] }, description: 'What the draft still misses; empty = ready. amount / type / date / wallet_to (and a transfer''s wallet) / people (a shared-bill draft with nobody on it) are hard; wallet and category of an expense / income are soft (an uncategorized, wallet-less bill is valid). An amount-less เตือนจ่าย draft is valid: it just needs the amount.' }
         can_confirm: { type: boolean, description: 'false while a hard key is missing: confirm answers it in failed[] (MISSING_AMOUNT …) and the draft stays.' }
         created_at: { $ref: '#/components/schemas/DateTime' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
@@ -6630,7 +6642,7 @@ components:
         summary: { $ref: '#/components/schemas/PendingSummary' }
     PendingSummary:
       type: object
-      description: 'Over ALL the user''s drafts: count; expense_total / income_total = Σ the amounts of the kind-create drafts that have one; needs_input_count = drafts missing something (incl. soft keys), ready_count = the rest (the ones submit-ready confirms); by_source = the source chips (recurring = recurring / upcoming / auto-saving, manual = typed / chat, other_people = from another person, slip = scanned).'
+      description: 'Over ALL the user''s drafts: count; expense_total / income_total = Σ the amounts of the kind-create drafts that have one (a shared-bill draft: my share); needs_input_count = drafts missing something (incl. soft keys), ready_count = the rest (the ones submit-ready confirms); by_source = the source chips (recurring = recurring / upcoming / auto-saving, manual = typed / chat, other_people = from another person, slip = scanned).'
       required: [count, expense_total, income_total, needs_input_count, ready_count, by_source]
       properties:
         count: { type: integer }

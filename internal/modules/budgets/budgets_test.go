@@ -321,8 +321,8 @@ func TestBudgetFutureEventBillIsExpected(t *testing.T) {
 	}, http.StatusCreated, &d)
 	id := d.Budget.ID.String()
 	ev, tag, meM, beeM := f.tripEvent()
-	f.claimedBill(ev, tag, meM, beeM, 300, 100, false, f.day(-1)) // past: used
-	f.claimedBill(ev, tag, meM, beeM, 210, 70, false, f.day(2))   // future: expected
+	f.claimedBill(ev, tag, meM, beeM, 300, 100, false, f.day(-1), "trip") // past: used
+	f.claimedBill(ev, tag, meM, beeM, 210, 70, false, f.day(2), "trip")   // future: expected
 
 	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
 	if p := d.Budget.Period; p.Used != 100 || p.Expected != 70 {
@@ -364,8 +364,9 @@ func TestBudgetTagRangeWithEvent(t *testing.T) {
 	f.tx(100, &f.travel, f.day(0), "trip")
 	f.tx(50, &f.travel, f.day(0), "other")
 	ev, tag, meM, beeM := f.tripEvent()
-	f.claimedBill(ev, tag, meM, beeM, 300, 100, false, f.day(-1)) // Bee paid: my share 100
-	f.claimedBill(ev, tag, meM, beeM, 200, 120, true, f.day(-2))  // I paid 200, my share 120
+	f.claimedBill(ev, tag, meM, beeM, 300, 100, false, f.day(-1), "trip") // Bee paid: my share 100
+	f.claimedBill(ev, tag, meM, beeM, 200, 120, true, f.day(-2), "trip")  // I paid 200, my share 120
+	f.claimedBill(ev, tag, meM, beeM, 90, 40, false, f.day(-1))           // the event tag only: not counted
 
 	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
 	p := d.Budget.Period

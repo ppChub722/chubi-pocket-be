@@ -198,7 +198,7 @@ const (
 
 var registry = []Def{
 	// general
-	{ValidationError, []int{400}, InEnvelope, "The request is invalid; details lists the fields (FieldError[])."},
+	{ValidationError, []int{400}, InEnvelope | InPendingLastError, "The request is invalid; details lists the fields (FieldError[])."},
 	{Unauthorized, []int{401}, InEnvelope, "No valid session (missing / expired token); the app signs out."},
 	{Forbidden, []int{403}, InEnvelope, "The caller may not use this record or action."},
 	{NotFound, []int{404}, InEnvelope | InPendingLastError, "The record does not exist or is not the caller's."},
@@ -294,16 +294,16 @@ var registry = []Def{
 	// events (projects)
 	{ProjectNotActive, []int{409}, InEnvelope | InPendingLastError, "The event is not active."},
 	{ProjectLocked, []int{409}, InEnvelope | InPendingLastError, "The event is cancelled or archived; writes are blocked."},
-	{EventCompleted, []int{409}, InEnvelope, "The event is completed; it can't be changed any more."},
+	{EventCompleted, []int{409}, InEnvelope | InPendingLastError, "The event is completed; it can't be changed any more."},
 	{EventNotCompleted, []int{409}, InEnvelope, "Settle lines can be booked only after the event is completed."},
 	{EventHasEmptyPerson, []int{409}, InEnvelope, "A bill still has an empty person to assign (details.bill_ids)."},
 	{UseCompleteEndpoint, []int{400}, InEnvelope, "Complete an event with POST /projects/{id}/complete."},
 	{AlreadyMember, []int{409}, InEnvelope, "The user is already a member of the event."},
-	{MemberNotInProject, []int{400}, InEnvelope, "The member does not belong to this event."},
+	{MemberNotInProject, []int{400}, InEnvelope | InPendingLastError, "The member does not belong to this event."},
 	{CannotChangeOwner, []int{409}, InEnvelope, "The owner's role can't be changed here; use transfer-ownership."},
 	{CannotRemoveOwner, []int{400}, InEnvelope, "The owner can't be removed; transfer ownership first."},
 	{OwnerCannotLeave, []int{409}, InEnvelope, "The owner can't leave; transfer ownership first."},
-	{ForbiddenRole, []int{403}, InEnvelope, "The caller's event role can't do this."},
+	{ForbiddenRole, []int{403}, InEnvelope | InPendingLastError, "The caller's event role can't do this."},
 	{NotInBill, []int{400}, InEnvelope, "Claim: no pair with that member on the bill (details.bill_ids)."},
 	{BillAlreadyBooked, []int{409}, InEnvelope, "The bill is already booked with that person (details.bill_ids on claim)."},
 	{BillChanged, []int{409}, InEnvelope, "The bill changed since it was opened; reload (details.bill)."},

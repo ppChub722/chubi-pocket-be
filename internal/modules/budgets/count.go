@@ -72,15 +72,10 @@ func countSQL(expected bool) string {
 	return countSQLHead + items + countSQLTail
 }
 
-// My books count (a paper's bill counts through my transaction of it: my share). A transaction of
-// an event bill also carries the bill's event tags and my tags of that event.
-var countTxTags = `ARRAY(SELECT n FROM (
-		SELECT g.name AS n FROM transaction_tags tt JOIN tags g ON g.id = tt.tag_id
-			WHERE tt.transaction_id = t.id AND g.user_id = $1
-		UNION SELECT et.name FROM project_transaction_tags ptt JOIN event_tags et ON et.id = ptt.event_tag_id
-			WHERE ptt.project_transaction_id = t.split_transaction_id
-		UNION SELECT g.name FROM project_transactions pb JOIN project_my_tags pmt ON pmt.project_id = pb.project_id
-			JOIN tags g ON g.id = pmt.tag_id WHERE pb.id = t.split_transaction_id AND pmt.user_id = $1) z ORDER BY n)::text[]`
+// My books count (a paper's bill counts through my transaction of it: my share). Only my own tags
+// on the transaction count; event tags never reach a budget.
+var countTxTags = `ARRAY(SELECT g.name FROM transaction_tags tt JOIN tags g ON g.id = tt.tag_id
+		WHERE tt.transaction_id = t.id AND g.user_id = $1 ORDER BY g.name)::text[]`
 
 var countTxEvent = `(SELECT pb.project_id FROM project_transactions pb WHERE pb.id = t.split_transaction_id)`
 
@@ -112,11 +107,22 @@ WITH all_rows AS (
 
 	UNION ALL`
 
+// pendingMyAmount — a draft's amount; a shared-bill draft counts my share only.
+const pendingMyAmount = `(CASE WHEN p.draft->'paper' IS NULL OR jsonb_typeof(p.draft->'paper') = 'null'
+		OR jsonb_array_length(COALESCE(p.draft->'paper'->'people', '[]'::jsonb)) = 0
+		THEN (p.draft->>'amount')::float8
+		WHEN NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(p.draft->'paper'->'people', '[]'::jsonb)) x
+			WHERE (x->>'me')::boolean) THEN 0
+		WHEN p.draft->'paper'->>'split_mode' = 'equal'
+		THEN round(((p.draft->>'amount')::numeric / jsonb_array_length(p.draft->'paper'->'people')), 2)::float8
+		ELSE (SELECT COALESCE((x->>'share')::float8, 0) FROM jsonb_array_elements(p.draft->'paper'->'people') x
+			WHERE (x->>'me')::boolean LIMIT 1) END)`
+
 // The recurring-items branch goes between the head and the tail.
 const countSQLTail = `
 
 	UNION ALL
-	SELECT 'pending', p.id, 'pending', 'expected', (p.draft->>'date')::date, (p.draft->>'amount')::float8,
+	SELECT 'pending', p.id, 'pending', 'expected', (p.draft->>'date')::date, ` + pendingMyAmount + `,
 		p.draft->>'description', (p.draft->>'category_id')::uuid, (p.draft->>'account_id')::uuid,
 		ARRAY(SELECT g.name FROM tags g WHERE g.user_id = $1 AND g.id::text IN
 			(SELECT jsonb_array_elements_text(COALESCE(p.draft->'tag_ids', '[]'::jsonb))) ORDER BY g.name)::text[],

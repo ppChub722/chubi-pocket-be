@@ -37,6 +37,7 @@ func newAPIEnv(t *testing.T) *apiEnv {
 	txSvc.WithDebtLinks(pdSvc)
 	prj := projects.NewService(projects.NewStore(pool))
 	prj.WithTransactionsService(txSvc)
+	prj.WithDebts(pdSvc)
 	svc := NewService(NewStore(pool), txSvc, tags.NewService(tags.NewStore(pool)), pdSvc, prj)
 	h := NewHandler(svc)
 	e := &apiEnv{pool: pool, uid: uid, acct: testdb.Account(t, pool, uid), cat: testdb.Category(t, pool, uid, "Food")}
@@ -343,5 +344,48 @@ func TestNeedsInputSummaryAndSubmitReady(t *testing.T) {
 	e.call(t, "submitReadyPending", "POST", "/pending-transactions/submit-ready", nil, http.StatusOK, &sub)
 	if len(sub.Submitted) != 0 || len(sub.Failed) != 0 {
 		t.Errorf("empty submit-ready = %+v", sub)
+	}
+}
+
+// A shared-bill draft: the summary counts my share; confirming it makes the paper and my books.
+func TestPaperDraft(t *testing.T) {
+	e := newAPIEnv(t)
+	empty := e.expense(90)
+	empty["paper"] = map[string]any{"people": []any{}}
+	d := e.expense(300)
+	d["paper"] = map[string]any{"split_mode": "custom", "people": []map[string]any{
+		{"me": true, "share": 100, "paid": 300},
+		{"person_name": "Bee", "share": 200, "paid": 0},
+	}}
+	created := e.create(t, empty, d)
+	if !has(created[0].NeedsInput, NeedPeople) || created[0].CanConfirm {
+		t.Fatalf("no people: needs %v can %v", created[0].NeedsInput, created[0].CanConfirm)
+	}
+	if len(created[1].NeedsInput) != 0 {
+		t.Fatalf("paper draft needs %v", created[1].NeedsInput)
+	}
+	var lst ListResponse
+	e.call(t, "listPending", "GET", "/pending-transactions", nil, http.StatusOK, &lst)
+	if lst.Summary.ExpenseTotal != 190 { // 90 + my 100 of the 300
+		t.Fatalf("expense_total %v, want 190", lst.Summary.ExpenseTotal)
+	}
+
+	var res SubmitResponse
+	e.call(t, "submitPending", "POST", "/pending-transactions/submit", map[string]any{"ids": []uuid.UUID{created[1].ID}}, http.StatusOK, &res)
+	if len(res.Submitted) != 1 || len(res.Submitted[0].Rows) != 1 {
+		t.Fatalf("submit: %+v", res)
+	}
+	row := res.Submitted[0].Rows[0]
+	if row.Amount != 300 || row.MyShare == nil || *row.MyShare != 100 {
+		t.Fatalf("my books: amount %v my_share %v", row.Amount, row.MyShare)
+	}
+	var paper, debts int
+	_ = e.pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM project_transactions WHERE owner_user_id = $1 AND project_id IS NULL`, e.uid).Scan(&paper)
+	_ = e.pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1`, e.uid).Scan(&debts)
+	if paper != 1 || debts != 1 {
+		t.Fatalf("paper %d, debts %d; want 1 / 1", paper, debts)
+	}
+	if b := e.balance(t, e.acct); b != 700 {
+		t.Fatalf("wallet %v, want 700", b)
 	}
 }

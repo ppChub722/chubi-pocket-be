@@ -75,6 +75,17 @@ func checkDraft(d Draft) error {
 			return apierr.Wrap(ErrInvalidDraft, "date must be YYYY-MM-DD", apierr.Field("date", apierr.FieldInvalid, "format", "date"))
 		}
 	}
+	if p := d.Paper; p != nil {
+		if d.Type != nil && *d.Type != string(transactions.TypeExpense) && *d.Type != string(transactions.TypeIncome) {
+			return apierr.Wrap(ErrInvalidDraft, "a shared bill is an expense or an income", apierr.Field("type", apierr.FieldInvalid, "allowed", []string{"expense", "income"}))
+		}
+		if p.SplitMode != "" && p.SplitMode != "equal" && p.SplitMode != "custom" {
+			return apierr.Wrap(ErrInvalidDraft, "split_mode must be equal or custom", apierr.Field("paper.split_mode", apierr.FieldInvalid, "allowed", []string{"equal", "custom"}))
+		}
+		if p.Pay != "" && p.Pay != "debt" && p.Pay != "wallet" {
+			return apierr.Wrap(ErrInvalidDraft, "pay must be debt or wallet", apierr.Field("paper.pay", apierr.FieldInvalid, "allowed", []string{"debt", "wallet"}))
+		}
+	}
 	return nil
 }
 
@@ -312,23 +323,29 @@ func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *Pending
 	defer tx.Rollback(ctx)
 
 	var txID uuid.UUID
-	created, err := s.txs.CreateInTx(ctx, tx, userID, req)
-	if err != nil {
-		return nil, err
-	}
-	switch c := created.(type) {
-	case *transactions.TransactionDetail:
-		txID = c.ID
-	case *transactions.TransferResponse:
-		for _, r := range c.Rows {
-			if r.AccountID != nil && req.AccountID != nil && *r.AccountID == *req.AccountID {
-				txID = r.ID
+	if p.Draft.Paper != nil {
+		if txID, err = s.submitPaperTx(ctx, tx, userID, p.Draft); err != nil {
+			return nil, err
+		}
+	} else {
+		created, err := s.txs.CreateInTx(ctx, tx, userID, req)
+		if err != nil {
+			return nil, err
+		}
+		switch c := created.(type) {
+		case *transactions.TransactionDetail:
+			txID = c.ID
+		case *transactions.TransferResponse:
+			for _, r := range c.Rows {
+				if r.AccountID != nil && req.AccountID != nil && *r.AccountID == *req.AccountID {
+					txID = r.ID
+				}
 			}
 		}
-	}
-	if txID != uuid.Nil && s.tags != nil {
-		if err := s.tags.AttachTagsTx(ctx, tx, userID, txID, p.Draft.TagIDs); err != nil {
-			return nil, err
+		if txID != uuid.Nil && s.tags != nil {
+			if err := s.tags.AttachTagsTx(ctx, tx, userID, txID, p.Draft.TagIDs); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if txID != uuid.Nil && s.onSubmit != nil {
@@ -342,7 +359,46 @@ func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *Pending
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
+	if txID == uuid.Nil {
+		return nil, nil
+	}
 	return &txID, nil
+}
+
+// submitPaperTx — a shared-bill draft: the paper with my claim; answers my transaction of it
+// (uuid.Nil when the claim made none).
+func (s *Service) submitPaperTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, d Draft) (uuid.UUID, error) {
+	if s.projects == nil {
+		return uuid.Nil, errors.New("papers not available")
+	}
+	p := d.Paper
+	if len(p.People) == 0 {
+		return uuid.Nil, &submitErr{apierr.ValidationError, "a shared bill needs its people"}
+	}
+	if *d.Type != string(transactions.TypeExpense) && *d.Type != string(transactions.TypeIncome) {
+		return uuid.Nil, &submitErr{apierr.ValidationError, "a shared bill is an expense or an income"}
+	}
+	pay := p.Pay
+	if pay == "" {
+		pay = "debt"
+	}
+	eff := shared.NewEffects()
+	paperID, err := s.projects.CreatePaperTx(ctx, tx, userID, p.ProjectID, projects.CreatePaperRequest{
+		Paper: projects.PaperInput{
+			Type: *d.Type, Amount: *d.Amount, Date: *d.Date, Description: d.Description, Note: d.Note,
+			SplitMode: p.SplitMode, People: p.People, TagIDs: p.EventTagIDs,
+		},
+		MyBooks: &projects.ClaimInput{Pay: pay, AccountID: d.AccountID, CategoryID: d.CategoryID, TagIDs: d.TagIDs},
+	}, &eff)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	var txID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM transactions WHERE split_transaction_id = $1 AND user_id = $2
+		ORDER BY created_at LIMIT 1`, paperID, userID).Scan(&txID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, err
+	}
+	return txID, nil
 }
 
 func (s *Service) submitSaving(ctx context.Context, userID uuid.UUID, p *PendingTransaction) (*uuid.UUID, error) {
@@ -459,11 +515,23 @@ func toSubmitError(err error) SubmitError {
 		{saving_goals.ErrWalletNotTracked, apierr.WalletNotTracked},
 		{saving_goals.ErrGoalNotActive, apierr.GoalNotActive},
 		{saving_goals.ErrGoalNotFound, apierr.NotFound},
+		{projects.ErrProjectNotFound, apierr.NotFound},
+		{projects.ErrEventTagNotFound, apierr.NotFound},
+		{projects.ErrContactNotFound, apierr.ContactNotFound},
+		{projects.ErrMemberNotInProject, apierr.MemberNotInProject},
+		{projects.ErrViewerReadOnly, apierr.ForbiddenRole},
+		{projects.ErrEventCompleted, apierr.EventCompleted},
+		{projects.ErrProjectLocked, apierr.ProjectLocked},
+		{projects.ErrUnknownTag, apierr.TagNotFound},
+		{transactions.ErrTagNotFound, apierr.TagNotFound},
 	}
 	for _, c := range codes {
 		if errors.Is(err, c.target) {
 			return SubmitError{Code: c.code, Message: c.target.Error()}
 		}
+	}
+	if apierr.FieldsOf(err) != nil {
+		return SubmitError{Code: apierr.ValidationError, Message: err.Error()}
 	}
 	slog.Error("pending: submit failed", "error", err)
 	return SubmitError{Code: apierr.SubmitFailed, Message: "Couldn't save this item"}
