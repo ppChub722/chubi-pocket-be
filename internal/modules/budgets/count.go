@@ -72,67 +72,43 @@ func countSQL(expected bool) string {
 	return countSQLHead + items + countSQLTail
 }
 
+// My books count (a paper's bill counts through my transaction of it: my share). A transaction of
+// an event bill also carries the bill's event tags and my tags of that event.
+var countTxTags = `ARRAY(SELECT n FROM (
+		SELECT g.name AS n FROM transaction_tags tt JOIN tags g ON g.id = tt.tag_id
+			WHERE tt.transaction_id = t.id AND g.user_id = $1
+		UNION SELECT et.name FROM project_transaction_tags ptt JOIN event_tags et ON et.id = ptt.event_tag_id
+			WHERE ptt.project_transaction_id = t.split_transaction_id
+		UNION SELECT g.name FROM project_transactions pb JOIN project_my_tags pmt ON pmt.project_id = pb.project_id
+			JOIN tags g ON g.id = pmt.tag_id WHERE pb.id = t.split_transaction_id AND pmt.user_id = $1) z ORDER BY n)::text[]`
+
+var countTxEvent = `(SELECT pb.project_id FROM project_transactions pb WHERE pb.id = t.split_transaction_id)`
+
 var countSQLHead = `
-WITH ev AS (
-	SELECT pt.id, pt.scope_id AS project_id, pt.date, pt.description,
-		COALESCE((SELECT SUM(sp.share) FROM split_transaction_people sp
-			WHERE sp.split_transaction_id = pt.id AND sp.event_member_id = pm.id), 0) AS share,
-		(SELECT t2.id FROM transactions t2 WHERE t2.user_id = $1
-			AND (t2.id = pt.linked_transaction_id OR t2.source_project_transaction_id = pt.id)
-			ORDER BY (t2.id = pt.linked_transaction_id) DESC LIMIT 1) AS my_tx
-	FROM project_transactions pt
-	JOIN project_members pm ON pm.scope_id = pt.scope_id AND pm.user_id = $1 AND pm.status = 'active'
-	JOIN scopes p ON p.id = pt.scope_id AND p.status <> 'cancelled'
-	WHERE pt.parent_project_transaction_id IS NULL AND pt.type = 'expense' AND pt.date BETWEEN $2 AND $3
-	  -- V4 / X5: a bill counts once. My tx unlinked from it ("ลงบัญชีของฉัน" off, a tx-detail
-	  -- disconnect) counts as a plain tx in the first branch, so the bill's share doesn't.
-	  AND NOT EXISTS (SELECT 1 FROM transactions u WHERE u.user_id = $1 AND u.unlinked_split_transaction_id = pt.id)
-),
-all_rows AS (
-	SELECT 'transaction' AS kind, t.id, CASE WHEN ri.id IS NULL THEN 'normal' ELSE 'recurring' END AS source,
+WITH all_rows AS (
+	SELECT CASE WHEN t.split_transaction_id IS NULL THEN 'transaction' ELSE 'event_bill' END AS kind, t.id,
+		CASE WHEN ri.id IS NOT NULL THEN 'recurring' WHEN t.split_transaction_id IS NOT NULL THEN 'event' ELSE 'normal' END AS source,
 		'used' AS counts_as, t.date, (` + shared.ShareAmountExpr("t") + `)::float8 AS amount, t.description,
-		t.category_id, t.account_id,
-		ARRAY(SELECT g.name FROM transaction_tags tt JOIN tags g ON g.id = tt.tag_id
-			WHERE tt.transaction_id = t.id AND g.user_id = $1 ORDER BY g.name)::text[] AS tags,
-		NULL::uuid AS event_id, ri.id AS item_id, NULL::uuid AS rule_id, NULL::date AS slot
+		t.category_id, t.account_id, ` + countTxTags + ` AS tags,
+		` + countTxEvent + ` AS event_id, ri.id AS item_id, NULL::uuid AS rule_id, NULL::date AS slot
 	FROM transactions t
 	LEFT JOIN categories c ON c.id = t.category_id
 	LEFT JOIN recurring_items ri ON ri.transaction_id = t.id AND ri.user_id = $1
 	WHERE t.user_id = $1 AND ` + shared.ReportScopePredicate("t", "$1") + `
 	  AND t.type = 'expense' AND t.date BETWEEN $2 AND $3 AND t.date <= ` + shared.TodaySQL("$1") + `
-	  AND t.source_personal_debt_id IS NULL AND t.source_project_transaction_id IS NULL
+	  AND t.source_personal_debt_id IS NULL
 	  AND (c.id IS NULL OR (NOT c.is_system AND ` + shared.ReportableCategoryPredicate("c") + `))
-	  AND NOT EXISTS (SELECT 1 FROM project_transactions lp WHERE lp.linked_transaction_id = t.id)
 
 	UNION ALL
 	SELECT 'transaction', t.id, 'future_tx', 'expected', t.date, (` + shared.ShareAmountExpr("t") + `)::float8, t.description,
-		t.category_id, t.account_id,
-		ARRAY(SELECT g.name FROM transaction_tags tt JOIN tags g ON g.id = tt.tag_id
-			WHERE tt.transaction_id = t.id AND g.user_id = $1 ORDER BY g.name)::text[],
-		NULL::uuid, NULL::uuid, NULL::uuid, NULL::date
+		t.category_id, t.account_id, ` + countTxTags + `,
+		` + countTxEvent + `, NULL::uuid, NULL::uuid, NULL::date
 	FROM transactions t
 	LEFT JOIN categories c ON c.id = t.category_id
 	WHERE $4 AND t.user_id = $1 AND ` + shared.ReportScopePredicate("t", "$1") + `
 	  AND t.type = 'expense' AND t.date > ` + shared.TodaySQL("$1") + ` AND t.date BETWEEN $5 AND $6
-	  AND t.source_personal_debt_id IS NULL AND t.source_project_transaction_id IS NULL
+	  AND t.source_personal_debt_id IS NULL
 	  AND (c.id IS NULL OR (NOT c.is_system AND ` + shared.ReportableCategoryPredicate("c") + `))
-	  AND NOT EXISTS (SELECT 1 FROM project_transactions lp WHERE lp.linked_transaction_id = t.id)
-
-	UNION ALL
-	SELECT 'event_bill', ev.id, 'event', CASE WHEN ev.date <= ` + shared.TodaySQL("$1") + ` THEN 'used' ELSE 'expected' END,
-		ev.date, ev.share::float8, COALESCE(ev.description, mt.description),
-		mt.category_id, mt.account_id,
-		ARRAY(SELECT n FROM (
-			SELECT et.name AS n FROM project_transaction_tags ptt JOIN event_tags et ON et.id = ptt.event_tag_id
-				WHERE ptt.project_transaction_id = ev.id
-			UNION SELECT g.name FROM project_my_tags pmt JOIN tags g ON g.id = pmt.tag_id
-				WHERE pmt.project_id = ev.project_id AND pmt.user_id = $1
-			UNION SELECT g.name FROM transaction_tags tt JOIN tags g ON g.id = tt.tag_id
-				WHERE tt.transaction_id = ev.my_tx AND g.user_id = $1) z ORDER BY n)::text[],
-		ev.project_id, NULL::uuid, NULL::uuid, NULL::date
-	FROM ev LEFT JOIN transactions mt ON mt.id = ev.my_tx
-	WHERE ev.share > 0
-	  AND (ev.date <= ` + shared.TodaySQL("$1") + ` OR ($4 AND ev.date BETWEEN $5 AND $6))
 
 	UNION ALL`
 
@@ -144,7 +120,7 @@ const countSQLTail = `
 		p.draft->>'description', (p.draft->>'category_id')::uuid, (p.draft->>'account_id')::uuid,
 		ARRAY(SELECT g.name FROM tags g WHERE g.user_id = $1 AND g.id::text IN
 			(SELECT jsonb_array_elements_text(COALESCE(p.draft->'tag_ids', '[]'::jsonb))) ORDER BY g.name)::text[],
-		(p.draft->>'project_id')::uuid, (SELECT ri.id FROM recurring_items ri WHERE ri.pending_id = p.id),
+		NULL::uuid, (SELECT ri.id FROM recurring_items ri WHERE ri.pending_id = p.id),
 		NULL::uuid, NULL::date
 	FROM pending_transactions p
 	WHERE $4 AND p.user_id = $1 AND p.kind = 'create' AND p.draft->>'type' = 'expense'

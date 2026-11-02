@@ -239,9 +239,9 @@ func formTags(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]TagOpt
 
 func formEvents(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]shared.EventRef, error) {
 	rows, err := q.Query(ctx, `
-		SELECT p.id, p.name, p.icon_code, p.status, p.kind
+		SELECT p.id, p.name, p.icon_code, p.status
 		FROM projects p
-		WHERE p.status = 'active' AND p.kind = 'event'
+		WHERE p.status = 'active'
 		  AND EXISTS (SELECT 1 FROM project_members m
 		              WHERE m.project_id = p.id AND m.user_id = $1
 		                AND m.status = 'active' AND m.role <> 'viewer')

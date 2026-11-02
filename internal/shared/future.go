@@ -15,10 +15,9 @@ func TodaySQL(userParam string) string {
 	 WHERE up.user_id = ` + userParam + `), 'Asia/Bangkok'))::date`
 }
 
-// CashAmountSQL is what a transaction moves on its wallet: the amount minus the
-// part someone else paid (paid_by_amount, 0.4.0-3).
+// CashAmountSQL is what a transaction moves on its wallet.
 func CashAmountSQL(txAlias string) string {
-	return `(` + txAlias + `.amount - COALESCE(` + txAlias + `.paid_by_amount, 0))`
+	return `(` + txAlias + `.amount)`
 }
 
 // SignedTxSQL is a transaction's effect on its wallet: + income, - expense (each
