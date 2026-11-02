@@ -16,12 +16,12 @@ import (
 var (
 	ErrPaperNotFound = errors.New("bill not found")
 	// ErrPaperChanged — someone saved the paper since this version was read (409 BILL_CHANGED).
-	ErrPaperChanged  = errors.New("the bill was changed by someone else: reload it")
-	ErrPaperNotEven  = apierr.Invalid("what everyone paid and what everyone owes must each add up to the amount", "people", apierr.FieldInvalid)
-	ErrNotPaperOwner = errors.New("only the bill's owner can do this")
-	ErrNotOnPaper    = errors.New("you are not on this bill")
-	ErrNothingToClaim = errors.New("this bill gives you nothing to put in your books")
-	ErrAlreadyClaimed = errors.New("your books already hold this bill")
+	ErrPaperChanged     = errors.New("the bill was changed by someone else: reload it")
+	ErrPaperNotEven     = apierr.Invalid("what everyone paid and what everyone owes must each add up to the amount", "people", apierr.FieldInvalid)
+	ErrNotPaperOwner    = errors.New("only the bill's owner can do this")
+	ErrNotOnPaper       = errors.New("you are not on this bill")
+	ErrNothingToClaim   = errors.New("this bill gives you nothing to put in your books")
+	ErrAlreadyClaimed   = errors.New("your books already hold this bill")
 	ErrPaybackSplitOnly = apierr.Invalid("a payback is a bill of an event", "type", apierr.FieldInvalid)
 )
 

@@ -337,7 +337,7 @@ paths:
       summary: Confirm drafts (each independently)
       description: |
         A draft that goes through is gone from pending and comes back as its created `rows` (final state); the top-level `account_balances` carries the post-submit balance of every wallet any submitted draft touched, transfers included. One that fails stays pending and comes back as the updated `PendingTransaction` (with `last_error`). So the page patches itself from this one response.
-        A draft with `project_id` confirms through the "add a new bill to an event" path (event rules apply; splits go onto the board). Split rules apply at confirm: every split needs a name and an amount > 0 (`INVALID_SPLIT`), Σ ≤ amount (`SPLITS_EXCEED_AMOUNT`).
+        A draft is always a personal transaction (sharing it with people is done afterwards, as a split bill or an event bill).
       operationId: submitPending
       requestBody:
         required: true
@@ -3358,9 +3358,9 @@ paths:
       summary: Delete an event (owner)
       operationId: deleteProject
       description: |
-        Owner only (403 FORBIDDEN_ROLE). 0.4.1-2 (owner 2026-10-28): the event goes (its members, settle bookings, completion) but its bills STAY — every bill (and every payback) becomes a standalone split bill (a hidden kind split "event" each), with every member's copies, debts and lump parts still connected (same bill ids). Nothing in anyone's book is deleted and no wallet moves. Active or completed (a completed event's bills are unlocked when they move). One DB transaction.
+        Owner only (403 FORBIDDEN_ROLE). 0.4.1-2 (owner 2026-10-28): the event goes (its members, settle bookings, completion) but its bills STAY — every bill (and every payback) becomes a split bill (the same paper, same id: everyone's books still follow it; members become their contacts / names). Nothing in anyone's book is deleted and no wallet moves. Active or completed (a completed event's bills are unlocked when they move). One DB transaction.
         The other linked members get `event_deleted` (info, can be muted). `delete_linked_txs` is retired (ignored).
-        Answers {id, split_bill_count, effects}: effects.transactions / debts = MY records, now pointing at the split bills.
+        Answers {id, split_bill_count, effects}: effects.transactions / debts = MY records of those papers.
       responses:
         '200':
           description: Deleted.
@@ -3398,14 +3398,14 @@ paths:
       summary: Complete an event = lock it for good (owner)
       operationId: completeProject
       description: |
-        0.4.1-2 V2 (owner 2026-10-26, Q-E1): after the confirm "ปิดแล้วแก้ไม่ได้อีก และสมุดของทุกคนจะเลิก sync". One DB transaction:
-        - the event becomes `completed` with `completed_at` = now; it can't be undone (no way back to active / cancelled; archive and delete are allowed, owner 2026-10-28);
-        - no more bills, bill edits, members or event edits (my personal tag_ids stay editable);
-        - every member's books stop syncing at once: their transactions / debts / lumps keep their link (frozen, so budgets and reports stay right) but are plain records of their owners, freely editable; no more bill_changed for this event; pending notices are superseded; a later claim is a one-time copy;
-        - claiming after this is a one-time copy (no sync);
-        - every other linked member gets `event_completed` (info only, can be muted).
-        Errors: 403 FORBIDDEN_ROLE (not the owner) · 409 PROJECT_NOT_ACTIVE (not active: completed / cancelled / archived) · 409 EVENT_HAS_EMPTY_PERSON, details {bill_ids}: a bill still has an empty "( ) ____" person (a removed member's spot) to assign first.
-        Answers the patch + `effects` (transactions / debts = MY records that just stopped syncing, so their "ไม่ตรง" / sync marks go).
+        After the confirm "ปิดแล้วแก้ไม่ได้อีก และสมุดของทุกคนจะเลิก sync". One DB transaction:
+        - the event becomes `completed` (`completed_at` = now) for good (archive and delete stay allowed);
+        - its bills are locked: no new bills, edits, moves, people changes or member merges (the DB refuses them too);
+        - everyone's books stop following the bills: transactions and debts keep their link but show in sync; a claim after this is a one-time copy;
+        - "จ่ายน้อยครั้งสุด" opens on the settle page (`simplified_available`);
+        - every other linked member gets `event_completed` (info).
+        Errors: 403 FORBIDDEN_ROLE (not the owner), 409 PROJECT_NOT_ACTIVE, 409 EVENT_HAS_EMPTY_PERSON (details {bill_ids}: a removed member is still on a bill; merge them into someone first).
+        Answers the patch + `effects` (my records that stopped syncing).
       responses:
         '200':
           description: The patch.
@@ -3471,7 +3471,10 @@ paths:
       tags: [Events]
       summary: Who pays whom
       operationId: getProjectSettle
-      description: '0.4.0-3, the event สรุป tab. Over expense bills and paybacks: each split row owes its parent''s member; 0.4.1-2 V14: on an income bill the member who received owes each split (also in Event.my_net and the summary positions). pairs = each two members netted; simplified = the fewest transfers over everyone''s net (largest debtor pays largest creditor). from owes to.'
+      description: |
+        The event สรุป tab, over every bill of the event (papers): who owes whom.
+        `pairs` = each two members netted over the bills (any time). `simplified` = the fewest transfers over everyone's net (largest debtor pays largest creditor), shown once the event is completed (`simplified_available`). `from` owes `to`.
+        On my lines (`mine`): `booked` = what my books already hold with that member for this event (lump debts and payback rows), `unbooked` = what "ลงหนี้" would add now, `in_sync` = my lump debts with them still match the bills.
       responses:
         '200':
           description: The settle lines.
@@ -3488,12 +3491,10 @@ paths:
       summary: '"ลงในสมุดฉัน" — book the fewest-transfers settle once (0.4.1-2 V12)'
       operationId: bookEventSettle
       description: |
-        Completed events only (409 EVENT_NOT_COMPLETED), once per member (409 SETTLE_BOOKED). One DB transaction (`preview` = rolled back; then effects.transactions is []). For MY fewest-transfers lines (`EventSettle.simplified` with me in them):
-        - each line = a plain transaction for the money that really moves: expense when I pay, income when I receive, amount of the line, today, my `account_id` / `category_id` (Q-E5: I pick; a system category is refused, null = none), described with the event name, in the event; or `link_transaction_id` = one of my plain transactions of that type instead;
-        - the real pairs I had already claimed (bill debts, debt-type rows) are cleared by a repayment row WITHOUT a transaction per person, so every person of the event nets to 0 in my book (Q-E2: real pairs claimed first → this subtracts what was claimed);
-        - my unbooked real pairs can't be booked any more (409 SETTLE_BOOKED).
-        `lines` lists each of my simplified lines once, by the other member (400 SETTLE_LINES). A member who doesn't book keeps the real pairs and settles them as usual.
-        Answers the settle (with `my_settle_booking`) + `effects`.
+        "ลงหนี้" — the event settles as lumps (event bills never make debts one by one). One DB transaction.
+        - `mode` pairs (default) + `with` = a member: every bill with them not yet in my books goes into ONE debt per direction (a lump of many bills, one part per bill, its amount = Σ parts, followed by "อัปเดต" like any paper debt); a payback bill becomes a repayment row (with a wallet transaction when `account_id`). Any time, as often as new bills come. 422 SETTLE_NOTHING when nothing is left with them.
+        - `mode` simplified: completed events only (409 EVENT_NOT_COMPLETED), once (409 SETTLE_BOOKED): my fewest-transfers lines minus what my books already hold with each member, as plain debts. After it, pairs can't be booked any more (409 SETTLE_BOOKED).
+        Answers the settle again + `effects`.
       requestBody:
         required: true
         content:
@@ -5949,7 +5950,7 @@ components:
       schema: { $ref: '#/components/schemas/PersonKey' }
   responses:
     ValidationError:
-      description: '400 VALIDATION_ERROR with `details` = FieldError[] (the invalid fields; maybe empty), or a module code such as SPLITS_EXCEED_AMOUNT.'
+      description: '400 VALIDATION_ERROR with `details` = FieldError[] (the invalid fields; maybe empty), or a module code such as TAG_NOT_FOUND.'
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -5959,7 +5960,7 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     Forbidden:
-      description: '403 FORBIDDEN (or a module code such as SPLITS_AUTHOR_ONLY).'
+      description: '403 FORBIDDEN (or a module code such as NOT_BILL_OWNER).'
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -6889,8 +6890,8 @@ components:
         auto_accept_event_invites: { type: boolean, description: '0.4.2-3 F2: an event invite (project_invite) links me at once; the notice (if not muted) comes already answered. Default false.' }
         auto_accept_contact_links: { type: boolean, description: '0.4.2-3 F2: the same for a contact link request. Default false.' }
         auto_accept_wallet_invites: { type: boolean, description: '0.4.2-3 F2: the same for a wallet invite. Default false.' }
-        auto_accept_repayments: { type: boolean }
-        on_split_removed: { type: string }
+        auto_accept_repayments: { type: boolean, description: 'A partner''s "I paid you back" (debt_repaid) is written into my book at once (no wallet); off = the notice asks. Default off.' }
+        on_split_removed: { type: string, enum: [ask, keep, delete], description: 'Taken off a paper (removed, or it was deleted): my books of it are kept as plain records, deleted, or I am asked (bill_removed). Default ask.' }
         default_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'The main wallet (กระเป๋าหลัก): quick create starts with it (getTransactionFormOptions `default_account_id`); null = the last wallet used. Same value as `/users/me` `default_account`.' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
     UpdateNotificationSettingsRequest:
@@ -6905,8 +6906,8 @@ components:
         auto_accept_event_invites: { type: boolean }
         auto_accept_contact_links: { type: boolean }
         auto_accept_wallet_invites: { type: boolean }
-        auto_accept_repayments: { type: [boolean, 'null'] }
-        on_split_removed: { type: [string, 'null'] }
+        auto_accept_repayments: { type: [boolean, 'null'], description: 'A partner''s "I paid you back" (debt_repaid) is written into my book at once (no wallet); off = the notice asks. Default off.' }
+        on_split_removed: { type: [string, 'null'], enum: [ask, keep, delete, null], description: 'Taken off a paper (removed, or it was deleted): my books of it are kept as plain records, deleted, or I am asked (bill_removed). Default ask.' }
         default_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'A key present with null clears it. '}
 
     # ───────── categories ─────────
@@ -10773,7 +10774,7 @@ components:
     DebtEntry:
       type: object
       description: |
-        A person-book row (0.4.1-1 D3): `kind` debt (ให้ยืม paid / ยืม received, or a split / paid-by / event debt) or repayment (จ่ายคืน paid / รับคืน received). Both count in the person's balance (paid +, received −), each with an optional transaction (`transaction`), connected and synced.
+        A person-book row (0.4.1-1 D3): `kind` debt (ให้ยืม paid / ยืม received, or a debt made from papers: `source.kind` paper) or repayment (จ่ายคืน paid / รับคืน received). Both count in the person's balance (paid +, received −), each with an optional transaction (`transaction`), connected and synced.
         A repayment: `paid` always false (no label), `due_date` null, `source` null or {kind event} for an event payback, `origin` null.
       required: [id, kind, key, direction, amount, date, description, note, private_note, paid, due_date, source, transaction, partner_linked, disconnected_at, created_at, in_current_cycle, updated_at, origin, bills, in_sync]
       properties:
@@ -10976,7 +10977,7 @@ components:
         mark_paid_ids: { $ref: '#/components/schemas/Ids', description: 'Debt entries of the same person to label paid in the same call (label only, numbers never change).' }
         mark_all_paid: { type: boolean, description: '0.4.1-1 D10 "ปิดหนี้": label every open debt of this person on the side this repayment pays down paid (pay → their received debts, receive → their paid debts). Label only. Combines with mark_paid_ids.' }
         person_name: { type: string, minLength: 1, maxLength: 100, description: '`n:` keys only: the shown spelling of a typed name.' }
-        notify: { type: boolean }
+        notify: { type: boolean, description: 'Tell the other user of this pair (my debt''s partner, made from the same paper): they get debt_repaid (written in their book at once when their auto_accept_repayments is on).' }
     PersonDelta:
       type: object
       description: 'A person''s balance before / after a write or a preview (net: > 0 รอรับ, < 0 รอจ่าย).'
@@ -11146,7 +11147,7 @@ components:
         data: { type: array, items: { $ref: '#/components/schemas/EventTag' } }
     EventPosition:
       type: object
-      description: 'A member''s standing: paid = expense bills they paid; share = their split rows (a bill without splits is fully its payer''s share); sent / received = paybacks they made / got (0.4.0-3); net = paid − share + sent − received (> 0: the others owe them).'
+      description: 'A member''s standing over the event''s bills: paid = what they paid; share = their shares; sent / received = paybacks they made / got; net = paid − share + sent − received (> 0: the others owe them).'
       required: [member, paid, share, sent, received, net, receivable, payable]
       properties:
         member: { $ref: '#/components/schemas/MemberRef' }
@@ -11182,13 +11183,13 @@ components:
               properties:
                 booked_at: { $ref: '#/components/schemas/DateTime' }
             - { type: 'null' }
-          description: '0.4.1-2 V12: I already booked the simplified lines into my book (then my real pairs can''t be claimed).'
+          description: 'I already booked the simplified lines (then pairs can''t be booked any more).'
     SettleBookRequest:
       type: object
       properties:
-        mode: { type: string }
-        with: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
-        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        mode: { type: string, enum: [pairs, simplified], description: 'Default pairs.' }
+        with: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'pairs: the member to book with (required).' }
+        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'pairs: the wallet of the payback rows booked with it (none = ledger-only).' }
     SettleBookResult:
       type: object
       required: [settle, effects]

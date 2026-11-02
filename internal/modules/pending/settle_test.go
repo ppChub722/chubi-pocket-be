@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-
 )
 
 // TestSubmitSettleDebtMakesRepaymentTx — a settle_debt draft submits as a repayment to the debt's

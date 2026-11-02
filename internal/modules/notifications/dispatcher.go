@@ -45,7 +45,7 @@ func (s *Service) DeliveryFor(
 		return Delivery{}, err
 	}
 	return Delivery{
-		Deliver: st.Deliver(notifType),
+		Deliver:    st.Deliver(notifType),
 		SyncEvents: st.AutoSyncEvents, SyncDebts: st.AutoSyncDebts,
 		AcceptEvents: st.AutoAcceptEvents, AcceptDebts: st.AutoAcceptDebts,
 		AcceptRequest: st.AcceptRequest(notifType),

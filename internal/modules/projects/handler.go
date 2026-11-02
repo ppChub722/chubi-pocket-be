@@ -164,8 +164,6 @@ func (h *Handler) TransferOwnership(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-
-
 func (h *Handler) Settle(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
 	if !ok {
@@ -259,7 +257,6 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-
 func (h *Handler) AcceptLinkRequest(c *gin.Context) {
 	userID, ok := auth.UserIDFromContext(c)
 	if !ok {
@@ -304,12 +301,6 @@ func (h *Handler) RejectLinkRequest(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Project link request rejected", "inbox_summary": sum})
 }
-
-
-
-
-
-
 
 func (h *Handler) ListTags(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)
@@ -420,9 +411,6 @@ func (h *Handler) Complete(c *gin.Context) {
 	out, err := h.service.Complete(c.Request.Context(), userID, id)
 	reply(c, http.StatusOK, out, err)
 }
-
-
-
 
 // BookSettle — POST /projects/:id/settle/book (0.4.1-2 V12).
 func (h *Handler) BookSettle(c *gin.Context) {

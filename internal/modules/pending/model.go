@@ -21,16 +21,16 @@ const (
 const SourceManual = "manual"
 
 type Draft struct {
-	Type                *string                   `json:"type,omitempty"`
-	Amount              *float64                  `json:"amount,omitempty"`
-	AccountID           *uuid.UUID                `json:"account_id,omitempty"`
-	CategoryID          *uuid.UUID                `json:"category_id,omitempty"`
-	Date                *string                   `json:"date,omitempty"`
-	Description         *string                   `json:"description,omitempty" binding:"omitempty,max=200"`
-	Note                *string                   `json:"note,omitempty"        binding:"omitempty,max=500"`
-	TransferToAccountID *uuid.UUID                `json:"transfer_to_account_id,omitempty"`
-	TagIDs              []uuid.UUID               `json:"tag_ids,omitempty"`
-	GoalID              *uuid.UUID                `json:"goal_id,omitempty"`
+	Type                *string     `json:"type,omitempty"`
+	Amount              *float64    `json:"amount,omitempty"`
+	AccountID           *uuid.UUID  `json:"account_id,omitempty"`
+	CategoryID          *uuid.UUID  `json:"category_id,omitempty"`
+	Date                *string     `json:"date,omitempty"`
+	Description         *string     `json:"description,omitempty" binding:"omitempty,max=200"`
+	Note                *string     `json:"note,omitempty"        binding:"omitempty,max=500"`
+	TransferToAccountID *uuid.UUID  `json:"transfer_to_account_id,omitempty"`
+	TagIDs              []uuid.UUID `json:"tag_ids,omitempty"`
+	GoalID              *uuid.UUID  `json:"goal_id,omitempty"`
 }
 
 type SubmitError struct {

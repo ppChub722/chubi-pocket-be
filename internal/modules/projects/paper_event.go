@@ -14,10 +14,10 @@ import (
 )
 
 var (
-	ErrMergeSame       = apierr.Invalid("a member can't be merged into itself", "into", apierr.FieldInvalid)
-	ErrMergeTwoUsers   = errors.New("two different users can't be merged")
-	ErrMoveSameEvent   = apierr.Invalid("the bill is already there", "project_id", apierr.FieldInvalid)
-	ErrMoveNotAMember  = errors.New("you are not a member of that event")
+	ErrMergeSame      = apierr.Invalid("a member can't be merged into itself", "into", apierr.FieldInvalid)
+	ErrMergeTwoUsers  = errors.New("two different users can't be merged")
+	ErrMoveSameEvent  = apierr.Invalid("the bill is already there", "project_id", apierr.FieldInvalid)
+	ErrMoveNotAMember = errors.New("you are not a member of that event")
 )
 
 // --- move ---

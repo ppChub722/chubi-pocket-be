@@ -182,12 +182,12 @@ func TestDashboardAttentionRule(t *testing.T) {
 	read, actioned, dismissed := ago(1), ago(1), ago(1)
 	empty := `{}`
 
-	unreadInfo := e.notif(t, "event_completed", nil, nil, nil, ago(5), empty)                    // IN: unread
-	readInfo := e.notif(t, "event_completed", &read, nil, nil, ago(6), empty)                    // OUT: read, plain info
-	readAwaiting := e.notif(t, "bill_new", &read, nil, nil, ago(7), empty)                 // IN: read but awaits answer
-	actionedRead := e.notif(t, "bill_new", &read, &actioned, nil, ago(8), empty)           // OUT: actioned + read
-	dismissedUnread := e.notif(t, "event_completed", nil, nil, &dismissed, ago(9), empty)        // OUT: dismissed
-	dismissedAwaiting := e.notif(t, "bill_new", &read, nil, &dismissed, ago(10), empty)    // OUT: dismissed
+	unreadInfo := e.notif(t, "event_completed", nil, nil, nil, ago(5), empty)             // IN: unread
+	readInfo := e.notif(t, "event_completed", &read, nil, nil, ago(6), empty)             // OUT: read, plain info
+	readAwaiting := e.notif(t, "bill_new", &read, nil, nil, ago(7), empty)                // IN: read but awaits answer
+	actionedRead := e.notif(t, "bill_new", &read, &actioned, nil, ago(8), empty)          // OUT: actioned + read
+	dismissedUnread := e.notif(t, "event_completed", nil, nil, &dismissed, ago(9), empty) // OUT: dismissed
+	dismissedAwaiting := e.notif(t, "bill_new", &read, nil, &dismissed, ago(10), empty)   // OUT: dismissed
 	supersededRead := e.notif(t, "bill_new", &read, nil, nil, ago(11), `{"applied":true}`)
 
 	blk := e.attention(t)

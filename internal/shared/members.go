@@ -93,4 +93,3 @@ func TextOr(s *string) string {
 	}
 	return *s
 }
-

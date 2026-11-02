@@ -45,8 +45,8 @@ type Settings struct {
 	AutoAcceptEvents bool `json:"auto_accept_events"`
 	AutoAcceptDebts  bool `json:"auto_accept_debts"`
 	// The three requests' own auto-accept switches (0.4.2-3 F2, migration 125, default off).
-	AutoAcceptEventInvites  bool      `json:"auto_accept_event_invites"`
-	AutoAcceptContactLinks  bool      `json:"auto_accept_contact_links"`
+	AutoAcceptEventInvites  bool `json:"auto_accept_event_invites"`
+	AutoAcceptContactLinks  bool `json:"auto_accept_contact_links"`
 	AutoAcceptWalletInvites bool `json:"auto_accept_wallet_invites"`
 	// OnSplitRemoved — removed from a bill (or leaving it): ask | keep | delete my books of it.
 	OnSplitRemoved string `json:"on_split_removed"`

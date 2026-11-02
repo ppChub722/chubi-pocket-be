@@ -37,12 +37,12 @@ type PaperPerson struct {
 	MemberID *uuid.UUID `json:"member_id"`
 	// Person — this person as the viewer knows them: their contact (by the viewer's own binding or a
 	// contact linked to the same user), else just the name.
-	Person   PersonRef  `json:"person"`
-	IsMe     bool       `json:"is_me"`
-	Status   string     `json:"status"`
-	Share    float64    `json:"share"`
-	Paid     float64    `json:"paid"`
-	PaidBack bool       `json:"paid_back"`
+	Person   PersonRef `json:"person"`
+	IsMe     bool      `json:"is_me"`
+	Status   string    `json:"status"`
+	Share    float64   `json:"share"`
+	Paid     float64   `json:"paid"`
+	PaidBack bool      `json:"paid_back"`
 	// PaidBackBy — who ticked "คืนแล้ว" (a name), nil when not ticked.
 	PaidBackBy *string    `json:"paid_back_by"`
 	PaidBackAt *time.Time `json:"paid_back_at"`

@@ -889,7 +889,7 @@ func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID) (*Delet
 	if out.Effects, err = s.rowEffects(ctx, userID, nil, []uuid.UUID{id}, debtIDs, unionKeys([]string{d.debtKey}, nil), out.AccountBalances); err != nil {
 		return nil, err
 	}
-	if d.item != nil && s.recurring != nil {                                            // the occurrence it filled, now skipped (R2)
+	if d.item != nil && s.recurring != nil { // the occurrence it filled, now skipped (R2)
 		if slot, err := s.recurring.SlotView(ctx, *d.item); err == nil {
 			out.Effects.Slots = append(out.Effects.Slots, slot)
 		}

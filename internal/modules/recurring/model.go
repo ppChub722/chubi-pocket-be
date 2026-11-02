@@ -228,33 +228,33 @@ type LinkedTx struct {
 // Item is one occurrence of a setting: a stored row (id set) or one computed
 // from the rule (id null, stored false), addressed by rule_id + slot.
 type Item struct {
-	ID            *uuid.UUID              `json:"id"`
-	RuleID        uuid.UUID               `json:"rule_id"`
-	Slot          string                  `json:"slot"` // the occurrence's original date
-	Stored        bool                    `json:"stored"`
-	AutoCreated   bool                    `json:"auto_created"`
-	NeedsAmount   bool                    `json:"needs_amount"`
-	Recurring     *shared.RecurringRef    `json:"recurring"`
-	Seq           *int                    `json:"seq"`
-	Total         *int                    `json:"total"`
-	Date          string                  `json:"date"`
-	DaysUntil     int                     `json:"days_until"`
-	Status        string                  `json:"status"`
-	Edited        bool                    `json:"edited"`
-	Manual        bool                    `json:"manual"`
-	Type          string                  `json:"type"`
-	Amount        *float64                `json:"amount"` // null = not known yet (a reminder)
-	Account       *shared.AccountRef      `json:"account"`
-	ToAccount     *shared.AccountRef      `json:"to_account"`
-	Category      *shared.CategoryRef     `json:"category"`
-	GoalID        *uuid.UUID              `json:"goal_id"`
-	Goal          *shared.SavingGoalRef   `json:"goal"`
-	Tags          []shared.TagRef         `json:"tags"`
-	Description   *string                 `json:"description"`
-	Note          *string                 `json:"note"`
-	PendingID     *uuid.UUID              `json:"pending_id"`
-	Transaction   *LinkedTx               `json:"transaction"`
-	SavingEntryID *uuid.UUID              `json:"saving_entry_id"`
+	ID            *uuid.UUID            `json:"id"`
+	RuleID        uuid.UUID             `json:"rule_id"`
+	Slot          string                `json:"slot"` // the occurrence's original date
+	Stored        bool                  `json:"stored"`
+	AutoCreated   bool                  `json:"auto_created"`
+	NeedsAmount   bool                  `json:"needs_amount"`
+	Recurring     *shared.RecurringRef  `json:"recurring"`
+	Seq           *int                  `json:"seq"`
+	Total         *int                  `json:"total"`
+	Date          string                `json:"date"`
+	DaysUntil     int                   `json:"days_until"`
+	Status        string                `json:"status"`
+	Edited        bool                  `json:"edited"`
+	Manual        bool                  `json:"manual"`
+	Type          string                `json:"type"`
+	Amount        *float64              `json:"amount"` // null = not known yet (a reminder)
+	Account       *shared.AccountRef    `json:"account"`
+	ToAccount     *shared.AccountRef    `json:"to_account"`
+	Category      *shared.CategoryRef   `json:"category"`
+	GoalID        *uuid.UUID            `json:"goal_id"`
+	Goal          *shared.SavingGoalRef `json:"goal"`
+	Tags          []shared.TagRef       `json:"tags"`
+	Description   *string               `json:"description"`
+	Note          *string               `json:"note"`
+	PendingID     *uuid.UUID            `json:"pending_id"`
+	Transaction   *LinkedTx             `json:"transaction"`
+	SavingEntryID *uuid.UUID            `json:"saving_entry_id"`
 	// Person / DebtEntry — kind debt (0.4.1-2 K): the setting's person; the entry that fills it.
 	Person    *shared.PersonRef `json:"person"`
 	DebtEntry *DebtEntryRef     `json:"debt_entry"`

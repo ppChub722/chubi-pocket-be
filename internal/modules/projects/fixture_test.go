@@ -23,10 +23,11 @@ import (
 // fx — three users (A owns, B and C are app users), each with a wallet and a category; A knows B
 // and C as linked contacts and Dee as a plain name.
 type fx struct {
-	t    *testing.T
-	pool *pgxpool.Pool
-	svc  *Service
-	txs  *transactions.Service
+	t     *testing.T
+	pool  *pgxpool.Pool
+	svc   *Service
+	txs   *transactions.Service
+	debts *personal_debts.Service
 
 	a, b, c          uuid.UUID
 	walletA, walletB uuid.UUID
@@ -43,14 +44,14 @@ func newFx(t *testing.T) *fx {
 	f := &fx{t: t, pool: pool}
 	catSvc := categories.NewService(categories.NewStore(pool))
 	f.txs = transactions.NewService(transactions.NewStore(pool), catSvc)
-	debts := personal_debts.NewService(personal_debts.NewStore(pool), f.txs)
+	f.debts = personal_debts.NewService(personal_debts.NewStore(pool), f.txs)
 	notifs := notifications.NewService(notifications.NewStore(pool))
-	debts.WithNotifications(notifs)
-	f.txs.WithDebtLinks(debts)
+	f.debts.WithNotifications(notifs)
+	f.txs.WithDebtLinks(f.debts)
 	f.svc = NewService(NewStore(pool))
 	f.svc.WithNotificationService(notifs)
 	f.svc.WithTransactionsService(f.txs)
-	f.svc.WithDebts(debts)
+	f.svc.WithDebts(f.debts)
 	t.Cleanup(f.cleanup)
 
 	f.a, f.b, f.c = f.user("Alice"), f.user("Bee"), f.user("Chai")
@@ -290,4 +291,13 @@ func person(paper map[string]any, name string) map[string]any {
 		}
 	}
 	return nil
+}
+
+func mustUUID(t *testing.T, s string) uuid.UUID {
+	t.Helper()
+	id, err := uuid.Parse(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }

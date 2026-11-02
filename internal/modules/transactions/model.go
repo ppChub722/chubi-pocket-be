@@ -18,19 +18,19 @@ const (
 )
 
 type Transaction struct {
-	ID                         uuid.UUID  `json:"id"`
-	UserID                     uuid.UUID  `json:"user_id"`
-	AccountID                  *uuid.UUID `json:"-"` // nil = no wallet (floating)
-	Type                       TxType     `json:"type"`
-	Amount                     float64    `json:"amount"`
-	CategoryID                 *uuid.UUID `json:"-"`
-	Date                       string     `json:"date"` // YYYY-MM-DD; calendar date in user's tz
-	Description                *string    `json:"description"`
-	Note                       *string    `json:"note"`
+	ID          uuid.UUID  `json:"id"`
+	UserID      uuid.UUID  `json:"user_id"`
+	AccountID   *uuid.UUID `json:"-"` // nil = no wallet (floating)
+	Type        TxType     `json:"type"`
+	Amount      float64    `json:"amount"`
+	CategoryID  *uuid.UUID `json:"-"`
+	Date        string     `json:"date"` // YYYY-MM-DD; calendar date in user's tz
+	Description *string    `json:"description"`
+	Note        *string    `json:"note"`
 	// PrivateNote (0.4.1-2 S11) — mine only, on a copy of a shared bill; never synced. Null on
 	// another member's row.
-	PrivateNote     *string    `json:"private_note"`
-	TransferGroupID *uuid.UUID `json:"transfer_group_id"`
+	PrivateNote          *string    `json:"private_note"`
+	TransferGroupID      *uuid.UUID `json:"transfer_group_id"`
 	SourcePersonalDebtID *uuid.UUID `json:"-"` // the debt entry this row is the wallet side of (see Counterparty)
 	// SplitTransactionID / SplitPersonID — the paper (split or event bill) this row is my book of,
 	// and my person on it. MyShare — my part of that bill (what reports count); nil = the amount.
@@ -106,13 +106,13 @@ type TransferPeer struct {
 
 type TransactionDetail struct {
 	Transaction
-	Currency      string                    `json:"currency"`
-	Account       *shared.AccountRef        `json:"account"`
-	Category      *shared.CategoryRef       `json:"category"`
-	Tags          []shared.TagRef           `json:"tags"` // the caller's tags on the row
-	Project       *shared.EventRef          `json:"project"`
-	TransferPeer  *TransferPeer             `json:"transfer_peer"` // transfer rows only
-	Counterparty  *shared.DebtLink          `json:"counterparty"`
+	Currency     string              `json:"currency"`
+	Account      *shared.AccountRef  `json:"account"`
+	Category     *shared.CategoryRef `json:"category"`
+	Tags         []shared.TagRef     `json:"tags"` // the caller's tags on the row
+	Project      *shared.EventRef    `json:"project"`
+	TransferPeer *TransferPeer       `json:"transfer_peer"` // transfer rows only
+	Counterparty *shared.DebtLink    `json:"counterparty"`
 	// SplitBill / EventBill — the paper this row is my book of (never both): a split bill, or a bill
 	// of the event Project.
 	SplitBill     *shared.PaperBookRef      `json:"split_bill"`
@@ -150,7 +150,7 @@ type DeleteResult struct {
 	DebtEntryID     *uuid.UUID             `json:"debt_entry_id"`
 	PersonBalance   any                    `json:"person_balance"`
 	RecurringItemID *uuid.UUID             `json:"recurring_item_id"`
-	Effects        shared.Effects         `json:"effects"` // 0.4.1-1 B2
+	Effects         shared.Effects         `json:"effects"` // 0.4.1-1 B2
 }
 
 type CreateRequest struct {
