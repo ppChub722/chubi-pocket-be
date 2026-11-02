@@ -547,3 +547,28 @@ func TestBudgetScopeListsAreAnd(t *testing.T) {
 		t.Fatalf("used = %v, want 100 (only rows matching every picked list)", d.Budget.Period.Used)
 	}
 }
+
+// My tag on the event reaches my claimed bills of it; the event's own tags never do.
+func TestBudgetMyEventTag(t *testing.T) {
+	f := newBudFix(t)
+	var d Detail
+	f.call("POST", "/budgets", "createBudget", map[string]any{
+		"name": "Trip", "amount": 1000, "warn_pct": nil, "start_date": f.day(-4), "end": map[string]any{"kind": "date", "date": f.day(6)},
+		"scope": map[string]any{"tags": []string{"Trip"}},
+	}, http.StatusCreated, &d)
+	id := d.Budget.ID.String()
+	f.tx(10, &f.travel, f.day(0), "trip")
+	ev, tag, meM, beeM := f.tripEvent()
+	f.claimedBill(ev, tag, meM, beeM, 300, 100, false, f.day(-1))
+
+	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
+	if p := d.Budget.Period; p.Used != 10 {
+		t.Fatalf("event tag only: used %v, want 10", p.Used)
+	}
+	f.exec(`INSERT INTO project_my_tags (project_id, user_id, tag_id)
+		SELECT $1, $2, id FROM tags WHERE user_id = $2 AND lower(name) = 'trip'`, ev, f.me)
+	f.call("GET", "/budgets/"+id, "getBudget", nil, http.StatusOK, &d)
+	if p := d.Budget.Period; p.Used != 110 {
+		t.Fatalf("my tag on the event: used %v, want 110", p.Used)
+	}
+}

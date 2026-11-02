@@ -72,10 +72,13 @@ func countSQL(expected bool) string {
 	return countSQLHead + items + countSQLTail
 }
 
-// My books count (a paper's bill counts through my transaction of it: my share). Only my own tags
-// on the transaction count; event tags never reach a budget.
-var countTxTags = `ARRAY(SELECT g.name FROM transaction_tags tt JOIN tags g ON g.id = tt.tag_id
-		WHERE tt.transaction_id = t.id AND g.user_id = $1 ORDER BY g.name)::text[]`
+// My books count (a paper's bill counts through my transaction of it: my share). Tags = my own tags
+// on the transaction plus my tags of the bill's event; event tags never reach a budget.
+var countTxTags = `ARRAY(SELECT n FROM (
+		SELECT g.name AS n FROM transaction_tags tt JOIN tags g ON g.id = tt.tag_id
+			WHERE tt.transaction_id = t.id AND g.user_id = $1
+		UNION SELECT g.name FROM project_transactions pb JOIN project_my_tags pmt ON pmt.project_id = pb.project_id
+			JOIN tags g ON g.id = pmt.tag_id WHERE pb.id = t.split_transaction_id AND pmt.user_id = $1) z ORDER BY n)::text[]`
 
 var countTxEvent = `(SELECT pb.project_id FROM project_transactions pb WHERE pb.id = t.split_transaction_id)`
 
