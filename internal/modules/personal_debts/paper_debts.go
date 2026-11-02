@@ -124,6 +124,22 @@ func (s *Service) CreatePaperDebtTx(ctx context.Context, tx pgx.Tx, userID uuid.
 	return e, nil
 }
 
+// LinkPaperPartTx — a row I wrote myself (a repayment of a payback paper) counts as booking that
+// paper + person.
+func LinkPaperPartTx(ctx context.Context, tx pgx.Tx, userID, entryID uuid.UUID, p PaperPart) error {
+	tag, err := tx.Exec(ctx, `INSERT INTO personal_debt_bills (debt_id, user_id, split_transaction_id, split_person_id, transaction_id, amount)
+		VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (user_id, split_transaction_id, split_person_id) DO NOTHING`,
+		entryID, userID, p.PaperID, p.PersonID, p.TransactionID, round2(p.Amount))
+	if err != nil {
+		return fmt.Errorf("paper part: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrBillAlreadyBooked
+	}
+	_, err = tx.Exec(ctx, `UPDATE personal_debts SET source_kind = 'paper' WHERE id = $1`, entryID)
+	return err
+}
+
 // SetPaperPartAmountTx — a paper edit reached my part: the part and its debt follow.
 func (s *Service) SetPaperPartAmountTx(ctx context.Context, tx pgx.Tx, userID, partID uuid.UUID, amount float64) error {
 	var debtID uuid.UUID

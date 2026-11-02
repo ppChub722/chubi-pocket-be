@@ -185,6 +185,12 @@ const (
 	TxSplitPaid         Code = "TX_SPLIT_PAID"
 	InvalidDateRange    Code = "INVALID_DATE_RANGE"
 	InvalidBillPeople   Code = "INVALID_BILL_PEOPLE"
+	NothingToClaim      Code = "NOTHING_TO_CLAIM"
+	AlreadyClaimed      Code = "ALREADY_CLAIMED"
+	NotBillOwner        Code = "NOT_BILL_OWNER"
+	MergeTwoUsers       Code = "MERGE_TWO_USERS"
+	SettleNothing       Code = "SETTLE_NOTHING"
+	NotPaperBook        Code = "NOT_PAPER_BOOK"
 
 	// recurring / budgets / saving goals
 	InvalidRule        Code = "INVALID_RULE"
@@ -365,6 +371,12 @@ var registry = []Def{
 	{NotInBill, []int{400}, InEnvelope, "Claim: no pair with that member on the bill (details.bill_ids)."},
 	{BillAlreadyBooked, []int{409}, InEnvelope, "The bill is already booked with that person (details.bill_ids on claim)."},
 	{BillChanged, []int{409}, InEnvelope, "The bill changed since it was opened; reload (details.bill)."},
+	{NothingToClaim, []int{422}, InEnvelope, "Claim: the bill gives you nothing to put in your books."},
+	{AlreadyClaimed, []int{409}, InEnvelope, "Claim: your books already hold every piece of this bill."},
+	{NotBillOwner, []int{403}, InEnvelope, "Only the bill's owner can remove people or move it."},
+	{MergeTwoUsers, []int{409}, InEnvelope, "Two different users can't be merged into one member."},
+	{SettleNothing, []int{422}, InEnvelope, "Nothing left to book with that member."},
+	{NotPaperBook, []int{400}, InEnvelope, "This transaction / debt is not linked to a bill."},
 	{BillDisconnected, []int{409}, InEnvelope, "The caller disconnected their copy of this bill."},
 	{BillGone, []int{410}, InEnvelope, "The bill was deleted."},
 	{MoveTarget, []int{400}, InEnvelope, "Move: exactly one of project_id, new_event or split."},

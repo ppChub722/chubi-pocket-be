@@ -13,7 +13,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-const memberColumns = `id, scope_id AS project_id, user_id, display_name, role, status, icon_code,
+const memberColumns = `id, project_id, user_id, display_name, role, status, icon_code,
 	invited_at, joined_at, left_at, created_at, updated_at`
 
 func scanMember(row pgx.Row) (*ProjectMember, error) {
@@ -60,10 +60,9 @@ func (s *Store) InsertMemberTx(
 		}
 	}
 	q := `INSERT INTO project_members
-		(id, project_id, split_transaction_id, user_id, display_name, role, status, icon_code,
+		(id, project_id, user_id, display_name, role, status, icon_code,
 		 invited_at, joined_at, created_by_user_id, updated_by_user_id)
-		VALUES ($1, event_or_null($2), CASE WHEN event_or_null($2) IS NULL THEN $2::uuid END,
-		        $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $10)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $10)
 		RETURNING ` + memberColumns
 	m, err := scanMember(tx.QueryRow(ctx, q,
 		id, projectID, userID, displayName, role, status, iconJSON,
@@ -106,7 +105,7 @@ func (s *Store) IsActiveMember(ctx context.Context, projectID, userID uuid.UUID)
 	var n int
 	err := s.db.QueryRow(ctx,
 		`SELECT COUNT(*) FROM project_members
-		WHERE scope_id = $1 AND user_id = $2 AND status = 'active'`,
+		WHERE project_id = $1 AND user_id = $2 AND status = 'active'`,
 		projectID, userID).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("is member: %w", err)
@@ -116,7 +115,7 @@ func (s *Store) IsActiveMember(ctx context.Context, projectID, userID uuid.UUID)
 
 func (s *Store) ListMembers(ctx context.Context, projectID uuid.UUID) ([]ProjectMember, error) {
 	q := `SELECT ` + memberColumns + ` FROM project_members
-		WHERE scope_id = $1
+		WHERE project_id = $1
 		ORDER BY (role = 'owner') DESC, status, LOWER(display_name)`
 	rows, err := s.db.Query(ctx, q, projectID)
 	if err != nil {
@@ -245,9 +244,37 @@ func (s *Store) AssertCanWrite(ctx context.Context, projectID, userID uuid.UUID)
 	return m, nil
 }
 
+func (s *Store) MemberByUserID(ctx context.Context, projectID, userID uuid.UUID) (*ProjectMember, error) {
+	m, err := scanMember(s.db.QueryRow(ctx, `SELECT `+memberColumns+` FROM project_members
+		WHERE project_id = $1 AND user_id = $2`, projectID, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotMember
+	}
+	if err != nil {
+		return nil, fmt.Errorf("member lookup: %w", err)
+	}
+	return m, nil
+}
+
+func LoadMemberRefs(ctx context.Context, q shared.Querier, callerUserID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]shared.MemberRef, error) {
+	return shared.LoadMemberRefs(ctx, q, callerUserID, ids)
+}
+
+func uniqueIDs(ids []uuid.UUID) []uuid.UUID {
+	seen := map[uuid.UUID]bool{}
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 func (s *Store) MemberByUserIDTx(ctx context.Context, tx pgx.Tx, projectID, userID uuid.UUID) (*ProjectMember, error) {
 	m, err := scanMember(tx.QueryRow(ctx, `SELECT `+memberColumns+` FROM project_members
-		WHERE scope_id = $1 AND user_id = $2`, projectID, userID))
+		WHERE project_id = $1 AND user_id = $2`, projectID, userID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotMember
 	}

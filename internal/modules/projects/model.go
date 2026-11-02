@@ -4,10 +4,9 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
-
 	"github.com/google/uuid"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -31,13 +30,6 @@ const (
 	MemberStatusLeft    = "left"
 )
 
-const (
-	PTTypeExpense = "expense"
-	PTTypeIncome  = "income"
-	// PTTypePayback (0.4.0-3) — "A paid B back": the parent's member pays, its one child receives.
-	PTTypePayback = "payback"
-)
-
 type Project struct {
 	ID            uuid.UUID
 	OwnerUserID   uuid.UUID
@@ -51,7 +43,7 @@ type Project struct {
 	PlannedAmount *float64
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
-	CompletedAt   *time.Time // 0.4.1-2 V2: set = locked for good
+	CompletedAt   *time.Time // set = locked for good
 }
 
 type ProjectMember struct {
@@ -69,25 +61,6 @@ type ProjectMember struct {
 	UpdatedAt   time.Time
 }
 
-type ProjectTransaction struct {
-	ID                         uuid.UUID
-	ProjectID                  uuid.UUID
-	ParentProjectTransactionID *uuid.UUID
-	TransactionMemberID        uuid.UUID
-	RecordUserID               uuid.UUID
-	Type                       string
-	Amount                     float64
-	Currency                   string
-	Date                       string
-	Note                       *string
-	Description                *string
-	Marks                      []uuid.UUID
-	CreatedAt                  time.Time
-	UpdatedAt                  time.Time
-	PaybackKind                *string // 0.4.1-2 V11: payback | loan on a payback parent (NULL = payback)
-	TagNames                   []string
-}
-
 type Event struct {
 	ID               uuid.UUID        `json:"id"`
 	OwnerUserID      uuid.UUID        `json:"owner_user_id"`
@@ -96,7 +69,6 @@ type Event struct {
 	Description      *string          `json:"description"`
 	Note             *string          `json:"note"`
 	Status           string           `json:"status"`
-	Kind             string           `json:"kind"` // 0.4.1-2 S1: event | split
 	StartDate        *string          `json:"start_date"`
 	EndDate          *string          `json:"end_date"`
 	PlannedAmount    *float64         `json:"planned_amount"`
@@ -119,13 +91,22 @@ type Event struct {
 	CanManageMembers bool             `json:"can_manage_members"`
 	CompletedAt      *time.Time       `json:"completed_at"`
 	CanComplete      bool             `json:"can_complete"`
-	// EmptyPersonBillCount (0.4.1-2 V15) — bills with a removed member's spot to assign (ต้องจัดการ).
-	EmptyPersonBillCount int       `json:"empty_person_bill_count"`
-	LinkedTxCount        int       `json:"linked_tx_count"`
-	CreatedAt            time.Time `json:"created_at"`
-	UpdatedAt            time.Time `json:"updated_at"`
+	// EmptyPersonBillCount — bills with a removed member's spot to assign (ต้องจัดการ).
+	EmptyPersonBillCount int `json:"empty_person_bill_count"`
+	// UnclaimedCount — bills I am on that are not in my books yet.
+	UnclaimedCount int `json:"unclaimed_count"`
+	// MyDefaults — my category / wallet for auto claim in this event.
+	MyDefaults *MyDefaults `json:"my_defaults"`
+	CreatedAt  time.Time   `json:"created_at"`
+	UpdatedAt  time.Time   `json:"updated_at"`
 
 	myStatus string
+}
+
+// MyDefaults — a member's own defaults for an event (auto claim).
+type MyDefaults struct {
+	CategoryID *uuid.UUID `json:"category_id"`
+	AccountID  *uuid.UUID `json:"account_id"`
 }
 
 type EventList struct {
@@ -141,16 +122,14 @@ type EventMember struct {
 	Avatar shared.Avatar `json:"avatar"`
 	IsMe   bool          `json:"is_me"`
 	Linked bool          `json:"linked"`
-	// ContactID (0.4.0-3) — MY contact for this member (a linked member: my contact linked to that
-	// user; a typed member: my contact with the same name), so a picked contact can be told apart
-	// from a new person. Null when none.
+	// ContactID — MY contact for this member (bound by me, or my contact linked to that user).
 	ContactID *uuid.UUID `json:"contact_id"`
 	Role      string     `json:"role"`
 	Status    string     `json:"status"`
 	InvitedAt *time.Time `json:"invited_at"`
 	JoinedAt  *time.Time `json:"joined_at"`
 	LeftAt    *time.Time `json:"left_at"`
-	// RemovedAt (0.4.1-2 V15) — the owner removed them (left_at alone = they left themselves).
+	// RemovedAt — the owner removed them (left_at alone = they left themselves).
 	RemovedAt *time.Time `json:"removed_at"`
 }
 
@@ -178,7 +157,7 @@ type EventPosition struct {
 	Member shared.MemberRef `json:"member"`
 	Paid   float64          `json:"paid"`
 	Share  float64          `json:"share"`
-	// Sent / Received (0.4.0-3) — paybacks this member made / got; Net = paid - share + sent - received.
+	// Sent / Received — paybacks this member made / got; Net = what the others owe them overall.
 	Sent       float64 `json:"sent"`
 	Received   float64 `json:"received"`
 	Net        float64 `json:"net"`
@@ -206,53 +185,116 @@ type EventSummary struct {
 	ByTag            []EventTagTotal `json:"by_tag"`
 }
 
-type BoardSourceTx struct {
-	ID          uuid.UUID          `json:"id"`
-	Description *string            `json:"description"`
-	Account     *shared.AccountRef `json:"account"`
+// PaperView — a paper (split or event bill) as one user sees it, with their books.
+type PaperView struct {
+	shared.Paper
+	Event *shared.EventRef `json:"event"`
+	Tags  []EventTagRef    `json:"tags"`
+	// Me — my person on it (nil when I am not on it).
+	Me *shared.PaperPerson `json:"me"`
+	// MyBooks — what my books hold for it now.
+	MyBooks MyPaperBooks `json:"my_books"`
+	Rights  PaperRights  `json:"rights"`
 }
 
-type BoardSplit struct {
-	ID                uuid.UUID        `json:"id"`
-	TransactionMember shared.MemberRef `json:"transaction_member"`
-	Amount            float64          `json:"amount"`
-	Marks             []uuid.UUID      `json:"marks"`
-	MyMark            bool             `json:"my_mark"`
-	// PaidBack (0.4.1-1) — "คืนแล้ว": a payback row (this member → the payer) was made for this bill.
+// MyPaperBooks — my transaction and debts made from this paper, and whether they match it now.
+type MyPaperBooks struct {
+	Transaction *transactions.TransactionDetail `json:"transaction"`
+	DebtIDs     []uuid.UUID                     `json:"debt_ids"`
+	// Claimed — my books hold every piece the paper gives me (a tx, and debts on a split bill).
+	Claimed bool `json:"claimed"`
+	// Missing — what a claim would add now: transaction | debt.
+	Missing []string `json:"missing"`
+	InSync  bool     `json:"in_sync"`
+}
+
+// PaperRights — what I may do with this paper.
+type PaperRights struct {
+	Edit         bool `json:"edit"`
+	RemovePeople bool `json:"remove_people"`
+	Move         bool `json:"move"`
+	Claim        bool `json:"claim"`
+	Leave        bool `json:"leave"`
+	// Join — a split bill I am invited to and have not answered.
+	Join bool `json:"join"`
+}
+
+type PaperList struct {
+	Data       []PaperView `json:"data"`
+	Pagination shared.Page `json:"pagination"`
+}
+
+// PaperPersonInput — one person on a paper. Exactly one of: me, member_id (event bills), contact_id,
+// person_name; person_id keeps an existing row (an edit).
+type PaperPersonInput struct {
+	PersonID   *uuid.UUID `json:"person_id"`
+	Me         bool       `json:"me"`
+	MemberID   *uuid.UUID `json:"member_id"`
+	ContactID  *uuid.UUID `json:"contact_id"`
+	PersonName *string    `json:"person_name" binding:"omitempty,max=100"`
+	Share      float64    `json:"share"`
+	Paid       float64    `json:"paid"`
+}
+
+// PaperInput — the paper's own fields (create and edit).
+type PaperInput struct {
+	Type        string             `json:"type"         binding:"required,oneof=expense income payback"`
+	PaybackKind *string            `json:"payback_kind" binding:"omitempty,oneof=payback loan"`
+	Amount      float64            `json:"amount"       binding:"required,gt=0"`
+	Date        string             `json:"date"         binding:"required,datetime=2006-01-02"`
+	Description *string            `json:"description"  binding:"omitempty,max=200"`
+	Note        *string            `json:"note"         binding:"omitempty,max=500"`
+	SplitMode   string             `json:"split_mode"   binding:"omitempty,oneof=equal custom"`
+	People      []PaperPersonInput `json:"people"       binding:"required,min=1,dive"`
+	// TagIDs — event tags (event bills only).
+	TagIDs []uuid.UUID `json:"tag_ids"`
+}
+
+// ClaimInput — "ลงสมุดของฉัน": my side of a paper.
+type ClaimInput struct {
+	// Pay — wallet (I settled it from my wallet) | debt (I owe the payers). Default debt.
+	Pay         string      `json:"pay"          binding:"omitempty,oneof=wallet debt"`
+	AccountID   *uuid.UUID  `json:"account_id"`
+	CategoryID  *uuid.UUID  `json:"category_id"`
+	TagIDs      []uuid.UUID `json:"tag_ids"`
+	PrivateNote *string     `json:"private_note" binding:"omitempty,max=500"`
+}
+
+type CreatePaperRequest struct {
+	Paper PaperInput `json:"paper" binding:"required"`
+	// MyBooks — the creator's claim (omitted = auto claim).
+	MyBooks *ClaimInput `json:"my_books"`
+}
+
+type UpdatePaperRequest struct {
+	Paper   PaperInput `json:"paper"   binding:"required"`
+	Version int        `json:"version" binding:"required,min=1"`
+}
+
+type MarkPaidBackRequest struct {
 	PaidBack bool `json:"paid_back"`
 }
 
-type BoardRow struct {
-	ID                uuid.UUID        `json:"id"`
-	ProjectID         uuid.UUID        `json:"project_id"`
-	Type              string           `json:"type"`
-	PaybackKind       *string          `json:"payback_kind"` // 0.4.1-2 V11
-	Payers            []BillPayer      `json:"payers"`       // 0.4.1-2 multi-payer, biggest first
-	Amount            float64          `json:"amount"`
-	Date              string           `json:"date"`
-	Description       *string          `json:"description"`
-	Note              *string          `json:"note"`
-	TransactionMember shared.MemberRef `json:"transaction_member"`
-	RecordUserID      uuid.UUID        `json:"record_user_id"`
-	Tags              []EventTagRef    `json:"tags"`
-	Marks             []uuid.UUID      `json:"marks"`
-	MyMark            bool             `json:"my_mark"`
-	MyShare           float64          `json:"my_share"`
-	Locked            bool             `json:"locked"`
-	Linked            bool             `json:"linked"`
-	// MyBooked (0.4.0-3) — my part of this row is in my books: a tx of mine linked to / copied from
-	// it (or a child), a repayment pointing at it, or a debt made from it.
-	MyBooked  bool           `json:"my_booked"`
-	MyBooks   MyBooks        `json:"my_books"`
-	SourceTx  *BoardSourceTx `json:"source_tx"`
-	Children  []BoardSplit   `json:"children"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
+// LeaveRequest — leaving a paper (or being removed): my books linked to it are kept or deleted.
+type LeaveRequest struct {
+	Books string `json:"books" binding:"omitempty,oneof=keep delete"`
 }
 
-type BoardRowList struct {
-	Data       []BoardRow  `json:"data"`
-	Pagination shared.Page `json:"pagination"`
+type MovePaperRequest struct {
+	// ProjectID — the event to move into; null = out of its event (a split bill).
+	ProjectID *uuid.UUID `json:"project_id"`
+}
+
+// PaperWriteResult — a write's answer: the paper as I see it and everything it changed.
+type PaperWriteResult struct {
+	Paper   *PaperView     `json:"paper"`
+	Effects shared.Effects `json:"effects"`
+}
+
+type PaperDeleteResult struct {
+	ID      uuid.UUID      `json:"id"`
+	Deleted bool           `json:"deleted"`
+	Effects shared.Effects `json:"effects"`
 }
 
 type EventDetail struct {
@@ -260,43 +302,18 @@ type EventDetail struct {
 	Summary       EventSummary   `json:"summary"`
 	Members       []EventMember  `json:"members"`
 	Tags          []EventTag     `json:"tags"`
-	Board         BoardRowList   `json:"board"`
+	Board         PaperList      `json:"board"`
 	DeletePreview *DeletePreview `json:"delete_preview"`
-	// AutoSyncEvents — my events auto-sync switch (0.4.1-2 S4), shown on the event page.
-	AutoSyncEvents bool `json:"auto_sync_events"`
-	// AutoAcceptEvents — my events auto-accept switch (0.4.1-2, owner 2026-10-28).
+	// AutoSyncEvents / AutoAcceptEvents — my switches, shown on the event page.
+	AutoSyncEvents   bool `json:"auto_sync_events"`
 	AutoAcceptEvents bool `json:"auto_accept_events"`
 }
 
 type EventPatch struct {
-	Event           Event                  `json:"event"`
-	Summary         EventSummary           `json:"summary"`
-	Members         []EventMember          `json:"members"`
-	Tags            []EventTag             `json:"tags"`
-	Row             *BoardRow              `json:"row"`
-	RemovedRowID    *uuid.UUID             `json:"removed_row_id"`
-	AccountBalances []shared.WalletBalance `json:"account_balances"`
-	// MyTransaction (0.4.0-3 B3, bill edits) — my transaction linked to the edited bill, after the
-	// edit: its event_bill.in_sync / differences tell the app whether to ask "แก้ในสมุดของฉันด้วยไหม?"
-	// (apply_to_my_tx, or POST /transactions/{id}/apply-event later). Omitted when I have none.
-	MyTransaction *transactions.TransactionDetail `json:"my_transaction,omitempty"`
-}
-
-type AddBillsResult struct {
-	EventPatch
-	NewTransactionID *uuid.UUID `json:"new_transaction_id"`
-	Rows             []BoardRow `json:"rows"`
-}
-
-type QuickCreateEventResult struct {
-	Detail           EventDetail            `json:"detail"`
-	NewTransactionID *uuid.UUID             `json:"new_transaction_id"`
-	AccountBalances  []shared.WalletBalance `json:"account_balances"`
-}
-
-type EventCopyResult struct {
-	EventPatch
-	Transaction *transactions.TransactionDetail `json:"transaction"`
+	Event   Event         `json:"event"`
+	Summary EventSummary  `json:"summary"`
+	Members []EventMember `json:"members"`
+	Tags    []EventTag    `json:"tags"`
 }
 
 type EventTagWriteResult struct {
@@ -309,7 +326,7 @@ type EventTagImportResult struct {
 	Tags    []EventTag      `json:"tags"`
 }
 
-// EventDeleteResult — DELETE /projects/{id} (owner 2026-10-28): the bills became split bills.
+// EventDeleteResult — DELETE /projects/{id}: its bills became split bills.
 type EventDeleteResult struct {
 	ID             uuid.UUID      `json:"id"`
 	SplitBillCount int            `json:"split_bill_count"`
@@ -369,6 +386,7 @@ func (r *UpdateProjectRequest) NoteChange() (*string, bool) {
 type AddMemberRequest struct {
 	Email       *string          `json:"email"        binding:"omitempty,email"`
 	DisplayName *string          `json:"display_name" binding:"omitempty,min=1,max=100"`
+	ContactID   *uuid.UUID       `json:"contact_id"`
 	Role        string           `json:"role"         binding:"omitempty,oneof=contributor viewer"`
 	AdHoc       bool             `json:"ad_hoc"`
 	IconCode    *shared.IconCode `json:"icon_code"    binding:"omitempty"`
@@ -379,67 +397,9 @@ type UpdateMemberRequest struct {
 	IconCode *shared.IconCode `json:"icon_code" binding:"omitempty"`
 }
 
-type ProjectSplitInput struct {
-	MemberID uuid.UUID `json:"member_id" binding:"required"`
-	Amount   float64   `json:"amount"    binding:"required,gt=0"`
-}
-
-type CreateProjectTransactionRequest struct {
-	TransactionMemberID uuid.UUID           `json:"transaction_member_id" binding:"required"`
-	Type                string              `json:"type"                  binding:"required,oneof=expense income payback"`
-	Amount              float64             `json:"amount"                binding:"required,gt=0"`
-	Date                string              `json:"date"                  binding:"required,datetime=2006-01-02"`
-	Note                *string             `json:"note"                  binding:"omitempty,max=500"`
-	Description         *string             `json:"description"           binding:"omitempty,max=200"`
-	TagIDs              []uuid.UUID         `json:"tag_ids"`
-	Splits              []ProjectSplitInput `json:"splits"                binding:"omitempty,dive"`
-
-	TagNames            []string   `json:"-"`
-	LinkedTransactionID *uuid.UUID `json:"-"`
-	ID                  uuid.UUID  `json:"-"` // set: the new bill's id (a split bill's members point at it first)
-}
-
-type UpdateProjectTransactionRequest struct {
-	// TransactionMemberID — paybacks only: who paid back (a bill's payer never changes).
-	TransactionMemberID *uuid.UUID           `json:"transaction_member_id"`
-	Amount              *float64             `json:"amount"      binding:"omitempty,gt=0"`
-	Date                *string              `json:"date"        binding:"omitempty,datetime=2006-01-02"`
-	Note                *string              `json:"note"        binding:"omitempty,max=500"`
-	Description         *string              `json:"description" binding:"omitempty,max=200"`
-	TagIDs              *[]uuid.UUID         `json:"tag_ids"`
-	Splits              *[]ProjectSplitInput `json:"splits"      binding:"omitempty,dive"`
-	AlsoUpdateLink      bool                 `json:"also_update_link"`
-	// ApplyToMyTx (0.4.0-3) — "แก้ในสมุดของฉันด้วย": my transaction linked to this bill (the one it
-	// was made from, or my copy of my share) takes the bill's new amount / date / description / note.
-	ApplyToMyTx bool `json:"apply_to_my_tx"`
-
-	descriptionPresent bool
-	notePresent        bool
-}
-
-func (r *UpdateProjectTransactionRequest) UnmarshalJSON(data []byte) error {
-	type alias UpdateProjectTransactionRequest
-	present, err := shared.DecodeTracked(data, (*alias)(r))
-	r.descriptionPresent, r.notePresent = present["description"], present["note"]
-	return err
-}
-
-// SetText sets description and note (both sent, nil clears).
-func (r *UpdateProjectTransactionRequest) SetText(description, note *string) {
-	r.Description, r.Note = description, note
-	r.descriptionPresent, r.notePresent = true, true
-}
-
-func (r *UpdateProjectTransactionRequest) DescriptionChange() (*string, bool) {
-	return shared.TextChange(r.Description, r.descriptionPresent)
-}
-
-func (r *UpdateProjectTransactionRequest) NoteChange() (*string, bool) {
-	return shared.TextChange(r.Note, r.notePresent)
-}
-
-type MarkRequest struct {
-	Marked bool `json:"marked"`
+// MergeMemberRequest — the member goes into Into (the better identified one stays).
+type MergeMemberRequest struct {
+	Into uuid.UUID `json:"into" binding:"required"`
 }
 
 type EventTagRequest struct {
@@ -460,29 +420,6 @@ type EventTagImportRequest struct {
 	TagIDs []uuid.UUID `json:"tag_ids"`
 }
 
-type QuickCreateRequest struct {
-	Name           string                      `json:"name"            binding:"required,min=1,max=100"`
-	NewTransaction *transactions.CreateRequest `json:"new_transaction" binding:"omitempty"`
-	TransactionIDs []uuid.UUID                 `json:"transaction_ids" binding:"omitempty"`
-	IconCode       *shared.IconCode            `json:"icon_code"       binding:"omitempty"`
-	Move           bool                        `json:"move"`
-	BillPeople
-}
-
-type AddBillsRequest struct {
-	NewTransaction *transactions.CreateRequest `json:"new_transaction" binding:"omitempty"`
-	TransactionIDs []uuid.UUID                 `json:"transaction_ids" binding:"omitempty"`
-	Move           bool                        `json:"move"`
-	BillPeople
-}
-
-// The people of a new event bill (0.4.0-3): shared types, so a transaction PUT can name them too.
-type (
-	BillPerson = shared.BillPerson
-	BillMember = shared.BillMember
-	BillPeople = shared.BillPeople
-)
-
 type ListFilter struct {
 	Status  string
 	Q       string
@@ -492,15 +429,16 @@ type ListFilter struct {
 	PerPage int
 }
 
-type BoardFilter struct {
-	Type          string
-	Mine          bool
-	Q             string
-	TagID         *uuid.UUID
-	PayerMemberID *uuid.UUID
-	Sort          string
-	Page          int
-	PerPage       int
+// PaperFilter — a list of papers (an event's board, or my split bills).
+type PaperFilter struct {
+	Type    string
+	Mine    bool
+	Q       string
+	TagID   *uuid.UUID
+	Status  string // split bills: invited | joined (default: both)
+	Sort    string
+	Page    int
+	PerPage int
 }
 
 var _ json.Unmarshaler = (*UpdateProjectRequest)(nil)
@@ -511,7 +449,7 @@ type InviteAcceptResult struct {
 }
 
 type DeletePreview struct {
-	Bills         int `json:"bills"`           // bill rows of the board
+	Bills         int `json:"bills"`           // bills of the event
 	Members       int `json:"members"`         // active members
 	LinkedTxCount int `json:"linked_tx_count"` // my own book records linked to it
 }

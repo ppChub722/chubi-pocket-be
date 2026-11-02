@@ -115,8 +115,10 @@ func (s *Service) Detail(ctx context.Context, userID, id uuid.UUID, page, perPag
 	if err != nil || !withDeletePreview {
 		return d, err
 	}
-	p := &DeletePreview{Members: d.Event.MembersCount, LinkedTxCount: d.Event.LinkedTxCount}
-	if err := s.store.db.QueryRow(ctx, `SELECT COUNT(*) FROM project_transactions WHERE scope_id = $1 AND parent_project_transaction_id IS NULL`, id).Scan(&p.Bills); err != nil {
+	p := &DeletePreview{Members: d.Event.MembersCount}
+	if err := s.store.db.QueryRow(ctx, `SELECT COUNT(*), (SELECT COUNT(*) FROM transactions t
+		JOIN project_transactions x ON x.id = t.split_transaction_id WHERE x.project_id = $1 AND t.user_id = $2)
+		FROM project_transactions WHERE project_id = $1`, id, userID).Scan(&p.Bills, &p.LinkedTxCount); err != nil {
 		return nil, err
 	}
 	d.DeletePreview = p
@@ -164,7 +166,7 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdatePr
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return s.patch(ctx, userID, id, nil, nil, nil)
+	return s.patch(ctx, userID, id)
 }
 
 // completedUpdate — V2 rules for PUT /projects/{id}: `completed` only through /complete; a completed
@@ -203,37 +205,25 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	// owner 2026-10-28: the bills stay — each becomes a standalone split bill (BE-1's billToSplitTx),
-	// every copy / debt still connected; then the event (members, settle bookings) goes. A completed
-	// event is unlocked first so its bills can move (the event row goes anyway).
+	// The bills stay: each becomes a split bill (same paper, every book still following it); then
+	// the event (members, tags, settle bookings) goes. A completed event is unlocked first.
 	if _, err := tx.Exec(ctx, `UPDATE projects SET completed_at = NULL WHERE id = $1`, id); err != nil {
 		return nil, fmt.Errorf("unlock: %w", err)
 	}
 	others, err := collectIDs(ctx, tx, `SELECT user_id FROM project_members
-		WHERE scope_id = $1 AND user_id IS NOT NULL AND user_id <> $2 AND status = 'active'`, id, userID)
+		WHERE project_id = $1 AND user_id IS NOT NULL AND user_id <> $2 AND status = 'active'`, id, userID)
 	if err != nil {
 		return nil, fmt.Errorf("members: %w", err)
 	}
 	out := &EventDeleteResult{ID: id, Effects: shared.NewEffects()}
-	var splits []uuid.UUID
-	for guard := 0; ; guard++ {
-		var ptID uuid.UUID
-		err := tx.QueryRow(ctx, `SELECT id FROM project_transactions WHERE scope_id = $1 AND parent_project_transaction_id IS NULL
-			ORDER BY date, created_at, id LIMIT 1`, id).Scan(&ptID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("next bill: %w", err)
-		}
-		if guard > 10000 {
-			return nil, errors.New("delete event: bills keep coming back")
-		}
-		split, err := s.billToSplitTx(ctx, tx, userID, ptID)
-		if err != nil {
+	splits, err := collectIDs(ctx, tx, `SELECT id FROM project_transactions WHERE project_id = $1`, id)
+	if err != nil {
+		return nil, fmt.Errorf("bills: %w", err)
+	}
+	for _, paperID := range splits {
+		if err := s.moveOutOfEventTx(ctx, tx, paperID); err != nil {
 			return nil, err
 		}
-		splits = append(splits, split)
 		out.SplitBillCount++
 	}
 	if err := s.store.DeleteTx(ctx, tx, id); err != nil {
@@ -252,8 +242,8 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	// effects: my records, now pointing at the split bills
-	myTxs, err := collectPoolIDs(ctx, s.store.db, `SELECT t.id FROM transactions t WHERE t.user_id = $2 AND (t.split_transaction_id = ANY($1)
-		OR t.source_project_transaction_id IN (SELECT x.id FROM project_transactions x WHERE x.scope_id = ANY($1)))`, splits, userID)
+	myTxs, err := collectPoolIDs(ctx, s.store.db, `SELECT t.id FROM transactions t WHERE t.user_id = $2 AND t.split_transaction_id = ANY($1)`,
+		splits, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -263,9 +253,8 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked
 		}
 	}
 	if s.debts != nil {
-		myDebts, err := collectPoolIDs(ctx, s.store.db, `SELECT d.id FROM personal_debts d WHERE d.user_id = $2 AND (d.split_transaction_id = ANY($1)
-			OR d.id IN (SELECT b.debt_id FROM personal_debt_bills b JOIN project_transactions x ON x.id = b.pt_id
-				WHERE b.user_id = $2 AND x.scope_id = ANY($1)))`, splits, userID)
+		myDebts, err := collectPoolIDs(ctx, s.store.db, `SELECT DISTINCT b.debt_id FROM personal_debt_bills b
+			WHERE b.user_id = $2 AND b.split_transaction_id = ANY($1)`, splits, userID)
 		if err != nil {
 			return nil, err
 		}
@@ -306,7 +295,7 @@ func (s *Service) Leave(ctx context.Context, userID, projectID uuid.UUID) (*Dele
 	}
 	var memberID uuid.UUID
 	if err := s.store.db.QueryRow(ctx,
-		`SELECT id FROM project_members WHERE scope_id = $1 AND user_id = $2 AND status = 'active'`,
+		`SELECT id FROM project_members WHERE project_id = $1 AND user_id = $2 AND status = 'active'`,
 		projectID, userID).Scan(&memberID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotMember
@@ -318,7 +307,7 @@ func (s *Service) Leave(ctx context.Context, userID, projectID uuid.UUID) (*Dele
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, _, _, err := s.leaveTx(ctx, tx, projectID, memberID, userID, false); err != nil { // V15
+	if _, _, err := s.memberOutTx(ctx, tx, projectID, memberID, userID, false); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -346,7 +335,7 @@ func (s *Service) TransferOwnership(ctx context.Context, callerUserID, projectID
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
+	return s.patch(ctx, callerUserID, projectID)
 }
 
 func (s *Service) ListMembers(ctx context.Context, userID, projectID uuid.UUID) (*EventMemberList, error) {
@@ -389,6 +378,14 @@ func (s *Service) AddMember(ctx context.Context, callerUserID, projectID uuid.UU
 	switch {
 	case req.Email != nil && req.DisplayName != nil:
 		_, err = s.addMemberByEmailTx(ctx, tx, projectID, callerUserID, *req.DisplayName, *req.Email, role, req.IconCode)
+	case req.ContactID != nil:
+		m := newMatcher(s, tx, p, callerUserID)
+		if err = m.load(ctx); err == nil {
+			_, err = m.forContact(ctx, *req.ContactID)
+		}
+		if err == nil {
+			err = m.dispatchInvites(ctx)
+		}
 	case req.AdHoc && req.DisplayName != nil:
 		_, err = s.store.InsertMemberTx(ctx, tx,
 			projectID, nil, *req.DisplayName, role, MemberStatusActive, callerUserID, req.IconCode,
@@ -402,7 +399,7 @@ func (s *Service) AddMember(ctx context.Context, callerUserID, projectID uuid.UU
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
+	return s.patch(ctx, callerUserID, projectID)
 }
 
 func (s *Service) addMemberByEmailTx(
@@ -480,7 +477,7 @@ func (s *Service) UpdateMember(
 			return nil, err
 		}
 	}
-	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
+	return s.patch(ctx, callerUserID, projectID)
 }
 
 func (s *Service) RemoveMember(ctx context.Context, callerUserID, projectID, memberID uuid.UUID) (*EventPatch, error) {
@@ -509,10 +506,11 @@ func (s *Service) RemoveMember(ctx context.Context, callerUserID, projectID, mem
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	m, txs, debts, err := s.leaveTx(ctx, tx, projectID, memberID, callerUserID, true) // V15
+	m, unlinked, err := s.memberOutTx(ctx, tx, projectID, memberID, callerUserID, true)
 	if err != nil {
 		return nil, err
 	}
+	txs, debts := unlinked.txs, unlinked.debts
 	if m.UserID != nil && s.notifs != nil && m.Status != MemberStatusPending {
 		if err := s.notifs.DispatchEventMemberRemoved(ctx, tx, *m.UserID, callerUserID, notifications.EventMemberRemovedPayload{
 			ProjectID: projectID, ProjectName: p.Name, TransactionCount: txs, DebtCount: debts,
@@ -523,31 +521,8 @@ func (s *Service) RemoveMember(ctx context.Context, callerUserID, projectID, mem
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
+	return s.patch(ctx, callerUserID, projectID)
 }
-
-func (s *Service) RequestLink(ctx context.Context, callerUserID, projectID, memberID uuid.UUID) error {
-	p, err := s.store.GetByID(ctx, projectID)
-	if err != nil {
-		return err
-	}
-	if p.OwnerUserID != callerUserID {
-		return ErrNotOwner
-	}
-	target, err := s.store.GetMember(ctx, memberID)
-	if err != nil {
-		return err
-	}
-	if target.ProjectID != projectID {
-		return ErrMemberNotInProject
-	}
-	if target.UserID != nil || target.Status != MemberStatusPending {
-		return ErrNotPending
-	}
-	return nil
-}
-
-var ErrNotPending = errors.New("this member isn't waiting for an invite")
 
 func (s *Service) AcceptLinkRequest(ctx context.Context, userID, notificationID uuid.UUID) (*EventDetail, error) {
 	if s.notifs == nil {
@@ -632,7 +607,7 @@ func (s *Service) IsActiveMember(ctx context.Context, projectID, userID uuid.UUI
 
 func projectNameOrEmpty(ctx context.Context, tx pgx.Tx, projectID uuid.UUID) string {
 	var name string
-	_ = tx.QueryRow(ctx, `SELECT name FROM scopes WHERE id = $1`, projectID).Scan(&name)
+	_ = tx.QueryRow(ctx, `SELECT name FROM projects WHERE id = $1`, projectID).Scan(&name)
 	return name
 }
 

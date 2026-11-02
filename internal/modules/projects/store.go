@@ -34,21 +34,13 @@ var (
 	ErrCannotRemoveOwner    = errors.New("cannot remove the project owner; transfer ownership first")
 	ErrOwnerCannotLeave     = errors.New("project owner cannot leave; transfer ownership first")
 	ErrNotMember            = errors.New("caller is not a member of this project")
-	ErrPTNotFound           = errors.New("project transaction not found")
-	ErrPTIsChild            = errors.New("cannot operate on a split-child row directly; edit/delete its parent")
-	ErrSelfSplit            = errors.New("a split's member must differ from the parent's actor")
-	ErrSplitsExceedParent   = errors.New("sum of splits exceeds parent amount")
 	ErrMemberNotInProject   = errors.New("member does not belong to this project")
 	ErrLinkRequestNotForYou = errors.New("link request is not addressed to caller")
 	ErrCannotChangeOwner    = errors.New("the owner's role can't be changed here; use transfer-ownership")
-	ErrViewerReadOnly       = errors.New("viewers can't change project transactions")
+	ErrViewerReadOnly       = errors.New("viewers can't change the event's bills")
 	ErrInvalidDateRange     = errors.New("end_date must not be before start_date")
-	ErrBadMemberRequest     = errors.New("add a member with ad_hoc + display_name, or email + display_name")
-	ErrBadPayback           = errors.New("a payback has exactly one split: the receiver, for the whole amount")
-	ErrPayerFixed           = errors.New("a bill's payer can't change")
-	// ErrPaybackNotCopyable — a payback goes to my books as a repayment, not a copied expense.
-	ErrPaybackNotCopyable = errors.New("a payback can't be copied as an expense")
-	// 0.4.1-2 V1 / V2: a completed event is locked for good.
+	ErrBadMemberRequest     = errors.New("add a member with ad_hoc + display_name, contact_id, or email + display_name")
+	// A completed event is locked for good.
 	ErrEventCompleted      = errors.New("the event is completed: it can't be changed any more")
 	ErrUseCompleteEndpoint = errors.New("complete an event with POST /projects/{id}/complete")
 	ErrCompleteNotActive   = errors.New("only an active event can be completed")
@@ -112,7 +104,7 @@ func (s *Store) CreateInTx(ctx context.Context, tx pgx.Tx, ownerUserID uuid.UUID
 }
 
 func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (*Project, error) {
-	p, err := scanProject(s.db.QueryRow(ctx, `SELECT `+projectColumns+` FROM scopes WHERE id = $1`, id))
+	p, err := scanProject(s.db.QueryRow(ctx, `SELECT `+projectColumns+` FROM projects WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrProjectNotFound
 	}
@@ -127,24 +119,19 @@ func (s *Store) GetByIDForCaller(ctx context.Context, userID, projectID uuid.UUI
 	if err != nil {
 		return nil, err
 	}
-	// 0.4.1-2 S1: a split bill's hidden "event" never opens as an event (only via /event-bills).
-	var (
-		kind string
-		n    int
-	)
-	if err := s.db.QueryRow(ctx, `SELECT p.kind, (SELECT COUNT(*) FROM project_members
-			WHERE scope_id = p.id AND user_id = $2 AND status = 'active')
-		FROM scopes p WHERE p.id = $1`, projectID, userID).Scan(&kind, &n); err != nil {
+	var n int
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM project_members
+			WHERE project_id = $1 AND user_id = $2 AND status = 'active'`, projectID, userID).Scan(&n); err != nil {
 		return nil, fmt.Errorf("member check: %w", err)
 	}
-	if kind != "event" || (p.OwnerUserID != userID && n == 0) {
+	if p.OwnerUserID != userID && n == 0 {
 		return nil, ErrProjectNotFound
 	}
 	return p, nil
 }
 
 func (s *Store) ListIDs(ctx context.Context, userID uuid.UUID, f ListFilter) ([]uuid.UUID, int, error) {
-	where := []string{`p.kind = 'event'`, `(p.owner_user_id = $1 OR EXISTS (
+	where := []string{`(p.owner_user_id = $1 OR EXISTS (
 		SELECT 1 FROM project_members m
 		WHERE m.project_id = p.id AND m.user_id = $1 AND m.status = 'active'))`}
 	args := []any{userID}
@@ -254,10 +241,6 @@ func (s *Store) UpdateTx(ctx context.Context, tx pgx.Tx, actorID, id uuid.UUID, 
 }
 
 func (s *Store) DeleteTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
-	if _, err := tx.Exec(ctx, `UPDATE transactions SET project_id = NULL, source_project_transaction_id = NULL
-		WHERE project_id = $1 OR source_project_transaction_id IN (SELECT id FROM project_transactions WHERE scope_id = $1)`, id); err != nil {
-		return fmt.Errorf("unlink transactions: %w", err)
-	}
 	if _, err := tx.Exec(ctx, `UPDATE personal_debts SET project_id = NULL WHERE project_id = $1`, id); err != nil {
 		return fmt.Errorf("unlink debts: %w", err)
 	}
@@ -301,7 +284,7 @@ func (s *Store) TransferOwnershipTx(
 func (s *Store) AssertWritable(ctx context.Context, projectID uuid.UUID, op string) error {
 	var status string
 	if err := s.db.QueryRow(ctx,
-		`SELECT status FROM scopes WHERE id = $1`, projectID).Scan(&status); err != nil {
+		`SELECT status FROM projects WHERE id = $1`, projectID).Scan(&status); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrProjectNotFound
 		}

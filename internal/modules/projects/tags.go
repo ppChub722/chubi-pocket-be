@@ -291,11 +291,11 @@ func (s *Service) DeleteTag(ctx context.Context, callerUserID, projectID, tagID 
 	if tag.RowsAffected() == 0 {
 		return nil, ErrEventTagNotFound
 	}
-	return s.patch(ctx, callerUserID, projectID, nil, nil, nil)
+	return s.patch(ctx, callerUserID, projectID)
 }
 
 func (s *Service) tagResult(ctx context.Context, callerUserID, projectID, tagID uuid.UUID) (*EventTagWriteResult, error) {
-	p, err := s.patch(ctx, callerUserID, projectID, nil, nil, nil)
+	p, err := s.patch(ctx, callerUserID, projectID)
 	if err != nil {
 		return nil, err
 	}
