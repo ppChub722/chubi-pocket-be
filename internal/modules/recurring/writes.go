@@ -97,7 +97,7 @@ func applyToDraft(d *pending.Draft, f *Fields) {
 	case d.Type != nil && *d.Type == "transfer":
 		d.CategoryID, d.GoalID = nil, nil
 	case d.Type != nil && *d.Type == typeSaving:
-		d.CategoryID, d.TransferToAccountID, d.TagIDs, d.Splits = nil, nil, nil, nil
+		d.CategoryID, d.TransferToAccountID, d.TagIDs = nil, nil, nil
 	default:
 		d.TransferToAccountID, d.GoalID = nil, nil
 	}

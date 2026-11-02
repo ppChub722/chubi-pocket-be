@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -289,25 +288,6 @@ func createRequest(d Draft) (transactions.CreateRequest, error) {
 	if d.Date == nil {
 		return transactions.CreateRequest{}, &submitErr{apierr.MissingDate, "date is required"}
 	}
-	for _, sp := range d.Splits {
-		if name := strings.TrimSpace(sp.PersonName); name == "" || len([]rune(name)) > 100 {
-			return transactions.CreateRequest{}, &submitErr{apierr.InvalidSplit, "every split needs a person name (max 100 characters)"}
-		}
-		if sp.OwedAmount <= 0 {
-			return transactions.CreateRequest{}, &submitErr{apierr.InvalidSplit, "every split amount must be more than 0"}
-		}
-	}
-	if (d.Payer != nil || len(d.Members) > 0) && (d.ProjectID == nil || len(d.Splits) > 0 || d.PaidBy != nil) {
-		return transactions.CreateRequest{}, &submitErr{apierr.LinkModeConflict, "payer / members go with project_id only (no splits, no paid_by)"}
-	}
-	if pb := d.PaidBy; pb != nil {
-		if len(d.Splits) > 0 || d.ProjectID != nil {
-			return transactions.CreateRequest{}, &submitErr{apierr.LinkModeConflict, transactions.ErrLinkModeConflict.Error()}
-		}
-		if pb.Amount <= 0 || (pb.ContactID == nil && strings.TrimSpace(pb.PersonName) == "") {
-			return transactions.CreateRequest{}, &submitErr{apierr.InvalidPaidBy, "paid_by needs a person and an amount more than 0"}
-		}
-	}
 	return transactions.CreateRequest{
 		Type:                transactions.TxType(*d.Type),
 		AccountID:           d.AccountID,
@@ -317,22 +297,7 @@ func createRequest(d Draft) (transactions.CreateRequest, error) {
 		Description:         d.Description,
 		Note:                d.Note,
 		TransferToAccountID: d.TransferToAccountID,
-		Splits:              d.Splits,
-		PaidBy:              d.PaidBy,
 	}, nil
-}
-
-// draftLinkMode — the quick-create view a draft was saved with.
-func draftLinkMode(d Draft) string {
-	switch {
-	case d.ProjectID != nil:
-		return transactions.LinkEvent
-	case len(d.Splits) > 0:
-		return transactions.LinkSplit
-	case d.PaidBy != nil:
-		return transactions.LinkPaid
-	}
-	return transactions.LinkPersonal
 }
 
 func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *PendingTransaction) (*uuid.UUID, error) {
@@ -347,28 +312,17 @@ func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *Pending
 	defer tx.Rollback(ctx)
 
 	var txID uuid.UUID
-	if p.Draft.ProjectID != nil {
-		if s.projects == nil {
-			return nil, errors.New("events not available")
-		}
-		txID, err = s.projects.AddNewBillTx(ctx, tx, userID, *p.Draft.ProjectID, req,
-			projects.BillPeople{Payer: p.Draft.Payer, Members: p.Draft.Members})
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		created, err := s.txs.CreateInTx(ctx, tx, userID, req)
-		if err != nil {
-			return nil, err
-		}
-		switch c := created.(type) {
-		case *transactions.TransactionDetail:
-			txID = c.ID
-		case *transactions.TransferResponse:
-			for _, r := range c.Rows {
-				if r.AccountID != nil && req.AccountID != nil && *r.AccountID == *req.AccountID {
-					txID = r.ID
-				}
+	created, err := s.txs.CreateInTx(ctx, tx, userID, req)
+	if err != nil {
+		return nil, err
+	}
+	switch c := created.(type) {
+	case *transactions.TransactionDetail:
+		txID = c.ID
+	case *transactions.TransferResponse:
+		for _, r := range c.Rows {
+			if r.AccountID != nil && req.AccountID != nil && *r.AccountID == *req.AccountID {
+				txID = r.ID
 			}
 		}
 	}
@@ -498,26 +452,6 @@ func toSubmitError(err error) SubmitError {
 		{transactions.ErrTransferSameAccount, apierr.TransferSameAccount},
 		{transactions.ErrTransferToAccountRequired, apierr.TransferNeedsWallets},
 		{transactions.ErrTransferRequiresAccount, apierr.TransferNeedsWallets},
-		{transactions.ErrSplitsOnTransfer, apierr.SplitsOnTransfer},
-		{transactions.ErrSplitContactNotFound, apierr.ContactNotFound},
-		{transactions.ErrSplitsExceedAmount, apierr.SplitsExceedAmount},
-		{transactions.ErrPaidByExpenseOnly, apierr.PaidByExpenseOnly},
-		{transactions.ErrPaidByExceedsAmount, apierr.PaidByExceedsAmount},
-		{transactions.ErrPaidByPersonRequired, apierr.InvalidPaidBy},
-		{transactions.ErrLinkModeConflict, apierr.LinkModeConflict},
-		{projects.ErrBadBillPeople, apierr.InvalidBillPeople},
-		{projects.ErrPayerIncome, apierr.InvalidBillPeople},
-		{projects.ErrMemberNotInProject, apierr.ProjectNotMember},
-		{projects.ErrNoShareToCopy, apierr.NoShare},
-		{projects.ErrSplitsExceedParent, apierr.SplitsExceedAmount},
-		{projects.ErrProjectNotFound, apierr.ProjectNotFound},
-		{projects.ErrProjectNotActive, apierr.ProjectNotActive},
-		{projects.ErrEventCompleted, apierr.ProjectNotActive},
-		{projects.ErrProjectLocked, apierr.ProjectLocked},
-		{projects.ErrNotMember, apierr.ProjectNotMember},
-		{projects.ErrMemberNotFound, apierr.ProjectNotMember},
-		{projects.ErrViewerReadOnly, apierr.ProjectReadOnly},
-		{projects.ErrQuickTxNotBillable, apierr.TxNotBillable},
 		{tags.ErrTagNotFound, apierr.TagNotFound},
 		{personal_debts.ErrEntryNotFound, apierr.DebtNotFound},
 		{transactions.ErrTxNotFound, apierr.TransactionNotFound},

@@ -619,8 +619,8 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 			Recurring: &shared.RecurringRef{ID: o.rule.ID, Name: o.rule.Name, IconCode: o.rule.IconCode, Kind: o.rule.Kind,
 				PauseReason: o.rule.pauseReason()},
 			Seq: o.seq, Date: date.Format(dateLayout), DaysUntil: int(date.Sub(today).Hours() / 24),
-			Account: r.Account, ToAccount: r.TransferToAccount, Category: r.Category, Project: r.Project,
-			Tags: r.Tags, Splits: r.Splits, GoalID: d.GoalID, Goal: r.Goal, Description: d.Description, Note: d.Note,
+			Account: r.Account, ToAccount: r.TransferToAccount, Category: r.Category,
+			Tags: r.Tags, GoalID: d.GoalID, Goal: r.Goal, Description: d.Description, Note: d.Note,
 		}
 		if o.rule.TotalCount != nil {
 			t := *o.rule.TotalCount
@@ -628,9 +628,6 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 		}
 		if it.Tags == nil {
 			it.Tags = []shared.TagRef{}
-		}
-		if it.Splits == nil {
-			it.Splits = []pending.ResolvedSplit{}
 		}
 		if d.Type != nil {
 			it.Type = *d.Type

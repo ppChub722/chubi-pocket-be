@@ -6,7 +6,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
@@ -31,15 +30,7 @@ type Draft struct {
 	Note                *string                   `json:"note,omitempty"        binding:"omitempty,max=500"`
 	TransferToAccountID *uuid.UUID                `json:"transfer_to_account_id,omitempty"`
 	TagIDs              []uuid.UUID               `json:"tag_ids,omitempty"`
-	Splits              []transactions.SplitInput `json:"splits,omitempty"`
-	// PaidBy — someone paid (part of) it for me (0.4.0-3); exclusive with splits and project_id.
-	PaidBy    *transactions.PaidByInput `json:"paid_by,omitempty"`
-	ProjectID *uuid.UUID                `json:"project_id,omitempty"`
-	// Payer / Members — with project_id: who paid the bill and who is in it (0.4.0-3, as on
-	// POST /projects/{id}/bills).
-	Payer   *projects.BillPerson  `json:"payer,omitempty"`
-	Members []projects.BillMember `json:"members,omitempty"`
-	GoalID  *uuid.UUID            `json:"goal_id,omitempty"`
+	GoalID              *uuid.UUID                `json:"goal_id,omitempty"`
 }
 
 type SubmitError struct {
@@ -96,11 +87,6 @@ type DiscardResult struct {
 	Summary        ListSummary `json:"summary"`
 }
 
-type ResolvedSplit struct {
-	Person     shared.PersonRef `json:"person"`
-	OwedAmount float64          `json:"owed_amount"`
-}
-
 // DraftResolved — read-only (spec schema DraftResolved): the draft's ids resolved so the page
 // renders without other calls.
 type DraftResolved struct {
@@ -108,36 +94,8 @@ type DraftResolved struct {
 	TransferToAccount *shared.AccountRef    `json:"transfer_to_account"`
 	Category          *shared.CategoryRef   `json:"category"`
 	Tags              []shared.TagRef       `json:"tags"`
-	Project           *shared.EventRef      `json:"project"`
 	Goal              *shared.SavingGoalRef `json:"goal"`
-	Splits            []ResolvedSplit       `json:"splits"`
-	PaidBy            *ResolvedPaidBy       `json:"paid_by"`
-	BillPeople        *ResolvedBillPeople   `json:"bill_people"` // event drafts with payer / members
-	// LinkMode — personal | split | paid | event: the quick-create view the draft was saved with.
-	LinkMode string   `json:"link_mode"`
-	Missing  []string `json:"missing"`
-}
-
-// ResolvedBillPeople — an event draft's payer and members with names (me = the caller; name is
-// empty for a plain `me`, the FE shows ฉัน).
-type ResolvedBillPeople struct {
-	Payer   ResolvedBillPerson   `json:"payer"`
-	Members []ResolvedBillPerson `json:"members"`
-}
-
-type ResolvedBillPerson struct {
-	Me        bool       `json:"me"`
-	MemberID  *uuid.UUID `json:"member_id"`
-	ContactID *uuid.UUID `json:"contact_id"`
-	Name      string     `json:"name"`
-	Share     *float64   `json:"share,omitempty"` // members only
-}
-
-// ResolvedPaidBy — the draft's paid_by with its person resolved; my_paid = amount − paid_by.amount.
-type ResolvedPaidBy struct {
-	Person shared.PersonRef `json:"person"`
-	Amount float64          `json:"amount"`
-	MyPaid *float64         `json:"my_paid"`
+	Missing           []string              `json:"missing"`
 }
 
 type Submitted struct {

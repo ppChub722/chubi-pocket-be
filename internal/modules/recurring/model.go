@@ -5,7 +5,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared/recurrence"
 )
@@ -253,8 +252,6 @@ type Item struct {
 	Tags          []shared.TagRef         `json:"tags"`
 	Description   *string                 `json:"description"`
 	Note          *string                 `json:"note"`
-	Splits        []pending.ResolvedSplit `json:"splits"`
-	Project       *shared.EventRef        `json:"project"`
 	PendingID     *uuid.UUID              `json:"pending_id"`
 	Transaction   *LinkedTx               `json:"transaction"`
 	SavingEntryID *uuid.UUID              `json:"saving_entry_id"`

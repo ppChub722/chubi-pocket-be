@@ -276,7 +276,7 @@ func (h *Handler) resolveItems(ctx context.Context, uid uuid.UUID, items []Pendi
 			items[i].Resolved = res[i]
 		} else {
 			items[i].Resolved = pending.DraftResolved{
-				Tags: []shared.TagRef{}, Splits: []pending.ResolvedSplit{}, Missing: []string{},
+				Tags: []shared.TagRef{}, Missing: []string{},
 			}
 		}
 	}

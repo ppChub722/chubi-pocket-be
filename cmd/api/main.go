@@ -158,8 +158,6 @@ func main() {
 		transactionsService, accountsService, budgetsService, savingGoalsService, personalDebtsService)
 	dashboardHandler := dashboard.NewHandler(dashboardService)
 
-	transactionsService.WithDebtsCreator(personalDebtsService.CreateForTransactionTx)
-	transactionsService.WithSplitsEditor(personalDebtsService.EditForTransactionTx)
 	transactionsService.WithDebtLinks(personalDebtsService)
 	personalDebtsService.WithNotifications(notificationsService)
 
@@ -172,10 +170,7 @@ func main() {
 	projectsService.WithNotificationService(notificationsService)
 
 	projectsService.WithTransactionsService(transactionsService)
-	projectsService.WithDebts(personalDebtsService) // 0.4.1-1 E8: the bill sheet books debts and repayments
-	transactionsService.WithEventBillSyncer(projectsService.SyncBillFromTxTx)
-	transactionsService.WithEventBillDeleter(projectsService.DeleteBillOfTxTx)
-	transactionsService.WithEventLinks(projectsService)
+	projectsService.WithDebts(personalDebtsService) // claims and settles write debts and repayments
 
 	transactionsService.WithRecurringLinks(recurringService)
 	pendingService.WithSubmitHook(recurringService.OnDraftSubmitted)
@@ -418,9 +413,9 @@ func main() {
 			protected.GET("/transactions/form-options", transactionsHandler.FormOptions)
 			protected.GET("/transactions/:id", transactionsHandler.Get)
 			protected.PUT("/transactions/:id", transactionsHandler.Update)
-			protected.PUT("/transactions/:id/splits", transactionsHandler.EditSplits)
 			protected.PUT("/transactions/:id/tags", transactionsHandler.SetTags)
-			protected.POST("/transactions/:id/apply-event", projectsHandler.ApplyEventToTx)
+			protected.POST("/transactions/:id/paper-sync", projectsHandler.SyncTransaction)
+			protected.POST("/transactions/:id/unlink-paper", projectsHandler.UnlinkTransaction)
 			protected.DELETE("/transactions/:id", transactionsHandler.Delete)
 
 			protected.POST("/contacts", contactsHandler.Create)
@@ -453,6 +448,8 @@ func main() {
 			protected.POST("/personal-debts/:id/link", personalDebtsHandler.LinkTx)
 			protected.POST("/personal-debts/:id/unlink", personalDebtsHandler.UnlinkTx)
 			protected.POST("/personal-debts/:id/disconnect", personalDebtsHandler.Disconnect)
+			protected.POST("/personal-debts/:id/paper-sync", projectsHandler.SyncDebt)
+			protected.POST("/personal-debts/:id/unlink-paper", projectsHandler.UnlinkDebt)
 
 			protected.GET("/notifications", notificationsHandler.List)
 			protected.GET("/notifications/unread-count", notificationsHandler.UnreadCount)
@@ -475,34 +472,41 @@ func main() {
 			protected.DELETE("/projects/:id", projectsHandler.Delete)
 			protected.POST("/projects/:id/archive", projectsHandler.Archive)
 			protected.POST("/projects/:id/restore", projectsHandler.Restore)
-			protected.POST("/projects/:id/complete", projectsHandler.Complete)                       // 0.4.1-2 V2
-			protected.POST("/projects/:id/members/:member_id/assign", projectsHandler.AssignRemoved) // 0.4.1-2 V15
-			protected.GET("/projects/:id/claimable", projectsHandler.ListClaimable)                  // 0.4.1-2 V6 / V9
-			protected.POST("/projects/:id/claim", projectsHandler.Claim)                             // 0.4.1-2 V6 / V9 / V11
-			protected.POST("/projects/:id/settle/book", projectsHandler.BookSettle)                  // 0.4.1-2 V12
+			protected.POST("/projects/:id/complete", projectsHandler.Complete)
+			protected.GET("/projects/:id/settle", projectsHandler.Settle)
+			protected.POST("/projects/:id/settle/book", projectsHandler.BookSettle)
+			protected.PUT("/projects/:id/my-defaults", projectsHandler.SetMyDefaults)
 			protected.GET("/projects/:id/members", projectsHandler.ListMembers)
 			protected.POST("/projects/:id/members", projectsHandler.AddMember)
 			protected.PUT("/projects/:id/members/:member_id", projectsHandler.UpdateMember)
 			protected.DELETE("/projects/:id/members/:member_id", projectsHandler.RemoveMember)
-			protected.POST("/projects/:id/members/:member_id/request-link", projectsHandler.RequestLink)
-			protected.PUT("/projects/:id/members/:member_id/my-contact", projectsHandler.BindMyContact)      // 0.4.2-3 F3
-			protected.DELETE("/projects/:id/members/:member_id/my-contact", projectsHandler.UnbindMyContact) // 0.4.2-3 F3
+			protected.POST("/projects/:id/members/:member_id/merge", projectsHandler.MergeMember)
+			protected.PUT("/projects/:id/members/:member_id/my-contact", projectsHandler.BindMyContact)
+			protected.DELETE("/projects/:id/members/:member_id/my-contact", projectsHandler.UnbindMyContact)
 			protected.POST("/projects/:id/transfer-ownership", projectsHandler.TransferOwnership)
 			protected.POST("/projects/:id/leave", projectsHandler.Leave)
-			protected.GET("/projects/:id/transactions", projectsHandler.ListPT)
-			protected.POST("/projects/:id/project-transactions", projectsHandler.CreatePT)
-			protected.POST("/event-bills", projectsHandler.BookBill)
-			protected.PUT("/event-bills/:pt_id", projectsHandler.RebookBill)
-			protected.GET("/event-bills/:pt_id", projectsHandler.GetBill)
-			protected.DELETE("/event-bills/:pt_id", projectsHandler.DeleteBill)
-			protected.POST("/event-bills/:pt_id/apply", projectsHandler.ApplyBill)
-			protected.POST("/event-bills/:pt_id/disconnect", projectsHandler.DisconnectBill)
-			protected.PUT("/projects/:id/project-transactions/:pt_id", projectsHandler.UpdatePT)
-			protected.DELETE("/projects/:id/project-transactions/:pt_id", projectsHandler.DeletePT)
-			protected.PUT("/projects/:id/project-transactions/:pt_id/mark", projectsHandler.ToggleMark)
-			protected.GET("/projects/:id/summary", projectsHandler.Summary)
-			protected.GET("/projects/:id/settle", projectsHandler.Settle)
-			protected.POST("/projects/:id/people", projectsHandler.ResolvePeople)
+			// Event bills: papers of the event.
+			protected.GET("/projects/:id/bills", projectsHandler.ListEventBills)
+			protected.POST("/projects/:id/bills", projectsHandler.CreateEventBill)
+			protected.GET("/projects/:id/bills/:bid", projectsHandler.GetPaper(true))
+			protected.PUT("/projects/:id/bills/:bid", projectsHandler.UpdatePaper(true))
+			protected.POST("/projects/:id/bills/:bid/claim", projectsHandler.ClaimPaper(true))
+			protected.POST("/projects/:id/bills/:bid/leave", projectsHandler.LeavePaper(true))
+			protected.POST("/projects/:id/bills/:bid/move", projectsHandler.MoveEventBill)
+			protected.DELETE("/projects/:id/bills/:bid/people/:pid", projectsHandler.RemovePaperPerson(true))
+			protected.PATCH("/projects/:id/bills/:bid/people/:pid", projectsHandler.MarkPaperPerson(true))
+			// Split bills: papers with no event.
+			protected.GET("/split-bills", projectsHandler.ListSplitBills)
+			protected.POST("/split-bills", projectsHandler.CreateSplitBill)
+			protected.GET("/split-bills/:id", projectsHandler.GetPaper(false))
+			protected.PUT("/split-bills/:id", projectsHandler.UpdatePaper(false))
+			protected.POST("/split-bills/:id/join", projectsHandler.JoinSplitBill)
+			protected.POST("/split-bills/:id/decline", projectsHandler.DeclineSplitBill)
+			protected.POST("/split-bills/:id/claim", projectsHandler.ClaimPaper(false))
+			protected.POST("/split-bills/:id/leave", projectsHandler.LeavePaper(false))
+			protected.POST("/split-bills/:id/move-to-event", projectsHandler.MoveSplitBill)
+			protected.DELETE("/split-bills/:id/people/:pid", projectsHandler.RemovePaperPerson(false))
+			protected.PATCH("/split-bills/:id/people/:pid", projectsHandler.MarkPaperPerson(false))
 			protected.GET("/projects/:id/tags", projectsHandler.ListTags)
 			protected.POST("/projects/:id/tags", projectsHandler.CreateTag)
 			protected.POST("/projects/:id/tags/import", projectsHandler.ImportTags)
