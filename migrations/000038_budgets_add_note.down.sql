@@ -1,1 +1,0 @@
-ALTER TABLE budgets DROP COLUMN IF EXISTS note;
