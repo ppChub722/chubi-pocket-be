@@ -170,7 +170,7 @@ func loadEvent(ctx context.Context, q shared.Querier, callerID, id uuid.UUID) (E
 
 func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid.UUID) ([]EventMember, error) {
 	rows, err := q.Query(ctx, `SELECT pm.id, pm.user_id, COALESCE(u.display_name, pm.display_name),
-			`+shared.AvatarSQL("u.id", "pm.icon_code")+`, pm.role, pm.status, pm.invited_at, pm.joined_at, pm.left_at,
+			`+shared.AvatarSQL("u.id", "COALESCE(pm.icon_code, mc.icon_code)")+`, pm.role, pm.status, pm.invited_at, pm.joined_at, pm.left_at,
 			mc.id, pm.removed_at, mc.linked_user_id IS NOT NULL, pm.invited_user_id IS NOT NULL AND pm.user_id IS NULL
 		FROM project_members pm LEFT JOIN users u ON u.id = pm.user_id
 		`+myContactJoin("$2")+` ON pm.user_id IS DISTINCT FROM $2
