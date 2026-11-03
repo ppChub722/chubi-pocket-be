@@ -1,9 +1,12 @@
--- Baseline (paper plan, 2026-11-02): the whole schema in one file; migrations 1-130 live in git history.
+-- Baseline (2026-11-03): migrations 1-130 (main before the paper model) in one file; they live in git history.
 --
 -- PostgreSQL database dump
 --
 
+\restrict y9NirLr6KrQdSDdMzfOvuRdN89CH6I1sdWqKlcROsSfDkXiHQ9DQfvYCxLD44Ul
 
+-- Dumped from database version 15.15
+-- Dumped by pg_dump version 15.15
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -41,6 +44,34 @@ $$;
 
 
 --
+-- Name: event_or_null(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.event_or_null(p_scope uuid) RETURNS uuid
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT id FROM projects WHERE id = p_scope $$;
+
+
+--
+-- Name: project_transaction_payers_locked_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.project_transaction_payers_locked_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM project_transactions p JOIN projects pr ON pr.id = p.project_id
+               WHERE p.id = COALESCE(NEW.project_transaction_id, OLD.project_transaction_id)
+                 AND pr.completed_at IS NOT NULL FOR SHARE OF pr) THEN
+        RAISE EXCEPTION 'EVENT_COMPLETED' USING ERRCODE = 'P0001', HINT = 'event_completed';
+    END IF;
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+
+--
 -- Name: project_transactions_locked_check(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -48,16 +79,12 @@ CREATE FUNCTION public.project_transactions_locked_check() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF TG_OP IN ('UPDATE', 'DELETE') AND EXISTS (
-        SELECT 1 FROM projects WHERE id = OLD.project_id AND completed_at IS NOT NULL FOR SHARE) THEN
+    IF EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id AND completed_at IS NOT NULL FOR SHARE) THEN
         RAISE EXCEPTION 'EVENT_COMPLETED' USING ERRCODE = 'P0001', HINT = 'event_completed';
     END IF;
-    IF TG_OP IN ('INSERT', 'UPDATE') AND EXISTS (
-        SELECT 1 FROM projects WHERE id = NEW.project_id AND completed_at IS NOT NULL FOR SHARE) THEN
-        RAISE EXCEPTION 'EVENT_COMPLETED' USING ERRCODE = 'P0001', HINT = 'event_completed';
-    END IF;
-    RETURN COALESCE(NEW, OLD);
-END $$;
+    RETURN NEW;
+END;
+$$;
 
 
 --
@@ -93,6 +120,16 @@ $$;
 
 
 --
+-- Name: split_bill_of(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.split_bill_of(p_pt uuid) RETURNS uuid
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT COALESCE(parent_project_transaction_id, id) FROM project_transactions WHERE id = p_pt $$;
+
+
+--
 -- Name: split_people_locked(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -110,6 +147,75 @@ END $$;
 
 
 --
+-- Name: trg_links_debt_bills(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trg_links_debt_bills() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.split_transaction_id := split_bill_of(NEW.pt_id);
+    NEW.split_person_id := (SELECT p.id FROM split_transaction_people p
+                             WHERE p.split_transaction_id = NEW.split_transaction_id AND p.event_member_id = NEW.member_id);
+    RETURN NEW;
+END $$;
+
+
+--
+-- Name: trg_links_debts(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trg_links_debts() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.split_transaction_id := split_bill_of(NEW.source_project_transaction_id);
+    NEW.unlinked_split_transaction_id := split_bill_of(NEW.unlinked_project_transaction_id);
+    RETURN NEW;
+END $$;
+
+
+--
+-- Name: trg_links_origin(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trg_links_origin() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND OLD.linked_transaction_id IS NOT NULL THEN
+        UPDATE transactions t SET split_transaction_id = split_bill_of(t.source_project_transaction_id)
+         WHERE t.id = OLD.linked_transaction_id AND t.split_transaction_id = OLD.id AND t.source_project_transaction_id IS NULL;
+    END IF;
+    IF NEW.linked_transaction_id IS NOT NULL THEN
+        UPDATE transactions t SET split_transaction_id = NEW.id,
+               split_person_id = (SELECT p.id FROM split_transaction_people p
+                                   WHERE p.split_transaction_id = NEW.id AND p.user_id = t.user_id)
+         WHERE t.id = NEW.linked_transaction_id AND t.split_transaction_id IS DISTINCT FROM NEW.id;
+    END IF;
+    RETURN NULL;
+END $$;
+
+
+--
+-- Name: trg_links_transactions(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trg_links_transactions() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    -- the bill a copy belongs to, else the bill this transaction was made from
+    NEW.split_transaction_id := COALESCE(split_bill_of(NEW.source_project_transaction_id),
+        (SELECT id FROM project_transactions WHERE linked_transaction_id = NEW.id));
+    NEW.split_person_id := (SELECT p.id FROM split_transaction_people p
+                             WHERE p.split_transaction_id = NEW.split_transaction_id AND p.user_id = NEW.user_id);
+    NEW.unlinked_split_transaction_id := split_bill_of(NEW.unlinked_project_transaction_id);
+    RETURN NEW;
+END $$;
+
+
+--
 -- Name: trg_sync_split_people_member(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -117,11 +223,9 @@ CREATE FUNCTION public.trg_sync_split_people_member() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    UPDATE split_transaction_people
-       SET name = NEW.display_name, user_id = COALESCE(NEW.user_id, user_id)
-     WHERE project_member_id = NEW.id
-       AND (name IS DISTINCT FROM NEW.display_name OR (NEW.user_id IS NOT NULL AND user_id IS DISTINCT FROM NEW.user_id));
-    RETURN NEW;
+    UPDATE split_transaction_people SET user_id = NEW.user_id, name = LEFT(NEW.display_name, 100)
+     WHERE event_member_id = NEW.id;
+    RETURN NULL;
 END $$;
 
 
@@ -146,8 +250,8 @@ CREATE TABLE public.account_members (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_by_user_id uuid,
     sort_order integer DEFAULT 0 NOT NULL,
-    CONSTRAINT account_members_report_scope_check CHECK (((report_scope)::text = ANY (ARRAY[('none'::character varying)::text, ('own'::character varying)::text, ('all'::character varying)::text]))),
-    CONSTRAINT account_members_role_check CHECK (((role)::text = ANY (ARRAY[('owner'::character varying)::text, ('member'::character varying)::text])))
+    CONSTRAINT account_members_report_scope_check CHECK (((report_scope)::text = ANY ((ARRAY['none'::character varying, 'own'::character varying, 'all'::character varying])::text[]))),
+    CONSTRAINT account_members_role_check CHECK (((role)::text = ANY ((ARRAY['owner'::character varying, 'member'::character varying])::text[])))
 );
 
 
@@ -180,8 +284,8 @@ CREATE TABLE public.accounts (
     track_balance boolean DEFAULT true NOT NULL,
     CONSTRAINT accounts_payment_due_date_check CHECK (((payment_due_date IS NULL) OR ((payment_due_date >= 1) AND (payment_due_date <= 31)))),
     CONSTRAINT accounts_statement_date_check CHECK (((statement_date IS NULL) OR ((statement_date >= 1) AND (statement_date <= 31)))),
-    CONSTRAINT accounts_status_check CHECK (((status)::text = ANY (ARRAY[('active'::character varying)::text, ('archived'::character varying)::text]))),
-    CONSTRAINT accounts_type_check CHECK (((type)::text = ANY (ARRAY[('cash'::character varying)::text, ('bank'::character varying)::text, ('e_wallet'::character varying)::text, ('credit_card'::character varying)::text, ('pay_later'::character varying)::text])))
+    CONSTRAINT accounts_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'archived'::character varying])::text[]))),
+    CONSTRAINT accounts_type_check CHECK (((type)::text = ANY ((ARRAY['cash'::character varying, 'bank'::character varying, 'e_wallet'::character varying, 'credit_card'::character varying, 'pay_later'::character varying])::text[])))
 );
 
 
@@ -192,23 +296,27 @@ CREATE TABLE public.accounts (
 CREATE TABLE public.project_transactions (
     id uuid NOT NULL,
     project_id uuid,
-    owner_user_id uuid NOT NULL,
+    transaction_member_id uuid,
+    record_user_id uuid NOT NULL,
     type character varying(20) NOT NULL,
     amount numeric(15,2) NOT NULL,
+    currency character varying(3) NOT NULL,
     date date NOT NULL,
     note text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by_user_id uuid,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_by_user_id uuid,
+    parent_project_transaction_id uuid,
     description text,
+    linked_transaction_id uuid,
+    unlinked_transaction_id uuid,
+    paid_back_for_id uuid,
     payback_kind character varying(10),
-    version integer DEFAULT 1 NOT NULL,
-    split_mode character varying(10) DEFAULT 'custom'::character varying NOT NULL,
+    scope_id uuid GENERATED ALWAYS AS (COALESCE(project_id, paid_back_for_id, id)) STORED,
     CONSTRAINT project_transactions_amount_check CHECK ((amount > (0)::numeric)),
-    CONSTRAINT project_transactions_payback_kind_check CHECK (((payback_kind)::text = ANY (ARRAY[('payback'::character varying)::text, ('loan'::character varying)::text]))),
-    CONSTRAINT project_transactions_split_mode_check CHECK (((split_mode)::text = ANY ((ARRAY['equal'::character varying, 'custom'::character varying])::text[]))),
-    CONSTRAINT project_transactions_type_check CHECK (((type)::text = ANY (ARRAY[('expense'::character varying)::text, ('income'::character varying)::text, ('payback'::character varying)::text])))
+    CONSTRAINT project_transactions_payback_kind_check CHECK (((payback_kind)::text = ANY ((ARRAY['payback'::character varying, 'loan'::character varying])::text[]))),
+    CONSTRAINT project_transactions_type_check CHECK (((type)::text = ANY ((ARRAY['expense'::character varying, 'income'::character varying, 'payback'::character varying])::text[])))
 );
 
 
@@ -220,20 +328,18 @@ CREATE TABLE public.split_transaction_people (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     split_transaction_id uuid NOT NULL,
     user_id uuid,
-    project_member_id uuid,
+    event_member_id uuid,
     name character varying(100) NOT NULL,
     share numeric(15,2) DEFAULT 0 NOT NULL,
     paid numeric(15,2) DEFAULT 0 NOT NULL,
     paid_back boolean DEFAULT false NOT NULL,
+    marked_at timestamp with time zone,
+    disconnected_at timestamp with time zone,
     sort integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    status character varying(10) DEFAULT 'joined'::character varying NOT NULL,
-    paid_back_by_user_id uuid,
-    paid_back_at timestamp with time zone,
     CONSTRAINT split_transaction_people_paid_check CHECK ((paid >= (0)::numeric)),
-    CONSTRAINT split_transaction_people_share_check CHECK ((share >= (0)::numeric)),
-    CONSTRAINT split_transaction_people_status_check CHECK (((status)::text = ANY ((ARRAY['invited'::character varying, 'joined'::character varying, 'declined'::character varying, 'left'::character varying])::text[])))
+    CONSTRAINT split_transaction_people_share_check CHECK ((share >= (0)::numeric))
 );
 
 
@@ -243,8 +349,16 @@ CREATE TABLE public.split_transaction_people (
 
 CREATE VIEW public.bill_pairs AS
  SELECT b.id AS pt_id,
-    b.project_id,
+    b.scope_id AS project_id,
     b.type,
+        CASE
+            WHEN ((b.type)::text = 'income'::text) THEN pa.event_member_id
+            ELSE s.event_member_id
+        END AS debtor,
+        CASE
+            WHEN ((b.type)::text = 'income'::text) THEN s.event_member_id
+            ELSE pa.event_member_id
+        END AS creditor,
         CASE
             WHEN ((b.type)::text = 'income'::text) THEN pa.id
             ELSE s.id
@@ -253,19 +367,11 @@ CREATE VIEW public.bill_pairs AS
             WHEN ((b.type)::text = 'income'::text) THEN s.id
             ELSE pa.id
         END AS creditor_person,
-        CASE
-            WHEN ((b.type)::text = 'income'::text) THEN pa.project_member_id
-            ELSE s.project_member_id
-        END AS debtor,
-        CASE
-            WHEN ((b.type)::text = 'income'::text) THEN s.project_member_id
-            ELSE pa.project_member_id
-        END AS creditor,
     round(((s.share * pa.paid) / b.amount), 2) AS amount
    FROM ((public.project_transactions b
      JOIN public.split_transaction_people pa ON (((pa.split_transaction_id = b.id) AND (pa.paid > (0)::numeric))))
      JOIN public.split_transaction_people s ON (((s.split_transaction_id = b.id) AND (s.share > (0)::numeric) AND (s.id <> pa.id))))
-  WHERE (round(((s.share * pa.paid) / b.amount), 2) > (0)::numeric);
+  WHERE ((b.parent_project_transaction_id IS NULL) AND (round(((s.share * pa.paid) / b.amount), 2) > (0)::numeric));
 
 
 --
@@ -339,10 +445,10 @@ CREATE TABLE public.budgets (
     CONSTRAINT budgets_amount_check1 CHECK ((amount > (0)::numeric)),
     CONSTRAINT budgets_check CHECK ((recurring = (freq IS NOT NULL))),
     CONSTRAINT budgets_end_count_check CHECK ((end_count >= 1)),
-    CONSTRAINT budgets_end_kind_check CHECK (((end_kind)::text = ANY (ARRAY[('none'::character varying)::text, ('date'::character varying)::text, ('count'::character varying)::text]))),
-    CONSTRAINT budgets_freq_check CHECK (((freq)::text = ANY (ARRAY[('daily'::character varying)::text, ('weekly'::character varying)::text, ('monthly'::character varying)::text, ('yearly'::character varying)::text]))),
+    CONSTRAINT budgets_end_kind_check CHECK (((end_kind)::text = ANY ((ARRAY['none'::character varying, 'date'::character varying, 'count'::character varying])::text[]))),
+    CONSTRAINT budgets_freq_check CHECK (((freq)::text = ANY ((ARRAY['daily'::character varying, 'weekly'::character varying, 'monthly'::character varying, 'yearly'::character varying])::text[]))),
     CONSTRAINT budgets_interval_n_check CHECK ((interval_n >= 1)),
-    CONSTRAINT budgets_status_check1 CHECK (((status)::text = ANY (ARRAY[('active'::character varying)::text, ('archived'::character varying)::text]))),
+    CONSTRAINT budgets_status_check1 CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'archived'::character varying])::text[]))),
     CONSTRAINT budgets_warn_pct_check CHECK (((warn_pct >= 1) AND (warn_pct <= 100)))
 );
 
@@ -368,7 +474,7 @@ CREATE TABLE public.categories (
     description text,
     note text,
     icon_code jsonb,
-    CONSTRAINT categories_type_check CHECK (((type)::text = ANY (ARRAY[('income'::character varying)::text, ('expense'::character varying)::text]))),
+    CONSTRAINT categories_type_check CHECK (((type)::text = ANY ((ARRAY['income'::character varying, 'expense'::character varying])::text[]))),
     CONSTRAINT chk_categories_no_self_parent CHECK ((id <> parent_id)),
     CONSTRAINT chk_categories_system_kind CHECK ((((is_system = true) AND (system_kind IS NOT NULL)) OR ((is_system = false) AND (system_kind IS NULL))))
 );
@@ -394,8 +500,8 @@ CREATE TABLE public.connection_link_codes (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT connection_link_codes_check CHECK ((((purpose)::text = 'login'::text) OR (user_id IS NOT NULL))),
     CONSTRAINT connection_link_codes_check1 CHECK ((((purpose)::text = 'link'::text) OR (code_challenge IS NOT NULL))),
-    CONSTRAINT connection_link_codes_provider_check CHECK (((provider)::text = ANY (ARRAY[('telegram'::character varying)::text, ('line'::character varying)::text, ('google'::character varying)::text]))),
-    CONSTRAINT connection_link_codes_purpose_check CHECK (((purpose)::text = ANY (ARRAY[('link'::character varying)::text, ('login'::character varying)::text])))
+    CONSTRAINT connection_link_codes_provider_check CHECK (((provider)::text = ANY ((ARRAY['telegram'::character varying, 'line'::character varying, 'google'::character varying])::text[]))),
+    CONSTRAINT connection_link_codes_purpose_check CHECK (((purpose)::text = ANY ((ARRAY['link'::character varying, 'login'::character varying])::text[])))
 );
 
 
@@ -422,7 +528,7 @@ CREATE TABLE public.contacts (
     nickname character varying(100),
     show_nickname boolean DEFAULT true NOT NULL,
     CONSTRAINT contacts_no_self_link CHECK ((user_id <> linked_user_id)),
-    CONSTRAINT contacts_status_check CHECK (((status)::text = ANY (ARRAY[('active'::character varying)::text, ('archived'::character varying)::text])))
+    CONSTRAINT contacts_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'archived'::character varying])::text[])))
 );
 
 
@@ -504,7 +610,7 @@ CREATE TABLE public.notifications (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_by_user_id uuid,
     CONSTRAINT notifications_terminal_xor CHECK (((actioned_at IS NULL) OR (dismissed_at IS NULL))),
-    CONSTRAINT notifications_type_check CHECK (((type)::text = ANY ((ARRAY['contact_link_request'::character varying, 'account_invite'::character varying, 'project_invite'::character varying, 'recurring_due'::character varying, 'recurring_ending'::character varying, 'recurring_auto_created'::character varying, 'debt_disconnected'::character varying, 'debt_repaid'::character varying, 'event_completed'::character varying, 'event_member_removed'::character varying, 'event_deleted'::character varying, 'bill_invite'::character varying, 'bill_new'::character varying, 'bill_changed'::character varying, 'bill_removed'::character varying, 'bill_owner_changed'::character varying, 'bill_moved'::character varying])::text[])))
+    CONSTRAINT notifications_type_check CHECK (((type)::text = ANY ((ARRAY['split_created'::character varying, 'split_paid'::character varying, 'split_received'::character varying, 'split_changed'::character varying, 'project_tx_recorded_for_you'::character varying, 'project_tx_changed'::character varying, 'project_invite'::character varying, 'contact_link_request'::character varying, 'account_invite'::character varying, 'project_added'::character varying, 'recurring_due'::character varying, 'recurring_ending'::character varying, 'recurring_auto_created'::character varying, 'debt_disconnected'::character varying, 'shared_bill_created'::character varying, 'shared_bill_deleted'::character varying, 'shared_bill_disconnected'::character varying, 'event_completed'::character varying, 'event_member_removed'::character varying, 'event_deleted'::character varying])::text[])))
 );
 
 
@@ -523,7 +629,7 @@ CREATE TABLE public.payment_providers (
     color character varying(9),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT payment_providers_kind_check CHECK (((kind)::text = ANY (ARRAY[('bank'::character varying)::text, ('e_wallet'::character varying)::text, ('card_issuer'::character varying)::text, ('other'::character varying)::text])))
+    CONSTRAINT payment_providers_kind_check CHECK (((kind)::text = ANY ((ARRAY['bank'::character varying, 'e_wallet'::character varying, 'card_issuer'::character varying, 'other'::character varying])::text[])))
 );
 
 
@@ -543,8 +649,8 @@ CREATE TABLE public.pending_transactions (
     last_error jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT pending_kind_target CHECK (((((kind)::text = ANY (ARRAY[('create'::character varying)::text, ('saving'::character varying)::text])) AND (target_debt_id IS NULL) AND (target_transaction_id IS NULL)) OR (((kind)::text = 'settle_debt'::text) AND (target_debt_id IS NOT NULL)) OR (((kind)::text = 'update_tx'::text) AND (target_transaction_id IS NOT NULL)))),
-    CONSTRAINT pending_transactions_kind_check CHECK (((kind)::text = ANY (ARRAY[('create'::character varying)::text, ('settle_debt'::character varying)::text, ('update_tx'::character varying)::text, ('saving'::character varying)::text])))
+    CONSTRAINT pending_kind_target CHECK (((((kind)::text = ANY ((ARRAY['create'::character varying, 'saving'::character varying])::text[])) AND (target_debt_id IS NULL) AND (target_transaction_id IS NULL)) OR (((kind)::text = 'settle_debt'::text) AND (target_debt_id IS NOT NULL)) OR (((kind)::text = 'update_tx'::text) AND (target_transaction_id IS NOT NULL)))),
+    CONSTRAINT pending_transactions_kind_check CHECK (((kind)::text = ANY ((ARRAY['create'::character varying, 'settle_debt'::character varying, 'update_tx'::character varying, 'saving'::character varying])::text[])))
 );
 
 
@@ -556,11 +662,13 @@ CREATE TABLE public.personal_debt_bills (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     debt_id uuid NOT NULL,
     user_id uuid NOT NULL,
+    pt_id uuid NOT NULL,
+    member_id uuid NOT NULL,
     transaction_id uuid,
     amount numeric(15,2) NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    split_transaction_id uuid NOT NULL,
+    split_transaction_id uuid,
     split_person_id uuid,
     CONSTRAINT personal_debt_bills_amount_check CHECK ((amount >= (0)::numeric))
 );
@@ -576,6 +684,8 @@ CREATE TABLE public.personal_debts (
     direction character varying(20) NOT NULL,
     counterparty_contact_id uuid,
     counterparty_person_name character varying(100) NOT NULL,
+    source_transaction_id uuid,
+    source_project_transaction_id uuid,
     project_id uuid,
     amount numeric(15,2) NOT NULL,
     currency character varying(3) NOT NULL,
@@ -589,14 +699,18 @@ CREATE TABLE public.personal_debts (
     date date NOT NULL,
     paid boolean DEFAULT false NOT NULL,
     source_kind character varying(20),
+    paid_for_transaction_id uuid,
     due_date date,
+    unlinked_project_transaction_id uuid,
     kind character varying(20) DEFAULT 'debt'::character varying NOT NULL,
     disconnected_at timestamp with time zone,
     private_note text,
+    split_transaction_id uuid,
+    unlinked_split_transaction_id uuid,
     CONSTRAINT personal_debts_amount_check CHECK ((amount >= (0)::numeric)),
-    CONSTRAINT personal_debts_direction_check CHECK (((direction)::text = ANY (ARRAY[('paid'::character varying)::text, ('received'::character varying)::text]))),
-    CONSTRAINT personal_debts_kind_check CHECK (((kind)::text = ANY (ARRAY[('debt'::character varying)::text, ('repayment'::character varying)::text]))),
-    CONSTRAINT personal_debts_source_kind_check CHECK (((source_kind IS NULL) OR ((source_kind)::text = 'paper'::text)))
+    CONSTRAINT personal_debts_direction_check CHECK (((direction)::text = ANY ((ARRAY['paid'::character varying, 'received'::character varying])::text[]))),
+    CONSTRAINT personal_debts_kind_check CHECK (((kind)::text = ANY ((ARRAY['debt'::character varying, 'repayment'::character varying])::text[]))),
+    CONSTRAINT personal_debts_source_kind_check CHECK (((source_kind IS NULL) OR ((source_kind)::text = ANY ((ARRAY['transaction'::character varying, 'event'::character varying, 'partner'::character varying, 'paid_by'::character varying])::text[]))))
 );
 
 
@@ -618,7 +732,7 @@ CREATE TABLE public.project_member_contacts (
 
 CREATE TABLE public.project_members (
     id uuid NOT NULL,
-    project_id uuid NOT NULL,
+    project_id uuid,
     user_id uuid,
     display_name character varying(100) NOT NULL,
     role character varying(20) DEFAULT 'contributor'::character varying NOT NULL,
@@ -633,22 +747,12 @@ CREATE TABLE public.project_members (
     icon_code jsonb,
     removed_at timestamp with time zone,
     invited_user_id uuid,
-    CONSTRAINT project_members_role_check CHECK (((role)::text = ANY (ARRAY[('owner'::character varying)::text, ('contributor'::character varying)::text, ('viewer'::character varying)::text]))),
-    CONSTRAINT project_members_status_check CHECK (((status)::text = ANY (ARRAY[('pending'::character varying)::text, ('active'::character varying)::text, ('left'::character varying)::text])))
-);
-
-
---
--- Name: project_my_defaults; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.project_my_defaults (
-    project_id uuid NOT NULL,
-    user_id uuid NOT NULL,
-    category_id uuid,
-    account_id uuid,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    name_match boolean DEFAULT false NOT NULL,
+    split_transaction_id uuid,
+    scope_id uuid GENERATED ALWAYS AS (COALESCE(project_id, split_transaction_id)) STORED,
+    CONSTRAINT project_members_one_scope CHECK (((project_id IS NULL) <> (split_transaction_id IS NULL))),
+    CONSTRAINT project_members_role_check CHECK (((role)::text = ANY ((ARRAY['owner'::character varying, 'contributor'::character varying, 'viewer'::character varying])::text[]))),
+    CONSTRAINT project_members_status_check CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'active'::character varying, 'left'::character varying])::text[])))
 );
 
 
@@ -693,9 +797,12 @@ CREATE TABLE public.projects (
     icon_code jsonb,
     planned_amount numeric(15,2),
     note text,
+    kind character varying(10) DEFAULT 'event'::character varying NOT NULL,
     completed_at timestamp with time zone,
+    CONSTRAINT projects_kind_check CHECK (((kind)::text = ANY ((ARRAY['event'::character varying, 'split'::character varying])::text[]))),
+    CONSTRAINT projects_kind_event CHECK (((kind)::text = 'event'::text)),
     CONSTRAINT projects_planned_amount_check CHECK ((planned_amount > (0)::numeric)),
-    CONSTRAINT projects_status_check CHECK (((status)::text = ANY (ARRAY[('active'::character varying)::text, ('completed'::character varying)::text, ('cancelled'::character varying)::text, ('archived'::character varying)::text])))
+    CONSTRAINT projects_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'completed'::character varying, 'cancelled'::character varying, 'archived'::character varying])::text[])))
 );
 
 
@@ -788,17 +895,17 @@ CREATE TABLE public.recurring_rules (
     debt_direction character varying(20),
     zero_rounds integer DEFAULT 0 NOT NULL,
     CONSTRAINT recurring_rules_amount_check CHECK ((amount >= (0)::numeric)),
-    CONSTRAINT recurring_rules_debt_direction_check CHECK (((debt_direction)::text = ANY (ARRAY[('paid'::character varying)::text, ('received'::character varying)::text]))),
+    CONSTRAINT recurring_rules_debt_direction_check CHECK (((debt_direction)::text = ANY ((ARRAY['paid'::character varying, 'received'::character varying])::text[]))),
     CONSTRAINT recurring_rules_debt_fields_check CHECK (((((type)::text = 'debt'::text) = ((person_name IS NOT NULL) AND (debt_kind IS NOT NULL) AND (debt_direction IS NOT NULL))) AND (((type)::text = 'debt'::text) OR (contact_id IS NULL)))),
-    CONSTRAINT recurring_rules_debt_kind_check CHECK (((debt_kind)::text = ANY (ARRAY[('debt'::character varying)::text, ('repayment'::character varying)::text]))),
-    CONSTRAINT recurring_rules_end_kind_check CHECK (((end_kind)::text = ANY (ARRAY[('none'::character varying)::text, ('date'::character varying)::text, ('count'::character varying)::text]))),
-    CONSTRAINT recurring_rules_freq_check CHECK (((freq)::text = ANY (ARRAY[('daily'::character varying)::text, ('weekly'::character varying)::text, ('monthly'::character varying)::text, ('yearly'::character varying)::text, ('dates'::character varying)::text]))),
+    CONSTRAINT recurring_rules_debt_kind_check CHECK (((debt_kind)::text = ANY ((ARRAY['debt'::character varying, 'repayment'::character varying])::text[]))),
+    CONSTRAINT recurring_rules_end_kind_check CHECK (((end_kind)::text = ANY ((ARRAY['none'::character varying, 'date'::character varying, 'count'::character varying])::text[]))),
+    CONSTRAINT recurring_rules_freq_check CHECK (((freq)::text = ANY ((ARRAY['daily'::character varying, 'weekly'::character varying, 'monthly'::character varying, 'yearly'::character varying, 'dates'::character varying])::text[]))),
     CONSTRAINT recurring_rules_interval_n_check CHECK ((interval_n >= 1)),
-    CONSTRAINT recurring_rules_kind_check CHECK (((kind)::text = ANY (ARRAY[('subscription'::character varying)::text, ('installment'::character varying)::text, ('income'::character varying)::text, ('reminder'::character varying)::text, ('saving'::character varying)::text, ('debt'::character varying)::text]))),
-    CONSTRAINT recurring_rules_monthly_mode_check CHECK (((monthly_mode IS NULL) OR ((monthly_mode)::text = ANY (ARRAY[('day'::character varying)::text, ('weekday'::character varying)::text])))),
+    CONSTRAINT recurring_rules_kind_check CHECK (((kind)::text = ANY ((ARRAY['subscription'::character varying, 'installment'::character varying, 'income'::character varying, 'reminder'::character varying, 'saving'::character varying, 'debt'::character varying])::text[]))),
+    CONSTRAINT recurring_rules_monthly_mode_check CHECK (((monthly_mode IS NULL) OR ((monthly_mode)::text = ANY ((ARRAY['day'::character varying, 'weekday'::character varying])::text[])))),
     CONSTRAINT recurring_rules_pause_reason_check CHECK ((pause_reason = ANY (ARRAY['manual'::text, 'overdue_limit'::text, 'goal_inactive'::text, 'no_balance'::text]))),
-    CONSTRAINT recurring_rules_status_check CHECK (((status)::text = ANY (ARRAY[('active'::character varying)::text, ('paused'::character varying)::text, ('archived'::character varying)::text]))),
-    CONSTRAINT recurring_rules_type_check CHECK (((type)::text = ANY (ARRAY[('expense'::character varying)::text, ('income'::character varying)::text, ('transfer'::character varying)::text, ('saving'::character varying)::text, ('debt'::character varying)::text]))),
+    CONSTRAINT recurring_rules_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'paused'::character varying, 'archived'::character varying])::text[]))),
+    CONSTRAINT recurring_rules_type_check CHECK (((type)::text = ANY ((ARRAY['expense'::character varying, 'income'::character varying, 'transfer'::character varying, 'saving'::character varying, 'debt'::character varying])::text[]))),
     CONSTRAINT recurring_rules_zero_rounds_check CHECK (((zero_rounds >= 0) AND (zero_rounds <= 3)))
 );
 
@@ -825,10 +932,10 @@ CREATE TABLE public.saving_entries (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT saving_entries_amount_check CHECK ((amount > (0)::numeric)),
     CONSTRAINT saving_entries_check CHECK (((((kind)::text = 'save'::text) AND ((from_bucket)::text = 'available'::text) AND ((to_bucket)::text <> 'available'::text)) OR (((kind)::text = 'withdraw'::text) AND ((from_bucket)::text <> 'available'::text) AND ((to_bucket)::text = 'available'::text)) OR (((kind)::text = 'move'::text) AND ((from_bucket)::text <> 'available'::text) AND ((to_bucket)::text <> 'available'::text)))),
-    CONSTRAINT saving_entries_from_bucket_check CHECK (((from_bucket)::text = ANY (ARRAY[('available'::character varying)::text, ('spare'::character varying)::text, ('goal'::character varying)::text]))),
-    CONSTRAINT saving_entries_kind_check CHECK (((kind)::text = ANY (ARRAY[('save'::character varying)::text, ('withdraw'::character varying)::text, ('move'::character varying)::text]))),
-    CONSTRAINT saving_entries_source_check CHECK (((source)::text = ANY (ARRAY[('manual'::character varying)::text, ('recurring'::character varying)::text, ('pending'::character varying)::text]))),
-    CONSTRAINT saving_entries_to_bucket_check CHECK (((to_bucket)::text = ANY (ARRAY[('available'::character varying)::text, ('spare'::character varying)::text, ('goal'::character varying)::text])))
+    CONSTRAINT saving_entries_from_bucket_check CHECK (((from_bucket)::text = ANY ((ARRAY['available'::character varying, 'spare'::character varying, 'goal'::character varying])::text[]))),
+    CONSTRAINT saving_entries_kind_check CHECK (((kind)::text = ANY ((ARRAY['save'::character varying, 'withdraw'::character varying, 'move'::character varying])::text[]))),
+    CONSTRAINT saving_entries_source_check CHECK (((source)::text = ANY ((ARRAY['manual'::character varying, 'recurring'::character varying, 'pending'::character varying])::text[]))),
+    CONSTRAINT saving_entries_to_bucket_check CHECK (((to_bucket)::text = ANY ((ARRAY['available'::character varying, 'spare'::character varying, 'goal'::character varying])::text[])))
 );
 
 
@@ -859,22 +966,52 @@ CREATE TABLE public.saving_goals (
     CONSTRAINT saving_goals_period_amount_check CHECK ((period_amount > (0)::numeric)),
     CONSTRAINT saving_goals_period_freq_check CHECK ((period_freq = ANY (ARRAY['daily'::text, 'weekly'::text, 'monthly'::text, 'yearly'::text]))),
     CONSTRAINT saving_goals_period_interval_check CHECK (((period_interval >= 1) AND (period_interval <= 99))),
-    CONSTRAINT saving_goals_status_check CHECK (((status)::text = ANY (ARRAY[('active'::character varying)::text, ('completed'::character varying)::text, ('archived'::character varying)::text]))),
+    CONSTRAINT saving_goals_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'completed'::character varying, 'archived'::character varying])::text[]))),
     CONSTRAINT saving_goals_target_amount_check CHECK ((target_amount > (0)::numeric))
 );
 
 
-
 --
--- Name: split_person_contacts; Type: TABLE; Schema: public; Owner: -
+-- Name: scopes; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE TABLE public.split_person_contacts (
-    split_person_id uuid NOT NULL,
-    user_id uuid NOT NULL,
-    contact_id uuid NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
-);
+CREATE VIEW public.scopes AS
+ SELECT projects.id,
+    projects.owner_user_id,
+    projects.name,
+    projects.description,
+    projects.start_date,
+    projects.end_date,
+    projects.status,
+    projects.created_at,
+    projects.created_by_user_id,
+    projects.updated_at,
+    projects.updated_by_user_id,
+    projects.icon_code,
+    projects.planned_amount,
+    projects.note,
+    projects.kind,
+    projects.completed_at
+   FROM public.projects
+UNION ALL
+ SELECT b.id,
+    b.record_user_id AS owner_user_id,
+    ("left"(COALESCE(b.description, ''::text), 100))::character varying AS name,
+    NULL::text AS description,
+    NULL::date AS start_date,
+    NULL::date AS end_date,
+    'active'::character varying AS status,
+    b.created_at,
+    b.created_by_user_id,
+    b.updated_at,
+    b.updated_by_user_id,
+    NULL::jsonb AS icon_code,
+    NULL::numeric AS planned_amount,
+    NULL::text AS note,
+    'split'::character varying AS kind,
+    NULL::timestamp with time zone AS completed_at
+   FROM public.project_transactions b
+  WHERE ((b.project_id IS NULL) AND (b.paid_back_for_id IS NULL) AND (b.parent_project_transaction_id IS NULL));
 
 
 --
@@ -942,18 +1079,23 @@ CREATE TABLE public.transactions (
     created_by_user_id uuid,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_by_user_id uuid,
+    project_id uuid,
+    source_project_transaction_id uuid,
     source_personal_debt_id uuid,
     description text,
+    paid_by_amount numeric(15,2),
+    unlinked_project_transaction_id uuid,
     debt_connected boolean DEFAULT false NOT NULL,
     debt_prev_category_id uuid,
     private_note text,
     split_transaction_id uuid,
     split_person_id uuid,
-    my_share numeric(15,2),
+    unlinked_split_transaction_id uuid,
     CONSTRAINT transactions_amount_check CHECK ((amount >= (0)::numeric)),
-    CONSTRAINT transactions_my_share_check CHECK ((my_share >= (0)::numeric)),
-    CONSTRAINT transactions_source_at_most_one CHECK (((source_personal_debt_id IS NULL) OR (split_transaction_id IS NULL))),
-    CONSTRAINT transactions_type_check CHECK (((type)::text = ANY (ARRAY[('expense'::character varying)::text, ('income'::character varying)::text, ('transfer'::character varying)::text])))
+    CONSTRAINT transactions_paid_by_check CHECK (((paid_by_amount IS NULL) OR ((paid_by_amount > (0)::numeric) AND (paid_by_amount <= amount) AND ((type)::text = ANY ((ARRAY['expense'::character varying, 'income'::character varying])::text[]))))),
+    CONSTRAINT transactions_project_id_implies_source CHECK (((project_id IS NULL) OR (source_personal_debt_id IS NOT NULL) OR (source_project_transaction_id IS NOT NULL))),
+    CONSTRAINT transactions_source_at_most_one CHECK (((((source_personal_debt_id IS NOT NULL))::integer + ((source_project_transaction_id IS NOT NULL))::integer) <= 1)),
+    CONSTRAINT transactions_type_check CHECK (((type)::text = ANY ((ARRAY['expense'::character varying, 'income'::character varying, 'transfer'::character varying])::text[])))
 );
 
 
@@ -968,7 +1110,7 @@ CREATE TABLE public.user_avatars (
     image bytea NOT NULL,
     version integer DEFAULT 1 NOT NULL,
     imported_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT user_avatars_source_check CHECK (((source)::text = ANY (ARRAY[('upload'::character varying)::text, ('telegram'::character varying)::text, ('line'::character varying)::text, ('google'::character varying)::text])))
+    CONSTRAINT user_avatars_source_check CHECK (((source)::text = ANY ((ARRAY['upload'::character varying, 'telegram'::character varying, 'line'::character varying, 'google'::character varying])::text[])))
 );
 
 
@@ -986,7 +1128,7 @@ CREATE TABLE public.user_connections (
     permissions jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT user_connections_provider_check CHECK (((provider)::text = ANY (ARRAY[('telegram'::character varying)::text, ('line'::character varying)::text, ('google'::character varying)::text])))
+    CONSTRAINT user_connections_provider_check CHECK (((provider)::text = ANY ((ARRAY['telegram'::character varying, 'line'::character varying, 'google'::character varying])::text[])))
 );
 
 
@@ -1008,10 +1150,7 @@ CREATE TABLE public.user_notification_settings (
     auto_accept_debts boolean DEFAULT false NOT NULL,
     auto_accept_event_invites boolean DEFAULT false NOT NULL,
     auto_accept_contact_links boolean DEFAULT false NOT NULL,
-    auto_accept_wallet_invites boolean DEFAULT false NOT NULL,
-    on_split_removed character varying(10) DEFAULT 'ask'::character varying NOT NULL,
-    auto_accept_repayments boolean DEFAULT false NOT NULL,
-    CONSTRAINT user_notification_settings_on_split_removed_check CHECK (((on_split_removed)::text = ANY ((ARRAY['ask'::character varying, 'keep'::character varying, 'delete'::character varying])::text[])))
+    auto_accept_wallet_invites boolean DEFAULT false NOT NULL
 );
 
 
@@ -1064,9 +1203,9 @@ CREATE TABLE public.users (
     icon_code jsonb,
     avatar_settings jsonb DEFAULT '{"border": null, "colors": [], "source": "icon"}'::jsonb NOT NULL,
     created_via character varying(20) DEFAULT 'password'::character varying NOT NULL,
-    CONSTRAINT users_created_via_check CHECK (((created_via)::text = ANY (ARRAY[('password'::character varying)::text, ('telegram'::character varying)::text, ('line'::character varying)::text, ('google'::character varying)::text]))),
+    CONSTRAINT users_created_via_check CHECK (((created_via)::text = ANY ((ARRAY['password'::character varying, 'telegram'::character varying, 'line'::character varying, 'google'::character varying])::text[]))),
     CONSTRAINT users_password_or_external CHECK (((password_hash IS NOT NULL) OR ((created_via)::text <> 'password'::text))),
-    CONSTRAINT users_status_check CHECK (((status)::text = ANY (ARRAY[('active'::character varying)::text, ('inactive'::character varying)::text])))
+    CONSTRAINT users_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'inactive'::character varying])::text[])))
 );
 
 
@@ -1255,14 +1394,6 @@ ALTER TABLE ONLY public.project_members
 
 
 --
--- Name: project_my_defaults project_my_defaults_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_my_defaults
-    ADD CONSTRAINT project_my_defaults_pkey PRIMARY KEY (project_id, user_id);
-
-
---
 -- Name: project_my_tags project_my_tags_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1332,15 +1463,6 @@ ALTER TABLE ONLY public.saving_entries
 
 ALTER TABLE ONLY public.saving_goals
     ADD CONSTRAINT saving_goals_pkey PRIMARY KEY (id);
-
-
-
---
--- Name: split_person_contacts split_person_contacts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.split_person_contacts
-    ADD CONSTRAINT split_person_contacts_pkey PRIMARY KEY (split_person_id, user_id);
 
 
 --
@@ -1642,14 +1764,14 @@ CREATE INDEX idx_personal_debt_bills_debt ON public.personal_debt_bills USING bt
 -- Name: idx_personal_debt_bills_pair; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX idx_personal_debt_bills_pair ON public.personal_debt_bills USING btree (user_id, split_transaction_id, split_person_id);
+CREATE UNIQUE INDEX idx_personal_debt_bills_pair ON public.personal_debt_bills USING btree (user_id, pt_id, member_id);
 
 
 --
--- Name: idx_personal_debt_bills_paper; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_personal_debt_bills_pt; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_personal_debt_bills_paper ON public.personal_debt_bills USING btree (split_transaction_id);
+CREATE INDEX idx_personal_debt_bills_pt ON public.personal_debt_bills USING btree (pt_id);
 
 
 --
@@ -1660,13 +1782,6 @@ CREATE INDEX idx_personal_debt_bills_tx ON public.personal_debt_bills USING btre
 
 
 --
--- Name: idx_personal_debts_counterpart; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_personal_debts_counterpart ON public.personal_debts USING btree (counterpart_debt_id) WHERE (counterpart_debt_id IS NOT NULL);
-
-
---
 -- Name: idx_personal_debts_counterparty_contact; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1674,10 +1789,45 @@ CREATE INDEX idx_personal_debts_counterparty_contact ON public.personal_debts US
 
 
 --
+-- Name: idx_personal_debts_paid_for_tx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_personal_debts_paid_for_tx ON public.personal_debts USING btree (paid_for_transaction_id) WHERE (paid_for_transaction_id IS NOT NULL);
+
+
+--
 -- Name: idx_personal_debts_project; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_personal_debts_project ON public.personal_debts USING btree (project_id) WHERE (project_id IS NOT NULL);
+
+
+--
+-- Name: idx_personal_debts_source_pt; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_personal_debts_source_pt ON public.personal_debts USING btree (source_project_transaction_id) WHERE (source_project_transaction_id IS NOT NULL);
+
+
+--
+-- Name: idx_personal_debts_source_tx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_personal_debts_source_tx ON public.personal_debts USING btree (source_transaction_id) WHERE (source_transaction_id IS NOT NULL);
+
+
+--
+-- Name: idx_personal_debts_split_tx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_personal_debts_split_tx ON public.personal_debts USING btree (split_transaction_id) WHERE (split_transaction_id IS NOT NULL);
+
+
+--
+-- Name: idx_personal_debts_unlinked_pt; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_personal_debts_unlinked_pt ON public.personal_debts USING btree (unlinked_project_transaction_id) WHERE (unlinked_project_transaction_id IS NOT NULL);
 
 
 --
@@ -1709,6 +1859,27 @@ CREATE INDEX idx_project_members_project ON public.project_members USING btree (
 
 
 --
+-- Name: idx_project_members_scope; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_project_members_scope ON public.project_members USING btree (scope_id, status);
+
+
+--
+-- Name: idx_project_members_split_tx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_project_members_split_tx ON public.project_members USING btree (split_transaction_id) WHERE (split_transaction_id IS NOT NULL);
+
+
+--
+-- Name: idx_project_members_split_tx_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_project_members_split_tx_user ON public.project_members USING btree (split_transaction_id, user_id) WHERE ((split_transaction_id IS NOT NULL) AND (user_id IS NOT NULL));
+
+
+--
 -- Name: idx_project_members_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1737,10 +1908,17 @@ CREATE INDEX idx_project_transaction_tags_tag ON public.project_transaction_tags
 
 
 --
--- Name: idx_project_transactions_owner; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_project_transactions_linked_tx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_project_transactions_owner ON public.project_transactions USING btree (owner_user_id);
+CREATE UNIQUE INDEX idx_project_transactions_linked_tx ON public.project_transactions USING btree (linked_transaction_id) WHERE (linked_transaction_id IS NOT NULL);
+
+
+--
+-- Name: idx_project_transactions_paid_back_for; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_project_transactions_paid_back_for ON public.project_transactions USING btree (paid_back_for_id) WHERE (paid_back_for_id IS NOT NULL);
 
 
 --
@@ -1751,6 +1929,20 @@ CREATE INDEX idx_project_transactions_project_updated ON public.project_transact
 
 
 --
+-- Name: idx_project_transactions_scope; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_project_transactions_scope ON public.project_transactions USING btree (scope_id);
+
+
+--
+-- Name: idx_project_tx_member; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_project_tx_member ON public.project_transactions USING btree (transaction_member_id);
+
+
+--
 -- Name: idx_project_tx_project; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1758,10 +1950,17 @@ CREATE INDEX idx_project_tx_project ON public.project_transactions USING btree (
 
 
 --
+-- Name: idx_project_tx_recorder; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_project_tx_recorder ON public.project_transactions USING btree (record_user_id);
+
+
+--
 -- Name: idx_projects_owner; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_projects_owner ON public.projects USING btree (owner_user_id, status);
+CREATE INDEX idx_projects_owner ON public.projects USING btree (owner_user_id, kind, status);
 
 
 --
@@ -1894,7 +2093,7 @@ CREATE INDEX idx_saving_goals_user ON public.saving_goals USING btree (user_id, 
 -- Name: idx_split_people_bill_member; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX idx_split_people_bill_member ON public.split_transaction_people USING btree (split_transaction_id, project_member_id) WHERE (project_member_id IS NOT NULL);
+CREATE UNIQUE INDEX idx_split_people_bill_member ON public.split_transaction_people USING btree (split_transaction_id, event_member_id) WHERE (event_member_id IS NOT NULL);
 
 
 --
@@ -1908,7 +2107,7 @@ CREATE UNIQUE INDEX idx_split_people_bill_user ON public.split_transaction_peopl
 -- Name: idx_split_people_member; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_split_people_member ON public.split_transaction_people USING btree (project_member_id) WHERE (project_member_id IS NOT NULL);
+CREATE INDEX idx_split_people_member ON public.split_transaction_people USING btree (event_member_id) WHERE (event_member_id IS NOT NULL);
 
 
 --
@@ -1982,10 +2181,10 @@ CREATE INDEX idx_transactions_category ON public.transactions USING btree (categ
 
 
 --
--- Name: idx_transactions_paper_person; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_transactions_project; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX idx_transactions_paper_person ON public.transactions USING btree (split_transaction_id, user_id) WHERE (split_transaction_id IS NOT NULL);
+CREATE INDEX idx_transactions_project ON public.transactions USING btree (project_id, date DESC) WHERE (project_id IS NOT NULL);
 
 
 --
@@ -1993,6 +2192,13 @@ CREATE UNIQUE INDEX idx_transactions_paper_person ON public.transactions USING b
 --
 
 CREATE UNIQUE INDEX idx_transactions_source_personal_debt ON public.transactions USING btree (source_personal_debt_id) WHERE (source_personal_debt_id IS NOT NULL);
+
+
+--
+-- Name: idx_transactions_source_pt; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_transactions_source_pt ON public.transactions USING btree (source_project_transaction_id) WHERE (source_project_transaction_id IS NOT NULL);
 
 
 --
@@ -2007,6 +2213,13 @@ CREATE INDEX idx_transactions_split_tx ON public.transactions USING btree (split
 --
 
 CREATE INDEX idx_transactions_transfer_group ON public.transactions USING btree (transfer_group_id) WHERE (transfer_group_id IS NOT NULL);
+
+
+--
+-- Name: idx_transactions_unlinked_pt; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_transactions_unlinked_pt ON public.transactions USING btree (unlinked_project_transaction_id) WHERE (unlinked_project_transaction_id IS NOT NULL);
 
 
 --
@@ -2073,10 +2286,38 @@ CREATE INDEX project_members_invited_user_idx ON public.project_members USING bt
 
 
 --
--- Name: split_person_contacts_contact_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: project_transactions_parent_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX split_person_contacts_contact_idx ON public.split_person_contacts USING btree (contact_id);
+CREATE INDEX project_transactions_parent_idx ON public.project_transactions USING btree (parent_project_transaction_id) WHERE (parent_project_transaction_id IS NOT NULL);
+
+
+--
+-- Name: personal_debt_bills links_debt_bills; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER links_debt_bills BEFORE INSERT OR UPDATE OF pt_id, member_id ON public.personal_debt_bills FOR EACH ROW EXECUTE FUNCTION public.trg_links_debt_bills();
+
+
+--
+-- Name: personal_debts links_debts; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER links_debts BEFORE INSERT OR UPDATE OF source_project_transaction_id, unlinked_project_transaction_id ON public.personal_debts FOR EACH ROW EXECUTE FUNCTION public.trg_links_debts();
+
+
+--
+-- Name: project_transactions links_origin; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER links_origin AFTER INSERT OR UPDATE OF linked_transaction_id ON public.project_transactions FOR EACH ROW EXECUTE FUNCTION public.trg_links_origin();
+
+
+--
+-- Name: transactions links_transactions; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER links_transactions BEFORE INSERT OR UPDATE OF source_project_transaction_id, unlinked_project_transaction_id, user_id ON public.transactions FOR EACH ROW EXECUTE FUNCTION public.trg_links_transactions();
 
 
 --
@@ -2090,7 +2331,7 @@ CREATE TRIGGER personal_debts_recurring_skip BEFORE DELETE ON public.personal_de
 -- Name: project_transactions project_transactions_locked; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER project_transactions_locked BEFORE INSERT OR DELETE OR UPDATE OF project_id, type, payback_kind, amount, date, description, note, split_mode ON public.project_transactions FOR EACH ROW EXECUTE FUNCTION public.project_transactions_locked_check();
+CREATE TRIGGER project_transactions_locked BEFORE INSERT OR UPDATE OF project_id, parent_project_transaction_id, transaction_member_id, type, amount, date, description, note ON public.project_transactions FOR EACH ROW EXECUTE FUNCTION public.project_transactions_locked_check();
 
 
 --
@@ -2175,13 +2416,6 @@ CREATE TRIGGER set_timestamp_personal_debts BEFORE UPDATE ON public.personal_deb
 --
 
 CREATE TRIGGER set_timestamp_project_members BEFORE UPDATE ON public.project_members FOR EACH ROW EXECUTE FUNCTION public.set_timestamp();
-
-
---
--- Name: project_my_defaults set_timestamp_project_my_defaults; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER set_timestamp_project_my_defaults BEFORE UPDATE ON public.project_my_defaults FOR EACH ROW EXECUTE FUNCTION public.set_timestamp();
 
 
 --
@@ -2293,7 +2527,7 @@ CREATE TRIGGER set_timestamp_users BEFORE UPDATE ON public.users FOR EACH ROW EX
 -- Name: split_transaction_people split_people_locked; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER split_people_locked BEFORE INSERT OR DELETE OR UPDATE OF share, paid, paid_back, project_member_id ON public.split_transaction_people FOR EACH ROW EXECUTE FUNCTION public.split_people_locked();
+CREATE TRIGGER split_people_locked BEFORE INSERT OR DELETE OR UPDATE OF share, paid, marked_at, event_member_id ON public.split_transaction_people FOR EACH ROW EXECUTE FUNCTION public.split_people_locked();
 
 
 --
@@ -2600,6 +2834,22 @@ ALTER TABLE ONLY public.personal_debt_bills
 
 
 --
+-- Name: personal_debt_bills personal_debt_bills_member_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.personal_debt_bills
+    ADD CONSTRAINT personal_debt_bills_member_id_fkey FOREIGN KEY (member_id) REFERENCES public.project_members(id) ON DELETE CASCADE;
+
+
+--
+-- Name: personal_debt_bills personal_debt_bills_pt_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.personal_debt_bills
+    ADD CONSTRAINT personal_debt_bills_pt_id_fkey FOREIGN KEY (pt_id) REFERENCES public.project_transactions(id) ON DELETE CASCADE;
+
+
+--
 -- Name: personal_debt_bills personal_debt_bills_split_person_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2656,11 +2906,59 @@ ALTER TABLE ONLY public.personal_debts
 
 
 --
+-- Name: personal_debts personal_debts_paid_for_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.personal_debts
+    ADD CONSTRAINT personal_debts_paid_for_transaction_id_fkey FOREIGN KEY (paid_for_transaction_id) REFERENCES public.transactions(id) ON DELETE CASCADE;
+
+
+--
 -- Name: personal_debts personal_debts_project_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.personal_debts
     ADD CONSTRAINT personal_debts_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE SET NULL;
+
+
+--
+-- Name: personal_debts personal_debts_source_project_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.personal_debts
+    ADD CONSTRAINT personal_debts_source_project_transaction_id_fkey FOREIGN KEY (source_project_transaction_id) REFERENCES public.project_transactions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: personal_debts personal_debts_source_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.personal_debts
+    ADD CONSTRAINT personal_debts_source_transaction_id_fkey FOREIGN KEY (source_transaction_id) REFERENCES public.transactions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: personal_debts personal_debts_split_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.personal_debts
+    ADD CONSTRAINT personal_debts_split_transaction_id_fkey FOREIGN KEY (split_transaction_id) REFERENCES public.project_transactions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: personal_debts personal_debts_unlinked_project_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.personal_debts
+    ADD CONSTRAINT personal_debts_unlinked_project_transaction_id_fkey FOREIGN KEY (unlinked_project_transaction_id) REFERENCES public.project_transactions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: personal_debts personal_debts_unlinked_split_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.personal_debts
+    ADD CONSTRAINT personal_debts_unlinked_split_transaction_id_fkey FOREIGN KEY (unlinked_split_transaction_id) REFERENCES public.project_transactions(id) ON DELETE SET NULL;
 
 
 --
@@ -2728,6 +3026,14 @@ ALTER TABLE ONLY public.project_members
 
 
 --
+-- Name: project_members project_members_split_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.project_members
+    ADD CONSTRAINT project_members_split_transaction_id_fkey FOREIGN KEY (split_transaction_id) REFERENCES public.project_transactions(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+
+
+--
 -- Name: project_members project_members_updated_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2741,38 +3047,6 @@ ALTER TABLE ONLY public.project_members
 
 ALTER TABLE ONLY public.project_members
     ADD CONSTRAINT project_members_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
-
-
---
--- Name: project_my_defaults project_my_defaults_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_my_defaults
-    ADD CONSTRAINT project_my_defaults_account_id_fkey FOREIGN KEY (account_id) REFERENCES public.accounts(id) ON DELETE SET NULL;
-
-
---
--- Name: project_my_defaults project_my_defaults_category_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_my_defaults
-    ADD CONSTRAINT project_my_defaults_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.categories(id) ON DELETE SET NULL;
-
-
---
--- Name: project_my_defaults project_my_defaults_project_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_my_defaults
-    ADD CONSTRAINT project_my_defaults_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE CASCADE;
-
-
---
--- Name: project_my_defaults project_my_defaults_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_my_defaults
-    ADD CONSTRAINT project_my_defaults_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -2824,11 +3098,27 @@ ALTER TABLE ONLY public.project_transactions
 
 
 --
--- Name: project_transactions project_transactions_owner_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: project_transactions project_transactions_linked_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.project_transactions
-    ADD CONSTRAINT project_transactions_owner_user_id_fkey FOREIGN KEY (owner_user_id) REFERENCES public.users(id);
+    ADD CONSTRAINT project_transactions_linked_transaction_id_fkey FOREIGN KEY (linked_transaction_id) REFERENCES public.transactions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: project_transactions project_transactions_paid_back_for_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.project_transactions
+    ADD CONSTRAINT project_transactions_paid_back_for_id_fkey FOREIGN KEY (paid_back_for_id) REFERENCES public.project_transactions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: project_transactions project_transactions_parent_project_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.project_transactions
+    ADD CONSTRAINT project_transactions_parent_project_transaction_id_fkey FOREIGN KEY (parent_project_transaction_id) REFERENCES public.project_transactions(id) ON DELETE CASCADE;
 
 
 --
@@ -2837,6 +3127,30 @@ ALTER TABLE ONLY public.project_transactions
 
 ALTER TABLE ONLY public.project_transactions
     ADD CONSTRAINT project_transactions_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE CASCADE;
+
+
+--
+-- Name: project_transactions project_transactions_record_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.project_transactions
+    ADD CONSTRAINT project_transactions_record_user_id_fkey FOREIGN KEY (record_user_id) REFERENCES public.users(id);
+
+
+--
+-- Name: project_transactions project_transactions_transaction_member_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.project_transactions
+    ADD CONSTRAINT project_transactions_transaction_member_id_fkey FOREIGN KEY (transaction_member_id) REFERENCES public.project_members(id);
+
+
+--
+-- Name: project_transactions project_transactions_unlinked_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.project_transactions
+    ADD CONSTRAINT project_transactions_unlinked_transaction_id_fkey FOREIGN KEY (unlinked_transaction_id) REFERENCES public.transactions(id) ON DELETE SET NULL;
 
 
 --
@@ -3032,43 +3346,11 @@ ALTER TABLE ONLY public.saving_goals
 
 
 --
--- Name: split_person_contacts split_person_contacts_contact_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.split_person_contacts
-    ADD CONSTRAINT split_person_contacts_contact_id_fkey FOREIGN KEY (contact_id) REFERENCES public.contacts(id) ON DELETE CASCADE;
-
-
---
--- Name: split_person_contacts split_person_contacts_split_person_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.split_person_contacts
-    ADD CONSTRAINT split_person_contacts_split_person_id_fkey FOREIGN KEY (split_person_id) REFERENCES public.split_transaction_people(id) ON DELETE CASCADE;
-
-
---
--- Name: split_person_contacts split_person_contacts_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.split_person_contacts
-    ADD CONSTRAINT split_person_contacts_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
--- Name: split_transaction_people split_transaction_people_paid_back_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: split_transaction_people split_transaction_people_event_member_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.split_transaction_people
-    ADD CONSTRAINT split_transaction_people_paid_back_by_user_id_fkey FOREIGN KEY (paid_back_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
-
-
---
--- Name: split_transaction_people split_transaction_people_project_member_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.split_transaction_people
-    ADD CONSTRAINT split_transaction_people_project_member_id_fkey FOREIGN KEY (project_member_id) REFERENCES public.project_members(id) ON DELETE SET NULL;
+    ADD CONSTRAINT split_transaction_people_event_member_id_fkey FOREIGN KEY (event_member_id) REFERENCES public.project_members(id) ON DELETE SET NULL;
 
 
 --
@@ -3184,11 +3466,27 @@ ALTER TABLE ONLY public.transactions
 
 
 --
+-- Name: transactions transactions_project_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transactions
+    ADD CONSTRAINT transactions_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE SET NULL;
+
+
+--
 -- Name: transactions transactions_source_personal_debt_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.transactions
     ADD CONSTRAINT transactions_source_personal_debt_id_fkey FOREIGN KEY (source_personal_debt_id) REFERENCES public.personal_debts(id) ON DELETE SET NULL;
+
+
+--
+-- Name: transactions transactions_source_project_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transactions
+    ADD CONSTRAINT transactions_source_project_transaction_id_fkey FOREIGN KEY (source_project_transaction_id) REFERENCES public.project_transactions(id) ON DELETE SET NULL;
 
 
 --
@@ -3205,6 +3503,22 @@ ALTER TABLE ONLY public.transactions
 
 ALTER TABLE ONLY public.transactions
     ADD CONSTRAINT transactions_split_transaction_id_fkey FOREIGN KEY (split_transaction_id) REFERENCES public.project_transactions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: transactions transactions_unlinked_project_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transactions
+    ADD CONSTRAINT transactions_unlinked_project_transaction_id_fkey FOREIGN KEY (unlinked_project_transaction_id) REFERENCES public.project_transactions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: transactions transactions_unlinked_split_transaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transactions
+    ADD CONSTRAINT transactions_unlinked_split_transaction_id_fkey FOREIGN KEY (unlinked_split_transaction_id) REFERENCES public.project_transactions(id) ON DELETE SET NULL;
 
 
 --
@@ -3323,10 +3637,11 @@ ALTER TABLE ONLY public.users
 -- PostgreSQL database dump complete
 --
 
+\unrestrict y9NirLr6KrQdSDdMzfOvuRdN89CH6I1sdWqKlcROsSfDkXiHQ9DQfvYCxLD44Ul
 
 
 -- static data
-INSERT INTO public.payment_providers (id, kind, scheme, code, name_th, name_en, short_name, color, created_at, updated_at) VALUES ('d2b411e2-870a-4c63-8eaf-63c4c705f2d9', 'bank', 'bot', '002', 'ธนาคารกรุงเทพ', 'Bangkok Bank', 'BBL', NULL, '2026-10-16 16:45:54.439976+00', '2026-10-24 18:12:50.570024+00');
-INSERT INTO public.payment_providers (id, kind, scheme, code, name_th, name_en, short_name, color, created_at, updated_at) VALUES ('eff9eae8-7a1d-4323-a7f6-0749ae968a8e', 'bank', 'bot', '004', 'ธนาคารกสิกรไทย', 'Kasikornbank', 'KBANK', NULL, '2026-10-16 16:45:54.439976+00', '2026-10-26 08:16:51.108514+00');
-INSERT INTO public.payment_providers (id, kind, scheme, code, name_th, name_en, short_name, color, created_at, updated_at) VALUES ('79efbcc0-f938-4115-b904-21ad31472d37', 'bank', 'bot', '006', 'ธนาคารกรุงไทย', 'Krungthai Bank', 'KTB', NULL, '2026-10-16 16:45:54.439976+00', '2026-10-31 07:43:01.811545+00');
-INSERT INTO public.payment_providers (id, kind, scheme, code, name_th, name_en, short_name, color, created_at, updated_at) VALUES ('171126d8-3133-4b4f-b2b0-3eac35f5dd74', 'bank', 'bot', '014', 'ธนาคารไทยพาณิชย์', 'Siam Commercial Bank', 'SCB', NULL, '2026-10-16 16:45:54.439976+00', '2026-10-31 08:08:18.482452+00');
+INSERT INTO public.payment_providers (id, kind, scheme, code, name_th, name_en, short_name, color, created_at, updated_at) VALUES ('44ab950e-b490-4318-8a2c-981ecfc4c7b2', 'bank', 'bot', '002', 'ธนาคารกรุงเทพ', 'Bangkok Bank', 'BBL', NULL, '2026-11-03 07:36:58.857651+00', '2026-11-03 07:36:58.857651+00');
+INSERT INTO public.payment_providers (id, kind, scheme, code, name_th, name_en, short_name, color, created_at, updated_at) VALUES ('76877b3d-f167-4381-aeb5-6a277246a187', 'bank', 'bot', '004', 'ธนาคารกสิกรไทย', 'Kasikornbank', 'KBANK', NULL, '2026-11-03 07:36:58.857651+00', '2026-11-03 07:36:58.857651+00');
+INSERT INTO public.payment_providers (id, kind, scheme, code, name_th, name_en, short_name, color, created_at, updated_at) VALUES ('86f61f62-d6c6-4632-abc7-33bb9b085023', 'bank', 'bot', '006', 'ธนาคารกรุงไทย', 'Krungthai Bank', 'KTB', NULL, '2026-11-03 07:36:58.857651+00', '2026-11-03 07:36:58.857651+00');
+INSERT INTO public.payment_providers (id, kind, scheme, code, name_th, name_en, short_name, color, created_at, updated_at) VALUES ('7faf5899-7520-4a53-8566-d762bca5ab72', 'bank', 'bot', '014', 'ธนาคารไทยพาณิชย์', 'Siam Commercial Bank', 'SCB', NULL, '2026-11-03 07:36:58.857651+00', '2026-11-03 07:36:58.857651+00');
