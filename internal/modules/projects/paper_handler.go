@@ -159,6 +159,10 @@ func (h *Handler) CreateEventBill(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
+	if req.NewEvent != nil {
+		response.Validation(c, "new_event is only for POST /split-bills", apierr.Field("new_event", apierr.FieldInvalid))
+		return
+	}
 	out, err := h.service.createPaper(c.Request.Context(), userID, &pid, req)
 	reply(c, http.StatusCreated, out, err)
 }

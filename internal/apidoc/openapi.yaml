@@ -6902,7 +6902,7 @@ components:
         auto_accept_event_invites: { type: boolean, description: '0.4.2-3 F2: an event invite (project_invite) links me at once; the notice (if not muted) comes already answered. Default false.' }
         auto_accept_contact_links: { type: boolean, description: '0.4.2-3 F2: the same for a contact link request. Default false.' }
         auto_accept_wallet_invites: { type: boolean, description: '0.4.2-3 F2: the same for a wallet invite. Default false.' }
-        auto_accept_repayments: { type: boolean, description: 'A partner''s "I paid you back" (debt_repaid) is written into my book at once (into my default wallet; ledger-only when there is none or it can't take it); off = the notice asks. Default off.' }
+        auto_accept_repayments: { type: boolean, description: 'A partner''s "I paid you back" (debt_repaid) is written into my book at once (into my default wallet; ledger-only when there is none or it can''t take it); off = the notice asks. Default off.' }
         on_split_removed: { type: string, enum: [ask, keep, delete], description: 'Taken off a paper (removed, or it was deleted): my books of it are kept as plain records, deleted, or I am asked (bill_removed). Default ask.' }
         default_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'The main wallet (กระเป๋าหลัก): quick create starts with it (getTransactionFormOptions `default_account_id`); null = the last wallet used. Same value as `/users/me` `default_account`.' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
@@ -6918,7 +6918,7 @@ components:
         auto_accept_event_invites: { type: boolean }
         auto_accept_contact_links: { type: boolean }
         auto_accept_wallet_invites: { type: boolean }
-        auto_accept_repayments: { type: [boolean, 'null'], description: 'A partner''s "I paid you back" (debt_repaid) is written into my book at once (into my default wallet; ledger-only when there is none or it can't take it); off = the notice asks. Default off.' }
+        auto_accept_repayments: { type: [boolean, 'null'], description: 'A partner''s "I paid you back" (debt_repaid) is written into my book at once (into my default wallet; ledger-only when there is none or it can''t take it); off = the notice asks. Default off.' }
         on_split_removed: { type: [string, 'null'], enum: [ask, keep, delete, null], description: 'Taken off a paper (removed, or it was deleted): my books of it are kept as plain records, deleted, or I am asked (bill_removed). Default ask.' }
         default_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'A key present with null clears it. '}
 
@@ -12061,6 +12061,15 @@ components:
       properties:
         paper: { $ref: '#/components/schemas/PaperInput' }
         my_books: { oneOf: [{ $ref: '#/components/schemas/ClaimInput' }, { type: 'null' }], description: 'My claim in the same call; omitted = my auto claim.' }
+        new_event:
+          description: 'POST /split-bills only (400 VALIDATION_ERROR on an event''s bills): make this event with the bill in one transaction; the bill becomes its first bill (an event bill) and its people become members (matched as on any event bill).'
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 100 }
+                icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
     UpdatePaperRequest:
       type: object
       required: [paper, version]

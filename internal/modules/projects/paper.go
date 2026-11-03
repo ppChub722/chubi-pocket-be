@@ -188,7 +188,13 @@ func (s *Service) createPaper(ctx context.Context, writer uuid.UUID, projectID *
 func (s *Service) CreatePaperTx(ctx context.Context, tx pgx.Tx, writer uuid.UUID, projectID *uuid.UUID, req CreatePaperRequest, eff *shared.Effects) (uuid.UUID, error) {
 	var event *Project
 	var err error
-	if projectID != nil {
+	if req.NewEvent != nil {
+		// A new event made with its first bill, in the same transaction.
+		if event, err = s.createTx(ctx, tx, writer, CreateProjectRequest{Name: req.NewEvent.Name, IconCode: req.NewEvent.IconCode}); err != nil {
+			return uuid.Nil, err
+		}
+		projectID = &event.ID
+	} else if projectID != nil {
 		if event, err = s.store.GetByID(ctx, *projectID); err != nil {
 			return uuid.Nil, err
 		}

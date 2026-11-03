@@ -264,6 +264,14 @@ type CreatePaperRequest struct {
 	Paper PaperInput `json:"paper" binding:"required"`
 	// MyBooks — the creator's claim (omitted = auto claim).
 	MyBooks *ClaimInput `json:"my_books"`
+	// NewEvent — POST /split-bills only: make this event with the bill (one
+	// transaction); the bill is its first bill, its people become members.
+	NewEvent *NewEventInput `json:"new_event"`
+}
+
+type NewEventInput struct {
+	Name     string           `json:"name"      binding:"required,min=1,max=100"`
+	IconCode *shared.IconCode `json:"icon_code" binding:"omitempty"`
 }
 
 type UpdatePaperRequest struct {

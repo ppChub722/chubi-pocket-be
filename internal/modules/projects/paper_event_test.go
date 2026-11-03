@@ -142,3 +142,37 @@ func TestMergeMember(t *testing.T) {
 		t.Errorf("after merge: %v", arr(view, "people"))
 	}
 }
+
+// A split-bill create with new_event makes the event and its first bill in one go: its people become
+// members; on an event's own bills new_event is refused.
+func TestNewEventWithBill(t *testing.T) {
+	f := newFx(t)
+	A := f.as(f.a)
+	created := A.do("POST", "/split-bills", map[string]any{
+		"new_event": map[string]any{"name": "Khao Yai"},
+		"paper": map[string]any{
+			"type": "expense", "amount": 300, "date": "2026-11-01", "split_mode": "equal",
+			"people": []any{
+				map[string]any{"me": true, "paid": 300},
+				map[string]any{"person_name": "Dee"},
+			}},
+		"my_books": map[string]any{"account_id": f.walletA}}, "createSplitBill", 201)
+	ev := str(obj(created, "paper"), "project_id")
+	if ev == "" {
+		t.Fatalf("no event on the bill: %v", obj(created, "paper"))
+	}
+	names := map[string]bool{}
+	for _, m := range arr(A.do("GET", "/projects/"+ev+"/members", nil, "listProjectMembers", 200), "data") {
+		names[str(obj(m), "name")] = true
+	}
+	if !names["Dee"] || len(names) != 2 {
+		t.Errorf("members: %v", names)
+	}
+	if l := arr(A.do("GET", "/projects/"+ev+"/bills", nil, "listEventBills", 200), "data"); len(l) != 1 {
+		t.Errorf("board: %d bills", len(l))
+	}
+	A.fail("POST", "/projects/"+ev+"/bills", map[string]any{
+		"new_event": map[string]any{"name": "Again"},
+		"paper": map[string]any{"type": "expense", "amount": 10, "date": "2026-11-01",
+			"people": []any{map[string]any{"me": true, "paid": 10, "share": 10}}}}, 400, "VALIDATION_ERROR")
+}
