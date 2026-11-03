@@ -12,6 +12,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -379,7 +380,9 @@ func (s *Service) AddMember(ctx context.Context, callerUserID, projectID uuid.UU
 	case req.Email != nil && req.DisplayName != nil:
 		_, err = s.addMemberByEmailTx(ctx, tx, projectID, callerUserID, *req.DisplayName, *req.Email, role, req.IconCode)
 	case req.ContactID != nil:
+		// Added as my contact; an app user is invited with POST …/invite.
 		m := newMatcher(s, tx, p, callerUserID)
+		m.noInvite = true
 		if err = m.load(ctx); err == nil {
 			_, err = m.forContact(ctx, *req.ContactID)
 		}
@@ -395,6 +398,67 @@ func (s *Service) AddMember(ctx context.Context, callerUserID, projectID uuid.UU
 	}
 	if err != nil {
 		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return s.patch(ctx, callerUserID, projectID)
+}
+
+// InviteMember — the owner invites a member who is one of their contacts using the app (or sends a
+// waiting invite again). A member who joined already: nothing to do.
+func (s *Service) InviteMember(ctx context.Context, callerUserID, projectID, memberID uuid.UUID) (*EventPatch, error) {
+	p, err := s.store.GetByID(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if p.OwnerUserID != callerUserID {
+		return nil, ErrNotOwner
+	}
+	if err := s.store.AssertWritable(ctx, projectID, "member_crud"); err != nil {
+		return nil, err
+	}
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var user, invited, contactUser *uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT pm.user_id, pm.invited_user_id, c.linked_user_id
+		FROM project_members pm
+		LEFT JOIN project_member_contacts pmc ON pmc.project_member_id = pm.id AND pmc.user_id = $3
+		LEFT JOIN contacts c ON c.id = pmc.contact_id
+		WHERE pm.id = $1 AND pm.project_id = $2 AND pm.status <> 'left'`, memberID, projectID, callerUserID).
+		Scan(&user, &invited, &contactUser)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrMemberNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("member: %w", err)
+	}
+	if user == nil {
+		target := invited
+		if target == nil {
+			target = contactUser
+		}
+		if target == nil || *target == callerUserID {
+			return nil, apierr.Invalid("this member is not one of your contacts using the app", "member_id", apierr.FieldInvalid)
+		}
+		m := newMatcher(s, tx, p, callerUserID)
+		accepted := m.autoAcceptsInvite(ctx, *target)
+		if _, err := tx.Exec(ctx, `UPDATE project_members SET invited_user_id = $2, invited_at = now() WHERE id = $1`,
+			memberID, *target); err != nil {
+			return nil, fmt.Errorf("invite: %w", err)
+		}
+		if accepted {
+			if _, err := s.store.LinkMemberToUserTx(ctx, tx, memberID, *target); err != nil {
+				return nil, err
+			}
+		}
+		m.invites = []pendingInvite{{userID: *target, memberID: memberID, accepted: accepted}}
+		if err := m.dispatchInvites(ctx); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)

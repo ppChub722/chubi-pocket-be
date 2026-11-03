@@ -19,7 +19,7 @@ var ErrContactNotFound = errors.New("contact not found")
 // (project_member_contacts). Never by name. viewer is a SQL parameter ("$2"); the caller adds ON.
 func myContactJoin(viewer string) string {
 	return `LEFT JOIN LATERAL (
-		SELECT c.id, c.display_name FROM contacts c
+		SELECT c.id, c.display_name, c.linked_user_id FROM contacts c
 		LEFT JOIN project_member_contacts pmc ON pmc.project_member_id = pm.id AND pmc.user_id = ` + viewer + `
 		WHERE c.user_id = ` + viewer + ` AND (
 		      c.linked_user_id = COALESCE(pm.user_id, pm.invited_user_id)

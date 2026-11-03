@@ -338,6 +338,21 @@ func (h *Handler) MergeMember(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
+// InviteMember — POST /projects/:id/members/:member_id/invite: invite (or invite again) a member
+// who is one of my contacts using the app.
+func (h *Handler) InviteMember(c *gin.Context) {
+	userID, id, ok := h.bindProjectID(c)
+	if !ok {
+		return
+	}
+	memberID, ok := pathID(c, "member_id", "member id")
+	if !ok {
+		return
+	}
+	out, err := h.service.InviteMember(c.Request.Context(), userID, id, memberID)
+	reply(c, http.StatusOK, out, err)
+}
+
 // SetMyDefaults — PUT /projects/:id/my-defaults {category_id, account_id}.
 func (h *Handler) SetMyDefaults(c *gin.Context) {
 	userID, id, ok := h.bindProjectID(c)

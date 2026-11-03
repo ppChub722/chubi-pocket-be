@@ -124,7 +124,11 @@ type EventMember struct {
 	Linked bool          `json:"linked"`
 	// ContactID — MY contact for this member (bound by me, or my contact linked to that user).
 	ContactID *uuid.UUID `json:"contact_id"`
-	Role      string     `json:"role"`
+	// ContactLinked — that contact of mine uses the app (it can be invited).
+	ContactLinked bool `json:"contact_linked"`
+	// Invited — invited and not joined yet (the invite can be sent again).
+	Invited bool   `json:"invited"`
+	Role    string `json:"role"`
 	Status    string     `json:"status"`
 	InvitedAt *time.Time `json:"invited_at"`
 	JoinedAt  *time.Time `json:"joined_at"`

@@ -15,7 +15,41 @@ func (f *fx) eventWithBee(A client) (string, map[string]string) {
 	for _, m := range arr(A.do("GET", "/projects/"+ev+"/members", nil, "listProjectMembers", 200), "data") {
 		ids[str(obj(m), "name")] = str(obj(m), "id")
 	}
+	// Adding a contact doesn't invite: the owner does.
+	A.do("POST", "/projects/"+ev+"/members/"+ids["Bee"]+"/invite", nil, "inviteEventMember", 200)
 	return ev, ids
+}
+
+// A contact who uses the app is added as a contact only (no invite); the owner invites them, and
+// may send a waiting invite again.
+func TestMemberInviteIsExplicit(t *testing.T) {
+	f := newFx(t)
+	A := f.as(f.a)
+	ev := str(obj(A.do("POST", "/projects", map[string]any{"name": "Party"}, "createProject", 201), "event"), "id")
+	A.do("POST", "/projects/"+ev+"/members", map[string]any{"contact_id": f.contactB}, "addProjectMember", 201)
+	var bee map[string]any
+	for _, m := range arr(A.do("GET", "/projects/"+ev+"/members", nil, "listProjectMembers", 200), "data") {
+		if !obj(m)["is_me"].(bool) {
+			bee = obj(m)
+		}
+	}
+	if bee == nil || bee["contact_linked"] != true || bee["invited"] != false || bee["user_id"] != nil {
+		t.Fatalf("added contact: %v", bee)
+	}
+	if n := f.notices(f.b, "project_invite"); n != 0 {
+		t.Fatalf("adding sent %d invites", n)
+	}
+	mid := str(bee, "id")
+	A.do("POST", "/projects/"+ev+"/members/"+mid+"/invite", nil, "inviteEventMember", 200)
+	for _, m := range arr(A.do("GET", "/projects/"+ev+"/members", nil, "listProjectMembers", 200), "data") {
+		if str(obj(m), "id") == mid && obj(m)["invited"] != true {
+			t.Errorf("after invite: %v", obj(m))
+		}
+	}
+	A.do("POST", "/projects/"+ev+"/members/"+mid+"/invite", nil, "inviteEventMember", 200)
+	if n := f.notices(f.b, "project_invite"); n < 1 {
+		t.Errorf("project_invite notices: %d", n)
+	}
 }
 
 // Event bills: Bee's auto claim books her share with her event defaults and no debt (events settle

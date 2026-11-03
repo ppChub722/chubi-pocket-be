@@ -481,6 +481,7 @@ func main() {
 			protected.PUT("/projects/:id/members/:member_id", projectsHandler.UpdateMember)
 			protected.DELETE("/projects/:id/members/:member_id", projectsHandler.RemoveMember)
 			protected.POST("/projects/:id/members/:member_id/merge", projectsHandler.MergeMember)
+			protected.POST("/projects/:id/members/:member_id/invite", projectsHandler.InviteMember)
 			protected.PUT("/projects/:id/members/:member_id/my-contact", projectsHandler.BindMyContact)
 			protected.DELETE("/projects/:id/members/:member_id/my-contact", projectsHandler.UnbindMyContact)
 			protected.POST("/projects/:id/transfer-ownership", projectsHandler.TransferOwnership)

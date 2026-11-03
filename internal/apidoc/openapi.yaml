@@ -5840,6 +5840,26 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: 'MERGE_TWO_USERS, EVENT_COMPLETED.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /projects/{id}/members/{member_id}/invite:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+      - { name: member_id, in: path, required: true, schema: { $ref: '#/components/schemas/Uuid' } }
+    post:
+      tags: [Events]
+      summary: Invite a member, or invite again (owner)
+      operationId: inviteEventMember
+      description: 'A member who is one of my contacts using the app gets the event invite (their auto-accept switch may join them at once); a waiting invite is sent again. A member who joined: nothing changes. Adding a contact (POST members {contact_id}) never invites by itself (owner 2026-11-03).'
+      responses:
+        '200':
+          description: The event patch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventPatch' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: 'EVENT_COMPLETED, PROJECT_LOCKED.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   /transactions/{id}/paper-sync:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
@@ -11116,7 +11136,7 @@ components:
     EventMember:
       type: object
       x-breaking: '0.4.2 1b: icon_code → avatar.'
-      required: [id, user_id, name, avatar, is_me, linked, contact_id, role, status, invited_at, joined_at, left_at, removed_at]
+      required: [id, user_id, name, avatar, is_me, linked, contact_id, contact_linked, invited, role, status, invited_at, joined_at, left_at, removed_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         user_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The linked user (an app account), else null.' }
@@ -11125,6 +11145,8 @@ components:
         is_me: { type: boolean }
         linked: { type: boolean, description: 'An app user (user_id set).' }
         contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.0-3: MY contact for this member (linked member → my contact linked to that user; typed member → my contact with the same name, case-insensitive). Lets the bill form tell a picked contact that is already a member from a new person (ใหม่ · เพิ่มเข้าอีเวนต์). Null when none (and on my own row).' }
+        contact_linked: { type: boolean, description: 'That contact of mine uses the app: the owner can invite them (POST …/invite).' }
+        invited: { type: boolean, description: 'Invited and not joined yet (the invite can be sent again).' }
         role: { type: string, enum: [owner, contributor, viewer] }
         status: { type: string, enum: [pending, active, left] }
         invited_at: { oneOf: [{ $ref: '#/components/schemas/DateTime' }, { type: 'null' }] }

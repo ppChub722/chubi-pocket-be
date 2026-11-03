@@ -196,6 +196,7 @@ func (f *fx) engine(as uuid.UUID) http.Handler {
 		g.GET("/projects/:id/members", h.ListMembers)
 		g.POST("/projects/:id/members", h.AddMember)
 		g.POST("/projects/:id/members/:member_id/merge", h.MergeMember)
+		g.POST("/projects/:id/members/:member_id/invite", h.InviteMember)
 		g.GET("/projects/:id/settle", h.Settle)
 		g.POST("/projects/:id/settle/book", h.BookSettle)
 		g.PUT("/projects/:id/my-defaults", h.SetMyDefaults)

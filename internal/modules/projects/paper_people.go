@@ -46,6 +46,9 @@ type matcher struct {
 	byBound map[uuid.UUID]uuid.UUID // writer's contact → member
 	byName  map[string]uuid.UUID    // NFC name → name-only member
 	invites []pendingInvite
+	// noInvite — a contact who uses the app is added as their contact only;
+	// the owner invites them later (the members page, owner 2026-11-03).
+	noInvite bool
 }
 
 type pendingInvite struct {
@@ -143,15 +146,24 @@ func (m *matcher) forContact(ctx context.Context, contactID uuid.UUID) (uuid.UUI
 	if err != nil {
 		return uuid.Nil, err
 	}
-	if linked != nil {
-		id, err := m.forUser(ctx, *linked, name)
-		if err != nil {
-			return uuid.Nil, err
-		}
-		return id, bindContactTx(ctx, m.tx, id, m.writer, contactID)
-	}
+	// Already a member through this contact (maybe added and not invited yet).
 	if id, ok := m.byBound[contactID]; ok {
 		return id, nil
+	}
+	if linked != nil {
+		id, ok := m.byUser[*linked]
+		if !ok {
+			id, ok = m.invited[*linked]
+		}
+		if !ok && !m.noInvite {
+			if id, err = m.forUser(ctx, *linked, name); err != nil {
+				return uuid.Nil, err
+			}
+			ok = true
+		}
+		if ok {
+			return id, bindContactTx(ctx, m.tx, id, m.writer, contactID)
+		}
 	}
 	mem, err := m.insert(ctx, nil, name)
 	if err != nil {
