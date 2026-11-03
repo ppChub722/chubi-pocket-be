@@ -164,9 +164,10 @@ type BookPlan struct {
 }
 
 // PlanFor — my books for this paper. payDebt = the claim took the debt branch (I owe the payers
-// rather than having settled from my wallet). Event bills never get debts here: an event settles
-// as a lump (one debt per person, made from the summary).
-func (p Paper) PlanFor(me uuid.UUID, payDebt bool) (BookPlan, bool) {
+// rather than having settled from my wallet). An event bill gets debts only when eventDebts (the
+// claim asked for this bill's debts now); otherwise the event settles as a lump from the summary,
+// which skips the pairs already booked.
+func (p Paper) PlanFor(me uuid.UUID, payDebt, eventDebts bool) (BookPlan, bool) {
 	person := p.Person(me)
 	if person == nil {
 		return BookPlan{}, false
@@ -205,12 +206,13 @@ func (p Paper) PlanFor(me uuid.UUID, payDebt bool) (BookPlan, bool) {
 		plan.Amount, plan.UseWallet = round2(person.Paid), true
 	case person.Paid > paperEps:
 		plan.Amount, plan.UseWallet = round2(person.Paid+owe), true
-	case event || payDebt:
+	case payDebt:
 		plan.Amount = round2(person.Share)
 	default:
+		// Settled from my wallet ("คืน X แล้ว"), a split or an event bill.
 		plan.Amount, plan.UseWallet = round2(person.Share), true
 	}
-	if !event {
+	if !event || eventDebts {
 		for _, id := range ids {
 			v := net[id]
 			if v > 0 && !payDebt {
@@ -374,7 +376,7 @@ func (p Paper) TxInSync(userID uuid.UUID, amount float64, myShare *float64, date
 		share = *myShare
 	}
 	for _, payDebt := range []bool{true, false} {
-		plan, ok := p.PlanFor(person.ID, payDebt)
+		plan, ok := p.PlanFor(person.ID, payDebt, false)
 		if ok && plan.Tx && math.Abs(plan.Amount-amount) < paperEps && math.Abs(plan.MyShare-share) < paperEps {
 			return true
 		}

@@ -12055,12 +12055,14 @@ components:
         category_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         tag_ids: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
         private_note: { type: [string, 'null'], maxLength: 500 }
+        book_debts: { type: boolean, description: 'Event bills: my debts of this bill now (one per pair, a lump of one bill); the event''s lump skips these pairs. Default false (the lump from the summary). Split bills always book their debts.' }
     CreatePaperRequest:
       type: object
       required: [paper]
       properties:
         paper: { $ref: '#/components/schemas/PaperInput' }
         my_books: { oneOf: [{ $ref: '#/components/schemas/ClaimInput' }, { type: 'null' }], description: 'My claim in the same call; omitted = my auto claim.' }
+        skip_my_books: { type: boolean, description: 'The paper only: nothing goes in my books now (claim later). Default false.' }
         new_event:
           description: 'POST /split-bills only (400 VALIDATION_ERROR on an event''s bills): make this event with the bill in one transaction; the bill becomes its first bill (an event bill) and its people become members (matched as on any event bill).'
           oneOf:

@@ -546,7 +546,7 @@ func valueOr(id *uuid.UUID) uuid.UUID {
 // with nothing booked (a pair I owe counts only when my books took the debt branch or hold nothing).
 func missingBooks(p shared.Paper, me uuid.UUID, hasTx bool, parts []personal_debts.PaperPart) []string {
 	out := []string{}
-	planTx, ok := p.PlanFor(me, true)
+	planTx, ok := p.PlanFor(me, true, false)
 	if !ok {
 		return out
 	}

@@ -258,12 +258,17 @@ type ClaimInput struct {
 	CategoryID  *uuid.UUID  `json:"category_id"`
 	TagIDs      []uuid.UUID `json:"tag_ids"`
 	PrivateNote *string     `json:"private_note" binding:"omitempty,max=500"`
+	// BookDebts — an event bill: my debts of this bill now (a lump of one bill; the event's
+	// lump skips these pairs). A split bill always books its debts.
+	BookDebts bool `json:"book_debts"`
 }
 
 type CreatePaperRequest struct {
 	Paper PaperInput `json:"paper" binding:"required"`
 	// MyBooks — the creator's claim (omitted = auto claim).
 	MyBooks *ClaimInput `json:"my_books"`
+	// SkipMyBooks — the paper only; I claim it later.
+	SkipMyBooks bool `json:"skip_my_books"`
 	// NewEvent — POST /split-bills only: make this event with the bill (one
 	// transaction); the bill is its first bill, its people become members.
 	NewEvent *NewEventInput `json:"new_event"`

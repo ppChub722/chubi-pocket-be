@@ -229,7 +229,7 @@ func (s *Service) CreatePaperTx(ctx context.Context, tx pgx.Tx, writer uuid.UUID
 	if err != nil {
 		return uuid.Nil, err
 	}
-	if paper.PersonOfUser(writer) != nil {
+	if paper.PersonOfUser(writer) != nil && !req.SkipMyBooks {
 		claim := ClaimInput{Pay: "debt"}
 		if req.MyBooks != nil {
 			claim = *req.MyBooks
@@ -405,7 +405,7 @@ func (s *Service) claimTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, pape
 		return 0, ErrNotOnPaper
 	}
 	payDebt := in.Pay != "wallet"
-	plan, ok := paper.PlanFor(me.ID, payDebt)
+	plan, ok := paper.PlanFor(me.ID, payDebt, in.BookDebts)
 	if !ok {
 		return 0, ErrNothingToClaim
 	}
@@ -481,8 +481,8 @@ func (s *Service) claimTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, pape
 		}
 		e, err := s.debts.CreatePaperDebtTx(ctx, tx, userID, personal_debts.PaperDebtInput{
 			IOwe: d.IOwe, ContactID: other.Person.ContactID, PersonName: other.Person.Name, Date: paper.Date,
-			Description: paper.Description,
-			Parts:       []personal_debts.PaperPart{{PaperID: paper.ID, PersonID: d.PersonID, TransactionID: txID, Amount: d.Amount}},
+			Description: paper.Description, ProjectID: paper.ProjectID,
+			Parts: []personal_debts.PaperPart{{PaperID: paper.ID, PersonID: d.PersonID, TransactionID: txID, Amount: d.Amount}},
 		})
 		if err != nil {
 			return 0, err
@@ -604,7 +604,7 @@ func (s *Service) syncBooksTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, 
 		for _, p := range parts {
 			payDebt = payDebt || paper.NetOf(me.ID)[p.PersonID] > 0
 		}
-		if plan, ok := paper.PlanFor(me.ID, payDebt); ok && plan.Tx {
+		if plan, ok := paper.PlanFor(me.ID, payDebt, false); ok && plan.Tx {
 			var myShare *float64
 			if math.Abs(plan.MyShare-plan.Amount) >= 0.005 {
 				v := plan.MyShare

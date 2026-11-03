@@ -176,3 +176,42 @@ func TestNewEventWithBill(t *testing.T) {
 		"paper": map[string]any{"type": "expense", "amount": 10, "date": "2026-11-01",
 			"people": []any{map[string]any{"me": true, "paid": 10, "share": 10}}}}, 400, "VALIDATION_ERROR")
 }
+
+// An event bill can book my debts of it at once (book_debts): the summary's lump then skips those
+// pairs. skip_my_books makes the paper only.
+func TestEventBillDebtsNowAndSkip(t *testing.T) {
+	f := newFx(t)
+	A := f.as(f.a)
+	ev, mem := f.eventWithBee(A)
+	A.do("POST", "/projects/"+ev+"/bills", map[string]any{"paper": map[string]any{
+		"type": "expense", "amount": 300, "date": "2026-11-01", "split_mode": "equal",
+		"people": []any{
+			map[string]any{"me": true, "paid": 300},
+			map[string]any{"member_id": mem["Bee"]},
+			map[string]any{"member_id": mem["Dee"]},
+		}}, "my_books": map[string]any{"account_id": f.walletA, "book_debts": true}}, "createEventBill", 201)
+	if v := f.personNet(f.a, "Bee"); !near(v, 100) {
+		t.Errorf("A's debt with Bee: %v, want 100", v)
+	}
+	if v := f.personNet(f.a, "Dee"); !near(v, 100) {
+		t.Errorf("A's debt with Dee: %v, want 100", v)
+	}
+	for _, l := range arr(A.do("GET", "/projects/"+ev+"/settle", nil, "getProjectSettle", 200), "pairs") {
+		if line := obj(l); !near(num(line, "unbooked"), 0) {
+			t.Errorf("a booked pair still unbooked: %v", line)
+		}
+	}
+	A.fail("POST", "/projects/"+ev+"/settle/book", map[string]any{"mode": "pairs", "with": mem["Bee"]}, 422, "SETTLE_NOTHING")
+
+	before := f.count(`SELECT COUNT(*) FROM transactions WHERE user_id = $1`, f.a)
+	created := A.do("POST", "/projects/"+ev+"/bills", map[string]any{"skip_my_books": true, "paper": map[string]any{
+		"type": "expense", "amount": 90, "date": "2026-11-02", "split_mode": "equal",
+		"people": []any{map[string]any{"me": true, "paid": 90}, map[string]any{"member_id": mem["Dee"]}}}},
+		"createEventBill", 201)
+	if f.count(`SELECT COUNT(*) FROM transactions WHERE user_id = $1`, f.a) != before {
+		t.Errorf("skip_my_books still booked a transaction")
+	}
+	if b := obj(created, "paper", "my_books"); b["claimed"] != false {
+		t.Errorf("my books after skip: %v", b)
+	}
+}
