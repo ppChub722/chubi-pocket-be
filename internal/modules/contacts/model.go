@@ -65,7 +65,7 @@ type UpdateContactRequest struct {
 	DisplayName  *string          `json:"display_name" binding:"omitempty,min=1,max=100"`
 	Nickname     *string          `json:"nickname"     binding:"omitempty,max=100"`
 	ShowNickname *bool            `json:"show_nickname"`
-	Email        *string          `json:"email"        binding:"omitempty,email,max=255"`
+	Email        *string          `json:"email"        binding:"omitempty,optemail,max=255"`
 	Phone        *string          `json:"phone"        binding:"omitempty,max=50"`
 	Description  *string          `json:"description"  binding:"omitempty,max=200"`
 	Note         *string          `json:"note"         binding:"omitempty,max=500"`

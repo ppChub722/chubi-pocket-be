@@ -247,7 +247,11 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCont
 		q += fmt.Sprintf(", show_nickname = $%d", len(args))
 	}
 	if req.Email != nil {
-		args = append(args, *req.Email)
+		var email *string
+		if e := strings.TrimSpace(*req.Email); e != "" {
+			email = &e
+		}
+		args = append(args, email)
 		q += fmt.Sprintf(", email = $%d", len(args))
 	}
 	if req.Phone != nil {

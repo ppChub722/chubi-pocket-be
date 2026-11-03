@@ -130,6 +130,8 @@ func fromValidator(fe validator.FieldError) FieldError {
 		return Field(field, FieldInvalid, "len", param)
 	case "datetime":
 		return Field(field, FieldInvalid, "format", fe.Param())
+	case "optemail":
+		return Field(field, FieldInvalid, "format", "email")
 	default: // email, url, uuid, alpha, ...
 		return Field(field, FieldInvalid, "format", fe.Tag())
 	}

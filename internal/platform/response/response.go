@@ -28,9 +28,16 @@ type APIError struct {
 	Details interface{} `json:"details,omitempty"`
 }
 
+var emailCheck = validator.New()
+
 // The gin validator names fields by their JSON tag, so FieldError paths are request-body paths.
+// `optemail`: an email, or "" (a pointer to "" is not skipped by omitempty).
 func init() {
 	if v, ok := binding.Validator.Engine().(*validator.Validate); ok {
+		_ = v.RegisterValidation("optemail", func(fl validator.FieldLevel) bool {
+			s := fl.Field().String()
+			return s == "" || emailCheck.Var(s, "email") == nil
+		})
 		v.RegisterTagNameFunc(func(f reflect.StructField) string {
 			name := strings.SplitN(f.Tag.Get("json"), ",", 2)[0]
 			switch name {
