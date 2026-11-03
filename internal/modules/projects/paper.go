@@ -234,7 +234,9 @@ func (s *Service) CreatePaperTx(ctx context.Context, tx pgx.Tx, writer uuid.UUID
 		if req.MyBooks != nil {
 			claim = *req.MyBooks
 		}
-		if _, err := s.claimTx(ctx, tx, writer, paper, event, claim, req.MyBooks == nil, eff); err != nil {
+		// Debts only, and none fall to me: the paper alone is fine.
+		if _, err := s.claimTx(ctx, tx, writer, paper, event, claim, req.MyBooks == nil, eff); err != nil &&
+			!(claim.SkipTransaction && errors.Is(err, ErrNothingToClaim)) {
 			return uuid.Nil, err
 		}
 	}
@@ -433,7 +435,7 @@ func (s *Service) claimTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, pape
 	if have != nil {
 		txID = &have.ID
 	}
-	if plan.Tx && have == nil {
+	if plan.Tx && have == nil && !in.SkipTransaction {
 		var account *uuid.UUID
 		if plan.UseWallet {
 			account = in.AccountID

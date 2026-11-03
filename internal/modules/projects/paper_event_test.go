@@ -214,4 +214,16 @@ func TestEventBillDebtsNowAndSkip(t *testing.T) {
 	if b := obj(created, "paper", "my_books"); b["claimed"] != false {
 		t.Errorf("my books after skip: %v", b)
 	}
+
+	// Debts only: no transaction, Dee owes me her share of this bill.
+	A.do("POST", "/projects/"+ev+"/bills", map[string]any{"paper": map[string]any{
+		"type": "expense", "amount": 40, "date": "2026-11-03", "split_mode": "equal",
+		"people": []any{map[string]any{"me": true, "paid": 40}, map[string]any{"member_id": mem["Dee"]}}},
+		"my_books": map[string]any{"skip_transaction": true, "book_debts": true}}, "createEventBill", 201)
+	if f.count(`SELECT COUNT(*) FROM transactions WHERE user_id = $1`, f.a) != before {
+		t.Errorf("skip_transaction still booked a transaction")
+	}
+	if v := f.personNet(f.a, "Dee"); !near(v, 120) {
+		t.Errorf("A's debts with Dee: %v, want 120 (100 + 20)", v)
+	}
 }

@@ -12056,6 +12056,7 @@ components:
         tag_ids: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
         private_note: { type: [string, 'null'], maxLength: 500 }
         book_debts: { type: boolean, description: 'Event bills: my debts of this bill now (one per pair, a lump of one bill); the event''s lump skips these pairs. Default false (the lump from the summary). Split bills always book their debts.' }
+        skip_transaction: { type: boolean, description: 'No transaction now, only the debts (claim later adds it). Default false.' }
     CreatePaperRequest:
       type: object
       required: [paper]

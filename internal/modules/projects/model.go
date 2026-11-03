@@ -261,6 +261,8 @@ type ClaimInput struct {
 	// BookDebts — an event bill: my debts of this bill now (a lump of one bill; the event's
 	// lump skips these pairs). A split bill always books its debts.
 	BookDebts bool `json:"book_debts"`
+	// SkipTransaction — no transaction now, only the debts (claim it later).
+	SkipTransaction bool `json:"skip_transaction"`
 }
 
 type CreatePaperRequest struct {
