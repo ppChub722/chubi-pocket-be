@@ -36,6 +36,8 @@ const (
 	labelToday    = "วันนี้"
 	labelYday     = "เมื่อวาน"
 	labelNone     = "ไม่ระบุ"
+	labelCategory = "หมวด: "
+	labelWallet   = "กระเป๋า: "
 	sep           = " | "
 )
 

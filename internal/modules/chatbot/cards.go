@@ -127,13 +127,13 @@ func cardText(c Card, lists Lists, today time.Time) string {
 		}
 		b.WriteString("\n" + num + title)
 		if it.Type == "transfer" {
-			b.WriteString("\n" + indent + emojiWallet + " " + walletName(lists, it.AccountID) + " → " +
+			b.WriteString("\n" + indent + labelWallet + emojiWallet + " " + walletName(lists, it.AccountID) + " → " +
 				walletName(lists, it.TransferToID))
 			continue
 		}
-		b.WriteString("\n" + indent + categoryLine(lists, it.CategoryID))
+		b.WriteString("\n" + indent + labelCategory + categoryLine(lists, it.CategoryID))
 		if !oneWallet {
-			b.WriteString("\n" + indent + emojiWallet + " " + walletName(lists, it.AccountID))
+			b.WriteString("\n" + indent + labelWallet + emojiWallet + " " + walletName(lists, it.AccountID))
 		}
 	}
 	return b.String()

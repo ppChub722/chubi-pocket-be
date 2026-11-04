@@ -199,7 +199,7 @@ func TestBotCardFlow(t *testing.T) {
 
 	b.Text(ctx, user, text(1, "normal tx", 0))
 	card := s.last()
-	if card.kind != "card" || card.text != "🧾 1 รายการ | วันนี้\nnormal -฿60\n🏷️ อาหาร\n👛 กสิกร" || len(card.buttons) != 2 {
+	if card.kind != "card" || card.text != "🧾 1 รายการ | วันนี้\nnormal -฿60\nหมวด: 🏷️ อาหาร\nกระเป๋า: 👛 กสิกร" || len(card.buttons) != 2 {
 		t.Fatalf("card = %+v", card)
 	}
 
