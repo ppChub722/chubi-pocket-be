@@ -19,6 +19,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/apidoc"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/accounts"
@@ -187,11 +188,13 @@ func main() {
 
 	accountsService.WithNotificationService(notificationsService)
 
-	// Auth registration hooks: seed 6 system + starter user categories AND the user's notification
-	// settings row, atomic with the user insert.
+	// Auth registration hooks: seed system + starter user categories (starter names in the sign-up
+	// language) AND the user's notification settings row, atomic with the user insert.
 	authService := auth.NewService(authStore, cfg,
-		categoriesService.SeedForUser,
-		notificationsService.SeedSettings,
+		categoriesService.SeedForUserLang,
+		func(ctx context.Context, tx pgx.Tx, userID uuid.UUID, _ string) error {
+			return notificationsService.SeedSettings(ctx, tx, userID)
+		},
 	)
 	authHandler := auth.NewHandler(authService, log)
 

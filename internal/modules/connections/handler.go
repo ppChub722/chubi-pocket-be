@@ -25,20 +25,22 @@ func NewHandler(s *Service) *Handler {
 	return &Handler{s: s, tokenLimit: newLimiter(20, 10*time.Minute)}
 }
 
-// LoginToken — POST /auth/telegram/token {id_token}: log in, or sign up at once (0.4.2-4).
+// LoginToken — POST /auth/telegram/token {id_token, language?}: log in, or sign up at once (0.4.2-4).
+// language only picks the starter categories' language of a new account.
 func (h *Handler) LoginToken(c *gin.Context) {
 	if !h.tokenLimit.allow(c.ClientIP()) {
 		rateLimited(c)
 		return
 	}
 	var req struct {
-		IDToken string `json:"id_token"`
+		IDToken  string `json:"id_token"`
+		Language string `json:"language"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.IDToken == "" {
 		response.Validation(c, "body must be {id_token}")
 		return
 	}
-	out, err := h.s.TelegramTokenLogin(c.Request.Context(), req.IDToken)
+	out, err := h.s.TelegramTokenLogin(c.Request.Context(), req.IDToken, req.Language)
 	if err != nil {
 		h.loginFail(c, err)
 		return

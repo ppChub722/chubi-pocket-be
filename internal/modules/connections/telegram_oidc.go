@@ -33,8 +33,9 @@ func (s *Service) WithTelegramLogin(v *IDTokenVerifier, welcome Welcomer) {
 }
 
 // TelegramTokenLogin logs in the account linked to that Telegram, or makes one: no password,
-// username from Telegram, THB, the Telegram photo, the chat linked with chat on.
-func (s *Service) TelegramTokenLogin(ctx context.Context, idToken string) (*TokenLogin, error) {
+// username from Telegram, THB, the Telegram photo, the chat linked with chat on. language is the
+// app language (used only when an account is made: the starter categories' language).
+func (s *Service) TelegramTokenLogin(ctx context.Context, idToken, language string) (*TokenLogin, error) {
 	if s.auth == nil || s.idTokens == nil {
 		return nil, ErrUnavailable
 	}
@@ -51,7 +52,7 @@ func (s *Service) TelegramTokenLogin(ctx context.Context, idToken string) (*Toke
 		if !s.auth.RegistrationOpen() {
 			return nil, ErrRegistrationClosed
 		}
-		userID, err = s.telegramSignup(ctx, who)
+		userID, err = s.telegramSignup(ctx, who, language)
 		if errors.Is(err, ErrAlreadyLinked) { // linked by another call meanwhile
 			if userID, _, linked, err = s.store.byExternal(ctx, ProviderTelegram, who.ID); err == nil && !linked {
 				err = ErrAlreadyLinked
@@ -70,7 +71,7 @@ func (s *Service) TelegramTokenLogin(ctx context.Context, idToken string) (*Toke
 	return &TokenLogin{Status: status, Auth: resp}, nil
 }
 
-func (s *Service) telegramSignup(ctx context.Context, who *TelegramIdentity) (uuid.UUID, error) {
+func (s *Service) telegramSignup(ctx context.Context, who *TelegramIdentity, language string) (uuid.UUID, error) {
 	account := telegramAccount(who)
 	display := who.Name
 	if display == "" {
@@ -84,7 +85,7 @@ func (s *Service) telegramSignup(ctx context.Context, who *TelegramIdentity) (uu
 		if err != nil {
 			return uuid.Nil, err
 		}
-		userID, err := s.createTelegramUser(ctx, who.ID, account, username, display)
+		userID, err := s.createTelegramUser(ctx, who.ID, account, username, display, language)
 		if errors.Is(err, auth.ErrUsernameExists) { // taken between the check and the insert
 			continue
 		}
@@ -102,14 +103,14 @@ func (s *Service) telegramSignup(ctx context.Context, who *TelegramIdentity) (uu
 	return uuid.Nil, errUsernameUnavailable
 }
 
-func (s *Service) createTelegramUser(ctx context.Context, externalID, account, username, display string) (uuid.UUID, error) {
+func (s *Service) createTelegramUser(ctx context.Context, externalID, account, username, display, language string) (uuid.UUID, error) {
 	tx, err := s.store.db.Begin(ctx)
 	if err != nil {
 		return uuid.Nil, err
 	}
 	defer tx.Rollback(ctx)
 	userID, err := s.auth.CreateExternalUserTx(ctx, tx, auth.ExternalSignup{Username: username,
-		DisplayName: display, CreatedVia: auth.CreatedViaTelegram})
+		DisplayName: display, CreatedVia: auth.CreatedViaTelegram, Language: language})
 	if err != nil {
 		return uuid.Nil, err
 	}

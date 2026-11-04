@@ -29,6 +29,7 @@ type RegisterRequest struct {
 	DisplayName string  `json:"display_name" binding:"required,min=1,max=100"`
 	Email       *string `json:"email"        binding:"omitempty,email,max=255"`
 	Currency    string  `json:"currency"     binding:"omitempty,len=3"`
+	Language    string  `json:"language"     binding:"omitempty,max=16"`
 }
 
 type LoginRequest struct {

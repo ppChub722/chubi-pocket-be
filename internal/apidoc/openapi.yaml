@@ -6111,6 +6111,7 @@ components:
       required: [id_token]
       properties:
         id_token: { type: string, description: 'The id_token from https://oauth.telegram.org/token (Log In With Telegram, OIDC). Lives 30 s: send it right away.' }
+        language: { type: string, description: 'POST /auth/telegram/token only: the app language (th | en). Used only when this call makes a new account (the starter categories'' language); ignored for a login and by POST /connections/telegram. Absent or unknown = en.' }
     TelegramTokenLogin:
       type: object
       required: [status, auth]
@@ -9488,6 +9489,11 @@ components:
           "currency": {
             "$ref": "#/components/schemas/CurrencyCode",
             "description": "Set once at sign-up (default THB when absent); locked afterwards."
+          },
+          "language": {
+            "type": "string",
+            "maxLength": 16,
+            "description": "The app language at sign-up (th | en; th-TH / en_US also fine). Picks the language of the starter categories' names and descriptions; anything else or absent = en. Not stored and not changed afterwards."
           }
         },
         "required": [

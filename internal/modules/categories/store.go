@@ -360,6 +360,13 @@ func (s *Store) ReorderTx(ctx context.Context, userID uuid.UUID, entries []Reord
 }
 
 func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
+	return s.SeedForUserLangTx(ctx, tx, userID, LangEN)
+}
+
+// SeedForUserLangTx seeds the system categories and the starter set, with the starter names and
+// descriptions in lang (see NormalizeLang).
+func (s *Store) SeedForUserLangTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, lang string) error {
+	lang = NormalizeLang(lang)
 	const insertCategory = `
 		INSERT INTO categories
 			(id, user_id, name, type, parent_id, is_system, system_kind,
@@ -401,7 +408,7 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 			return fmt.Errorf("marshal icon_code: %w", err)
 		}
 		_, err = tx.Exec(ctx, insertCategory,
-			rootID, userID, root.Name, "expense", nil, false, nil,
+			rootID, userID, pick(lang, root.Name, root.NameTH), "expense", nil, false, nil,
 			rootIconJSON, rootSortExpense, true, nil,
 			userID,
 		)
@@ -420,8 +427,8 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 				return fmt.Errorf("marshal icon_code: %w", err)
 			}
 			_, err = tx.Exec(ctx, insertCategory,
-				childID, userID, child.Name, "expense", rootID, false, nil,
-				childIconJSON, ci, child.IncludeInReport, child.Description,
+				childID, userID, pick(lang, child.Name, child.NameTH), "expense", rootID, false, nil,
+				childIconJSON, ci, child.IncludeInReport, pick(lang, child.Description, child.DescriptionTH),
 				userID,
 			)
 			if err != nil {
@@ -441,8 +448,8 @@ func (s *Store) SeedForUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 			return fmt.Errorf("marshal icon_code: %w", err)
 		}
 		_, err = tx.Exec(ctx, insertCategory,
-			id, userID, in.Name, "income", nil, false, nil,
-			iconJSON, incomeSort, in.IncludeInReport, in.Description,
+			id, userID, pick(lang, in.Name, in.NameTH), "income", nil, false, nil,
+			iconJSON, incomeSort, in.IncludeInReport, pick(lang, in.Description, in.DescriptionTH),
 			userID,
 		)
 		if err != nil {

@@ -37,6 +37,11 @@ func (s *Service) SeedForUser(ctx context.Context, tx pgx.Tx, userID uuid.UUID) 
 	return s.store.SeedForUserTx(ctx, tx, userID)
 }
 
+// SeedForUserLang — SeedForUser with the starter names in the user's language ("th" | "en", else en).
+func (s *Service) SeedForUserLang(ctx context.Context, tx pgx.Tx, userID uuid.UUID, lang string) error {
+	return s.store.SeedForUserLangTx(ctx, tx, userID, lang)
+}
+
 func (s *Service) SystemFor(ctx context.Context, userID uuid.UUID, kind SystemKind) (*Category, error) {
 	return s.store.LookupSystem(ctx, userID, kind)
 }

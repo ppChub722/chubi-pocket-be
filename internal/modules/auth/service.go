@@ -15,7 +15,8 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 )
 
-type RegistrationHook func(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error
+// RegistrationHook runs inside the sign-up transaction; lang is the app language the sign-up sent ("" = none).
+type RegistrationHook func(ctx context.Context, tx pgx.Tx, userID uuid.UUID, lang string) error
 
 type Service struct {
 	store *Store
@@ -79,7 +80,7 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthRespo
 		return nil, err
 	}
 	for _, hook := range s.hooks {
-		if err := hook(ctx, tx, user.ID); err != nil {
+		if err := hook(ctx, tx, user.ID, req.Language); err != nil {
 			return nil, fmt.Errorf("registration hook: %w", err)
 		}
 	}
@@ -139,6 +140,7 @@ type ExternalSignup struct {
 	DisplayName string
 	Currency    string // "" = THB
 	CreatedVia  string // telegram | line | google
+	Language    string // app language at sign-up; "" = none (starter categories in English)
 }
 
 // RegistrationOpen — REGISTRATION_OPEN (the outside-app sign-up refuses when closed).
@@ -164,7 +166,7 @@ func (s *Service) CreateExternalUserTx(ctx context.Context, tx pgx.Tx, in Extern
 		return uuid.Nil, err
 	}
 	for _, hook := range s.hooks {
-		if err := hook(ctx, tx, user.ID); err != nil {
+		if err := hook(ctx, tx, user.ID, in.Language); err != nil {
 			return uuid.Nil, fmt.Errorf("registration hook: %w", err)
 		}
 	}
