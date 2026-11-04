@@ -140,6 +140,7 @@ func Parse(ctx context.Context, c llm.Client, today time.Time, lists Lists, text
 			words = append(words, *it.Note)
 		}
 	}
+	transferDropped := false
 	for _, ai := range a.Items {
 		if len(out.Items) == maxItems {
 			break
@@ -156,10 +157,16 @@ func Parse(ctx context.Context, c llm.Client, today time.Time, lists Lists, text
 		out.Picks = append(out.Picks, pick)
 		if it, ok := al.check(ai, today, words); ok {
 			out.Items = append(out.Items, it)
+		} else if ai.Type == "transfer" {
+			transferDropped = true
 		}
 	}
 	if len(out.Items) == 0 && a.ReplyHint != nil && *a.ReplyHint != HintUnknown {
 		out.Hint = *a.ReplyHint
+	}
+	// a transfer left out for a missing wallet says so, whatever hint the model gave
+	if len(out.Items) == 0 && transferDropped {
+		out.Hint = HintTransferWallet
 	}
 	return out, nil
 }

@@ -37,7 +37,7 @@
 
 [category]
 ของใช้ในบ้าน 300 | expense 300; category=Household Supplies
-ค่าอะไรไม่รู้ 100 | expense 100; category=-
+ค่าอะไรไม่รู้ 100 | expense 100
 ให้แม่ 2000 | expense 2000
 
 [transfer]
