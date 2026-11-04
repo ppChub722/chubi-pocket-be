@@ -41,7 +41,8 @@ const (
 	ButtonOK           = "✓ ยืนยัน"
 	ButtonCancel       = "✗ ยกเลิก"
 
-	sep = " | "
+	sep       = " | "
+	separator = "──────────" // under the head line and between items
 )
 
 var textsTH = Texts{

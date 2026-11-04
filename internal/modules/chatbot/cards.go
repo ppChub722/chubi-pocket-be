@@ -112,7 +112,8 @@ func (s *memCards) close(id string, state CardState) bool {
 }
 
 // cardText renders the card (brief "Card, texts and errors") in the card's language: a head line,
-// then each item with its category and wallet. Shared wallet / date go into the head line.
+// then each item with its category and wallet, a line between parts. Shared wallet / date go into
+// the head line. A value the model was not sure of at all shows as "[value ?]" (owner 2026-11-04).
 func cardText(c Card, lists Lists, today time.Time) string {
 	t := textsFor(c.Lang)
 	multi := len(c.Items) > 1
@@ -120,11 +121,11 @@ func cardText(c Card, lists Lists, today time.Time) string {
 	wallet, oneWallet := sharedWallet(c.Items)
 	oneWallet = oneWallet && multi
 	if oneWallet {
-		head = append(head, emojiWallet+" "+walletName(t, lists, wallet))
+		head = append(head, emojiWallet+" "+unsureMark(walletName(t, lists, wallet), c.Items[0], "account"))
 	}
-	day, oneDay := sharedDay(c.Items)
+	oneDay := sharedDay(c.Items)
 	if oneDay {
-		head = append(head, dayLabel(t, day, today))
+		head = append(head, unsureMark(dayLabel(t, c.Items[0].Date, today), c.Items[0], "date"))
 	}
 	var b strings.Builder
 	b.WriteString(strings.Join(head, sep))
@@ -133,25 +134,39 @@ func cardText(c Card, lists Lists, today time.Time) string {
 		if multi {
 			num, indent = fmt.Sprintf("%d. ", i+1), "   "
 		}
-		title := itemName(t, it) + " " + signedMoney(it)
-		if !oneDay {
-			title += sep + dayLabel(t, it.Date, today)
+		money := signedMoney(it)
+		if contains(it.Unsure, "amount") || contains(it.Unsure, "type") {
+			money = "[" + money + " ?]"
 		}
-		b.WriteString("\n" + num + title)
+		title := itemName(t, it) + " " + money
+		if !oneDay {
+			title += sep + unsureMark(dayLabel(t, it.Date, today), it, "date")
+		}
+		b.WriteString("\n" + separator + "\n" + num + title)
 		if it.Type == "transfer" {
-			b.WriteString("\n" + indent + t.Wallet + emojiWallet + " " + walletName(t, lists, it.AccountID) + " → " +
-				walletName(t, lists, it.TransferToID))
+			b.WriteString("\n" + indent + t.Wallet + emojiWallet + " " +
+				unsureMark(walletName(t, lists, it.AccountID), it, "account") + " → " + walletName(t, lists, it.TransferToID))
 			continue
 		}
 		b.WriteString("\n" + indent + t.Category + categoryLine(t, lists, it.CategoryID))
 		if !oneWallet {
-			b.WriteString("\n" + indent + t.Wallet + emojiWallet + " " + walletName(t, lists, it.AccountID))
+			b.WriteString("\n" + indent + t.Wallet + emojiWallet + " " +
+				unsureMark(walletName(t, lists, it.AccountID), it, "account"))
 		}
 	}
 	return b.String()
 }
 
-// sharedWallet: the wallet every item goes to; false when items differ or one is a transfer.
+// unsureMark wraps s as "[s ?]" when the model was not sure of field at all.
+func unsureMark(s string, it Item, field string) string {
+	if contains(it.Unsure, field) {
+		return "[" + s + " ?]"
+	}
+	return s
+}
+
+// sharedWallet: the wallet every item goes to (and equally sure of); false when items differ or one
+// is a transfer.
 func sharedWallet(items []Item) (*uuid.UUID, bool) {
 	var w *uuid.UUID
 	for i, it := range items {
@@ -162,20 +177,22 @@ func sharedWallet(items []Item) (*uuid.UUID, bool) {
 			w = it.AccountID
 			continue
 		}
-		if (w == nil) != (it.AccountID == nil) || (w != nil && *w != *it.AccountID) {
+		if (w == nil) != (it.AccountID == nil) || (w != nil && *w != *it.AccountID) ||
+			contains(it.Unsure, "account") != contains(items[0].Unsure, "account") {
 			return nil, false
 		}
 	}
 	return w, len(items) > 0
 }
 
-func sharedDay(items []Item) (string, bool) {
+// sharedDay: every item has the same date, equally sure of.
+func sharedDay(items []Item) bool {
 	for _, it := range items[1:] {
-		if it.Date != items[0].Date {
-			return "", false
+		if it.Date != items[0].Date || contains(it.Unsure, "date") != contains(items[0].Unsure, "date") {
+			return false
 		}
 	}
-	return items[0].Date, true
+	return true
 }
 
 func itemName(t Texts, it Item) string {

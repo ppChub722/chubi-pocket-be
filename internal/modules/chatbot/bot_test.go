@@ -168,6 +168,17 @@ type staticLists struct{}
 func (staticLists) Lists(context.Context, uuid.UUID) (Lists, error) { return testLists, nil }
 func (staticLists) Lang(context.Context, uuid.UUID) string          { return "th" }
 
+// A low-confidence amount / date / wallet shows as "[value ?]"; a low category never does.
+func TestCardUnsureMarks(t *testing.T) {
+	c := Card{Lang: "th", Items: []Item{{Type: "expense", Amount: 300, Date: "2026-10-31", AccountID: &walletA.ID,
+		CategoryID: &catFood.ID, Unsure: []string{"amount", "date", "account", "category"}}}}
+	got := cardText(c, testLists, testDay)
+	want := "🧾 1 รายการ | [เมื่อวาน ?]\n──────────\nรายจ่าย [-฿300 ?]\nหมวด: 🏷️ อาหาร\nกระเป๋า: 👛 [กสิกร ?]"
+	if got != want {
+		t.Errorf("card =\n%s\nwant\n%s", got, want)
+	}
+}
+
 func TestLang(t *testing.T) {
 	cases := []struct{ app, tg, want string }{
 		{"th", "en", "th"}, {"en", "th", "en"}, {"", "th-TH", "th"}, {"ja", "th", "th"}, {"", "", "en"}, {"", "fr", "en"},
@@ -215,7 +226,7 @@ func TestBotCardFlow(t *testing.T) {
 
 	b.Text(ctx, user, text(1, "normal tx", 0))
 	card := s.last()
-	if card.kind != "card" || card.text != "🧾 1 รายการ | วันนี้\nnormal -฿60\nหมวด: 🏷️ อาหาร\nกระเป๋า: 👛 กสิกร" || len(card.buttons) != 2 {
+	if card.kind != "card" || card.text != "🧾 1 รายการ | วันนี้\n──────────\nnormal -฿60\nหมวด: 🏷️ อาหาร\nกระเป๋า: 👛 กสิกร" || len(card.buttons) != 2 {
 		t.Fatalf("card = %+v", card)
 	}
 

@@ -29,7 +29,7 @@ type fakeItem struct {
 	TransferTo  *string  `json:"transfer_to"`
 	Date        *string  `json:"date"`
 	Note        *string  `json:"note"`
-	Unsure      []string `json:"unsure"`
+	Confidence  map[string]string `json:"confidence"`
 }
 
 type fakeAnswer struct {
@@ -37,11 +37,20 @@ type fakeAnswer struct {
 	ReplyHint *string    `json:"reply_hint"`
 }
 
+// conf: every field "high" except the ones named, which are "low".
+func conf(low ...string) map[string]string {
+	c := map[string]string{"type": "high", "amount": "high", "date": "high", "account": "high", "category": "high"}
+	for _, f := range low {
+		c[f] = "low"
+	}
+	return c
+}
+
 func num(f float64) *float64 { return &f }
 func str(s string) *string   { return &s }
 
 func spend(amount float64, desc, cat string) fakeItem {
-	return fakeItem{Type: "expense", Amount: num(amount), Description: str(desc), Category: str(cat), Unsure: []string{}}
+	return fakeItem{Type: "expense", Amount: num(amount), Description: str(desc), Category: str(cat), Confidence: conf()}
 }
 
 // keywordAnswers: the descriptions are the keyword's own words, so the verbatim check keeps them
@@ -51,17 +60,17 @@ var keywordAnswers = map[string]fakeAnswer{
 	"multi tx": {Items: []fakeItem{
 		spend(60, "multi", "c1"),
 		spend(45, "tx", "c1"),
-		{Type: "income", Amount: num(500), Description: str("multi"), Unsure: []string{}},
+		{Type: "income", Amount: num(500), Description: str("multi"), Confidence: conf()},
 	}},
-	"income":   {Items: []fakeItem{{Type: "income", Amount: num(25000), Description: str("income"), Unsure: []string{}}}},
-	"transfer": {Items: []fakeItem{{Type: "transfer", Amount: num(5000), Account: str("w1"), TransferTo: str("w2"), Description: str("transfer"), Unsure: []string{}}}},
+	"income":   {Items: []fakeItem{{Type: "income", Amount: num(25000), Description: str("income"), Confidence: conf()}}},
+	"transfer": {Items: []fakeItem{{Type: "transfer", Amount: num(5000), Account: str("w1"), TransferTo: str("w2"), Description: str("transfer"), Confidence: conf()}}},
 	"unsure": {Items: []fakeItem{{Type: "expense", Amount: num(120), Description: str("unsure"), Category: str("c1"),
-		Unsure: []string{"category"}}}},
+		Confidence: conf("category")}}},
 	"bad alias": {Items: []fakeItem{spend(80, "bad", "c999")}},
 	"partial": {Items: []fakeItem{
 		spend(30, "partial", "c1"),
-		{Type: "expense", Amount: num(0), Description: str("partial"), Unsure: []string{}},
-		{Type: "transfer", Amount: num(100), Account: str("w1"), Unsure: []string{}},
+		{Type: "expense", Amount: num(0), Description: str("partial"), Confidence: conf()},
+		{Type: "transfer", Amount: num(100), Account: str("w1"), Confidence: conf()},
 	}},
 	"fake desc":        {Items: []fakeItem{spend(99, "อาหารกลางวันมื้อใหญ่", "c1")}},
 	"no amount":        {Items: []fakeItem{}, ReplyHint: str("no_amount")},
