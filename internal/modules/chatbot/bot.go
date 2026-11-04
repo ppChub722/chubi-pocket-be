@@ -168,8 +168,12 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 	if state == CardCancelled {
 		done = TextCancelled
 	}
-	if b.router.Fake() {
+	// Cards live in memory only until pending rows are written (K4).
+	switch {
+	case b.router.Fake():
 		done += TextFakeMark
+	case state == CardSaved:
+		done += TextTrialMark
 	}
 	if err := b.send.EditCard(ctx, c.ChatID, c.MessageID, cardText(c, lists, b.today())+"\n\n"+done, nil); err != nil {
 		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)

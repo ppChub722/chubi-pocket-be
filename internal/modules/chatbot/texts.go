@@ -15,6 +15,7 @@ const (
 	TextSaved          = "บันทึกแล้ว ✓"
 	TextCancelled      = "ยกเลิกแล้ว"
 	TextFakeMark       = " (fake)"
+	TextTrialMark      = " (ทดลอง ยังไม่ลงแอป)"
 
 	ButtonOK     = "✓ ยืนยัน"
 	ButtonCancel = "✗ ยกเลิก"
