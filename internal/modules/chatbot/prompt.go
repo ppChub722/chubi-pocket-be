@@ -16,7 +16,8 @@ Rules:
 - amount: a positive number in the user's currency ("1.2k" = 1200, "2,500" = 2500). No amount → leave the item out; if no item is left, reply_hint "no_amount".
 - description: the user's words for what it is, copied EXACTLY from the message (a substring), at most 50 characters, without the amount or the date. note: the rest of the user's words, copied exactly, or null.
 - category: an alias from the category list whose type matches the item. Category names may be in another language than the message: match by meaning ("ไก่ทอด" = fried chicken = a food category). Sure of the exact category → that one. Sure of the group but not which child → the parent category itself (a line without "in"). No idea → null. Never invent an alias.
-- account: the wallet alias the user named, or null (the main wallet). transfer needs account and transfer_to, two different wallets; if one is missing, leave the item out and use reply_hint "transfer_wallet_missing".
+- Aliases are the short ids on the left of the lists ("w1", "c12"); answer the alias, never the name.
+- account: the wallet alias the user named (the user types the wallet's name, e.g. "kbank" → the alias of Kbank), or null (the main wallet). transfer needs account and transfer_to, two different wallets; if one is missing, leave the item out and use reply_hint "transfer_wallet_missing".
 - date: ISO date (yyyy-mm-dd) from words like "เมื่อวาน" or a weekday, relative to today; null = today.
 - unsure: the names of the fields you guessed.
 - When a "current card" is given, the message edits that card: answer with the whole card after the edit.
