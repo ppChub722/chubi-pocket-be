@@ -252,9 +252,11 @@ func main() {
 			log.Error("llm config", "error", err)
 			os.Exit(1)
 		}
-		telegramWebhook.WithChat(chatbot.New(telegramWebhook.Client(), chatbot.NewDBLists(dbPool), llmRouter,
-			cfg.LLM.PerMinute, time.Duration(cfg.LLM.TimeoutSec)*time.Second, log))
-		log.Info("chatbot: on", "provider", cfg.LLM.Provider)
+		chat := chatbot.New(telegramWebhook.Client(), chatbot.NewDBLists(dbPool), llmRouter,
+			cfg.LLM.PerMinute, time.Duration(cfg.LLM.TimeoutSec)*time.Second, log)
+		chat.LogBodies = cfg.LLM.LogBodies
+		telegramWebhook.WithChat(chat)
+		log.Info("chatbot: on", "provider", cfg.LLM.Provider, "log_bodies", cfg.LLM.LogBodies)
 		// 0.4.2-4: Log In With Telegram (OIDC); the bot id is the client_id
 		client := telegramWebhook.Client()
 		connectionsService.WithTelegramLogin(connections.NewIDTokenVerifier(cfg.Telegram.BotID()),

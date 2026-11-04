@@ -63,6 +63,8 @@ type Outcome struct {
 	Hint  string
 	Fail  string // an error code when the model gave no usable answer (refused, cut off, bad JSON)
 	Picks []string // the category / account values the model gave per item, as given (for the log)
+	Sent  string   // the per-user request (lists + date + message), for LogBodies
+	Raw   string   // the model's answer as it came, for LogBodies
 	Usage llm.Usage
 	Model string
 }
@@ -103,7 +105,7 @@ func Parse(ctx context.Context, c llm.Client, today time.Time, lists Lists, text
 	if current != nil {
 		cur, _ = json.Marshal(answer{Items: al.toAnswer(current)})
 	}
-	res, err := c.Complete(ctx, llm.Request{
+	req := llm.Request{
 		System:    systemPrompt,
 		Context:   contextPart(al),
 		User:      userPart(today, text, cur),
@@ -111,11 +113,13 @@ func Parse(ctx context.Context, c llm.Client, today time.Time, lists Lists, text
 		MaxTokens: maxOutToken,
 		Input:     text,
 		Current:   cur,
-	})
-	if err != nil {
-		return Outcome{}, ErrProvider{err}
 	}
-	out := Outcome{Usage: res.Usage, Model: res.Model, Hint: HintNotMoney}
+	sent := req.Context + "\n" + req.User
+	res, err := c.Complete(ctx, req)
+	if err != nil {
+		return Outcome{Sent: sent}, ErrProvider{err}
+	}
+	out := Outcome{Usage: res.Usage, Model: res.Model, Hint: HintNotMoney, Sent: sent, Raw: res.Text}
 	switch res.Stop {
 	case llm.StopRefused:
 		out.Fail = CodeRefused

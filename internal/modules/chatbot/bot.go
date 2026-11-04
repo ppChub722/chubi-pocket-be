@@ -47,6 +47,10 @@ type Bot struct {
 	timeout time.Duration
 	log     *slog.Logger
 	now     func() time.Time
+
+	// LogBodies logs each call's request (lists, date, the user's text) and the model's raw
+	// answer. It writes the user's own words to the log: debug only (LLM_LOG_BODIES).
+	LogBodies bool
 }
 
 func New(send Sender, lists ListSource, router *llm.Router, perMinute int, timeout time.Duration, log *slog.Logger) *Bot {
@@ -149,6 +153,9 @@ func (b *Bot) parse(ctx context.Context, userID uuid.UUID, chatID, msgID int64, 
 	start := time.Now()
 	out, err := Parse(cctx, pick.Client, b.today(), lists, text, current)
 	ms := time.Since(start).Milliseconds()
+	if b.LogBodies {
+		b.log.Info("chatbot: io", "chat_id", chatID, "sent", out.Sent, "received", out.Raw)
+	}
 	if errors.Is(err, llm.ErrOff) {
 		b.say(ctx, chatID, label+TextOff, msgID)
 		return Lists{}, Outcome{}, false

@@ -31,6 +31,7 @@ type LLMConfig struct {
 	MonthlyCap int    // LLM_MONTHLY_CAP, calls per user per calendar month (Asia/Bangkok)
 	PerMinute  int    // LLM_PER_MINUTE, calls per user per minute
 	Effort     string // LLM_EFFORT, default low (a short extraction needs little thinking)
+	LogBodies  bool   // LLM_LOG_BODIES: log what is sent and what comes back (the user's own text); debug only
 }
 
 // TelegramConfig: the bot (0.4.2, modules/telegram). Webhook only; empty token = off. Who may use
@@ -156,6 +157,7 @@ func Load() (*Config, error) {
 			MonthlyCap: getEnvAsInt("LLM_MONTHLY_CAP", 1000),
 			PerMinute:  getEnvAsInt("LLM_PER_MINUTE", 10),
 			Effort:     getEnv("LLM_EFFORT", "low"),
+			LogBodies:  getEnv("LLM_LOG_BODIES", "false") == "true",
 		},
 	}
 
