@@ -40,7 +40,10 @@ func EvalCases(groups []string, ids []int) []EvalCase {
 			continue
 		}
 		id++
-		text, checks, _ := strings.Cut(line, "|")
+		text, checks := line, "" // the last "|" splits: a message may hold "|" itself
+		if i := strings.LastIndex(line, "|"); i >= 0 {
+			text, checks = line[:i], line[i+1:]
+		}
 		c := EvalCase{ID: id, Group: group, Text: strings.ReplaceAll(strings.TrimSpace(text), `\n`, "\n"),
 			Checks: strings.TrimSpace(checks)}
 		if (len(groups) == 0 || containsFold(groups, group)) && (len(ids) == 0 || containsInt(ids, id)) {
@@ -111,7 +114,8 @@ func checkCase(checks string, out Outcome, lists Lists, today time.Time) []strin
 				idx, ch = i-1, rest
 			}
 		}
-		key, want, hasEq := strings.Cut(ch, "=")
+		negate := strings.Contains(ch, "!=")
+		key, want, hasEq := strings.Cut(strings.Replace(ch, "!=", "=", 1), "=")
 		if !hasEq { // "expense 50"
 			typ, amt, _ := strings.Cut(ch, " ")
 			if idx >= len(out.Items) {
@@ -147,6 +151,11 @@ func checkCase(checks string, out Outcome, lists Lists, today time.Time) []strin
 				got = nameOrDash(walletName(textsEN, lists, it.AccountID), it.AccountID == nil)
 			case "to":
 				got = nameOrDash(walletName(textsEN, lists, it.TransferToID), it.TransferToID == nil)
+			case "desc":
+				got = "-"
+				if it.Description != nil {
+					got = *it.Description
+				}
 			case "category":
 				got = "-"
 				for _, c := range lists.Categories {
@@ -167,7 +176,7 @@ func checkCase(checks string, out Outcome, lists Lists, today time.Time) []strin
 				continue
 			}
 		}
-		if !strings.EqualFold(got, strings.TrimSpace(want)) {
+		if strings.EqualFold(got, strings.TrimSpace(want)) == negate {
 			bad = append(bad, fmt.Sprintf("%s: got %s", ch, got))
 		}
 	}
