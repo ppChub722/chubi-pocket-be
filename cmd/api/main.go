@@ -56,6 +56,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "chatbot-try" {
+		os.Exit(chatbotTry(os.Args[2:]))
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		panic(fmt.Errorf("failed to load config: %w", err))

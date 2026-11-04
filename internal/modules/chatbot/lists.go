@@ -34,6 +34,14 @@ func (d *DBLists) ChatLang(ctx context.Context, chatID int64) string {
 	return lang
 }
 
+// UserByChat is the user a Telegram chat is linked to (the eval runs as that user).
+func (d *DBLists) UserByChat(ctx context.Context, chatID int64) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := d.db.QueryRow(ctx, `SELECT user_id FROM user_connections WHERE provider = 'telegram' AND external_id = $1`,
+		strconv.FormatInt(chatID, 10)).Scan(&id)
+	return id, err
+}
+
 func (d *DBLists) Lists(ctx context.Context, userID uuid.UUID) (Lists, error) {
 	var l Lists
 	rows, err := d.db.Query(ctx, `
