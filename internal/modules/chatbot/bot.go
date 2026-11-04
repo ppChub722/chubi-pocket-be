@@ -91,16 +91,15 @@ func (b *Bot) Text(ctx context.Context, userID uuid.UUID, m *telegram.Message) {
 		return
 	}
 	b.react(ctx, tr.chatID, tr.msgID, reactRead)
+	// The draft bubble goes when the card (or a line) is sent.
+	if err := b.send.SendDraft(ctx, tr.chatID, tr.msgID, tr.t.Thinking); err != nil {
+		b.log.Warn("chatbot: draft failed", "chat_id", tr.chatID, "error", err)
+	}
 	if r := m.ReplyToMessage; r != nil {
 		if c, ok := b.cards.byMessage(tr.chatID, r.MessageID); ok {
 			b.edit(ctx, tr, c, m.Text)
 			return
 		}
-	}
-	// The draft bubble goes when the card (or a line) is sent; an edit sends nothing new, so only
-	// new messages get one.
-	if err := b.send.SendDraft(ctx, tr.chatID, tr.msgID, tr.t.Thinking); err != nil {
-		b.log.Warn("chatbot: draft failed", "chat_id", tr.chatID, "error", err)
 	}
 	if b.router.Fake() && strings.EqualFold(strings.TrimSpace(m.Text), "all") {
 		for _, kw := range llm.FakeKeywords {
@@ -135,7 +134,9 @@ func (b *Bot) fresh(ctx context.Context, tr turn, text string) {
 	b.cards.put(&c)
 }
 
-// edit — a Reply on a card: the card's items + the edit text → the whole card again.
+// edit — a Reply on a card: the card's items + the edit text → the whole card again, sent as a new
+// card under the edit message; the old one keeps its items, loses its buttons and points down
+// (owner 2026-11-04).
 func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
 	tr.label = c.Label
 	if c.State != CardOpen {
@@ -151,11 +152,17 @@ func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
 		b.say(ctx, c.ChatID, c.Label+tr.t.hint(out.Hint), tr.msgID)
 		return
 	}
+	before := c
 	c.Items, c.Lang = out.Items, tr.lang
-	b.cards.put(&c)
-	if err := b.send.EditCard(ctx, c.ChatID, c.MessageID, cardText(c, lists, b.today()), buttons(c.ID, tr.t)); err != nil {
-		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
+	id, err := b.send.SendCard(ctx, c.ChatID, cardText(c, lists, b.today()), tr.msgID, buttons(c.ID, tr.t))
+	if err != nil {
+		b.log.Error("chatbot: send card failed", "chat_id", c.ChatID, "error", err)
 		return
+	}
+	c.MessageID = id
+	b.cards.repoint(&c, before.MessageID)
+	if err := b.send.EditCard(ctx, c.ChatID, before.MessageID, cardText(before, lists, b.today())+"\n\n"+tr.t.Edited, nil); err != nil {
+		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
 	}
 	b.react(ctx, c.ChatID, tr.msgID, reactDone)
 }

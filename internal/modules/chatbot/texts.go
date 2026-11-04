@@ -12,11 +12,11 @@ import (
 // Telegram's, else English (owner 2026-11-04; telegram.Lang).
 type Texts struct {
 	NoAmount, NotMoney, TransferWallet, TooLong, TooFast, Handled string
-	FailAI, FailServer, FailRefused, FailTrunc, Off, Thinking    string
-	Saved, Cancelled, TrialMark, ButtonOK, ButtonCancel          string
-	Items                                                        string // "%d รายการ"
-	Expense, Income, Transfer, Today, Yesterday, None            string
-	Category, Wallet                                             string // line labels, with a trailing space
+	FailAI, FailServer, FailRefused, FailTrunc, Off, Thinking     string
+	Saved, Cancelled, TrialMark, ButtonOK, ButtonCancel, Edited   string
+	Items                                                         string // "%d รายการ"
+	Expense, Income, Transfer, Today, Yesterday, None             string
+	Category, Wallet                                              string // line labels, with a trailing space
 }
 
 // Thai texts as constants (tests read them).
@@ -37,6 +37,7 @@ const (
 	TextCancelled      = "ยกเลิกแล้ว"
 	TextTrialMark      = " (ทดลอง ยังไม่ลงแอป)"
 	TextFakeMark       = " (fake)"
+	TextEdited         = "✏️ แก้แล้ว ดูการ์ดใหม่ด้านล่าง"
 	ButtonOK           = "✓ ยืนยัน"
 	ButtonCancel       = "✗ ยกเลิก"
 
@@ -48,7 +49,7 @@ var textsTH = Texts{
 	TooLong: TextTooLong, TooFast: TextTooFast, Handled: TextHandled,
 	FailAI: TextFailAI, FailServer: TextFailServer, FailRefused: TextFailRefused, FailTrunc: TextFailTrunc,
 	Off: TextOff, Thinking: TextThinking, Saved: TextSaved, Cancelled: TextCancelled, TrialMark: TextTrialMark,
-	ButtonOK: ButtonOK, ButtonCancel: ButtonCancel,
+	ButtonOK: ButtonOK, ButtonCancel: ButtonCancel, Edited: TextEdited,
 	Items:   "%d รายการ",
 	Expense: "รายจ่าย", Income: "รายรับ", Transfer: "โอน", Today: "วันนี้", Yesterday: "เมื่อวาน", None: "ไม่ระบุ",
 	Category: "หมวด: ", Wallet: "กระเป๋า: ",
@@ -72,6 +73,7 @@ var textsEN = Texts{
 	TrialMark:      " (trial, not in the app yet)",
 	ButtonOK:       "✓ Confirm",
 	ButtonCancel:   "✗ Cancel",
+	Edited:         "✏️ Edited, see the new card below",
 	Items:          "%d items",
 	Expense:        "Expense", Income: "Income", Transfer: "Transfer", Today: "today", Yesterday: "yesterday",
 	None:     "none",

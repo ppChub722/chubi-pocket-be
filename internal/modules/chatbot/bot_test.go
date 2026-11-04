@@ -219,11 +219,17 @@ func TestBotCardFlow(t *testing.T) {
 		t.Fatalf("card = %+v", card)
 	}
 
-	// Reply "edit": the first amount becomes 50, same card, buttons kept
+	// Reply "edit": a new card with the first amount at 50 and the buttons; the old card loses its
+	// buttons and points down
 	b.Text(ctx, user, text(2, "edit", card.msgID))
-	if e := s.last(); e.kind != "edit" || e.msgID != card.msgID || !strings.Contains(e.text, "-฿50") || len(e.buttons) != 2 {
-		t.Fatalf("edit = %+v", e)
+	newCard, old := s.log[len(s.log)-2], s.last()
+	if newCard.kind != "card" || !strings.Contains(newCard.text, "-฿50") || len(newCard.buttons) != 2 {
+		t.Fatalf("new card = %+v", newCard)
 	}
+	if old.kind != "edit" || old.msgID != card.msgID || len(old.buttons) != 0 || !strings.HasSuffix(old.text, TextEdited) {
+		t.Fatalf("old card = %+v", old)
+	}
+	card = newCard
 	// Reply "edit empty": a fixed line, the card stays
 	b.Text(ctx, user, text(3, "edit empty", card.msgID))
 	if m := s.last(); m.kind != "msg" || m.text != TextNoAmount {

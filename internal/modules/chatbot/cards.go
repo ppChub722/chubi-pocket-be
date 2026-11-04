@@ -69,6 +69,16 @@ func (s *memCards) put(c *Card) {
 	s.byMsg[[2]int64{c.ChatID, c.MessageID}] = c.ID
 }
 
+// repoint stores c, now shown as a new message: a Reply on the old message no longer finds it.
+func (s *memCards) repoint(c *Card, oldMessageID int64) {
+	s.put(c)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if oldMessageID != c.MessageID {
+		delete(s.byMsg, [2]int64{c.ChatID, oldMessageID})
+	}
+}
+
 func (s *memCards) get(id string) (Card, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
