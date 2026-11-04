@@ -15,6 +15,7 @@ var ErrOff = errors.New("llm: off")
 
 type Request struct {
 	System    string         // fixed text, cached by the provider
+	Context   string         // the per-user part that repeats across calls (lists), cached after System
 	User      string         // the per-call part
 	Schema    map[string]any // JSON schema of the answer
 	MaxTokens int

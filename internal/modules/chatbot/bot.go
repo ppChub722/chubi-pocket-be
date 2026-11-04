@@ -2,6 +2,7 @@ package chatbot
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -126,8 +127,7 @@ func (b *Bot) edit(ctx context.Context, c Card, m *telegram.Message) {
 func (b *Bot) parse(ctx context.Context, userID uuid.UUID, chatID, msgID int64, text string, current []Item, label string) (Lists, Outcome, bool) {
 	lists, err := b.lists.Lists(ctx, userID)
 	if err != nil {
-		b.log.Error("chatbot: lists failed", "chat_id", chatID, "error", err)
-		b.say(ctx, chatID, label+TextDown, msgID)
+		b.fail(ctx, chatID, msgID, label, CodeDB, "lists", err)
 		return Lists{}, Outcome{}, false
 	}
 	pick := b.router.For(ctx, userID)
@@ -136,15 +136,27 @@ func (b *Bot) parse(ctx context.Context, userID uuid.UUID, chatID, msgID int64, 
 	start := time.Now()
 	out, err := Parse(cctx, pick.Client, b.today(), lists, text, current)
 	ms := time.Since(start).Milliseconds()
-	if err != nil {
-		b.log.Warn("chatbot: llm failed", "chat_id", chatID, "provider", pick.Provider, "ms", ms, "error", err)
-		b.say(ctx, chatID, label+TextDown, msgID)
+	if errors.Is(err, llm.ErrOff) {
+		b.say(ctx, chatID, label+TextOff, msgID)
 		return Lists{}, Outcome{}, false
 	}
+	if err != nil {
+		b.fail(ctx, chatID, msgID, label, llm.ErrorCode(err), "llm", err, "provider", pick.Provider, "ms", ms)
+		return Lists{}, Outcome{}, false
+	}
+	hint := ""
+	if len(out.Items) == 0 && out.Fail == "" {
+		hint = out.Hint
+	}
 	b.log.Info("chatbot: parsed", "chat_id", chatID, "user_id", userID, "provider", pick.Provider, "model", out.Model,
-		"edit", current != nil, "items", len(out.Items), "hint", out.Hint, "ms", ms,
+		"edit", current != nil, "items", len(out.Items), "hint", hint, "fail", out.Fail, "ms", ms,
+		"categories", pickedCategories(out.Items, lists), "unsure", unsureFieldsOf(out.Items),
 		"tokens_in", out.Usage.In, "tokens_out", out.Usage.Out,
 		"cache_read", out.Usage.CacheRead, "cache_write", out.Usage.CacheWrite)
+	if out.Fail != "" {
+		b.fail(ctx, chatID, msgID, label, out.Fail, "answer", nil)
+		return Lists{}, Outcome{}, false
+	}
 	return lists, out, true
 }
 
@@ -183,6 +195,47 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
 	}
 	return true
+}
+
+// fail logs a failure with a code and a short ref, and tells the user whose side it is. Until the
+// user tier exists everyone also gets the code line (later: the owner only).
+func (b *Bot) fail(ctx context.Context, chatID, msgID int64, label, code, stage string, err error, kv ...any) {
+	ref := newCardID()[:4]
+	args := append([]any{"chat_id", chatID, "code", code, "ref", ref, "stage", stage}, kv...)
+	if err != nil {
+		args = append(args, "error", err)
+	}
+	b.log.Warn("chatbot: failed", args...)
+	b.say(ctx, chatID, label+failText(code)+"\n"+code+" #"+ref, msgID)
+}
+
+// pickedCategories: the category name per item ("-" none), for the log; never the user's text.
+func pickedCategories(items []Item, lists Lists) []string {
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		name := "-"
+		if it.CategoryID != nil {
+			for _, c := range lists.Categories {
+				if c.ID == *it.CategoryID {
+					name = c.Name
+				}
+			}
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+func unsureFieldsOf(items []Item) []string {
+	var out []string
+	for _, it := range items {
+		for _, f := range it.Unsure {
+			if !contains(out, f) {
+				out = append(out, f)
+			}
+		}
+	}
+	return out
 }
 
 func buttons(id string) []telegram.Button {

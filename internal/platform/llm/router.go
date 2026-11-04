@@ -48,7 +48,7 @@ func NewRouter(cfg config.LLMConfig) (*Router, error) {
 		if cfg.APIKey == "" {
 			r.client = Off{}
 		} else {
-			r.client = NewAnthropic(cfg.APIKey, cfg.Model, time.Duration(cfg.TimeoutSec)*time.Second)
+			r.client = NewAnthropic(cfg.APIKey, cfg.Model, cfg.Effort, time.Duration(cfg.TimeoutSec)*time.Second)
 		}
 	default:
 		return nil, fmt.Errorf("llm: unknown LLM_PROVIDER %q", cfg.Provider)

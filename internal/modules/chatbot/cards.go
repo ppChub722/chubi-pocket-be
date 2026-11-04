@@ -99,33 +99,88 @@ func (s *memCards) close(id string, state CardState) bool {
 	return true
 }
 
-// cardText renders the card: a count line, then one line per item. Missing parts are left out;
-// a guessed field shows "?".
+// cardText renders the card (brief "Card, texts and errors"): a head line, then each item with
+// its category and wallet. Shared wallet / date go into the head line.
 func cardText(c Card, lists Lists, today time.Time) string {
+	multi := len(c.Items) > 1
+	head := []string{fmt.Sprintf("%s%s %d รายการ", c.Label, emojiCard, len(c.Items))}
+	wallet, oneWallet := sharedWallet(c.Items)
+	oneWallet = oneWallet && multi
+	if oneWallet {
+		head = append(head, emojiWallet+" "+walletName(lists, wallet))
+	}
+	day, oneDay := sharedDay(c.Items)
+	if oneDay {
+		head = append(head, dayLabel(day, today))
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s🧾 %d รายการ", c.Label, len(c.Items))
-	for _, it := range c.Items {
-		b.WriteString("\n")
-		b.WriteString(itemLine(it, lists, today))
+	b.WriteString(strings.Join(head, sep))
+	for i, it := range c.Items {
+		num, indent := "", ""
+		if multi {
+			num, indent = fmt.Sprintf("%d. ", i+1), "   "
+		}
+		title := itemName(it) + " " + signedMoney(it)
+		if !oneDay {
+			title += sep + dayLabel(it.Date, today)
+		}
+		b.WriteString("\n" + num + title)
+		if it.Type == "transfer" {
+			b.WriteString("\n" + indent + emojiWallet + " " + walletName(lists, it.AccountID) + " → " +
+				walletName(lists, it.TransferToID))
+			continue
+		}
+		b.WriteString("\n" + indent + categoryLine(lists, it.CategoryID))
+		if !oneWallet {
+			b.WriteString("\n" + indent + emojiWallet + " " + walletName(lists, it.AccountID))
+		}
 	}
 	return b.String()
 }
 
-func itemLine(it Item, lists Lists, today time.Time) string {
-	parts := []string{typeLabel(it.Type) + " " + money(it.Amount) + " ฿"}
+// sharedWallet: the wallet every item goes to; false when items differ or one is a transfer.
+func sharedWallet(items []Item) (*uuid.UUID, bool) {
+	var w *uuid.UUID
+	for i, it := range items {
+		if it.Type == "transfer" {
+			return nil, false
+		}
+		if i == 0 {
+			w = it.AccountID
+			continue
+		}
+		if (w == nil) != (it.AccountID == nil) || (w != nil && *w != *it.AccountID) {
+			return nil, false
+		}
+	}
+	return w, len(items) > 0
+}
+
+func sharedDay(items []Item) (string, bool) {
+	for _, it := range items[1:] {
+		if it.Date != items[0].Date {
+			return "", false
+		}
+	}
+	return items[0].Date, true
+}
+
+func itemName(it Item) string {
 	if it.Description != nil {
-		parts = append(parts, *it.Description)
+		return *it.Description
 	}
-	switch {
-	case it.Type == "transfer":
-		parts = append(parts, walletName(lists, it.AccountID)+" → "+walletName(lists, it.TransferToID))
-	case contains(it.Unsure, "category"):
-		parts = append(parts, unsureMark)
-	case it.CategoryID != nil:
-		parts = append(parts, categoryName(lists, *it.CategoryID))
+	return typeLabel(it.Type)
+}
+
+// signedMoney: expense -฿60, income +฿500, transfer ฿5,000 (Telegram has no text colour).
+func signedMoney(it Item) string {
+	switch it.Type {
+	case "expense":
+		return "-฿" + money(it.Amount)
+	case "income":
+		return "+฿" + money(it.Amount)
 	}
-	parts = append(parts, dayLabel(it.Date, today))
-	return strings.Join(parts, sep)
+	return "฿" + money(it.Amount)
 }
 
 func typeLabel(t string) string {
@@ -160,16 +215,23 @@ func walletName(l Lists, id *uuid.UUID) string {
 			}
 		}
 	}
-	return unsureMark
+	return labelNone
 }
 
-func categoryName(l Lists, id uuid.UUID) string {
-	for _, c := range l.Categories {
-		if c.ID == id {
-			return c.Name
+// categoryLine: "🍽️ Food & Drinks › Dining / Take-away", or "🏷️ ไม่ระบุ".
+func categoryLine(l Lists, id *uuid.UUID) string {
+	if id != nil {
+		for _, c := range l.Categories {
+			if c.ID == *id {
+				name := c.Name
+				if c.Parent != "" {
+					name = c.Parent + " › " + c.Name
+				}
+				return categoryEmoji(c.Icon) + " " + name
+			}
 		}
 	}
-	return unsureMark
+	return emojiCategory + " " + labelNone
 }
 
 // money: 1234.5 → "1,234.50"; whole numbers without decimals.

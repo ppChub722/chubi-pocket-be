@@ -42,7 +42,8 @@ func (d *DBLists) Lists(ctx context.Context, userID uuid.UUID) (Lists, error) {
 		return l, err
 	}
 	rows, err = d.db.Query(ctx, `
-		SELECT c.id, c.name, c.type, COALESCE(p.name, '')
+		SELECT c.id, c.name, c.type, COALESCE(p.name, ''),
+		       COALESCE(NULLIF(c.icon_code->>'icon', ''), p.icon_code->>'icon', '')
 		  FROM categories c LEFT JOIN categories p ON p.id = c.parent_id
 		 WHERE c.user_id = $1 AND c.is_system = FALSE
 		 ORDER BY c.type, c.sort_order, c.created_at`, userID)
@@ -52,7 +53,7 @@ func (d *DBLists) Lists(ctx context.Context, userID uuid.UUID) (Lists, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var c Category
-		if err := rows.Scan(&c.ID, &c.Name, &c.Type, &c.Parent); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Type, &c.Parent, &c.Icon); err != nil {
 			return l, err
 		}
 		l.Categories = append(l.Categories, c)

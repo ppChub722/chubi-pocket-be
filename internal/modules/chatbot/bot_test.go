@@ -67,7 +67,6 @@ func TestParseKeywords(t *testing.T) {
 		{"no amount", 0, HintNoAmount, nil},
 		{"not money", 0, HintNotMoney, nil},
 		{"transfer missing", 0, HintTransferWallet, nil},
-		{"refuse", 0, HintNotMoney, nil},
 		{"สวัสดี", 0, HintNotMoney, nil},
 	}
 	for _, c := range cases {
@@ -82,6 +81,9 @@ func TestParseKeywords(t *testing.T) {
 		if c.check != nil {
 			c.check(t, out.Items)
 		}
+	}
+	if out, _ := Parse(context.Background(), fake, testDay, testLists, "refuse", nil); out.Fail != CodeRefused {
+		t.Errorf("refuse fail = %q", out.Fail)
 	}
 	if _, err := Parse(context.Background(), fake, testDay, testLists, "error", nil); !errors.As(err, new(ErrProvider)) {
 		t.Errorf("error keyword = %v", err)
@@ -179,13 +181,13 @@ func TestBotCardFlow(t *testing.T) {
 
 	b.Text(ctx, user, text(1, "normal tx", 0))
 	card := s.last()
-	if card.kind != "card" || !strings.Contains(card.text, "รายจ่าย 60 ฿ | normal | อาหาร | วันนี้") || len(card.buttons) != 2 {
+	if card.kind != "card" || card.text != "🧾 1 รายการ | วันนี้\nnormal -฿60\n🏷️ อาหาร\n👛 กสิกร" || len(card.buttons) != 2 {
 		t.Fatalf("card = %+v", card)
 	}
 
 	// Reply "edit": the first amount becomes 50, same card, buttons kept
 	b.Text(ctx, user, text(2, "edit", card.msgID))
-	if e := s.last(); e.kind != "edit" || e.msgID != card.msgID || !strings.Contains(e.text, "50 ฿") || len(e.buttons) != 2 {
+	if e := s.last(); e.kind != "edit" || e.msgID != card.msgID || !strings.Contains(e.text, "-฿50") || len(e.buttons) != 2 {
 		t.Fatalf("edit = %+v", e)
 	}
 	// Reply "edit empty": a fixed line, the card stays
@@ -240,8 +242,8 @@ func TestBotAllAndLimits(t *testing.T) {
 			t.Errorf("message %d = %q, want the [%s] label", i, s.log[i].text, kw)
 		}
 	}
-	if !strings.Contains(s.log[len(s.log)-1].text, TextDown) {
-		t.Errorf("slow = %q, want the provider-down line", s.log[len(s.log)-1].text)
+	if last := s.log[len(s.log)-1].text; !strings.Contains(last, TextFailAI) || !strings.Contains(last, llm.CodeTimeout+" #") {
+		t.Errorf("slow = %q, want the AI-side line with E-TIMEOUT", last)
 	}
 
 	b.Text(ctx, user, text(2, "normal tx", 0)) // 2nd of 2 this minute

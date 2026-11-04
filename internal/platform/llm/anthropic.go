@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,24 +12,33 @@ import (
 )
 
 type Anthropic struct {
-	c     anthropic.Client
-	model anthropic.Model
+	c      anthropic.Client
+	model  anthropic.Model
+	effort anthropic.OutputConfigEffort
 }
 
 // NewAnthropic returns a Client for one model. Retries stay at one: the caller is a person waiting
 // in a chat, and a second try that also fails should be an answer, not a longer wait.
-func NewAnthropic(apiKey, model string, timeout time.Duration) *Anthropic {
+func NewAnthropic(apiKey, model, effort string, timeout time.Duration) *Anthropic {
 	return &Anthropic{
 		c: anthropic.NewClient(
 			option.WithAPIKey(apiKey),
 			option.WithMaxRetries(1),
 			option.WithRequestTimeout(timeout),
 		),
-		model: anthropic.Model(model),
+		model:  anthropic.Model(model),
+		effort: anthropic.OutputConfigEffort(effort),
 	}
 }
 
 func (a *Anthropic) Complete(ctx context.Context, r Request) (Result, error) {
+	var blocks []anthropic.ContentBlockParamUnion
+	if r.Context != "" {
+		c := anthropic.NewTextBlock(r.Context)
+		c.OfText.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		blocks = append(blocks, c)
+	}
+	blocks = append(blocks, anthropic.NewTextBlock(r.User))
 	msg, err := a.c.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     a.model,
 		MaxTokens: int64(r.MaxTokens),
@@ -36,8 +46,11 @@ func (a *Anthropic) Complete(ctx context.Context, r Request) (Result, error) {
 			Text:         r.System,
 			CacheControl: anthropic.NewCacheControlEphemeralParam(),
 		}},
-		Messages:     []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(r.User))},
-		OutputConfig: anthropic.OutputConfigParam{Format: anthropic.JSONOutputFormatParam{Schema: r.Schema}},
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(blocks...)},
+		OutputConfig: anthropic.OutputConfigParam{
+			Effort: a.effort,
+			Format: anthropic.JSONOutputFormatParam{Schema: r.Schema},
+		},
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("anthropic: %w", err)
@@ -66,4 +79,40 @@ func (a *Anthropic) Complete(ctx context.Context, r Request) (Result, error) {
 	}
 	res.Text = text.String()
 	return res, nil
+}
+
+// Error codes: where a failed call broke. The chatbot shows them to the owner and logs them.
+const (
+	CodeTimeout = "E-TIMEOUT"
+	CodeNet     = "E-NET"
+	Code400     = "E-LLM400"
+	Code401     = "E-LLM401"
+	Code402     = "E-LLM402"
+	Code429     = "E-LLM429"
+	Code5xx     = "E-LLM5XX"
+)
+
+// ErrorCode names the failure of a Complete call.
+func ErrorCode(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return CodeTimeout
+	}
+	if errors.Is(err, ErrFakeDown) {
+		return Code5xx
+	}
+	var api *anthropic.Error
+	if errors.As(err, &api) {
+		switch s := api.StatusCode; {
+		case s == 401 || s == 403:
+			return Code401
+		case s == 402 || strings.Contains(strings.ToLower(api.Error()), "credit balance"):
+			return Code402
+		case s == 429:
+			return Code429
+		case s >= 500:
+			return Code5xx
+		}
+		return Code400
+	}
+	return CodeNet
 }

@@ -30,6 +30,7 @@ type LLMConfig struct {
 	TimeoutSec int    // LLM_TIMEOUT_SECONDS, one call
 	MonthlyCap int    // LLM_MONTHLY_CAP, calls per user per calendar month (Asia/Bangkok)
 	PerMinute  int    // LLM_PER_MINUTE, calls per user per minute
+	Effort     string // LLM_EFFORT, default low (a short extraction needs little thinking)
 }
 
 // TelegramConfig: the bot (0.4.2, modules/telegram). Webhook only; empty token = off. Who may use
@@ -154,6 +155,7 @@ func Load() (*Config, error) {
 			TimeoutSec: getEnvAsInt("LLM_TIMEOUT_SECONDS", 20),
 			MonthlyCap: getEnvAsInt("LLM_MONTHLY_CAP", 1000),
 			PerMinute:  getEnvAsInt("LLM_PER_MINUTE", 10),
+			Effort:     getEnv("LLM_EFFORT", "low"),
 		},
 	}
 

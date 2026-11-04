@@ -35,6 +35,7 @@ type Category struct {
 	Name   string
 	Type   string // expense | income
 	Parent string
+	Icon   string // the app's icon id (its own, else the parent's)
 }
 
 // Lists — what the parse needs to know about the user.
@@ -60,6 +61,7 @@ type Item struct {
 type Outcome struct {
 	Items []Item
 	Hint  string
+	Fail  string // an error code when the model gave no usable answer (refused, cut off, bad JSON)
 	Usage llm.Usage
 	Model string
 }
@@ -102,7 +104,8 @@ func Parse(ctx context.Context, c llm.Client, today time.Time, lists Lists, text
 	}
 	res, err := c.Complete(ctx, llm.Request{
 		System:    systemPrompt,
-		User:      userPart(today, al, text, cur),
+		Context:   contextPart(al),
+		User:      userPart(today, text, cur),
 		Schema:    answerSchema,
 		MaxTokens: maxOutToken,
 		Input:     text,
@@ -112,11 +115,17 @@ func Parse(ctx context.Context, c llm.Client, today time.Time, lists Lists, text
 		return Outcome{}, ErrProvider{err}
 	}
 	out := Outcome{Usage: res.Usage, Model: res.Model, Hint: HintNotMoney}
-	if res.Stop != llm.StopDone {
+	switch res.Stop {
+	case llm.StopRefused:
+		out.Fail = CodeRefused
+		return out, nil
+	case llm.StopTruncated:
+		out.Fail = CodeTruncated
 		return out, nil
 	}
 	var a answer
 	if err := json.Unmarshal([]byte(res.Text), &a); err != nil {
+		out.Fail = CodeBadJSON
 		return out, nil
 	}
 	words := []string{text}
