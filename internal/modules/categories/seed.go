@@ -54,6 +54,10 @@ var systemCatalog = []systemSeed{
 		Icon: "volunteer_activism", Color: "#E57373", IncludeInReport: false},
 	{Name: "Loan Taken", Type: "income", Kind: SystemLoanTaken,
 		Icon: "handshake", Color: "#AED581", IncludeInReport: false},
+	{Name: "Withdrawal", Type: "expense", Kind: SystemWithdraw,
+		Icon: "system_withdraw", Color: "#4DD0E1", IncludeInReport: false},
+	{Name: "Deposit", Type: "income", Kind: SystemDeposit,
+		Icon: "system_deposit", Color: "#4DD0E1", IncludeInReport: false},
 }
 
 // starterChild / starterRoot / starterIncome hold both languages; the seed picks one.

@@ -23,6 +23,9 @@ const (
 	// 0.4.1-1 D5: the kinds of a DEBT row's transaction (lend / borrow); repayments keep DEBT_*.
 	SystemLoanGiven SystemKind = "LOAN_GIVEN" // expense — a debt I paid
 	SystemLoanTaken SystemKind = "LOAN_TAKEN" // income — a debt they paid
+	// A transfer with one side only: money out of a wallet to nowhere / into one from nowhere.
+	SystemWithdraw SystemKind = "WITHDRAW" // expense
+	SystemDeposit  SystemKind = "DEPOSIT"  // income
 )
 
 type Category struct {

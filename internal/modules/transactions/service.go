@@ -225,6 +225,9 @@ func (s *Service) CreateInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, r
 	case TypeExpense, TypeIncome:
 		return s.createSingleInTx(ctx, tx, userID, req)
 	case TypeTransfer:
+		if req.AccountID == nil || req.TransferToAccountID == nil {
+			return s.createOneSidedInTx(ctx, tx, userID, req)
+		}
 		return s.createTransferInTx(ctx, tx, userID, req)
 	default:
 		return nil, ErrAmountInvalid // unreachable; binding catches this
@@ -236,13 +239,12 @@ func (s *Service) validateCreateCommon(req CreateRequest) error {
 		return ErrAmountInvalid
 	}
 	if req.Type == TypeTransfer {
-		if req.AccountID == nil {
+		// One side is enough: from only = ถอนเงิน, to only = เพิ่มเงิน.
+		if req.AccountID == nil && req.TransferToAccountID == nil {
 			return ErrTransferRequiresAccount
 		}
-		if req.TransferToAccountID == nil {
-			return ErrTransferToAccountRequired
-		}
-		if *req.TransferToAccountID == *req.AccountID {
+		if req.AccountID != nil && req.TransferToAccountID != nil &&
+			*req.TransferToAccountID == *req.AccountID {
 			return ErrTransferSameAccount
 		}
 		if req.CategoryID != nil {
@@ -262,6 +264,23 @@ func (s *Service) createSingleInTx(ctx context.Context, tx pgx.Tx, userID uuid.U
 		Date: req.Date, Description: req.Description, Note: req.Note,
 	}, req.TagIDs)
 	if err != nil {
+		return nil, err
+	}
+	return detailOf(ctx, tx, userID, created)
+}
+
+// createOneSidedInTx — a transfer with one wallet only: one row in WITHDRAW (from only) or
+// DEPOSIT (to only), like an adjustment; out of reports.
+func (s *Service) createOneSidedInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, req CreateRequest) (*TransactionDetail, error) {
+	kind, accountID := categories.SystemWithdraw, req.AccountID
+	if accountID == nil {
+		kind, accountID = categories.SystemDeposit, req.TransferToAccountID
+	}
+	created, _, err := s.CreateSystemInTx(ctx, tx, userID, *accountID, kind, req.Amount, req.Date, req.Description, req.Note)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.AttachTagsTx(ctx, tx, userID, created.ID, req.TagIDs); err != nil {
 		return nil, err
 	}
 	return detailOf(ctx, tx, userID, created)
@@ -999,8 +1018,32 @@ func (s *Service) checkNotSystemRow(ctx context.Context, current *Transaction) e
 		// what kind it was.
 		return nil
 	}
-	if cat.IsSystem {
+	if cat.IsSystem && !isOneSided(cat) {
 		return ErrSystemTransactionImmutable
+	}
+	return nil
+}
+
+// isOneSided — a ถอนเงิน / เพิ่มเงิน row: its own row to edit (amount, date, wallet, text, tags)
+// or delete, never its category or wallet away.
+func isOneSided(c *categories.Category) bool {
+	return c.SystemKind != nil &&
+		(*c.SystemKind == string(categories.SystemWithdraw) || *c.SystemKind == string(categories.SystemDeposit))
+}
+
+func (s *Service) checkOneSidedEdit(ctx context.Context, current *Transaction, req UpdateRequest) error {
+	if current.CategoryID == nil {
+		return nil
+	}
+	cat, err := s.cats.GetCategoryRow(ctx, current.UserID, *current.CategoryID)
+	if err != nil || !isOneSided(cat) {
+		return nil
+	}
+	if c, ok := req.CategoryIDChange(); ok && (c == nil || *c != cat.ID) {
+		return ErrSystemTransactionImmutable
+	}
+	if acc, ok := req.AccountIDChange(); ok && acc == nil {
+		return ErrTransferRequiresAccount
 	}
 	return nil
 }

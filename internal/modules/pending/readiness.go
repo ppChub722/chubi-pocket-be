@@ -40,11 +40,9 @@ func readiness(p *PendingTransaction) (missing []string, canConfirm bool) {
 			case d.Type == nil:
 				add(NeedType, true)
 			case *d.Type == "transfer":
-				if d.AccountID == nil {
+				// One side is enough (ถอนเงิน / เพิ่มเงิน).
+				if d.AccountID == nil && d.TransferToAccountID == nil {
 					add(NeedWallet, true)
-				}
-				if d.TransferToAccountID == nil {
-					add(NeedWalletTo, true)
 				}
 			default:
 				if d.AccountID == nil {

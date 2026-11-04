@@ -6531,7 +6531,7 @@ components:
       required: [type, amount, date]
       properties:
         type: { type: string, enum: [expense, income, transfer] }
-        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Null = no wallet (not allowed for transfers). '}
+        account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Null = no wallet. A transfer needs at least one of account_id / transfer_to_account_id: from only = one WITHDRAW row (ถอนเงิน), to only = one DEPOSIT row (เพิ่มเงิน); both = the two-leg transfer. A WITHDRAW / DEPOSIT row is editable (amount, date, wallet, text, tags; never its category, never its wallet cleared) and deletable.' }
         amount: { type: number, exclusiveMinimum: 0 }
         category_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         date: { $ref: '#/components/schemas/Date' }

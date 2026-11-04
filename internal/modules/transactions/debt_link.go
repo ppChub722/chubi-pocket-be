@@ -215,7 +215,13 @@ func (s *Service) checkLinkedEdit(ctx context.Context, userID uuid.UUID, current
 	if current.SourcePersonalDebtID != nil {
 		return checkDebtTxEdit(userID, current, req, deleting)
 	}
-	return s.checkNotSystemRow(ctx, current)
+	if err := s.checkNotSystemRow(ctx, current); err != nil {
+		return err
+	}
+	if deleting {
+		return nil
+	}
+	return s.checkOneSidedEdit(ctx, current, req)
 }
 
 func checkDebtTxEdit(userID uuid.UUID, current *Transaction, req UpdateRequest, deleting bool) error {
