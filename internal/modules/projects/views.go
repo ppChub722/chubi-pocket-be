@@ -169,12 +169,14 @@ func loadEvent(ctx context.Context, q shared.Querier, callerID, id uuid.UUID) (E
 }
 
 func loadMembers(ctx context.Context, q shared.Querier, callerID, projectID uuid.UUID) ([]EventMember, error) {
-	// My contact for the member, when I have one, names it and gives its icon, or its linked user's avatar (for me only).
-	rows, err := q.Query(ctx, `SELECT pm.id, pm.user_id, COALESCE(mc.display_name, u.display_name, pm.display_name),
-			`+shared.AvatarSQL("COALESCE(u.id, mc.linked_user_id)", "COALESCE(mc.icon_code, pm.icon_code)")+`, pm.role, pm.status, pm.invited_at, pm.joined_at, pm.left_at,
+	// The member as I see them: my contact for them, else their app account, else the typed name.
+	rows, err := q.Query(ctx, `SELECT pm.id, pm.user_id,
+			`+shared.ShownNameSQL("mc", "mlu", "u", "pm.display_name")+`,
+			`+shared.ShownAvatarSQL("mc", "mlu", "u")+`, pm.role, pm.status, pm.invited_at, pm.joined_at, pm.left_at,
 			mc.id, pm.removed_at, mc.linked_user_id IS NOT NULL, pm.invited_user_id IS NOT NULL AND pm.user_id IS NULL
 		FROM project_members pm LEFT JOIN users u ON u.id = pm.user_id
 		`+myContactJoin("$2")+` ON pm.user_id IS DISTINCT FROM $2
+		LEFT JOIN users mlu ON mlu.id = mc.linked_user_id
 		WHERE pm.project_id = $1
 		ORDER BY pm.status = 'left', pm.role <> 'owner', pm.created_at, pm.id`, projectID, callerID)
 	if err != nil {

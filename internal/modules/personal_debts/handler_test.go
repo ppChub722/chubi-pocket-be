@@ -428,7 +428,7 @@ func TestContactsAndDebtsAreIndependent(t *testing.T) {
 		"createDebtEntry", http.StatusCreated)
 
 	f.exec(`UPDATE contacts SET status = 'archived', last_used_at = NULL WHERE id = $1`, f.contact)
-	f.exec(`UPDATE contacts SET nickname = 'Beebee', show_nickname = TRUE WHERE id = $1`, f.contact)
+	f.exec(`UPDATE contacts SET display_name = 'Beebee', show_nickname = TRUE WHERE id = $1`, f.contact)
 	f.call("POST", entriesPath(key), map[string]any{"direction": "paid", "amount": 50, "date": "2026-10-02"},
 		"createDebtEntry", http.StatusCreated)
 	f.call("POST", entriesPath(key), map[string]any{"direction": "received", "amount": 30, "date": "2026-10-03"},

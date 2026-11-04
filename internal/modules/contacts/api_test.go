@@ -20,7 +20,6 @@ import (
 type cJSON struct {
 	ID           uuid.UUID `json:"id"`
 	Name         string    `json:"name"`
-	Nickname     *string   `json:"nickname"`
 	ShowNickname bool      `json:"show_nickname"`
 	DisplayName  string    `json:"display_name"`
 	Email        *string   `json:"email"`
@@ -112,23 +111,18 @@ func TestContactAPI(t *testing.T) {
 	}
 	r := e.as(uid)
 
-	ann := e.create(r, map[string]any{"display_name": "Ann Real", "nickname": "  Annie ", "email": "ann@example.com"})
-	if ann.Name != "Annie" || !ann.ShowNickname || ann.DisplayName != "Ann Real" || ann.Nickname == nil || *ann.Nickname != "Annie" {
-		t.Errorf("created = %+v, want name Annie (trimmed), show_nickname true", ann)
+	ann := e.create(r, map[string]any{"display_name": "Ann Real", "email": "ann@example.com"})
+	if ann.Name != "Ann Real" || ann.ShowNickname || ann.DisplayName != "Ann Real" {
+		t.Errorf("created = %+v, want name Ann Real, show_nickname off by default", ann)
 	}
-	bob := e.create(r, map[string]any{"display_name": "bob", "nickname": "", "show_nickname": false})
-	if bob.Name != "bob" || bob.Nickname != nil || bob.ShowNickname {
-		t.Errorf("bob = %+v, want empty nickname stored as null, show false, name bob", bob)
-	}
-	cat := e.create(r, map[string]any{"display_name": "Cat", "nickname": "Zed", "show_nickname": false, "absorb_names": []string{"Cat", "Kitty"}})
+	bob := e.create(r, map[string]any{"display_name": "bob",
+		"icon_code": map[string]any{"icon": "heart", "iconColors": []string{}, "bgColors": []string{}, "borderColors": []string{}}})
+	cat := e.create(r, map[string]any{"display_name": "Cat", "absorb_names": []string{"Cat", "Kitty"}})
 	_, raw := apitest.Do(t, r, "POST", "/api/v1/contacts", map[string]any{"display_name": "Dan", "absorb_names": []string{"Dan"}})
 	if got := decode[struct {
 		Absorbed int `json:"absorbed_count"`
 	}](t, raw); got.Absorbed != 1 {
 		t.Errorf("absorbed_count = %d, want 1", got.Absorbed)
-	}
-	if status, _ := apitest.Do(t, r, "POST", "/api/v1/contacts", map[string]any{"display_name": "Long", "nickname": strings.Repeat("n", 101)}); status != http.StatusBadRequest {
-		t.Errorf("nickname > 100 status = %d, want 400", status)
 	}
 	if status, _ := apitest.Do(t, r, "POST", "/api/v1/contacts", map[string]any{"display_name": ""}); status != http.StatusBadRequest {
 		t.Errorf("empty display_name status = %d, want 400", status)
@@ -150,28 +144,22 @@ func TestContactAPI(t *testing.T) {
 		}
 		return decode[cJSON](t, raw)
 	}
-	if got := put(ann.ID, map[string]any{"show_nickname": false}); got.Name != "Ann Real" || got.Nickname == nil || *got.Nickname != "Annie" {
-		t.Errorf("nickname off = %+v, want name Ann Real, nickname kept", got)
+	// Unlinked: the switch changes nothing, my name shows.
+	if got := put(ann.ID, map[string]any{"show_nickname": true}); got.Name != "Ann Real" || !got.ShowNickname {
+		t.Errorf("unlinked, switch on = %+v, want Ann Real", got)
 	}
-	if got := put(ann.ID, map[string]any{"phone": "0812345678"}); got.ShowNickname || got.Name != "Ann Real" {
+	if got := put(ann.ID, map[string]any{"phone": "0812345678"}); !got.ShowNickname {
 		t.Errorf("show_nickname absent on update changed: %+v", got)
 	}
-	if got := put(ann.ID, map[string]any{"show_nickname": true}); got.Name != "Annie" {
-		t.Errorf("nickname back on = %+v, want Annie", got)
-	}
-	if got := put(ann.ID, map[string]any{"nickname": nil}); got.Nickname != nil || got.Name != "Ann Real" {
-		t.Errorf("nickname null = %+v, want cleared", got)
-	}
-	if got := put(ann.ID, map[string]any{"nickname": "Annie2"}); got.Name != "Annie2" {
-		t.Errorf("nickname set again = %+v", got)
-	}
-	if status, _ := apitest.Do(t, r, "PUT", "/api/v1/contacts/"+ann.ID.String(), map[string]any{"nickname": strings.Repeat("n", 101)}); status != http.StatusBadRequest {
-		t.Errorf("update nickname > 100 = %d, want 400", status)
+	if got := put(ann.ID, map[string]any{"display_name": "Annie2", "show_nickname": false}); got.Name != "Annie2" {
+		t.Errorf("renamed = %+v, want Annie2", got)
 	}
 	if status, _ := apitest.Do(t, r, "PUT", "/api/v1/contacts/"+uuid.NewString(), map[string]any{"phone": "1"}); status != http.StatusNotFound {
 		t.Errorf("update unknown = %d, want 404", status)
 	}
 
+	// Linked: their profile name and their own avatar (never the icon I set); the switch shows my
+	// name for them instead (owner 2026-11-03).
 	if _, err := e.pool.Exec(ctx, `UPDATE contacts SET linked_user_id = $1, email = 'stored@example.com' WHERE id = $2`, friend, bob.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -184,17 +172,22 @@ func TestContactAPI(t *testing.T) {
 		linked.Email == nil || *linked.Email == "stored@example.com" {
 		t.Errorf("linked = %+v, want profile name, linked user's icon + email", linked)
 	}
-	if got := put(bob.ID, map[string]any{"nickname": "Bobby", "show_nickname": true}); got.Name != "Bobby" || got.LinkedUser == nil {
-		t.Errorf("linked + nickname = %+v, want Bobby", got)
+	if got := put(bob.ID, map[string]any{"show_nickname": true}); got.Name != "bob" || got.LinkedUser == nil {
+		t.Errorf("linked, switch on = %+v, want my name bob", got)
+	}
+	if got := put(bob.ID, map[string]any{"display_name": "Bobby"}); got.Name != "Bobby" {
+		t.Errorf("linked, nickname edited = %+v, want Bobby", got)
 	}
 	if got := put(bob.ID, map[string]any{"show_nickname": false}); got.Name != "Friend Profile" {
-		t.Errorf("linked, nickname off = %+v, want Friend Profile", got)
+		t.Errorf("linked, switch off = %+v, want Friend Profile", got)
 	}
-	if _, err := e.pool.Exec(ctx, `UPDATE users SET display_name = 'Renamed Profile' WHERE id = $1`, friend); err != nil {
+	// A linked user with no icon of their own: still theirs (initials), not the heart I set.
+	if _, err := e.pool.Exec(ctx, `UPDATE users SET display_name = 'Renamed Profile', icon_code = NULL WHERE id = $1`, friend); err != nil {
 		t.Fatal(err)
 	}
-	if status, raw = apitest.Do(t, r, "GET", "/api/v1/contacts/"+bob.ID.String(), nil); decode[cJSON](t, raw).Name != "Renamed Profile" {
-		t.Errorf("profile rename not live: %s", raw)
+	status, raw = apitest.Do(t, r, "GET", "/api/v1/contacts/"+bob.ID.String(), nil)
+	if got := decode[cJSON](t, raw); got.Name != "Renamed Profile" || got.Avatar.IconCode != nil {
+		t.Errorf("profile rename / no own icon = %s, want Renamed Profile, no icon", raw)
 	}
 
 	// getContact include: unlinked_names null unless asked.
@@ -247,8 +240,8 @@ func TestContactAPI(t *testing.T) {
 		t.Errorf("default list = %s", got)
 	}
 	for q, want := range map[string]string{
-		"?search=annie2":   "Annie2", // nickname
-		"?search=ann%20re": "Annie2", // display_name
+		"?search=annie2":   "Annie2", // display_name
+		"?search=bobby":    "Renamed Profile", // my name behind their profile name
 		"?search=ann@exam": "Annie2", // email
 		"?search=renamed":  "Renamed Profile",
 		"?linked=true":     "Renamed Profile",
@@ -264,7 +257,7 @@ func TestContactAPI(t *testing.T) {
 		t.Errorf("search by linked email = %v", got)
 	}
 	if got := names("?status=archived&search=cat"); len(got) != 1 {
-		t.Errorf("search display_name behind hidden nickname = %v", got)
+		t.Errorf("search archived = %v", got)
 	}
 
 	status, raw = apitest.Do(t, r, "POST", "/api/v1/contacts/"+cat.ID.String()+"/restore", nil)
@@ -274,8 +267,8 @@ func TestContactAPI(t *testing.T) {
 	}
 	status, raw = apitest.Do(t, r, "POST", "/api/v1/contacts/"+bob.ID.String()+"/unlink", nil)
 	apitest.Conform(t, "unlinkContact", status, raw)
-	if got := decode[cJSON](t, raw); got.LinkedUser != nil || got.Name != "bob" {
-		t.Errorf("unlinked = %+v, want stored name bob and no linked_user", got)
+	if got := decode[cJSON](t, raw); got.LinkedUser != nil || got.Name != "Bobby" {
+		t.Errorf("unlinked = %+v, want my name Bobby and no linked_user", got)
 	}
 	if status, _ = apitest.Do(t, r, "POST", "/api/v1/contacts/"+bob.ID.String()+"/unlink", nil); status != http.StatusBadRequest {
 		t.Errorf("unlink twice = %d, want 400", status)
@@ -417,12 +410,12 @@ func TestContactLinkRequests(t *testing.T) {
 	if status, raw = apitest.Do(t, rd, "POST", "/api/v1/contacts/link-requests/"+notif3.String()+"/accept", nil); status != http.StatusOK {
 		t.Fatalf("accept: %d %s", status, raw)
 	}
-	mine := e.create(rd, map[string]any{"display_name": "My Fon", "nickname": "Fonny"})
+	mine := e.create(rd, map[string]any{"display_name": "Fonny", "show_nickname": true})
 	status, raw = apitest.Do(t, rd, "POST", "/api/v1/contacts/link-requests/"+notif3.String()+"/link-existing-contact/"+mine.ID.String(), map[string]any{"note": "met at work"})
 	apitest.Conform(t, "linkExistingContactFromRequest", status, raw)
 	ex := decode[linkResult](t, raw)
 	if ex.Contact == nil || ex.Contact.ID != mine.ID || ex.Contact.Name != "Fonny" || ex.Contact.LinkedUser == nil || ex.Contact.LinkedUser.ID != f {
-		t.Errorf("link-existing = %+v, want my contact linked to f, nickname Fonny shown", ex.Contact)
+		t.Errorf("link-existing = %+v, want my contact linked to f, my name Fonny shown (switch on)", ex.Contact)
 	}
 	if status, _ = apitest.Do(t, rd, "POST", "/api/v1/contacts/link-requests/"+notif3.String()+"/link-existing-contact/"+uuid.NewString(), nil); status != http.StatusNotFound {
 		t.Errorf("link-existing unknown contact = %d, want 404", status)

@@ -25,8 +25,8 @@ type LinkedUser struct {
 type Contact struct {
 	ID           uuid.UUID     `json:"id"`
 	UserID       uuid.UUID     `json:"-"`
-	Name         string        `json:"name"`
-	Nickname     *string       `json:"nickname"`
+	Name string `json:"name"`
+	// ShowNickname — linked: show my name for them (display_name) instead of their app name.
 	ShowNickname bool          `json:"show_nickname"`
 	DisplayName  string        `json:"display_name"`
 	Email        *string       `json:"email"`
@@ -51,7 +51,6 @@ type ContactDetail struct {
 
 type CreateContactRequest struct {
 	DisplayName  string           `json:"display_name" binding:"required,min=1,max=100"`
-	Nickname     *string          `json:"nickname"     binding:"omitempty,max=100"`
 	ShowNickname *bool            `json:"show_nickname"`
 	Email        *string          `json:"email"        binding:"omitempty,email,max=255"`
 	Phone        *string          `json:"phone"        binding:"omitempty,max=50"`
@@ -63,7 +62,6 @@ type CreateContactRequest struct {
 
 type UpdateContactRequest struct {
 	DisplayName  *string          `json:"display_name" binding:"omitempty,min=1,max=100"`
-	Nickname     *string          `json:"nickname"     binding:"omitempty,max=100"`
 	ShowNickname *bool            `json:"show_nickname"`
 	Email        *string          `json:"email"        binding:"omitempty,optemail,max=255"`
 	Phone        *string          `json:"phone"        binding:"omitempty,max=50"`
@@ -73,14 +71,12 @@ type UpdateContactRequest struct {
 
 	descriptionPresent bool
 	notePresent        bool
-	nicknamePresent    bool
 }
 
 func (r *UpdateContactRequest) UnmarshalJSON(data []byte) error {
 	type alias UpdateContactRequest
 	present, err := shared.DecodeTracked(data, (*alias)(r))
 	r.descriptionPresent, r.notePresent = present["description"], present["note"]
-	r.nicknamePresent = present["nickname"]
 	return err
 }
 
@@ -90,10 +86,6 @@ func (r *UpdateContactRequest) DescriptionChange() (*string, bool) {
 
 func (r *UpdateContactRequest) NoteChange() (*string, bool) {
 	return shared.TextChange(r.Note, r.notePresent)
-}
-
-func (r *UpdateContactRequest) NicknameChange() (*string, bool) {
-	return shared.TextChange(r.Nickname, r.nicknamePresent)
 }
 
 type CreateContactResponse struct {

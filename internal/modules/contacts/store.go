@@ -42,7 +42,7 @@ type rowQuerier interface {
 
 var contactSelect = `SELECT c.id, c.user_id,
 	COALESCE(` + shared.PersonNameSQL("c", "lu") + `, c.display_name),
-	c.nickname, c.show_nickname, c.display_name,
+	c.show_nickname, c.display_name,
 	CASE WHEN lu.id IS NOT NULL THEN lu.email ELSE c.email END,
 	c.phone, c.description, c.note, ` + shared.PersonAvatarSQL("c", "lu") + `,
 	c.linked_user_id, c.status, c.last_used_at, c.created_at, c.updated_at,
@@ -60,7 +60,7 @@ func scanContact(row pgx.Row) (*Contact, error) {
 		luUser    *string
 	)
 	err := row.Scan(
-		&c.ID, &c.UserID, &c.Name, &c.Nickname, &c.ShowNickname, &c.DisplayName,
+		&c.ID, &c.UserID, &c.Name, &c.ShowNickname, &c.DisplayName,
 		&c.Email, &c.Phone, &c.Description, &c.Note, &iconBytes,
 		&c.LinkedUserID, &c.Status, &c.LastUsedAt, &c.CreatedAt, &c.UpdatedAt,
 		&luID, &luName, &luEmail, &luIcon, &luUser,
@@ -114,15 +114,15 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, req CreateContactR
 	if err != nil {
 		return nil, err
 	}
-	show := true
+	show := false
 	if req.ShowNickname != nil {
 		show = *req.ShowNickname
 	}
 	_, err = s.db.Exec(ctx, `INSERT INTO contacts
-		(id, user_id, display_name, nickname, show_nickname, email, phone, description, note, icon_code,
+		(id, user_id, display_name, show_nickname, email, phone, description, note, icon_code,
 		 created_by_user_id, updated_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $2, $2)`,
-		id, userID, strings.TrimSpace(req.DisplayName), shared.CleanText(req.Nickname), show,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $2, $2)`,
+		id, userID, strings.TrimSpace(req.DisplayName), show,
 		req.Email, req.Phone, shared.CleanText(req.Description), shared.CleanText(req.Note), icon)
 	if err != nil {
 		return nil, fmt.Errorf("db error: %w", err)
@@ -199,7 +199,6 @@ func (s *Store) List(ctx context.Context, userID uuid.UUID, f ListFilter) ([]Con
 		args = append(args, "%"+shared.EscapeLike(strings.ToLower(s))+"%")
 		n := len(args)
 		cond := fmt.Sprintf(`LOWER(%[2]s) LIKE $%[1]d
-			OR LOWER(COALESCE(c.nickname, '')) LIKE $%[1]d
 			OR LOWER(c.display_name) LIKE $%[1]d
 			OR LOWER(COALESCE(lu.display_name, '')) LIKE $%[1]d
 			OR LOWER(COALESCE(c.email, '')) LIKE $%[1]d
@@ -237,10 +236,6 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateCont
 	if req.DisplayName != nil {
 		args = append(args, strings.TrimSpace(*req.DisplayName))
 		q += fmt.Sprintf(", display_name = $%d", len(args))
-	}
-	if v, ok := req.NicknameChange(); ok {
-		args = append(args, v)
-		q += fmt.Sprintf(", nickname = $%d", len(args))
 	}
 	if req.ShowNickname != nil {
 		args = append(args, *req.ShowNickname)

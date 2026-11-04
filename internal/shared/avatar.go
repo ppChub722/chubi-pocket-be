@@ -59,9 +59,11 @@ func AvatarSQL(userExpr, iconExpr string) string {
 	return fmt.Sprintf(`avatar_src(%s, %s)`, userExpr, iconExpr)
 }
 
-// PersonAvatarSQL is AvatarSQL for a contact (alias c) and its linked user (alias lu).
+// PersonAvatarSQL is AvatarSQL for a contact (alias c) and its linked user (alias lu): a linked
+// contact is the user's own avatar (the icon I set is not used); else the icon I set.
 func PersonAvatarSQL(contactAlias, linkedUserAlias string) string {
-	return AvatarSQL(linkedUserAlias+".id", contactAlias+".icon_code")
+	return AvatarSQL(linkedUserAlias+".id",
+		fmt.Sprintf("(CASE WHEN %s.id IS NULL THEN %s.icon_code END)", linkedUserAlias, contactAlias))
 }
 
 // avatarSrc is what avatar_src() returns.

@@ -10,7 +10,7 @@ info:
     - **Old app builds don't matter.** 0.3.1-9 forces an update (`MIN_APP_BUILD` = its build). Shapes are clean: fields are renamed or replaced, snapshot keys are dropped, there are no "old key kept for old builds". Every breaking change carries `x-breaking`.
     - **Thin FE.** The FE only displays. One button = one call; one page open = one page-ready call; a write returns the final state (the changed resource, with every embedded ref resolved); aggregates, statuses and display flags are computed in the BE.
     - **No lookup lists.** Anything a row shows about another record (account / category / event / tag / person: name, icon, colour, flag) is embedded in the row. The FE never loads a whole list to look a name up by id. Pickers may still load their list.
-    - **Person display name** (one SQL fragment, everywhere, including the contacts module): (1) the contact's `nickname` when it is set AND `show_nickname` is on → (2) else, when the contact is linked, the linked user's live profile name → (3) else the contact's `display_name` → (4) the stored snapshot `person_name` only when the row has no contact. Resolved server-side; the snapshot never reaches the FE when a contact exists.
+    - **Person display name** (one SQL fragment, everywhere, including the contacts module): (1) a linked contact → the linked user's live profile name, or the contact's `display_name` when `show_nickname` is on → (2) an unlinked contact → its `display_name` → (3) the stored snapshot `person_name` only when the row has no contact. Avatar: a linked contact is the linked user's own avatar; an unlinked one the icon I set; a typed name none. Resolved server-side; the snapshot never reaches the FE when a contact exists.
     - **Wallet balances.** Every write returns the post-write balances of ALL wallets it touched (`account_balances: [{account_id, balance}]`; a transfer touches two). The FE patches its wallet cards from the response and never reloads `/accounts` after a write. That includes the money-moving writes of pages not redesigned yet (debt settle, event bills, quick create, scheduled generate-now): they are listed below as touch-points and gain only `account_balances`; the FE adopts it on those pages in their own rounds.
     - **Errors.** Any operation may also answer 400 / 401 / 403 / 404 / 409 with the `Error` schema; `error.code` is one of the registered codes (the `Error` enum = the server registry `internal/platform/apierr`, kept equal by a test; never renamed). Clients map the code to their own text and never show `message` (safe English, no internals: 500 causes are only logged). VALIDATION_ERROR always carries `details` = FieldError[] (`field` = the body JSON path or the query / path parameter, `code` = required / too_long / invalid ..., `params`). 426 APP_OUTDATED = update the app. **Safe retries (0.4.2-3).** Any write (POST / PUT / PATCH / DELETE, not multipart uploads) may carry an `Idempotency-Key` header (up to 200 chars): the app sends ONE key per save and the SAME key on every retry. The first 2xx answer is stored per user for 24 hours; a retry with the same key and the same request gets that answer again with the header `Idempotent-Replay: true` and writes nothing; the same key for a different request is 422 IDEMPOTENCY_KEY_REUSED; a retry while the first is still running is 409 IDEMPOTENCY_IN_PROGRESS. A non-2xx answer is never stored, so a failed save is retried for real. A tag id that is not the caller's is 400 TAG_NOT_FOUND. No rate or daily limit exists yet, so no 429.
     - **Keys.** A response object always carries every documented key; "none" is `null`; arrays are never `null`. Money is a JSON number in the row's currency (2 decimals, never a string). Dates are `YYYY-MM-DD` (the user's calendar date), timestamps RFC 3339. Ids are UUIDs.
@@ -26,7 +26,7 @@ info:
 
     ## Coverage
     The `x-registered-routes` / `x-spec-routes` fields (added when served) count the routes the server registers and the method + path pairs described here. Routes not yet in this spec keep their current shape (see the coverage note in `ai/inbox/be.md`).
-  x-contact-person-name-rule: (nickname if set and show_nickname) -> linked user's profile name -> contact display_name -> snapshot person_name
+  x-contact-person-name-rule: linked -> (display_name if show_nickname else linked user's profile name); unlinked -> display_name; no contact -> snapshot person_name
 servers:
   - url: /api/v1
     description: 'Same origin as the app''s API base URL.'
@@ -627,7 +627,7 @@ paths:
     get:
       tags: [Contacts]
       summary: List contacts (names already resolved)
-      description: 'Order: active first, then by resolved name (case-insensitive). Search matches name, nickname, display_name and email.'
+      description: 'Order: active first, then by resolved name (case-insensitive). Search matches name, display_name and email.'
       operationId: listContacts
       parameters:
         - { name: status, in: query, schema: { type: string, enum: [active, archived, all] } }
@@ -650,7 +650,6 @@ paths:
     post:
       tags: [Contacts]
       summary: Create a contact
-      description: 'nickname longer than 100 gives 400 VALIDATION_ERROR; an empty string is stored as null.'
       operationId: createContact
       requestBody:
         required: true
@@ -690,7 +689,7 @@ paths:
     put:
       tags: [Contacts]
       summary: Edit a contact
-      description: 'Returns the final contact. Changing `nickname` / `show_nickname` changes the resolved `name` shown everywhere (splits, debts, pending, contacts). nickname longer than 100 gives 400 VALIDATION_ERROR; an empty string or null clears it; show_nickname absent = unchanged.'
+      description: 'Returns the final contact. Changing `display_name` / `show_nickname` changes the resolved `name` shown everywhere (splits, debts, pending, contacts); show_nickname absent = unchanged.'
       operationId: updateContact
       requestBody:
         required: true
@@ -6395,7 +6394,7 @@ components:
     PersonRef:
       type: object
       description: |
-        A person shown on a split, a debt or a draft. `name` follows the single name rule (nickname when set and shown → linked user's profile name → contact display_name → snapshot when there is no contact). The FE draws 👤 when `contact_id` is null.
+        A person shown on a split, a debt or a draft. `name` follows the single name rule (linked → their profile name, or my contact name when show_nickname is on; unlinked → contact display_name; snapshot when there is no contact). The FE draws 👤 when `contact_id` is null.
       required: [name, contact_id, avatar, linked, linked_user_id]
       properties:
         name: { type: string, description: 'Resolved display name. '}
@@ -7125,11 +7124,10 @@ components:
         avatar: { $ref: '#/components/schemas/Avatar' }
     Contact: {
         "type": "object",
-        "description": "name is the resolved display name (nickname when set and show_nickname, else the linked user's live profile name, else display_name). display_name is the contact's own stored name; nickname is my own label for them; show_nickname switches it on / off per contact without deleting it.",
+        "description": "name is the resolved display name: linked → the linked user's live profile name, or display_name when show_nickname is on (my name for them, as a nickname); unlinked → display_name.",
         "required": [
           "id",
           "name",
-          "nickname",
           "show_nickname",
           "display_name",
           "email",
@@ -7150,17 +7148,9 @@ components:
           "name": {
             "type": "string"
           },
-          "nickname": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "maxLength": 100,
-            "description": "My own label (\"แม่\"). Empty string is stored as null."
-          },
           "show_nickname": {
             "type": "boolean",
-            "description": "Use the nickname as the contact name. Defaults to true; only matters when a nickname is set."
+            "description": "Linked only: show display_name (my name for them) instead of their profile name. Defaults to false."
           },
           "display_name": {
             "type": "string",
@@ -7271,8 +7261,7 @@ components:
       required: [display_name]
       properties:
         display_name: { type: string, minLength: 1, maxLength: 100 }
-        nickname: { type: [string, 'null'], maxLength: 100 }
-        show_nickname: { type: boolean, description: 'Default true.' }
+        show_nickname: { type: boolean, description: 'Default false.' }
         email: { type: [string, 'null'], format: email }
         phone: { type: [string, 'null'], maxLength: 50 }
         description: { type: [string, 'null'], maxLength: 200 }
@@ -7281,11 +7270,10 @@ components:
         absorb_names: { type: array, items: { type: string }, description: 'Free-text names to wire to this contact in the same call. '}
     UpdateContactRequest:
       type: object
-      description: 'Partial. A key present with `null` clears nickname / description / note.'
+      description: 'Partial. A key present with `null` clears description / note.'
       properties:
         display_name: { type: string, minLength: 1, maxLength: 100 }
-        nickname: { type: [string, 'null'], maxLength: 100 }
-        show_nickname: { type: boolean, description: 'Default true.' }
+        show_nickname: { type: boolean }
         email: { type: [string, 'null'], format: email }
         phone: { type: [string, 'null'], maxLength: 50 }
         description: { type: [string, 'null'], maxLength: 200 }
@@ -12079,6 +12067,7 @@ components:
         private_note: { type: [string, 'null'], maxLength: 500 }
         book_debts: { type: boolean, description: 'Event bills: my debts of this bill now (one per pair, a lump of one bill); the event''s lump skips these pairs. Default false (the lump from the summary). Split bills always book their debts.' }
         skip_transaction: { type: boolean, description: 'No transaction now, only the debts (claim later adds it). Default false.' }
+        transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'My existing plain expense / income becomes my book of the paper instead of a new row: it takes the paper''s amount, my share, date and description; its wallet, category and tags stay. Not mine / already in a bill / a transfer / another type → 400 VALIDATION_ERROR (field transaction_id).' }
     CreatePaperRequest:
       type: object
       required: [paper]

@@ -241,3 +241,53 @@ func TestSplitBillDeclineAndMark(t *testing.T) {
 		t.Errorf("the mark moved money: Bee owes %v, want 50", v)
 	}
 }
+
+// The tx edit's "แบ่ง" switch (owner 2026-11-03): A's plain 300 becomes A's book of a new split bill
+// (no second row; the wallet stays as it was); switching it off again (A, the last user, leaves
+// keeping the books) deletes the paper and leaves the tx plain.
+func TestSplitBillFromMyTx(t *testing.T) {
+	f := newFx(t)
+	A, B := f.as(f.a), f.as(f.b)
+	txID := f.id()
+	f.exec(`INSERT INTO transactions (id, user_id, account_id, type, amount, date, category_id, description)
+		VALUES ($1, $2, $3, 'expense', 300, '2026-11-01', $4, 'Lunch')`, txID, f.a, f.walletA, f.catA)
+	f.exec(`UPDATE accounts SET balance = balance - 300 WHERE id = $1`, f.walletA)
+
+	created := A.do("POST", "/split-bills", map[string]any{
+		"paper": map[string]any{"type": "expense", "amount": 300, "date": "2026-11-01", "description": "Lunch",
+			"split_mode": "equal", "people": []any{
+				map[string]any{"me": true, "paid": 300},
+				map[string]any{"person_name": "Dee"},
+			}},
+		"my_books": map[string]any{"pay": "debt", "transaction_id": txID},
+	}, "createSplitBill", 201)
+	id := str(obj(created, "paper"), "id")
+	if got := str(obj(created, "paper", "my_books", "transaction"), "id"); got != txID.String() {
+		t.Errorf("my book = %s, want the existing tx %s", got, txID)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM transactions WHERE user_id = $1`, f.a); n != 1 {
+		t.Errorf("A has %d rows, want 1 (no second tx)", n)
+	}
+	if b := f.balance(f.walletA); !near(b, 700) {
+		t.Errorf("A's wallet %v, want 700 (unchanged)", b)
+	}
+	if v := f.personNet(f.a, "Dee"); !near(v, 150) {
+		t.Errorf("Dee owes %v, want 150", v)
+	}
+	// Not mine / already in a bill → 400.
+	B.fail("POST", "/split-bills", map[string]any{"paper": map[string]any{"type": "expense", "amount": 10,
+		"date": "2026-11-01", "people": []any{map[string]any{"me": true, "paid": 10}}},
+		"my_books": map[string]any{"transaction_id": txID}}, 400, "VALIDATION_ERROR")
+	A.fail("POST", "/split-bills", map[string]any{"paper": map[string]any{"type": "expense", "amount": 10,
+		"date": "2026-11-01", "people": []any{map[string]any{"me": true, "paid": 10}, map[string]any{"person_name": "Eve"}}},
+		"my_books": map[string]any{"transaction_id": txID}}, 400, "VALIDATION_ERROR")
+
+	// Switched off: the last user leaves keeping the books → the paper goes, the tx stays plain.
+	left := A.do("POST", "/split-bills/"+id+"/leave", map[string]any{"books": "keep"}, "leaveSplitBill", 200)
+	if !left["deleted"].(bool) {
+		t.Errorf("the last leaver did not delete the paper")
+	}
+	if f.count(`SELECT COUNT(*) FROM transactions WHERE id = $1 AND split_transaction_id IS NULL`, txID) != 1 {
+		t.Errorf("the tx is gone or still on a paper")
+	}
+}

@@ -267,6 +267,9 @@ type ClaimInput struct {
 	BookDebts bool `json:"book_debts"`
 	// SkipTransaction — no transaction now, only the debts (claim it later).
 	SkipTransaction bool `json:"skip_transaction"`
+	// TransactionID — my existing plain expense / income becomes my book of the paper instead of a
+	// new row (the tx edit switching "แบ่ง" on, owner 2026-11-03).
+	TransactionID *uuid.UUID `json:"transaction_id"`
 }
 
 type CreatePaperRequest struct {

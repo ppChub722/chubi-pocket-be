@@ -445,11 +445,17 @@ func (s *Service) claimTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, pape
 			v := plan.MyShare
 			myShare = &v
 		}
-		row, err := s.txs.InsertPaperBookTx(ctx, tx, userID, transactions.PaperBook{
+		book := transactions.PaperBook{
 			PaperID: paper.ID, PersonID: me.ID, Type: transactions.TxType(plan.TxType), Amount: plan.Amount,
 			MyShare: myShare, AccountID: account, CategoryID: in.CategoryID, Date: paper.Date,
 			Description: paper.Description, Note: paper.Note, TagIDs: in.TagIDs,
-		})
+		}
+		var row *transactions.Transaction
+		if in.TransactionID != nil {
+			row, err = s.txs.AdoptPaperBookTx(ctx, tx, userID, *in.TransactionID, book)
+		} else {
+			row, err = s.txs.InsertPaperBookTx(ctx, tx, userID, book)
+		}
 		if err != nil {
 			return 0, err
 		}

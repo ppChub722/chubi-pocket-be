@@ -149,12 +149,34 @@ func IconFromJSON(b []byte) *IconCode {
 	return &ic
 }
 
+// A person as shown — the one rule for every page (owner 2026-11-03):
+//   - my contact, linked → their app name (my name for them instead when show_nickname is on) and
+//     their own app avatar, whatever they set (never the icon I set);
+//   - my contact, not linked → my name for them and the icon I set;
+//   - an app user I have no contact for → their app name and avatar;
+//   - a typed name → that name and no icon (the app draws the grey person glyph).
+
+// PersonNameSQL — the shown name of contact alias c (NULL when there is no contact); lu = its
+// linked user.
 func PersonNameSQL(contactAlias, linkedUserAlias string) string {
 	return fmt.Sprintf(`(CASE
 		WHEN %[1]s.id IS NULL THEN NULL
-		WHEN %[1]s.nickname IS NOT NULL AND %[1]s.nickname <> '' AND %[1]s.show_nickname THEN %[1]s.nickname
-		WHEN %[2]s.id IS NOT NULL THEN %[2]s.display_name
+		WHEN %[2]s.id IS NOT NULL AND NOT %[1]s.show_nickname THEN %[2]s.display_name
 		ELSE %[1]s.display_name END)`, contactAlias, linkedUserAlias)
+}
+
+// ShownNameSQL — the shown name of a person who may be my contact (c / lu), an app user (u) and
+// has a typed name (typedExpr); every alias may be NULL-joined.
+func ShownNameSQL(contactAlias, linkedUserAlias, userAlias, typedExpr string) string {
+	return fmt.Sprintf(`COALESCE(%s, %s.display_name, %s)`,
+		PersonNameSQL(contactAlias, linkedUserAlias), userAlias, typedExpr)
+}
+
+// ShownAvatarSQL — the shown avatar of that person (an avatar_src() value; no icon for a typed
+// name).
+func ShownAvatarSQL(contactAlias, linkedUserAlias, userAlias string) string {
+	return fmt.Sprintf(`(CASE WHEN %[1]s.id IS NOT NULL THEN %[2]s ELSE %[3]s END)`,
+		contactAlias, PersonAvatarSQL(contactAlias, linkedUserAlias), AvatarSQL(userAlias+".id", "NULL"))
 }
 
 func LoadAccountRefs(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]AccountRef, error) {
