@@ -136,7 +136,7 @@ func Parse(ctx context.Context, c llm.Client, today time.Time, lists Lists, text
 			out.Items = append(out.Items, it)
 		}
 	}
-	if len(out.Items) == 0 && a.ReplyHint != nil {
+	if len(out.Items) == 0 && a.ReplyHint != nil && *a.ReplyHint != HintUnknown {
 		out.Hint = *a.ReplyHint
 	}
 	return out, nil

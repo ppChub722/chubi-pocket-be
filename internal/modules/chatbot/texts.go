@@ -34,6 +34,7 @@ const (
 	HintNoAmount       = "no_amount"
 	HintNotMoney       = "not_money"
 	HintTransferWallet = "transfer_wallet_missing"
+	HintUnknown        = "unknown" // items present; with no items it reads as not_money
 )
 
 func hintText(h string) string {

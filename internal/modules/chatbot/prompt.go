@@ -19,7 +19,7 @@ Rules:
 - date: ISO date (yyyy-mm-dd) from words like "เมื่อวาน" or a weekday, relative to today; null = today.
 - unsure: the names of the fields you guessed.
 - When a "current card" is given, the message edits that card: answer with the whole card after the edit.
-- reply_hint only when items is empty; otherwise null.`
+- reply_hint says why items is empty; when items is not empty, reply_hint is "unknown".`
 
 var answerSchema = map[string]any{
 	"type":                 "object",
@@ -47,8 +47,8 @@ var answerSchema = map[string]any{
 				},
 			},
 		},
-		"reply_hint": map[string]any{"type": []string{"string", "null"},
-			"enum": []any{HintNoAmount, HintNotMoney, HintTransferWallet, nil}},
+		"reply_hint": map[string]any{"type": "string",
+			"enum": []string{HintNoAmount, HintNotMoney, HintTransferWallet, HintUnknown}},
 	},
 }
 
