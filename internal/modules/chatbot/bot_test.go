@@ -168,12 +168,12 @@ type staticLists struct{}
 func (staticLists) Lists(context.Context, uuid.UUID) (Lists, error) { return testLists, nil }
 func (staticLists) Lang(context.Context, uuid.UUID) string          { return "th" }
 
-// A low-confidence amount / date / wallet shows as "[value ?]"; a low category never does.
+// Every field the model guessed shows as "[value ?]".
 func TestCardUnsureMarks(t *testing.T) {
 	c := Card{Lang: "th", Items: []Item{{Type: "expense", Amount: 300, Date: "2026-10-31", AccountID: &walletA.ID,
 		CategoryID: &catFood.ID, Unsure: []string{"amount", "date", "account", "category"}}}}
 	got := cardText(c, testLists, testDay)
-	want := "🧾 1 รายการ | [เมื่อวาน ?]\n──────────\nรายจ่าย [-฿300 ?]\nหมวด: 🏷️ อาหาร\nกระเป๋า: 👛 [กสิกร ?]"
+	want := "🧾 1 รายการ | [เมื่อวาน ?]\n──────────\nรายจ่าย [-฿300 ?]\nหมวด: [🏷️ อาหาร ?]\nกระเป๋า: 👛 [กสิกร ?]"
 	if got != want {
 		t.Errorf("card =\n%s\nwant\n%s", got, want)
 	}

@@ -197,7 +197,7 @@ func (b *Bot) parse(ctx context.Context, tr turn, text string, current []Item) (
 	b.log.Info("chatbot: parsed", "chat_id", tr.chatID, "user_id", tr.userID, "lang", tr.lang,
 		"provider", pick.Provider, "model", out.Model,
 		"edit", current != nil, "items", len(out.Items), "hint", hint, "fail", out.Fail, "ms", ms,
-		"categories", pickedCategories(out.Items, lists), "model_picks", out.Picks, "confidence", confidenceOf(out.Items),
+		"categories", pickedCategories(out.Items, lists), "model_picks", out.Picks, "unsure", unsureOf(out.Items),
 		"tokens_in", out.Usage.In, "tokens_out", out.Usage.Out,
 		"cache_read", out.Usage.CacheRead, "cache_write", out.Usage.CacheWrite)
 	if out.Fail != "" {
@@ -290,17 +290,11 @@ func pickedCategories(items []Item, lists Lists) []string {
 	return out
 }
 
-// confidenceOf: per item, the fields below "high" ("amount=low date=medium"), for the log.
-func confidenceOf(items []Item) []string {
+// unsureOf: per item, the fields the model guessed ("amount date"), for the log.
+func unsureOf(items []Item) []string {
 	out := make([]string, 0, len(items))
 	for _, it := range items {
-		var parts []string
-		for _, f := range confidenceFields {
-			if lvl := it.Confidence[f]; lvl != "" && lvl != confHigh {
-				parts = append(parts, f+"="+lvl)
-			}
-		}
-		out = append(out, strings.Join(parts, " "))
+		out = append(out, strings.Join(it.Unsure, " "))
 	}
 	return out
 }

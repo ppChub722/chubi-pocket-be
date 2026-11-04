@@ -113,7 +113,7 @@ func (s *memCards) close(id string, state CardState) bool {
 
 // cardText renders the card (brief "Card, texts and errors") in the card's language: a head line,
 // then each item with its category and wallet, a line between parts. Shared wallet / date go into
-// the head line. A value the model was not sure of at all shows as "[value ?]" (owner 2026-11-04).
+// the head line. A value the model guessed (unsure) shows as "[value ?]" (owner 2026-11-04).
 func cardText(c Card, lists Lists, today time.Time) string {
 	t := textsFor(c.Lang)
 	multi := len(c.Items) > 1
@@ -148,7 +148,7 @@ func cardText(c Card, lists Lists, today time.Time) string {
 				unsureMark(walletName(t, lists, it.AccountID), it, "account") + " → " + walletName(t, lists, it.TransferToID))
 			continue
 		}
-		b.WriteString("\n" + indent + t.Category + categoryLine(t, lists, it.CategoryID))
+		b.WriteString("\n" + indent + t.Category + unsureMark(categoryLine(t, lists, it.CategoryID), it, "category"))
 		if !oneWallet {
 			b.WriteString("\n" + indent + t.Wallet + emojiWallet + " " +
 				unsureMark(walletName(t, lists, it.AccountID), it, "account"))
@@ -157,7 +157,7 @@ func cardText(c Card, lists Lists, today time.Time) string {
 	return b.String()
 }
 
-// unsureMark wraps s as "[s ?]" when the model was not sure of field at all.
+// unsureMark wraps s as "[s ?]" when the model guessed field.
 func unsureMark(s string, it Item, field string) string {
 	if contains(it.Unsure, field) {
 		return "[" + s + " ?]"

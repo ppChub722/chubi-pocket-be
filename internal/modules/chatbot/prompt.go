@@ -21,22 +21,12 @@ Rules:
 - Aliases are the short ids on the left of the lists ("w1", "c12"); answer the alias, never the name.
 - account: the wallet alias the user named (the user types the wallet's name, e.g. "kbank" → the alias of Kbank), or null (the main wallet). transfer needs account and transfer_to, two different wallets; if one is missing, leave the item out and use reply_hint "transfer_wallet_missing".
 - date: ISO date (yyyy-mm-dd) from words like "เมื่อวาน" or a weekday, relative to today; null = today.
-- confidence: for each of type, amount, date, account and category: "high" = sure (the user said it plainly), "medium" = a guess that is likely right, "low" = not sure at all (e.g. "หัวละ300" without how many people, "เดือนที่แล้ว" without a day). A field the user left out on purpose (no account named → null, no date → today) is "high".
+- unsure: the fields (type, amount, date, account, category) you guessed and are not sure of (e.g. "หัวละ300" without how many people, "เดือนที่แล้ว" without a day). A field the user simply left out (no account named → null, no date → today) is not unsure.
 - When a "current card" is given, the message edits that card: answer with the whole card after the edit.
 - reply_hint says why items is empty; when items is not empty, reply_hint is "unknown".`
 
-// Confidence per field (owner 2026-11-04): high = sure, medium = a guess that is likely right,
-// low = not sure at all (the card shows a low value as "[value ?]").
-const (
-	confHigh   = "high"
-	confMedium = "medium"
-	confLow    = "low"
-)
-
-var (
-	confidenceFields = []string{"type", "amount", "date", "account", "category"}
-	level            = map[string]any{"type": "string", "enum": []string{confHigh, confMedium, confLow}}
-)
+// unsureFields: what the model may say it guessed; the card shows each as "[value ?]" (owner 2026-11-04).
+var unsureFields = []string{"type", "amount", "date", "account", "category"}
 
 var answerSchema = map[string]any{
 	"type":                 "object",
@@ -49,7 +39,7 @@ var answerSchema = map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
 				"required": []string{"type", "amount", "description", "category", "account", "transfer_to",
-					"date", "note", "confidence"},
+					"date", "note", "unsure"},
 				"properties": map[string]any{
 					"type":        map[string]any{"type": "string", "enum": []string{"expense", "income", "transfer"}},
 					"amount":      map[string]any{"type": []string{"number", "null"}},
@@ -59,14 +49,8 @@ var answerSchema = map[string]any{
 					"transfer_to": map[string]any{"type": []string{"string", "null"}},
 					"date":        map[string]any{"type": []string{"string", "null"}},
 					"note":        map[string]any{"type": []string{"string", "null"}},
-					"confidence": map[string]any{
-						"type":                 "object",
-						"additionalProperties": false,
-						"required":             confidenceFields,
-						"properties": map[string]any{
-							"type": level, "amount": level, "date": level, "account": level, "category": level,
-						},
-					},
+					"unsure": map[string]any{"type": "array", "items": map[string]any{"type": "string",
+						"enum": unsureFields}},
 				},
 			},
 		},

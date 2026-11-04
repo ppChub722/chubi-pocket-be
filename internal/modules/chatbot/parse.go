@@ -54,8 +54,7 @@ type Item struct {
 	AccountID    *uuid.UUID
 	TransferToID *uuid.UUID
 	Date         string
-	Unsure       []string          // fields at "low" confidence (shown as "[value ?]"); a bad category alias too
-	Confidence   map[string]string // the model's level per field, for the log
+	Unsure       []string // fields the model guessed (shown as "[value ?]"); a bad category alias too
 }
 
 // Outcome of one parse. Items empty → Hint says why.
@@ -85,7 +84,7 @@ type answerItem struct {
 	TransferTo  *string  `json:"transfer_to"`
 	Date        *string  `json:"date"`
 	Note        *string           `json:"note"`
-	Confidence  map[string]string `json:"confidence"`
+	Unsure      []string          `json:"unsure"`
 }
 
 // ErrProvider wraps a failed model call (down, timeout, no key).
@@ -218,13 +217,7 @@ func (a *aliases) toAnswer(items []Item) []answerItem {
 	for _, it := range items {
 		amt, date := it.Amount, it.Date
 		ai := answerItem{Type: it.Type, Amount: &amt, Description: it.Description, Note: it.Note, Date: &date,
-			Confidence: map[string]string{}}
-		for _, f := range confidenceFields {
-			ai.Confidence[f] = confHigh
-			if contains(it.Unsure, f) {
-				ai.Confidence[f] = confLow
-			}
-		}
+			Unsure: append([]string{}, it.Unsure...)}
 		if it.CategoryID != nil {
 			ai.Category = a.categoryAlias(*it.CategoryID)
 		}
@@ -243,15 +236,9 @@ func (a *aliases) check(ai answerItem, today time.Time, words []string) (Item, b
 	if ai.Amount == nil || math.IsNaN(*ai.Amount) || *ai.Amount <= 0 || *ai.Amount > maxAmount {
 		return Item{}, false
 	}
-	it := Item{Type: ai.Type, Amount: math.Round(*ai.Amount*100) / 100, Unsure: []string{},
-		Confidence: map[string]string{}}
-	for _, f := range confidenceFields {
-		lvl := ai.Confidence[f]
-		if lvl != confHigh && lvl != confMedium && lvl != confLow {
-			lvl = confHigh
-		}
-		it.Confidence[f] = lvl
-		if lvl == confLow {
+	it := Item{Type: ai.Type, Amount: math.Round(*ai.Amount*100) / 100, Unsure: []string{}}
+	for _, f := range ai.Unsure {
+		if contains(unsureFields, f) && !contains(it.Unsure, f) {
 			it.Unsure = append(it.Unsure, f)
 		}
 	}
