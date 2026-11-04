@@ -21,6 +21,8 @@ type Sender interface {
 	SendCard(ctx context.Context, chatID int64, text string, replyTo int64, buttons []telegram.Button) (int64, error)
 	EditCard(ctx context.Context, chatID, messageID int64, text string, buttons []telegram.Button) error
 	AnswerCallback(ctx context.Context, callbackID, text string) error
+	SetReaction(ctx context.Context, chatID, messageID int64, emoji string) error
+	SendDraft(ctx context.Context, chatID, draftID int64, text string) error
 }
 
 // ListSource reads the user's wallets and categories.
@@ -68,11 +70,17 @@ func (b *Bot) Text(ctx context.Context, userID uuid.UUID, m *telegram.Message) {
 		b.say(ctx, chatID, TextTooFast, m.MessageID)
 		return
 	}
+	b.react(ctx, chatID, m.MessageID, reactRead)
 	if r := m.ReplyToMessage; r != nil {
 		if c, ok := b.cards.byMessage(chatID, r.MessageID); ok {
 			b.edit(ctx, c, m)
 			return
 		}
+	}
+	// The draft bubble goes when the card (or a line) is sent; an edit sends nothing new, so only
+	// new messages get one.
+	if err := b.send.SendDraft(ctx, chatID, m.MessageID, TextThinking); err != nil {
+		b.log.Warn("chatbot: draft failed", "chat_id", chatID, "error", err)
 	}
 	if b.router.Fake() && strings.EqualFold(strings.TrimSpace(m.Text), "all") {
 		for _, kw := range llm.FakeKeywords {
@@ -90,10 +98,12 @@ func (b *Bot) fresh(ctx context.Context, userID uuid.UUID, chatID, msgID int64, 
 		return
 	}
 	if len(out.Items) == 0 {
+		b.react(ctx, chatID, msgID, reactFail)
 		b.say(ctx, chatID, label+hintText(out.Hint), msgID)
 		return
 	}
-	c := Card{ID: newCardID(), UserID: userID, ChatID: chatID, Items: out.Items, State: CardOpen, Label: label}
+	c := Card{ID: newCardID(), UserID: userID, ChatID: chatID, Items: out.Items, State: CardOpen, Label: label,
+		SourceID: msgID}
 	id, err := b.send.SendCard(ctx, chatID, cardText(c, lists, b.today()), msgID, buttons(c.ID))
 	if err != nil {
 		b.log.Error("chatbot: send card failed", "chat_id", chatID, "error", err)
@@ -114,6 +124,7 @@ func (b *Bot) edit(ctx context.Context, c Card, m *telegram.Message) {
 		return
 	}
 	if len(out.Items) == 0 {
+		b.react(ctx, c.ChatID, m.MessageID, reactFail)
 		b.say(ctx, c.ChatID, c.Label+hintText(out.Hint), m.MessageID)
 		return
 	}
@@ -121,7 +132,9 @@ func (b *Bot) edit(ctx context.Context, c Card, m *telegram.Message) {
 	b.cards.put(&c)
 	if err := b.send.EditCard(ctx, c.ChatID, c.MessageID, cardText(c, lists, b.today()), buttons(c.ID)); err != nil {
 		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
+		return
 	}
+	b.react(ctx, c.ChatID, m.MessageID, reactDone)
 }
 
 func (b *Bot) parse(ctx context.Context, userID uuid.UUID, chatID, msgID int64, text string, current []Item, label string) (Lists, Outcome, bool) {
@@ -150,7 +163,7 @@ func (b *Bot) parse(ctx context.Context, userID uuid.UUID, chatID, msgID int64, 
 	}
 	b.log.Info("chatbot: parsed", "chat_id", chatID, "user_id", userID, "provider", pick.Provider, "model", out.Model,
 		"edit", current != nil, "items", len(out.Items), "hint", hint, "fail", out.Fail, "ms", ms,
-		"categories", pickedCategories(out.Items, lists), "unsure", unsureFieldsOf(out.Items),
+		"categories", pickedCategories(out.Items, lists), "model_picks", out.Picks, "unsure", unsureFieldsOf(out.Items),
 		"tokens_in", out.Usage.In, "tokens_out", out.Usage.Out,
 		"cache_read", out.Usage.CacheRead, "cache_write", out.Usage.CacheWrite)
 	if out.Fail != "" {
@@ -194,6 +207,11 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 	if err := b.send.EditCard(ctx, c.ChatID, c.MessageID, cardText(c, lists, b.today())+"\n\n"+done, nil); err != nil {
 		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
 	}
+	if state == CardSaved {
+		b.react(ctx, c.ChatID, c.SourceID, reactDone)
+	} else {
+		b.react(ctx, c.ChatID, c.SourceID, "")
+	}
 	return true
 }
 
@@ -206,7 +224,18 @@ func (b *Bot) fail(ctx context.Context, chatID, msgID int64, label, code, stage 
 		args = append(args, "error", err)
 	}
 	b.log.Warn("chatbot: failed", args...)
+	b.react(ctx, chatID, msgID, reactFail)
 	b.say(ctx, chatID, label+failText(code)+"\n"+code+" #"+ref, msgID)
+}
+
+// react sets the bot's reaction on the user's message; a failure only logs (it is decoration).
+func (b *Bot) react(ctx context.Context, chatID, msgID int64, emoji string) {
+	if msgID == 0 {
+		return
+	}
+	if err := b.send.SetReaction(ctx, chatID, msgID, emoji); err != nil {
+		b.log.Warn("chatbot: reaction failed", "chat_id", chatID, "error", err)
+	}
 }
 
 // pickedCategories: the category name per item ("-" none), for the log; never the user's text.

@@ -39,7 +39,14 @@ func (a *Anthropic) Complete(ctx context.Context, r Request) (Result, error) {
 		blocks = append(blocks, c)
 	}
 	blocks = append(blocks, anthropic.NewTextBlock(r.User))
+	// A short extraction gains nothing from thinking; the API allows it off at high effort or below.
+	var thinking anthropic.ThinkingConfigParamUnion
+	switch a.effort {
+	case anthropic.OutputConfigEffortLow, anthropic.OutputConfigEffortMedium, anthropic.OutputConfigEffortHigh:
+		thinking.OfDisabled = &anthropic.ThinkingConfigDisabledParam{}
+	}
 	msg, err := a.c.Messages.New(ctx, anthropic.MessageNewParams{
+		Thinking:  thinking,
 		Model:     a.model,
 		MaxTokens: int64(r.MaxTokens),
 		System: []anthropic.TextBlockParam{{

@@ -100,6 +100,23 @@ func (c *Client) AnswerCallback(ctx context.Context, callbackID, text string) er
 	return c.call(ctx, "answerCallbackQuery", body, nil)
 }
 
+// SetReaction puts one emoji reaction on a message (it must be in Telegram's reaction set);
+// "" clears it.
+func (c *Client) SetReaction(ctx context.Context, chatID, messageID int64, emoji string) error {
+	reaction := []map[string]string{}
+	if emoji != "" {
+		reaction = append(reaction, map[string]string{"type": "emoji", "emoji": emoji})
+	}
+	return c.call(ctx, "setMessageReaction", map[string]any{"chat_id": chatID, "message_id": messageID,
+		"reaction": reaction}, nil)
+}
+
+// SendDraft shows a temporary bubble in a private chat while a reply is being made; it goes when
+// the bot sends a message, or after about 30 s.
+func (c *Client) SendDraft(ctx context.Context, chatID, draftID int64, text string) error {
+	return c.call(ctx, "sendMessageDraft", map[string]any{"chat_id": chatID, "draft_id": draftID, "text": text}, nil)
+}
+
 // EditText replaces a message's text (its buttons go).
 func (c *Client) EditText(ctx context.Context, chatID, messageID int64, text string) error {
 	return c.call(ctx, "editMessageText", map[string]any{"chat_id": chatID, "message_id": messageID, "text": text}, nil)

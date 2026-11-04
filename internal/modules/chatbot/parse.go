@@ -62,6 +62,7 @@ type Outcome struct {
 	Items []Item
 	Hint  string
 	Fail  string // an error code when the model gave no usable answer (refused, cut off, bad JSON)
+	Picks []string // the category value the model gave per item, as given (for the log)
 	Usage llm.Usage
 	Model string
 }
@@ -141,6 +142,11 @@ func Parse(ctx context.Context, c llm.Client, today time.Time, lists Lists, text
 		if len(out.Items) == maxItems {
 			break
 		}
+		pick := "null"
+		if ai.Category != nil {
+			pick = *ai.Category
+		}
+		out.Picks = append(out.Picks, pick)
 		if it, ok := al.check(ai, today, words); ok {
 			out.Items = append(out.Items, it)
 		}

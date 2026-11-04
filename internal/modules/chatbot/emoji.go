@@ -5,6 +5,11 @@ const (
 	emojiCard     = "🧾"
 	emojiWallet   = "👛"
 	emojiCategory = "🏷️" // no category, or an icon with no emoji
+
+	// Reactions on the user's message; Telegram allows only its own reaction set.
+	reactRead = "✍"
+	reactDone = "👌"
+	reactFail = "🤷"
 )
 
 // iconEmoji maps the app's category / wallet icon ids (chubi-pocket-app

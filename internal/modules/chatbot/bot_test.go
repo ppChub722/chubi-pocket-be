@@ -3,6 +3,7 @@ package chatbot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -104,9 +105,11 @@ type sent struct {
 }
 
 type fakeSender struct {
-	mu   sync.Mutex
-	next int64
-	log  []sent
+	mu        sync.Mutex
+	next      int64
+	log       []sent
+	reactions []string // "msgID:emoji"
+	drafts    []string
 }
 
 func (f *fakeSender) add(s sent) {
@@ -136,6 +139,21 @@ func (f *fakeSender) EditCard(_ context.Context, chatID, msgID int64, text strin
 
 func (f *fakeSender) AnswerCallback(_ context.Context, _, text string) error {
 	f.add(sent{kind: "answer", text: text})
+	return nil
+}
+
+// Reactions and drafts are kept apart from log, so the message counts stay as they were.
+func (f *fakeSender) SetReaction(_ context.Context, _, msgID int64, emoji string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reactions = append(f.reactions, fmt.Sprintf("%d:%s", msgID, emoji))
+	return nil
+}
+
+func (f *fakeSender) SendDraft(_ context.Context, _, _ int64, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.drafts = append(f.drafts, text)
 	return nil
 }
 

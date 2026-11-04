@@ -21,6 +21,7 @@ const (
 	TextFailRefused = "🙅 ข้อความนี้จดไม่ได้ ลองพิมพ์ใหม่นะครับ"
 	TextFailTrunc   = "📏 รายการเยอะเกินไป ลองแบ่งส่งทีละน้อยนะครับ"
 	TextOff         = "🛠️ ยังไม่เปิดจดรายการครับ"
+	TextThinking    = "⏳ กำลังอ่านรายการ…"
 	TextSaved          = "บันทึกแล้ว ✓"
 	TextCancelled      = "ยกเลิกแล้ว"
 	TextFakeMark       = " (fake)"

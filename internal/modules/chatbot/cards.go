@@ -25,6 +25,7 @@ type Card struct {
 	UserID    uuid.UUID
 	ChatID    int64
 	MessageID int64
+	SourceID  int64 // the user's message the card answers (its reaction follows the card)
 	Items     []Item
 	State     CardState
 	Label     string // "[keyword] " in the fake's all mode
