@@ -20,7 +20,7 @@ const (
 	maxDesc     = 50
 	maxNote     = 200
 	maxAmount   = 999_999_999_999.99
-	maxOutToken = 1024
+	maxOutToken = 2048 // 10 items of JSON fit with room; 1024 was cut off on 4 items while thinking was on
 )
 
 // Wallet / Category — the user's lists, sent to the model as short aliases (w1, c1 …).
