@@ -232,7 +232,7 @@ func (a *aliases) check(ai answerItem, today time.Time, words []string) (Item, b
 	switch ai.Type {
 	case "expense", "income":
 		if ai.Category != nil {
-			if c, ok := a.category[*ai.Category]; ok && c.Type == ai.Type {
+			if c, ok := a.categoryOf(*ai.Category, ai.Type); ok {
 				it.CategoryID = &c.ID
 			} else if !contains(it.Unsure, "category") {
 				it.Unsure = append(it.Unsure, "category")
@@ -270,7 +270,30 @@ func (a *aliases) walletOf(alias *string) *uuid.UUID {
 	if w, ok := a.wallet[*alias]; ok {
 		return &w.ID
 	}
+	// The model sometimes answers the name instead of the alias; a name on the list is as safe.
+	for _, w := range a.lists.Wallets {
+		if sameName(w.Name, *alias) {
+			return &w.ID
+		}
+	}
 	return nil
+}
+
+// categoryOf finds a category of type t by alias, else by its exact name (or "parent › name").
+func (a *aliases) categoryOf(v, t string) (Category, bool) {
+	if c, ok := a.category[v]; ok && c.Type == t {
+		return c, true
+	}
+	for _, c := range a.lists.Categories {
+		if c.Type == t && (sameName(c.Name, v) || (c.Parent != "" && sameName(c.Parent+" › "+c.Name, v))) {
+			return c, true
+		}
+	}
+	return Category{}, false
+}
+
+func sameName(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 // verbatim keeps s only when it is the user's own words (a substring of one of them) and short
