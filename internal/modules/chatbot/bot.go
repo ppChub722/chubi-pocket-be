@@ -133,14 +133,18 @@ func (b *Bot) parse(ctx context.Context, userID uuid.UUID, chatID, msgID int64, 
 	pick := b.router.For(ctx, userID)
 	cctx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
+	start := time.Now()
 	out, err := Parse(cctx, pick.Client, b.today(), lists, text, current)
+	ms := time.Since(start).Milliseconds()
 	if err != nil {
-		b.log.Warn("chatbot: llm failed", "chat_id", chatID, "provider", pick.Provider, "error", err)
+		b.log.Warn("chatbot: llm failed", "chat_id", chatID, "provider", pick.Provider, "ms", ms, "error", err)
 		b.say(ctx, chatID, label+TextDown, msgID)
 		return Lists{}, Outcome{}, false
 	}
-	b.log.Info("chatbot: parsed", "chat_id", chatID, "provider", pick.Provider, "model", out.Model,
-		"items", len(out.Items), "hint", out.Hint, "tokens_in", out.Usage.In, "tokens_out", out.Usage.Out)
+	b.log.Info("chatbot: parsed", "chat_id", chatID, "user_id", userID, "provider", pick.Provider, "model", out.Model,
+		"edit", current != nil, "items", len(out.Items), "hint", out.Hint, "ms", ms,
+		"tokens_in", out.Usage.In, "tokens_out", out.Usage.Out,
+		"cache_read", out.Usage.CacheRead, "cache_write", out.Usage.CacheWrite)
 	return lists, out, true
 }
 
