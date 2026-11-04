@@ -124,6 +124,9 @@ type TransactionDetail struct {
 	CreatedBy       *shared.UserRef `json:"created_by"`
 	IsLocked        bool            `json:"is_locked"`
 	CanEditCategory bool            `json:"can_edit_category"`
+	// Paper — GET /transactions/:id only: the bill this row is my book of, as GET of that bill
+	// gives it (a projects.PaperView); absent otherwise.
+	Paper any `json:"paper,omitempty"`
 }
 
 type TransferResponse struct {

@@ -42,6 +42,7 @@ type Service struct {
 	cats      *categories.Service
 	debtLinks DebtLinks
 	recurring RecurringLinks
+	papers    PaperReader
 }
 
 func NewService(s *Store, cats *categories.Service) *Service {
@@ -105,7 +106,12 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*TransactionDe
 	if err != nil {
 		return nil, err
 	}
-	return detailOf(ctx, s.store.db, userID, t)
+	d, err := detailOf(ctx, s.store.db, userID, t)
+	if err != nil {
+		return nil, err
+	}
+	s.withPaper(ctx, userID, d)
+	return d, nil
 }
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*ListResponse, error) {

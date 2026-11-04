@@ -6466,6 +6466,7 @@ components:
         created_by: { oneOf: [{ $ref: '#/components/schemas/UserRef' }, { type: 'null' }], description: 'Set on rows of a shared wallet (more than one active member). '}
         is_locked: { type: boolean }
         can_edit_category: { type: boolean }
+        paper: { $ref: '#/components/schemas/PaperView', description: 'GET /transactions/{id} only (owner 2026-11-04: the tx page in one call): the bill this row is my book of (split_bill / event_bill), as GET of that bill gives it. Absent elsewhere, on a plain row, and when the bill can''t be read.' }
     WalletBalance:
       type: object
       description: "A wallet's balance right after a write."

@@ -173,6 +173,7 @@ func main() {
 	projectsService.WithDebts(personalDebtsService) // claims and settles write debts and repayments
 
 	transactionsService.WithRecurringLinks(recurringService)
+	transactionsService.WithPaperReader(projectsService) // GET /transactions/:id carries its bill
 	pendingService.WithSubmitHook(recurringService.OnDraftSubmitted)
 	pendingService.WithSavings(savingGoalsService)
 	recurringService.WithSavings(savingGoalsService)

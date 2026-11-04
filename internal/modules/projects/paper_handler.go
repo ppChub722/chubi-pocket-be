@@ -367,6 +367,11 @@ func (h *Handler) SetMyDefaults(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
+// PaperFor — transactions.PaperReader: the paper a row of mine is my book of, either kind.
+func (s *Service) PaperFor(ctx context.Context, userID, paperID uuid.UUID) (any, error) {
+	return s.getPaper(ctx, userID, paperID, nil)
+}
+
 // getPaper — one paper as I see it.
 func (s *Service) getPaper(ctx context.Context, userID, paperID uuid.UUID, kind *uuid.UUID) (*PaperView, error) {
 	tx, err := s.store.Pool().Begin(ctx)
