@@ -90,7 +90,8 @@ type Handler struct {
 	send     sender
 	store    saver // nil = texts are not kept
 	accounts Accounts
-	chat     Chatbot // nil = texts get "ได้รับข้อความแล้ว ✓"
+	chat     Chatbot    // nil = texts get "ได้รับข้อความแล้ว ✓"
+	lang     LangSource // nil = Telegram's language, else English
 	seen     *seenSet
 	log      *slog.Logger
 }
@@ -137,22 +138,22 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) Outcome {
 	if _, ok := command(m.Text, "/unlink"); ok && linked {
 		_, err := h.accounts.TelegramUnlink(ctx, m.Chat.ID)
 		if errors.Is(err, shared.ErrLastLoginMethod) {
-			return h.reply(ctx, u, m, true, TextLastLogin, OutcomeLastLogin)
+			return h.reply(ctx, u, m, true, h.texts(ctx, m).LastLogin, OutcomeLastLogin)
 		}
 		if err != nil {
 			return h.failed(u, m, "unlink", err)
 		}
-		return h.reply(ctx, u, m, false, TextUnlinked, OutcomeUnlinked)
+		return h.reply(ctx, u, m, false, h.texts(ctx, m).Unlinked, OutcomeUnlinked)
 	}
 	switch {
 	case !linked:
-		return h.reply(ctx, u, m, false, TextLinkFirst, OutcomeLinkFirst)
+		return h.reply(ctx, u, m, false, h.texts(ctx, m).LinkFirst, OutcomeLinkFirst)
 	case isCommand(m.Text, "/start"):
-		return h.reply(ctx, u, m, true, TextWelcome, OutcomeStart)
+		return h.reply(ctx, u, m, true, h.texts(ctx, m).Welcome, OutcomeStart)
 	case !chatOn:
-		return h.reply(ctx, u, m, true, TextChatOff, OutcomeChatOff)
+		return h.reply(ctx, u, m, true, h.texts(ctx, m).ChatOff, OutcomeChatOff)
 	case m.Text == "":
-		return h.reply(ctx, u, m, true, TextNotText, OutcomeNotText)
+		return h.reply(ctx, u, m, true, h.texts(ctx, m).NotText, OutcomeNotText)
 	}
 	if h.store != nil {
 		r := received(u.UpdateID, m)
@@ -175,7 +176,7 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) Outcome {
 		h.logLine(u, m, true, OutcomeChat)
 		return OutcomeChat
 	}
-	return h.reply(ctx, u, m, true, TextReceived, OutcomeReceived)
+	return h.reply(ctx, u, m, true, h.texts(ctx, m).Received, OutcomeReceived)
 }
 
 // callback — a tap on a button that is not the chatbot's (old login buttons): just answered.
@@ -186,6 +187,18 @@ func (h *Handler) callback(ctx context.Context, u Update, cq *CallbackQuery) Out
 	h.log.Info("telegram update", "update_id", u.UpdateID, "outcome", string(OutcomeIgnored),
 		"chat_id", cq.Message.Chat.ID, "kind", "callback")
 	return OutcomeIgnored
+}
+
+// texts: the reply language of this chat (app setting → Telegram's → English).
+func (h *Handler) texts(ctx context.Context, m *Message) Texts {
+	app, tg := "", ""
+	if h.lang != nil {
+		app = h.lang.ChatLang(ctx, m.Chat.ID)
+	}
+	if m.From != nil {
+		tg = m.From.LanguageCode
+	}
+	return TextsFor(Lang(app, tg))
 }
 
 func (h *Handler) reply(ctx context.Context, u Update, m *Message, linked bool, text string, out Outcome) Outcome {

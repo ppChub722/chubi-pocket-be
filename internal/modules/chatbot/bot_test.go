@@ -166,6 +166,22 @@ func (f *fakeSender) last() sent {
 type staticLists struct{}
 
 func (staticLists) Lists(context.Context, uuid.UUID) (Lists, error) { return testLists, nil }
+func (staticLists) Lang(context.Context, uuid.UUID) string          { return "th" }
+
+func TestLang(t *testing.T) {
+	cases := []struct{ app, tg, want string }{
+		{"th", "en", "th"}, {"en", "th", "en"}, {"", "th-TH", "th"}, {"ja", "th", "th"}, {"", "", "en"}, {"", "fr", "en"},
+	}
+	for _, c := range cases {
+		if got := telegram.Lang(c.app, c.tg); got != c.want {
+			t.Errorf("Lang(%q, %q) = %q, want %q", c.app, c.tg, got, c.want)
+		}
+	}
+	if !strings.Contains(cardText(Card{Lang: "en", Items: []Item{{Type: "expense", Amount: 60, Date: "2026-11-01"}}},
+		testLists, testDay), "Category: 🏷️ none") {
+		t.Error("an English card is not in English")
+	}
+}
 
 func newTestBot(perMinute int) (*Bot, *fakeSender) {
 	s := &fakeSender{}

@@ -153,8 +153,15 @@ func newTestHandler(t *testing.T) (*Handler, *fakeSender, *fakeStore, *fakeAccou
 	t.Helper()
 	var logs bytes.Buffer
 	s, st, acc := &fakeSender{}, &fakeStore{rows: map[int64]Received{}}, newAccounts()
-	return NewHandler(s, st, acc, slog.New(slog.NewJSONHandler(&logs, nil))), s, st, acc, &logs
+	h := NewHandler(s, st, acc, slog.New(slog.NewJSONHandler(&logs, nil)))
+	h.lang = thaiChats{}
+	return h, s, st, acc, &logs
 }
+
+// thaiChats: every chat's app setting is Thai (the texts these tests expect).
+type thaiChats struct{}
+
+func (thaiChats) ChatLang(context.Context, int64) string { return LangThai }
 
 func msg(chatID int64, chatType, text string) *Message {
 	return &Message{MessageID: 77, Chat: Chat{ID: chatID, Type: chatType}, Date: 1761631200,

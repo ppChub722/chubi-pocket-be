@@ -3,6 +3,7 @@ package chatbot
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,6 +15,24 @@ import (
 type DBLists struct{ db *pgxpool.Pool }
 
 func NewDBLists(db *pgxpool.Pool) *DBLists { return &DBLists{db: db} }
+
+// Lang is the user's app language setting ("" when unset or unreadable).
+func (d *DBLists) Lang(ctx context.Context, userID uuid.UUID) string {
+	var lang string
+	_ = d.db.QueryRow(ctx, `SELECT COALESCE(preferences->>'language', '') FROM user_preferences WHERE user_id = $1`,
+		userID).Scan(&lang)
+	return lang
+}
+
+// ChatLang is the app language setting of the user a Telegram chat is linked to (telegram.LangSource).
+func (d *DBLists) ChatLang(ctx context.Context, chatID int64) string {
+	var lang string
+	_ = d.db.QueryRow(ctx, `
+		SELECT COALESCE(p.preferences->>'language', '')
+		  FROM user_connections c JOIN user_preferences p ON p.user_id = c.user_id
+		 WHERE c.provider = 'telegram' AND c.external_id = $1`, strconv.FormatInt(chatID, 10)).Scan(&lang)
+	return lang
+}
 
 func (d *DBLists) Lists(ctx context.Context, userID uuid.UUID) (Lists, error) {
 	var l Lists

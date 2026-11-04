@@ -25,7 +25,8 @@ type Card struct {
 	UserID    uuid.UUID
 	ChatID    int64
 	MessageID int64
-	SourceID  int64 // the user's message the card answers (its reaction follows the card)
+	SourceID  int64  // the user's message the card answers (its reaction follows the card)
+	Lang      string // the language the card is written in (telegram.Lang)
 	Items     []Item
 	State     CardState
 	Label     string // "[keyword] " in the fake's all mode
@@ -100,19 +101,20 @@ func (s *memCards) close(id string, state CardState) bool {
 	return true
 }
 
-// cardText renders the card (brief "Card, texts and errors"): a head line, then each item with
-// its category and wallet. Shared wallet / date go into the head line.
+// cardText renders the card (brief "Card, texts and errors") in the card's language: a head line,
+// then each item with its category and wallet. Shared wallet / date go into the head line.
 func cardText(c Card, lists Lists, today time.Time) string {
+	t := textsFor(c.Lang)
 	multi := len(c.Items) > 1
-	head := []string{fmt.Sprintf("%s%s %d รายการ", c.Label, emojiCard, len(c.Items))}
+	head := []string{c.Label + emojiCard + " " + fmt.Sprintf(t.Items, len(c.Items))}
 	wallet, oneWallet := sharedWallet(c.Items)
 	oneWallet = oneWallet && multi
 	if oneWallet {
-		head = append(head, emojiWallet+" "+walletName(lists, wallet))
+		head = append(head, emojiWallet+" "+walletName(t, lists, wallet))
 	}
 	day, oneDay := sharedDay(c.Items)
 	if oneDay {
-		head = append(head, dayLabel(day, today))
+		head = append(head, dayLabel(t, day, today))
 	}
 	var b strings.Builder
 	b.WriteString(strings.Join(head, sep))
@@ -121,19 +123,19 @@ func cardText(c Card, lists Lists, today time.Time) string {
 		if multi {
 			num, indent = fmt.Sprintf("%d. ", i+1), "   "
 		}
-		title := itemName(it) + " " + signedMoney(it)
+		title := itemName(t, it) + " " + signedMoney(it)
 		if !oneDay {
-			title += sep + dayLabel(it.Date, today)
+			title += sep + dayLabel(t, it.Date, today)
 		}
 		b.WriteString("\n" + num + title)
 		if it.Type == "transfer" {
-			b.WriteString("\n" + indent + labelWallet + emojiWallet + " " + walletName(lists, it.AccountID) + " → " +
-				walletName(lists, it.TransferToID))
+			b.WriteString("\n" + indent + t.Wallet + emojiWallet + " " + walletName(t, lists, it.AccountID) + " → " +
+				walletName(t, lists, it.TransferToID))
 			continue
 		}
-		b.WriteString("\n" + indent + labelCategory + categoryLine(lists, it.CategoryID))
+		b.WriteString("\n" + indent + t.Category + categoryLine(t, lists, it.CategoryID))
 		if !oneWallet {
-			b.WriteString("\n" + indent + labelWallet + emojiWallet + " " + walletName(lists, it.AccountID))
+			b.WriteString("\n" + indent + t.Wallet + emojiWallet + " " + walletName(t, lists, it.AccountID))
 		}
 	}
 	return b.String()
@@ -166,11 +168,17 @@ func sharedDay(items []Item) (string, bool) {
 	return items[0].Date, true
 }
 
-func itemName(it Item) string {
+func itemName(t Texts, it Item) string {
 	if it.Description != nil {
 		return *it.Description
 	}
-	return typeLabel(it.Type)
+	switch it.Type {
+	case "income":
+		return t.Income
+	case "transfer":
+		return t.Transfer
+	}
+	return t.Expense
 }
 
 // signedMoney: expense -฿60, income +฿500, transfer ฿5,000 (Telegram has no text colour).
@@ -184,31 +192,21 @@ func signedMoney(it Item) string {
 	return "฿" + money(it.Amount)
 }
 
-func typeLabel(t string) string {
-	switch t {
-	case "income":
-		return labelIncome
-	case "transfer":
-		return labelTransfer
-	}
-	return labelExpense
-}
-
-func dayLabel(date string, today time.Time) string {
+func dayLabel(t Texts, date string, today time.Time) string {
 	d, err := time.Parse(time.DateOnly, date)
 	if err != nil {
 		return date
 	}
 	switch d.Format(time.DateOnly) {
 	case today.Format(time.DateOnly):
-		return labelToday
+		return t.Today
 	case today.AddDate(0, 0, -1).Format(time.DateOnly):
-		return labelYday
+		return t.Yesterday
 	}
 	return d.Format("2/1/2006")
 }
 
-func walletName(l Lists, id *uuid.UUID) string {
+func walletName(t Texts, l Lists, id *uuid.UUID) string {
 	if id != nil {
 		for _, w := range l.Wallets {
 			if w.ID == *id {
@@ -216,11 +214,11 @@ func walletName(l Lists, id *uuid.UUID) string {
 			}
 		}
 	}
-	return labelNone
+	return t.None
 }
 
 // categoryLine: "🍽️ Food & Drinks › Dining / Take-away", or "🏷️ ไม่ระบุ".
-func categoryLine(l Lists, id *uuid.UUID) string {
+func categoryLine(t Texts, l Lists, id *uuid.UUID) string {
 	if id != nil {
 		for _, c := range l.Categories {
 			if c.ID == *id {
@@ -232,7 +230,7 @@ func categoryLine(l Lists, id *uuid.UUID) string {
 			}
 		}
 	}
-	return emojiCategory + " " + labelNone
+	return emojiCategory + " " + t.None
 }
 
 // money: 1234.5 → "1,234.50"; whole numbers without decimals.

@@ -25,9 +25,10 @@ type Sender interface {
 	SendDraft(ctx context.Context, chatID, draftID int64, text string) error
 }
 
-// ListSource reads the user's wallets and categories.
+// ListSource reads the user's wallets, categories and app language.
 type ListSource interface {
 	Lists(ctx context.Context, userID uuid.UUID) (Lists, error)
+	Lang(ctx context.Context, userID uuid.UUID) string
 }
 
 const (
@@ -63,54 +64,71 @@ func (b *Bot) today() time.Time {
 	return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, time.UTC)
 }
 
+// turn is one message being handled: who, where, and in which language.
+type turn struct {
+	userID uuid.UUID
+	chatID int64
+	msgID  int64
+	lang   string
+	t      Texts
+	label  string // "[keyword] " in the fake's all mode
+}
+
 // Text handles a text from a linked chat with the chat permission on (telegram checked both).
 func (b *Bot) Text(ctx context.Context, userID uuid.UUID, m *telegram.Message) {
-	chatID := m.Chat.ID
+	tg := ""
+	if m.From != nil {
+		tg = m.From.LanguageCode
+	}
+	lang := telegram.Lang(b.lists.Lang(ctx, userID), tg)
+	tr := turn{userID: userID, chatID: m.Chat.ID, msgID: m.MessageID, lang: lang, t: textsFor(lang)}
 	if utf8.RuneCountInString(m.Text) > MaxInput {
-		b.say(ctx, chatID, TextTooLong, m.MessageID)
+		b.say(ctx, tr.chatID, tr.t.TooLong, tr.msgID)
 		return
 	}
 	if !b.limit.allow(userID, b.now()) {
-		b.say(ctx, chatID, TextTooFast, m.MessageID)
+		b.say(ctx, tr.chatID, tr.t.TooFast, tr.msgID)
 		return
 	}
-	b.react(ctx, chatID, m.MessageID, reactRead)
+	b.react(ctx, tr.chatID, tr.msgID, reactRead)
 	if r := m.ReplyToMessage; r != nil {
-		if c, ok := b.cards.byMessage(chatID, r.MessageID); ok {
-			b.edit(ctx, c, m)
+		if c, ok := b.cards.byMessage(tr.chatID, r.MessageID); ok {
+			b.edit(ctx, tr, c, m.Text)
 			return
 		}
 	}
 	// The draft bubble goes when the card (or a line) is sent; an edit sends nothing new, so only
 	// new messages get one.
-	if err := b.send.SendDraft(ctx, chatID, m.MessageID, TextThinking); err != nil {
-		b.log.Warn("chatbot: draft failed", "chat_id", chatID, "error", err)
+	if err := b.send.SendDraft(ctx, tr.chatID, tr.msgID, tr.t.Thinking); err != nil {
+		b.log.Warn("chatbot: draft failed", "chat_id", tr.chatID, "error", err)
 	}
 	if b.router.Fake() && strings.EqualFold(strings.TrimSpace(m.Text), "all") {
 		for _, kw := range llm.FakeKeywords {
-			b.fresh(ctx, userID, chatID, m.MessageID, kw, "["+kw+"] ")
+			kt := tr
+			kt.label = "[" + kw + "] "
+			b.fresh(ctx, kt, kw)
 		}
 		return
 	}
-	b.fresh(ctx, userID, chatID, m.MessageID, m.Text, "")
+	b.fresh(ctx, tr, m.Text)
 }
 
 // fresh — a new message: parse, then one card or one fixed line.
-func (b *Bot) fresh(ctx context.Context, userID uuid.UUID, chatID, msgID int64, text, label string) {
-	lists, out, ok := b.parse(ctx, userID, chatID, msgID, text, nil, label)
+func (b *Bot) fresh(ctx context.Context, tr turn, text string) {
+	lists, out, ok := b.parse(ctx, tr, text, nil)
 	if !ok {
 		return
 	}
 	if len(out.Items) == 0 {
-		b.react(ctx, chatID, msgID, reactFail)
-		b.say(ctx, chatID, label+hintText(out.Hint), msgID)
+		b.react(ctx, tr.chatID, tr.msgID, reactFail)
+		b.say(ctx, tr.chatID, tr.label+tr.t.hint(out.Hint), tr.msgID)
 		return
 	}
-	c := Card{ID: newCardID(), UserID: userID, ChatID: chatID, Items: out.Items, State: CardOpen, Label: label,
-		SourceID: msgID}
-	id, err := b.send.SendCard(ctx, chatID, cardText(c, lists, b.today()), msgID, buttons(c.ID))
+	c := Card{ID: newCardID(), UserID: tr.userID, ChatID: tr.chatID, Items: out.Items, State: CardOpen,
+		Label: tr.label, SourceID: tr.msgID, Lang: tr.lang}
+	id, err := b.send.SendCard(ctx, tr.chatID, cardText(c, lists, b.today()), tr.msgID, buttons(c.ID, tr.t))
 	if err != nil {
-		b.log.Error("chatbot: send card failed", "chat_id", chatID, "error", err)
+		b.log.Error("chatbot: send card failed", "chat_id", tr.chatID, "error", err)
 		return
 	}
 	c.MessageID = id
@@ -118,63 +136,65 @@ func (b *Bot) fresh(ctx context.Context, userID uuid.UUID, chatID, msgID int64, 
 }
 
 // edit — a Reply on a card: the card's items + the edit text → the whole card again.
-func (b *Bot) edit(ctx context.Context, c Card, m *telegram.Message) {
+func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
+	tr.label = c.Label
 	if c.State != CardOpen {
-		b.say(ctx, c.ChatID, TextHandled, m.MessageID)
+		b.say(ctx, c.ChatID, tr.t.Handled, tr.msgID)
 		return
 	}
-	lists, out, ok := b.parse(ctx, c.UserID, c.ChatID, m.MessageID, m.Text, c.Items, c.Label)
+	lists, out, ok := b.parse(ctx, tr, text, c.Items)
 	if !ok {
 		return
 	}
 	if len(out.Items) == 0 {
-		b.react(ctx, c.ChatID, m.MessageID, reactFail)
-		b.say(ctx, c.ChatID, c.Label+hintText(out.Hint), m.MessageID)
+		b.react(ctx, c.ChatID, tr.msgID, reactFail)
+		b.say(ctx, c.ChatID, c.Label+tr.t.hint(out.Hint), tr.msgID)
 		return
 	}
-	c.Items = out.Items
+	c.Items, c.Lang = out.Items, tr.lang
 	b.cards.put(&c)
-	if err := b.send.EditCard(ctx, c.ChatID, c.MessageID, cardText(c, lists, b.today()), buttons(c.ID)); err != nil {
+	if err := b.send.EditCard(ctx, c.ChatID, c.MessageID, cardText(c, lists, b.today()), buttons(c.ID, tr.t)); err != nil {
 		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
 		return
 	}
-	b.react(ctx, c.ChatID, m.MessageID, reactDone)
+	b.react(ctx, c.ChatID, tr.msgID, reactDone)
 }
 
-func (b *Bot) parse(ctx context.Context, userID uuid.UUID, chatID, msgID int64, text string, current []Item, label string) (Lists, Outcome, bool) {
-	lists, err := b.lists.Lists(ctx, userID)
+func (b *Bot) parse(ctx context.Context, tr turn, text string, current []Item) (Lists, Outcome, bool) {
+	lists, err := b.lists.Lists(ctx, tr.userID)
 	if err != nil {
-		b.fail(ctx, chatID, msgID, label, CodeDB, "lists", err)
+		b.fail(ctx, tr, CodeDB, "lists", err)
 		return Lists{}, Outcome{}, false
 	}
-	pick := b.router.For(ctx, userID)
+	pick := b.router.For(ctx, tr.userID)
 	cctx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 	start := time.Now()
 	out, err := Parse(cctx, pick.Client, b.today(), lists, text, current)
 	ms := time.Since(start).Milliseconds()
 	if b.LogBodies {
-		b.log.Info("chatbot: io", "chat_id", chatID, "sent", out.Sent, "received", out.Raw)
+		b.log.Info("chatbot: io", "chat_id", tr.chatID, "sent", out.Sent, "received", out.Raw)
 	}
 	if errors.Is(err, llm.ErrOff) {
-		b.say(ctx, chatID, label+TextOff, msgID)
+		b.say(ctx, tr.chatID, tr.label+tr.t.Off, tr.msgID)
 		return Lists{}, Outcome{}, false
 	}
 	if err != nil {
-		b.fail(ctx, chatID, msgID, label, llm.ErrorCode(err), "llm", err, "provider", pick.Provider, "ms", ms)
+		b.fail(ctx, tr, llm.ErrorCode(err), "llm", err, "provider", pick.Provider, "ms", ms)
 		return Lists{}, Outcome{}, false
 	}
 	hint := ""
 	if len(out.Items) == 0 && out.Fail == "" {
 		hint = out.Hint
 	}
-	b.log.Info("chatbot: parsed", "chat_id", chatID, "user_id", userID, "provider", pick.Provider, "model", out.Model,
+	b.log.Info("chatbot: parsed", "chat_id", tr.chatID, "user_id", tr.userID, "lang", tr.lang,
+		"provider", pick.Provider, "model", out.Model,
 		"edit", current != nil, "items", len(out.Items), "hint", hint, "fail", out.Fail, "ms", ms,
 		"categories", pickedCategories(out.Items, lists), "model_picks", out.Picks, "unsure", unsureFieldsOf(out.Items),
 		"tokens_in", out.Usage.In, "tokens_out", out.Usage.Out,
 		"cache_read", out.Usage.CacheRead, "cache_write", out.Usage.CacheWrite)
 	if out.Fail != "" {
-		b.fail(ctx, chatID, msgID, label, out.Fail, "answer", nil)
+		b.fail(ctx, tr, out.Fail, "answer", nil)
 		return Lists{}, Outcome{}, false
 	}
 	return lists, out, true
@@ -190,9 +210,10 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 		state, id = CardCancelled, strings.TrimPrefix(cq.Data, cbNo)
 	}
 	c, ok := b.cards.get(id)
+	t := textsFor(telegram.Lang(c.Lang, cq.From.LanguageCode))
 	mine := ok && c.ChatID == cq.Message.Chat.ID && cq.From.ID == cq.Message.Chat.ID
 	if !mine || !b.cards.close(id, state) {
-		b.answer(ctx, cq.ID, TextHandled)
+		b.answer(ctx, cq.ID, t.Handled)
 		return true
 	}
 	b.answer(ctx, cq.ID, "")
@@ -200,16 +221,16 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 	if err != nil {
 		b.log.Error("chatbot: lists failed", "chat_id", c.ChatID, "error", err)
 	}
-	done := TextSaved
+	done := t.Saved
 	if state == CardCancelled {
-		done = TextCancelled
+		done = t.Cancelled
 	}
 	// Cards live in memory only until pending rows are written (K4).
 	switch {
 	case b.router.Fake():
 		done += TextFakeMark
 	case state == CardSaved:
-		done += TextTrialMark
+		done += t.TrialMark
 	}
 	if err := b.send.EditCard(ctx, c.ChatID, c.MessageID, cardText(c, lists, b.today())+"\n\n"+done, nil); err != nil {
 		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
@@ -224,15 +245,15 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 
 // fail logs a failure with a code and a short ref, and tells the user whose side it is. Until the
 // user tier exists everyone also gets the code line (later: the owner only).
-func (b *Bot) fail(ctx context.Context, chatID, msgID int64, label, code, stage string, err error, kv ...any) {
+func (b *Bot) fail(ctx context.Context, tr turn, code, stage string, err error, kv ...any) {
 	ref := newCardID()[:4]
-	args := append([]any{"chat_id", chatID, "code", code, "ref", ref, "stage", stage}, kv...)
+	args := append([]any{"chat_id", tr.chatID, "code", code, "ref", ref, "stage", stage}, kv...)
 	if err != nil {
 		args = append(args, "error", err)
 	}
 	b.log.Warn("chatbot: failed", args...)
-	b.react(ctx, chatID, msgID, reactFail)
-	b.say(ctx, chatID, label+failText(code)+"\n"+code+" #"+ref, msgID)
+	b.react(ctx, tr.chatID, tr.msgID, reactFail)
+	b.say(ctx, tr.chatID, tr.label+tr.t.fail(code)+"\n"+code+" #"+ref, tr.msgID)
 }
 
 // react sets the bot's reaction on the user's message; a failure only logs (it is decoration).
@@ -274,8 +295,8 @@ func unsureFieldsOf(items []Item) []string {
 	return out
 }
 
-func buttons(id string) []telegram.Button {
-	return []telegram.Button{{Text: ButtonOK, Data: cbOK + id}, {Text: ButtonCancel, Data: cbNo + id}}
+func buttons(id string, t Texts) []telegram.Button {
+	return []telegram.Button{{Text: t.ButtonOK, Data: cbOK + id}, {Text: t.ButtonCancel, Data: cbNo + id}}
 }
 
 func (b *Bot) say(ctx context.Context, chatID int64, text string, replyTo int64) {

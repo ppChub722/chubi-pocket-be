@@ -31,8 +31,9 @@ type User struct {
 	ID        int64  `json:"id"`
 	IsBot     bool   `json:"is_bot"`
 	Username  string `json:"username"`
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name"`
+	FirstName    string `json:"first_name"`
+	LastName     string `json:"last_name"`
+	LanguageCode string `json:"language_code"` // the user's Telegram app language, e.g. "th"
 }
 
 // Message: the media fields are kept raw; only their presence matters (a non-text message).

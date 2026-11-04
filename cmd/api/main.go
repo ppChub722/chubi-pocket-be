@@ -252,7 +252,9 @@ func main() {
 			log.Error("llm config", "error", err)
 			os.Exit(1)
 		}
-		chat := chatbot.New(telegramWebhook.Client(), chatbot.NewDBLists(dbPool), llmRouter,
+		dbLists := chatbot.NewDBLists(dbPool)
+		telegramWebhook.WithLang(dbLists)
+		chat := chatbot.New(telegramWebhook.Client(), dbLists, llmRouter,
 			cfg.LLM.PerMinute, time.Duration(cfg.LLM.TimeoutSec)*time.Second, log)
 		chat.LogBodies = cfg.LLM.LogBodies
 		telegramWebhook.WithChat(chat)
@@ -261,7 +263,9 @@ func main() {
 		client := telegramWebhook.Client()
 		connectionsService.WithTelegramLogin(connections.NewIDTokenVerifier(cfg.Telegram.BotID()),
 			func(ctx context.Context, chatID int64) {
-				if err := client.SendMessage(ctx, chatID, telegram.TextWelcome, 0); err != nil {
+				// the Telegram app language isn't known here: app setting, else English
+				welcome := telegram.TextsFor(telegram.Lang(dbLists.ChatLang(ctx, chatID), "")).Welcome
+				if err := client.SendMessage(ctx, chatID, welcome, 0); err != nil {
 					log.Warn("telegram: welcome not sent", "chat_id", chatID, "error", err)
 				}
 			})

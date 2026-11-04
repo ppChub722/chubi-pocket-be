@@ -3,43 +3,87 @@
 // the user's own lists, or the user's own words copied by the model; never text the model wrote.
 package chatbot
 
-import "github.com/ppChub722/chubi-pocket-be/internal/platform/llm"
+import (
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/telegram"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/llm"
+)
 
-// Fixed lines.
+// Texts is every fixed word of the bot in one language. The language: the app setting, else
+// Telegram's, else English (owner 2026-11-04; telegram.Lang).
+type Texts struct {
+	NoAmount, NotMoney, TransferWallet, TooLong, TooFast, Handled string
+	FailAI, FailServer, FailRefused, FailTrunc, Off, Thinking    string
+	Saved, Cancelled, TrialMark, ButtonOK, ButtonCancel          string
+	Items                                                        string // "%d รายการ"
+	Expense, Income, Transfer, Today, Yesterday, None            string
+	Category, Wallet                                             string // line labels, with a trailing space
+}
+
+// Thai texts as constants (tests read them).
 const (
 	TextNoAmount       = "ไม่เห็นยอดเงินครับ ลองพิมพ์ใหม่ เช่น ข้าว 60"
 	TextNotMoney       = "จดได้แค่รายรับ รายจ่าย และการโอนครับ"
 	TextTransferWallet = "บอกกระเป๋าต้นทางและปลายทางด้วยครับ"
 	TextTooLong        = "ข้อความยาวเกินไปครับ"
 	TextTooFast        = "ส่งเร็วไปนิดครับ รอสักครู่แล้วลองใหม่"
-	TextDown           = "ตอนนี้จดอัตโนมัติไม่ได้ ลองใหม่อีกครั้งนะครับ"
 	TextHandled        = "รายการนี้จัดการไปแล้วครับ"
-
-	// Failures: the user is told whose side it is (owner 2026-11-04); the code line follows.
-	TextFailAI      = "🤖 ระบบ AI มีปัญหาชั่วคราว ลองใหม่อีกครั้งนะครับ"
-	TextFailServer  = "🛠️ ระบบของเรามีปัญหา ลองใหม่ภายหลังนะครับ"
-	TextFailRefused = "🙅 ข้อความนี้จดไม่ได้ ลองพิมพ์ใหม่นะครับ"
-	TextFailTrunc   = "📏 รายการเยอะเกินไป ลองแบ่งส่งทีละน้อยนะครับ"
-	TextOff         = "🛠️ ยังไม่เปิดจดรายการครับ"
-	TextThinking    = "⏳ กำลังอ่านรายการ…"
+	TextFailAI         = "🤖 ระบบ AI มีปัญหาชั่วคราว ลองใหม่อีกครั้งนะครับ"
+	TextFailServer     = "🛠️ ระบบของเรามีปัญหา ลองใหม่ภายหลังนะครับ"
+	TextFailRefused    = "🙅 ข้อความนี้จดไม่ได้ ลองพิมพ์ใหม่นะครับ"
+	TextFailTrunc      = "📏 รายการเยอะเกินไป ลองแบ่งส่งทีละน้อยนะครับ"
+	TextOff            = "🛠️ ยังไม่เปิดจดรายการครับ"
+	TextThinking       = "⏳ กำลังอ่านรายการ…"
 	TextSaved          = "บันทึกแล้ว ✓"
 	TextCancelled      = "ยกเลิกแล้ว"
-	TextFakeMark       = " (fake)"
 	TextTrialMark      = " (ทดลอง ยังไม่ลงแอป)"
+	TextFakeMark       = " (fake)"
+	ButtonOK           = "✓ ยืนยัน"
+	ButtonCancel       = "✗ ยกเลิก"
 
-	ButtonOK     = "✓ ยืนยัน"
-	ButtonCancel = "✗ ยกเลิก"
-
-	labelExpense  = "รายจ่าย"
-	labelIncome   = "รายรับ"
-	labelTransfer = "โอน"
-	labelToday    = "วันนี้"
-	labelYday     = "เมื่อวาน"
-	labelNone     = "ไม่ระบุ"
-	labelCategory = "หมวด: "
-	labelWallet   = "กระเป๋า: "
-	sep           = " | "
+	sep = " | "
 )
+
+var textsTH = Texts{
+	NoAmount: TextNoAmount, NotMoney: TextNotMoney, TransferWallet: TextTransferWallet,
+	TooLong: TextTooLong, TooFast: TextTooFast, Handled: TextHandled,
+	FailAI: TextFailAI, FailServer: TextFailServer, FailRefused: TextFailRefused, FailTrunc: TextFailTrunc,
+	Off: TextOff, Thinking: TextThinking, Saved: TextSaved, Cancelled: TextCancelled, TrialMark: TextTrialMark,
+	ButtonOK: ButtonOK, ButtonCancel: ButtonCancel,
+	Items:   "%d รายการ",
+	Expense: "รายจ่าย", Income: "รายรับ", Transfer: "โอน", Today: "วันนี้", Yesterday: "เมื่อวาน", None: "ไม่ระบุ",
+	Category: "หมวด: ", Wallet: "กระเป๋า: ",
+}
+
+var textsEN = Texts{
+	NoAmount:       "No amount found. Try again, e.g. lunch 60",
+	NotMoney:       "I can only log income, expenses and transfers.",
+	TransferWallet: "Tell me both wallets, from and to.",
+	TooLong:        "That message is too long.",
+	TooFast:        "A bit too fast. Wait a moment and try again.",
+	Handled:        "This card is already done.",
+	FailAI:         "🤖 The AI service has a problem. Please try again.",
+	FailServer:     "🛠️ Our server has a problem. Please try again later.",
+	FailRefused:    "🙅 I can't log this message. Try writing it differently.",
+	FailTrunc:      "📏 Too many items. Send them in smaller parts.",
+	Off:            "🛠️ Chat logging isn't on yet.",
+	Thinking:       "⏳ Reading your items…",
+	Saved:          "Saved ✓",
+	Cancelled:      "Cancelled",
+	TrialMark:      " (trial, not in the app yet)",
+	ButtonOK:       "✓ Confirm",
+	ButtonCancel:   "✗ Cancel",
+	Items:          "%d items",
+	Expense:        "Expense", Income: "Income", Transfer: "Transfer", Today: "today", Yesterday: "yesterday",
+	None:     "none",
+	Category: "Category: ", Wallet: "Wallet: ",
+}
+
+func textsFor(lang string) Texts {
+	if lang == telegram.LangThai {
+		return textsTH
+	}
+	return textsEN
+}
 
 // Error codes of the chatbot itself; provider codes come from llm.ErrorCode.
 const (
@@ -49,17 +93,17 @@ const (
 	CodeBadJSON   = "E-JSON"
 )
 
-// failText: the line for a code, by whose side it is.
-func failText(code string) string {
+// fail: the line for a code, by whose side it is.
+func (t Texts) fail(code string) string {
 	switch code {
 	case CodeRefused:
-		return TextFailRefused
+		return t.FailRefused
 	case CodeTruncated:
-		return TextFailTrunc
+		return t.FailTrunc
 	case llm.Code5xx, llm.Code429, llm.CodeTimeout, CodeBadJSON:
-		return TextFailAI
+		return t.FailAI
 	}
-	return TextFailServer
+	return t.FailServer
 }
 
 // Hints the model may give when nothing is bookable; anything else reads as not_money.
@@ -70,12 +114,12 @@ const (
 	HintUnknown        = "unknown" // items present; with no items it reads as not_money
 )
 
-func hintText(h string) string {
+func (t Texts) hint(h string) string {
 	switch h {
 	case HintNoAmount:
-		return TextNoAmount
+		return t.NoAmount
 	case HintTransferWallet:
-		return TextTransferWallet
+		return t.TransferWallet
 	}
-	return TextNotMoney
+	return t.NotMoney
 }

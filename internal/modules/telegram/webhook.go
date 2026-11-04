@@ -93,6 +93,9 @@ func (w *Webhook) WithAccounts(a Accounts) { w.h.accounts = a }
 // WithChat hands the bot the chatbot (0.4.2-4); without it a text gets "ได้รับข้อความแล้ว ✓".
 func (w *Webhook) WithChat(c Chatbot) { w.h.chat = c }
 
+// WithLang hands the bot the users' app language setting.
+func (w *Webhook) WithLang(l LangSource) { w.h.lang = l }
+
 // Start checks the token (getMe) and points Telegram at TELEGRAM_WEBHOOK_URL, in the background:
 // a bad token or Telegram being down is logged, the API runs on.
 func (w *Webhook) Start() {
