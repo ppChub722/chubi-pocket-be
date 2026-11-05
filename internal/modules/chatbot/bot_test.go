@@ -49,6 +49,16 @@ func TestParseKeywords(t *testing.T) {
 				t.Errorf("transfer = %+v", its[0])
 			}
 		}},
+		{"withdraw", 1, "", func(t *testing.T, its []Item) {
+			if *its[0].AccountID != walletA.ID || its[0].TransferToID != nil {
+				t.Errorf("withdraw = %+v", its[0])
+			}
+		}},
+		{"deposit", 1, "", func(t *testing.T, its []Item) {
+			if its[0].AccountID != nil || *its[0].TransferToID != walletB.ID {
+				t.Errorf("deposit = %+v", its[0])
+			}
+		}},
 		{"unsure", 1, "", func(t *testing.T, its []Item) {
 			if !contains(its[0].Unsure, "category") {
 				t.Errorf("unsure = %+v", its[0])

@@ -26,6 +26,7 @@ type Card struct {
 	ChatID    int64
 	MessageID int64
 	SourceID  int64  // the user's message the card answers (its reaction follows the card)
+	PendingIDs []uuid.UUID // the pending rows the card stands for (K4); empty in the fake mode
 	Lang      string // the language the card is written in (telegram.Lang)
 	Items     []Item
 	State     CardState
@@ -279,4 +280,17 @@ func money(f float64) string {
 		fmt.Fprintf(&b, ".%02d", cents)
 	}
 	return b.String()
+}
+
+// transferWallets: "from → to"; a withdrawal shows "from →", a deposit "→ to" (one side only).
+func transferWallets(t Texts, l Lists, it Item) string {
+	from := unsureMark(walletName(t, l, it.AccountID), it, "account")
+	to := walletName(t, l, it.TransferToID)
+	switch {
+	case it.AccountID == nil:
+		return "→ " + to
+	case it.TransferToID == nil:
+		return from + " →"
+	}
+	return from + " → " + to
 }

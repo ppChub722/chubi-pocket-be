@@ -258,7 +258,7 @@ func (a *aliases) check(ai answerItem, today time.Time, words []string) (Item, b
 		}
 	case "transfer":
 		from, to := a.walletOf(ai.Account), a.walletOf(ai.TransferTo)
-		if from == nil || to == nil || *from == *to {
+		if (from == nil && to == nil) || (from != nil && to != nil && *from == *to) {
 			return Item{}, false
 		}
 		it.AccountID, it.TransferToID = from, to

@@ -22,6 +22,7 @@ import (
 type apiEnv struct {
 	pool *pgxpool.Pool
 	r    *gin.Engine
+	svc  *Service
 	uid  uuid.UUID
 	acct uuid.UUID
 	cat  uuid.UUID
@@ -40,7 +41,7 @@ func newAPIEnv(t *testing.T) *apiEnv {
 	prj.WithDebts(pdSvc)
 	svc := NewService(NewStore(pool), txSvc, tags.NewService(tags.NewStore(pool)), pdSvc, prj)
 	h := NewHandler(svc)
-	e := &apiEnv{pool: pool, uid: uid, acct: testdb.Account(t, pool, uid), cat: testdb.Category(t, pool, uid, "Food")}
+	e := &apiEnv{pool: pool, svc: svc, uid: uid, acct: testdb.Account(t, pool, uid), cat: testdb.Category(t, pool, uid, "Food")}
 	if _, err := pool.Exec(context.Background(), `UPDATE accounts SET balance = 1000 WHERE id = $1`, e.acct); err != nil {
 		t.Fatal(err)
 	}

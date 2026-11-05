@@ -263,6 +263,8 @@ func main() {
 		chat := chatbot.New(telegramWebhook.Client(), dbLists, llmRouter,
 			cfg.LLM.PerMinute, time.Duration(cfg.LLM.TimeoutSec)*time.Second, log)
 		chat.LogBodies = cfg.LLM.LogBodies
+		chat.WithSaver(chatbot.NewPendingSaver(pendingService)) // K4: cards are pending rows (the fake provider still writes nothing)
+		chat.WithMeter(chatbot.NewDBMeter(dbPool), cfg.LLM.MonthlyCap) // K2: tier, monthly cap, llm_calls
 		telegramWebhook.WithChat(chat)
 		log.Info("chatbot: on", "provider", cfg.LLM.Provider, "log_bodies", cfg.LLM.LogBodies)
 		// 0.4.2-4: Log In With Telegram (OIDC); the bot id is the client_id

@@ -42,7 +42,9 @@
 
 [transfer]
 โอน kbank ไป เงินสด 1000 | transfer 1000; wallet=Kbank; to=เงินสด
-ถอนเงิน 500 |
+ถอนเงิน 500 จาก kbank | transfer 500; wallet=Kbank; to=-
+ฝากเงิน 1000 เข้าเงินสด | transfer 1000; wallet=-; to=เงินสด
+โอน 500 | hint=transfer_wallet_missing
 
 [reject]
 กินข้าว | hint=no_amount

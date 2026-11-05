@@ -113,6 +113,8 @@ var iconEmoji = map[string]string{
 	"system_opening": "🏁",
 	"system_debt_received": "📥",
 	"system_debt_paid": "📤",
+	"system_withdraw": "🏧",
+	"system_deposit": "💰",
 }
 
 func categoryEmoji(icon string) string {

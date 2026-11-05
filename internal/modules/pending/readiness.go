@@ -84,7 +84,7 @@ func summarize(rows []PendingTransaction) ListSummary {
 		switch strings.ToLower(p.Source) {
 		case "recurring", "upcoming", "auto_save":
 			s.BySource.Recurring++
-		case "manual", "chat":
+		case "manual", "chat", SourceTelegram:
 			s.BySource.Manual++
 		case "project_update", "project_copy", "split", "partner":
 			s.BySource.OtherPeople++

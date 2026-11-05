@@ -14,7 +14,8 @@ type Texts struct {
 	NoAmount, NotMoney, TransferWallet, TooLong, TooFast, Handled string
 	FailAI, FailServer, FailRefused, FailTrunc, Off, Thinking     string
 	Saved, Cancelled, TrialMark, ButtonOK, ButtonCancel, Edited   string
-	Items                                                         string // "%d รายการ"
+	TierFree, CapReached                                          string
+	Items, Partial                                                string // "%d รายการ"; "บันทึก %d จาก %d รายการ …"
 	Expense, Income, Transfer, Today, Yesterday, None             string
 	Category, Wallet                                              string // line labels, with a trailing space
 }
@@ -23,9 +24,11 @@ type Texts struct {
 const (
 	TextNoAmount       = "ไม่เห็นยอดเงินครับ ลองพิมพ์ใหม่ เช่น ข้าว 60"
 	TextNotMoney       = "จดได้แค่รายรับ รายจ่าย และการโอนครับ"
-	TextTransferWallet = "บอกกระเป๋าต้นทางและปลายทางด้วยครับ"
+	TextTransferWallet = "บอกกระเป๋าด้วยครับ และว่าเงินออกหรือเข้า เช่น ถอน 500 จากกสิกร"
 	TextTooLong        = "ข้อความยาวเกินไปครับ"
 	TextTooFast        = "ส่งเร็วไปนิดครับ รอสักครู่แล้วลองใหม่"
+	TextTierFree       = "🔒 ฟีเจอร์นี้ยังไม่เปิดให้ใช้ครับ"
+	TextCapReached     = "📊 เดือนนี้ใช้ครบโควตาแล้วครับ ใช้ได้อีกวันที่ 1"
 	TextHandled        = "รายการนี้จัดการไปแล้วครับ"
 	TextFailAI         = "🤖 ระบบ AI มีปัญหาชั่วคราว ลองใหม่อีกครั้งนะครับ"
 	TextFailServer     = "🛠️ ระบบของเรามีปัญหา ลองใหม่ภายหลังนะครับ"
@@ -36,6 +39,7 @@ const (
 	TextSaved          = "บันทึกแล้ว ✓"
 	TextCancelled      = "ยกเลิกแล้ว"
 	TextTrialMark      = " (ทดลอง ยังไม่ลงแอป)"
+	TextPartial        = "⚠️ บันทึก %d จาก %d รายการ ที่เหลืออยู่ในหน้ารอยืนยันของแอป"
 	TextFakeMark       = " (fake)"
 	TextEdited         = "✏️ แก้แล้ว ดูการ์ดใหม่ด้านล่าง"
 	ButtonOK           = "✓ ยืนยัน"
@@ -47,9 +51,9 @@ const (
 
 var textsTH = Texts{
 	NoAmount: TextNoAmount, NotMoney: TextNotMoney, TransferWallet: TextTransferWallet,
-	TooLong: TextTooLong, TooFast: TextTooFast, Handled: TextHandled,
+	TooLong: TextTooLong, TooFast: TextTooFast, Handled: TextHandled, TierFree: TextTierFree, CapReached: TextCapReached,
 	FailAI: TextFailAI, FailServer: TextFailServer, FailRefused: TextFailRefused, FailTrunc: TextFailTrunc,
-	Off: TextOff, Thinking: TextThinking, Saved: TextSaved, Cancelled: TextCancelled, TrialMark: TextTrialMark,
+	Off: TextOff, Thinking: TextThinking, Saved: TextSaved, Cancelled: TextCancelled, TrialMark: TextTrialMark, Partial: TextPartial,
 	ButtonOK: ButtonOK, ButtonCancel: ButtonCancel, Edited: TextEdited,
 	Items:   "%d รายการ",
 	Expense: "รายจ่าย", Income: "รายรับ", Transfer: "โอน", Today: "วันนี้", Yesterday: "เมื่อวาน", None: "ไม่ระบุ",
@@ -59,9 +63,11 @@ var textsTH = Texts{
 var textsEN = Texts{
 	NoAmount:       "No amount found. Try again, e.g. lunch 60",
 	NotMoney:       "I can only log income, expenses and transfers.",
-	TransferWallet: "Tell me both wallets, from and to.",
+	TransferWallet: "Tell me the wallet, and whether money leaves or arrives, e.g. withdraw 500 from Kbank.",
 	TooLong:        "That message is too long.",
 	TooFast:        "A bit too fast. Wait a moment and try again.",
+	TierFree:       "🔒 This feature isn't open yet.",
+	CapReached:     "📊 You've used this month's quota. You can use it again on the 1st.",
 	Handled:        "This card is already done.",
 	FailAI:         "🤖 The AI service has a problem. Please try again.",
 	FailServer:     "🛠️ Our server has a problem. Please try again later.",
@@ -72,6 +78,7 @@ var textsEN = Texts{
 	Saved:          "Saved ✓",
 	Cancelled:      "Cancelled",
 	TrialMark:      " (trial, not in the app yet)",
+	Partial:        "⚠️ Saved %d of %d. The rest wait on the app's pending page.",
 	ButtonOK:       "✓ Confirm",
 	ButtonCancel:   "✗ Cancel",
 	Edited:         "✏️ Edited, see the new card below",

@@ -3,6 +3,7 @@ package chatbot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -44,6 +45,9 @@ type Bot struct {
 	lists   ListSource
 	router  *llm.Router
 	cards   *memCards
+	saver   Saver // nil = nothing is written (fake mode, tests)
+	meter   Meter // nil = no tier check, cap or call log
+	cap     int   // model calls per user per month; 0 = no cap
 	limit   *minuteLimit
 	timeout time.Duration
 	log     *slog.Logger
@@ -59,6 +63,16 @@ func New(send Sender, lists ListSource, router *llm.Router, perMinute int, timeo
 		timeout: timeout, log: log, now: time.Now}
 }
 
+// WithSaver makes cards real: rows in the app's pending page (K4). The fake provider never writes.
+func (b *Bot) WithSaver(s Saver) { b.saver = s }
+
+func (b *Bot) saves() bool { return b.saver != nil && !b.router.Fake() }
+
+// WithMeter turns on the tier check, the monthly cap and the call log (K2). The fake provider skips all three.
+func (b *Bot) WithMeter(m Meter, monthlyCap int) { b.meter, b.cap = m, monthlyCap }
+
+func (b *Bot) metering() bool { return b.meter != nil && !b.router.Fake() }
+
 func (b *Bot) today() time.Time {
 	n := b.now().In(bangkok)
 	return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, time.UTC)
@@ -72,6 +86,7 @@ type turn struct {
 	lang   string
 	t      Texts
 	label  string // "[keyword] " in the fake's all mode
+	owner  bool   // may see error codes (tier owner, or no tiers: fake, tests)
 }
 
 // Text handles a text from a linked chat with the chat permission on (telegram checked both).
@@ -85,6 +100,30 @@ func (b *Bot) Text(ctx context.Context, userID uuid.UUID, m *telegram.Message) {
 	if utf8.RuneCountInString(m.Text) > MaxInput {
 		b.say(ctx, tr.chatID, tr.t.TooLong, tr.msgID)
 		return
+	}
+	tr.owner = true
+	if b.metering() {
+		tier, err := b.meter.Tier(ctx, userID)
+		if err != nil {
+			tr.owner = false
+			b.fail(ctx, tr, CodeDB, "tier", err)
+			return
+		}
+		if tier != TierOwner {
+			b.say(ctx, tr.chatID, tr.t.TierFree, tr.msgID)
+			return
+		}
+		if b.cap > 0 {
+			used, err := b.meter.Used(ctx, userID, monthStart(b.now()))
+			if err != nil {
+				b.fail(ctx, tr, CodeDB, "cap", err)
+				return
+			}
+			if used >= b.cap {
+				b.say(ctx, tr.chatID, tr.t.CapReached, tr.msgID)
+				return
+			}
+		}
 	}
 	if !b.limit.allow(userID, b.now()) {
 		b.say(ctx, tr.chatID, tr.t.TooFast, tr.msgID)
@@ -125,9 +164,18 @@ func (b *Bot) fresh(ctx context.Context, tr turn, text string) {
 	}
 	c := Card{ID: newCardID(), UserID: tr.userID, ChatID: tr.chatID, Items: out.Items, State: CardOpen,
 		Label: tr.label, SourceID: tr.msgID, Lang: tr.lang}
+	if b.saves() {
+		ids, err := b.saver.Save(ctx, tr.userID, SaveRef{ChatID: tr.chatID, CardID: c.ID, MessageID: tr.msgID, Text: text}, out.Items)
+		if err != nil {
+			b.fail(ctx, tr, CodeDB, "save", err)
+			return
+		}
+		c.PendingIDs = ids
+	}
 	id, err := b.send.SendCard(ctx, tr.chatID, cardText(c, lists, b.today()), tr.msgID, buttons(c.ID, tr.t))
 	if err != nil {
 		b.log.Error("chatbot: send card failed", "chat_id", tr.chatID, "error", err)
+		b.drop(ctx, c)
 		return
 	}
 	c.MessageID = id
@@ -143,6 +191,16 @@ func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
 		b.say(ctx, c.ChatID, tr.t.Handled, tr.msgID)
 		return
 	}
+	if b.saves() {
+		if n, err := b.saver.Alive(ctx, c.UserID, c.PendingIDs); err != nil {
+			b.fail(ctx, tr, CodeDB, "alive", err)
+			return
+		} else if n < len(c.PendingIDs) { // settled in the app: the card is stale
+			b.cards.close(c.ID, CardCancelled)
+			b.say(ctx, c.ChatID, tr.t.Handled, tr.msgID)
+			return
+		}
+	}
 	lists, out, ok := b.parse(ctx, tr, text, c.Items)
 	if !ok {
 		return
@@ -154,6 +212,14 @@ func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
 	}
 	before := c
 	c.Items, c.Lang = out.Items, tr.lang
+	if b.saves() {
+		ids, err := b.saver.Replace(ctx, c.UserID, c.PendingIDs, SaveRef{ChatID: c.ChatID, CardID: c.ID, MessageID: c.SourceID, Text: text}, out.Items)
+		if err != nil {
+			b.fail(ctx, tr, CodeDB, "save", err)
+			return
+		}
+		c.PendingIDs = ids
+	}
 	id, err := b.send.SendCard(ctx, c.ChatID, cardText(c, lists, b.today()), tr.msgID, buttons(c.ID, tr.t))
 	if err != nil {
 		b.log.Error("chatbot: send card failed", "chat_id", c.ChatID, "error", err)
@@ -179,6 +245,9 @@ func (b *Bot) parse(ctx context.Context, tr turn, text string, current []Item) (
 	start := time.Now()
 	out, err := Parse(cctx, pick.Client, b.today(), lists, text, current)
 	ms := time.Since(start).Milliseconds()
+	if b.metering() && !errors.Is(err, llm.ErrOff) {
+		b.record(ctx, tr, pick, out, err, ms)
+	}
 	if b.LogBodies {
 		b.log.Info("chatbot: io", "chat_id", tr.chatID, "sent", out.Sent, "received", out.Raw)
 	}
@@ -219,6 +288,12 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 	c, ok := b.cards.get(id)
 	t := textsFor(telegram.Lang(c.Lang, cq.From.LanguageCode))
 	mine := ok && c.ChatID == cq.Message.Chat.ID && cq.From.ID == cq.Message.Chat.ID
+	if mine && b.saves() { // rows settled in the app: the card is stale
+		if n, err := b.saver.Alive(ctx, c.UserID, c.PendingIDs); err == nil && n < len(c.PendingIDs) {
+			b.cards.close(id, CardCancelled)
+			mine = false
+		}
+	}
 	if !mine || !b.cards.close(id, state) {
 		b.answer(ctx, cq.ID, t.Handled)
 		return true
@@ -232,17 +307,34 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 	if state == CardCancelled {
 		done = t.Cancelled
 	}
-	// Cards live in memory only until pending rows are written (K4).
+	saved := -1 // rows booked; -1 = nothing was tried
 	switch {
 	case b.router.Fake():
 		done += TextFakeMark
+	case !b.saves():
+		if state == CardSaved {
+			done += t.TrialMark
+		}
 	case state == CardSaved:
-		done += t.TrialMark
+		n, err := b.saver.Confirm(ctx, c.UserID, c.PendingIDs)
+		if err != nil {
+			b.log.Error("chatbot: confirm failed", "chat_id", c.ChatID, "error", err)
+		}
+		saved = n
+		if n < len(c.PendingIDs) {
+			done = fmt.Sprintf(t.Partial, n, len(c.PendingIDs))
+		}
+	default:
+		if err := b.saver.Discard(ctx, c.UserID, c.PendingIDs); err != nil {
+			b.log.Error("chatbot: discard failed", "chat_id", c.ChatID, "error", err)
+		}
 	}
 	if err := b.send.EditCard(ctx, c.ChatID, c.MessageID, cardText(c, lists, b.today())+"\n\n"+done, nil); err != nil {
 		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
 	}
-	if state == CardSaved {
+	if state == CardSaved && saved == 0 {
+		b.react(ctx, c.ChatID, c.SourceID, reactFail)
+	} else if state == CardSaved {
 		b.react(ctx, c.ChatID, c.SourceID, reactDone)
 	} else {
 		b.react(ctx, c.ChatID, c.SourceID, "")
@@ -250,8 +342,8 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 	return true
 }
 
-// fail logs a failure with a code and a short ref, and tells the user whose side it is. Until the
-// user tier exists everyone also gets the code line (later: the owner only).
+// fail logs a failure with a code and a short ref, and tells the user whose side it is; the code
+// line is for the owner tier only.
 func (b *Bot) fail(ctx context.Context, tr turn, code, stage string, err error, kv ...any) {
 	ref := newCardID()[:4]
 	args := append([]any{"chat_id", tr.chatID, "code", code, "ref", ref, "stage", stage}, kv...)
@@ -344,4 +436,34 @@ func (l *minuteLimit) allow(user uuid.UUID, now time.Time) bool {
 	}
 	l.hits[user] = append(keep, now)
 	return true
+}
+
+// drop discards the rows of a card that never reached Telegram.
+func (b *Bot) drop(ctx context.Context, c Card) {
+	if !b.saves() || len(c.PendingIDs) == 0 {
+		return
+	}
+	if err := b.saver.Discard(ctx, c.UserID, c.PendingIDs); err != nil {
+		b.log.Error("chatbot: discard failed", "chat_id", c.ChatID, "error", err)
+	}
+}
+
+// record logs one model call (tokens, ms, status; never the text). A failure only logs.
+func (b *Bot) record(ctx context.Context, tr turn, pick llm.Pick, out Outcome, err error, ms int64) {
+	status := "ok"
+	switch {
+	case err != nil:
+		status = llm.ErrorCode(err)
+	case out.Fail != "":
+		status = out.Fail
+	}
+	model := out.Model
+	if model == "" {
+		model = pick.Model
+	}
+	c := Call{Channel: "telegram", Provider: pick.Provider, Model: model, Status: status, Ms: ms,
+		In: out.Usage.In, Out: out.Usage.Out, CacheRead: out.Usage.CacheRead, CacheWrite: out.Usage.CacheWrite}
+	if rerr := b.meter.Record(ctx, tr.userID, c); rerr != nil {
+		b.log.Warn("chatbot: usage not logged", "chat_id", tr.chatID, "error", rerr)
+	}
 }

@@ -61,8 +61,10 @@ var keywordAnswers = map[string]fakeAnswer{
 	"partial": {Items: []fakeItem{
 		spend(30, "partial", "c1"),
 		{Type: "expense", Amount: num(0), Description: str("partial"), Unsure: []string{}},
-		{Type: "transfer", Amount: num(100), Account: str("w1"), Unsure: []string{}},
+		{Type: "transfer", Amount: num(100), Unsure: []string{}},
 	}},
+	"withdraw": {Items: []fakeItem{{Type: "transfer", Amount: num(500), Account: str("w1"), Description: str("withdraw"), Unsure: []string{}}}},
+	"deposit":  {Items: []fakeItem{{Type: "transfer", Amount: num(1000), TransferTo: str("w2"), Description: str("deposit"), Unsure: []string{}}}},
 	"fake desc":        {Items: []fakeItem{spend(99, "อาหารกลางวันมื้อใหญ่", "c1")}},
 	"no amount":        {Items: []fakeItem{}, ReplyHint: str("no_amount")},
 	"not money":        {Items: []fakeItem{}, ReplyHint: str("not_money")},
@@ -71,7 +73,7 @@ var keywordAnswers = map[string]fakeAnswer{
 
 // FakeKeywords is the order "all" runs them in: every non-reply case, slow last.
 var FakeKeywords = []string{
-	"normal tx", "multi tx", "income", "transfer", "unsure", "bad alias", "partial", "fake desc",
+	"normal tx", "multi tx", "income", "transfer", "withdraw", "deposit", "unsure", "bad alias", "partial", "fake desc",
 	"no amount", "not money", "transfer missing", "refuse", "error", "slow",
 }
 
