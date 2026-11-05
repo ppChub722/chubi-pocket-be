@@ -12,18 +12,36 @@ import (
 // SourceTelegram — rows the Telegram chatbot writes. The app treats it like manual (a person typed it).
 const SourceTelegram = "telegram"
 
-// CreateFrom inserts one pending row per draft with a source and source_ref, all or nothing.
+// BookResult says how many rows were booked and how many of those could not be tied to their recurring slot.
+type BookResult struct{ Booked, Unlinked int }
+
+// ErrBookFailed — Book could not book every row; the rows that failed are gone, nothing is left pending.
+var ErrBookFailed = errors.New("pending: booking failed")
+
+// BookError is ErrBookFailed with the code of the first row that failed (for example INSUFFICIENT_SAVING).
+type BookError struct{ Code string }
+
+func (e *BookError) Error() string { return "pending: booking failed: " + e.Code }
+func (e *BookError) Unwrap() error { return ErrBookFailed }
+
+// Check lists, per draft, what it still needs before it can be confirmed (the pending page's own
+// readiness check, hard ones only). An empty list = ready. A saving draft is a `saving` row, any other a `create`.
+func (s *Service) Check(drafts []Draft) [][]string {
+	out := make([][]string, len(drafts))
+	for i, d := range drafts {
+		kind := KindCreate
+		if d.Type != nil && *d.Type == string(typeSaving) {
+			kind = KindSaving
+		}
+		_, hard := readinessDetail(&PendingTransaction{Kind: kind, Draft: d})
+		out[i] = hard
+	}
+	return out
+}
+
+// CreateFrom inserts one pending row per draft with a source and source_ref, all or nothing: the user
+// reviews them on the pending page.
 func (s *Service) CreateFrom(ctx context.Context, userID uuid.UUID, source string, ref json.RawMessage, drafts []Draft) ([]uuid.UUID, error) {
-	return s.replace(ctx, userID, nil, source, ref, drafts)
-}
-
-// Replace deletes the rows oldIDs (those still there) and inserts the drafts in their place, in one
-// database transaction: a Reply edit on a chat card.
-func (s *Service) Replace(ctx context.Context, userID uuid.UUID, oldIDs []uuid.UUID, source string, ref json.RawMessage, drafts []Draft) ([]uuid.UUID, error) {
-	return s.replace(ctx, userID, oldIDs, source, ref, drafts)
-}
-
-func (s *Service) replace(ctx context.Context, userID uuid.UUID, oldIDs []uuid.UUID, source string, ref json.RawMessage, drafts []Draft) ([]uuid.UUID, error) {
 	for _, d := range drafts {
 		if err := checkDraft(d); err != nil {
 			return nil, err
@@ -34,14 +52,13 @@ func (s *Service) replace(ctx context.Context, userID uuid.UUID, oldIDs []uuid.U
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	for _, id := range oldIDs {
-		if err := s.store.DeleteTx(ctx, tx, userID, id); err != nil {
-			return nil, fmt.Errorf("delete old row: %w", err)
-		}
-	}
 	ids := make([]uuid.UUID, 0, len(drafts))
 	for _, d := range drafts {
-		p, err := s.store.InsertTx(ctx, tx, userID, source, KindCreate, d, ref)
+		kind := KindCreate
+		if d.Type != nil && *d.Type == string(typeSaving) {
+			kind = KindSaving // a saving entry is booked by the saving service, never as a transaction
+		}
+		p, err := s.store.InsertTx(ctx, tx, userID, source, kind, d, ref)
 		if err != nil {
 			return nil, fmt.Errorf("insert row: %w", err)
 		}
@@ -53,17 +70,34 @@ func (s *Service) replace(ctx context.Context, userID uuid.UUID, oldIDs []uuid.U
 	return ids, nil
 }
 
-// Alive counts how many of ids are still pending (a row confirmed or discarded in the app is gone).
-func (s *Service) Alive(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) (int, error) {
-	n := 0
-	for _, id := range ids {
-		if _, err := s.store.Get(ctx, userID, id); err != nil {
-			if errors.Is(err, ErrPendingNotFound) {
-				continue
-			}
-			return 0, err
-		}
-		n++
+// Book creates the rows and submits them at once (the user's "auto submit"): straight to the ledger.
+// Each row books in its own transaction, so a row that fails cannot undo the ones before it; the
+// failed rows are deleted (nothing stays pending) and ErrBookFailed comes back with the result so far.
+func (s *Service) Book(ctx context.Context, userID uuid.UUID, source string, ref json.RawMessage, drafts []Draft) (BookResult, error) {
+	ids, err := s.CreateFrom(ctx, userID, source, ref, drafts)
+	if err != nil {
+		return BookResult{}, err
 	}
-	return n, nil
+	res, err := s.Submit(ctx, userID, SubmitRequest{IDs: ids})
+	if err != nil {
+		_, _ = s.Discard(ctx, userID, ids)
+		return BookResult{}, err
+	}
+	out := BookResult{Booked: len(res.Submitted)}
+	for _, sub := range res.Submitted {
+		if sub.Unlinked {
+			out.Unlinked++
+		}
+	}
+	if len(res.Failed) == 0 {
+		return out, nil
+	}
+	failed := make([]uuid.UUID, 0, len(res.Failed))
+	for _, f := range res.Failed {
+		failed = append(failed, f.ID)
+	}
+	if _, derr := s.Discard(ctx, userID, failed); derr != nil {
+		return out, errors.Join(ErrBookFailed, derr)
+	}
+	return out, &BookError{Code: string(res.Failed[0].Error.Code)}
 }

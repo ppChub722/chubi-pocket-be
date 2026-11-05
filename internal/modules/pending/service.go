@@ -38,6 +38,7 @@ type Service struct {
 	projects *projects.Service
 	onSubmit SubmitHook
 	savings  *saving_goals.Service
+	recurringLink RecurringLink
 }
 
 const typeSaving = transactions.TxType("saving")
@@ -73,6 +74,21 @@ func checkDraft(d Draft) error {
 	if d.Date != nil {
 		if _, err := time.Parse(dateLayout, *d.Date); err != nil {
 			return apierr.Wrap(ErrInvalidDraft, "date must be YYYY-MM-DD", apierr.Field("date", apierr.FieldInvalid, "format", "date"))
+		}
+	}
+	switch d.SavingAction {
+	case "", ActionSave, ActionAllocate, ActionMove, ActionWithdraw:
+	default:
+		return apierr.Wrap(ErrInvalidDraft, "saving_action must be save, allocate, move or withdraw", apierr.Field("saving_action", apierr.FieldInvalid, "allowed", []string{ActionSave, ActionAllocate, ActionMove, ActionWithdraw}))
+	}
+	if db := d.Debt; db != nil {
+		switch db.Side {
+		case SideTheyOweMe, SideIOweThem, SideTheyRepay, SideIRepay:
+		default:
+			return apierr.Wrap(ErrInvalidDraft, "debt.side is not valid", apierr.Field("debt.side", apierr.FieldInvalid, "allowed", []string{SideTheyOweMe, SideIOweThem, SideTheyRepay, SideIRepay}))
+		}
+		if d.Paper != nil {
+			return apierr.Wrap(ErrInvalidDraft, "a debt is not a shared bill", apierr.Field("debt", apierr.FieldInvalid))
 		}
 	}
 	if p := d.Paper; p != nil {
@@ -218,7 +234,14 @@ func (s *Service) Submit(ctx context.Context, userID uuid.UUID, req SubmitReques
 			}
 		}
 		touched = append(touched, before...)
-		out.Submitted = append(out.Submitted, Submitted{ID: id, Rows: rows, TransactionID: txID})
+		unlinked := false
+		if p.Draft.RecurringID != nil && txID != nil && s.recurringLink != nil {
+			if lerr := s.recurringLink(ctx, userID, *p.Draft.RecurringID, *txID); lerr != nil {
+				unlinked = true // the transaction is booked; only the link to the slot failed
+				slog.Warn("pending: recurring link failed", "rule_id", *p.Draft.RecurringID, "error", lerr)
+			}
+		}
+		out.Submitted = append(out.Submitted, Submitted{ID: id, Rows: rows, TransactionID: txID, Unlinked: unlinked})
 	}
 	var err error
 	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.store.Pool(), touched); err != nil {
@@ -312,6 +335,9 @@ func createRequest(d Draft) (transactions.CreateRequest, error) {
 }
 
 func (s *Service) submitCreate(ctx context.Context, userID uuid.UUID, p *PendingTransaction) (*uuid.UUID, error) {
+	if p.Draft.Debt != nil {
+		return s.submitDebt(ctx, userID, p)
+	}
 	req, err := createRequest(p.Draft)
 	if err != nil {
 		return nil, err
@@ -388,6 +414,7 @@ func (s *Service) submitPaperTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID
 			Type: *d.Type, Amount: *d.Amount, Date: *d.Date, Description: d.Description, Note: d.Note,
 			SplitMode: p.SplitMode, People: p.People, TagIDs: p.EventTagIDs,
 		},
+		NewEvent: p.NewEvent,
 		MyBooks: &projects.ClaimInput{Pay: pay, AccountID: d.AccountID, CategoryID: d.CategoryID, TagIDs: d.TagIDs},
 	}, &eff)
 	if err != nil {
@@ -425,7 +452,13 @@ func (s *Service) submitSaving(ctx context.Context, userID uuid.UUID, p *Pending
 	if note == nil {
 		note = d.Description
 	}
-	id, err := s.savings.SaveFromDraftTx(ctx, tx, userID, d.AccountID, d.GoalID, *d.Amount, *d.Date, note, source)
+	var id uuid.UUID
+	switch d.SavingAction {
+	case "", ActionSave:
+		id, err = s.savings.SaveFromDraftTx(ctx, tx, userID, d.AccountID, d.GoalID, *d.Amount, *d.Date, note, source)
+	default:
+		id, err = s.savings.EntryFromDraftTx(ctx, tx, userID, entryRequest(d, note), source)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -514,6 +547,7 @@ func toSubmitError(err error) SubmitError {
 		{saving_goals.ErrAccountNotFound, apierr.AccountNotFound},
 		{saving_goals.ErrWalletNotTracked, apierr.WalletNotTracked},
 		{saving_goals.ErrGoalNotActive, apierr.GoalNotActive},
+		{saving_goals.ErrInsufficientSaving, apierr.InsufficientSaving},
 		{saving_goals.ErrGoalNotFound, apierr.NotFound},
 		{projects.ErrProjectNotFound, apierr.NotFound},
 		{projects.ErrEventTagNotFound, apierr.NotFound},

@@ -12,14 +12,23 @@ const (
 	NeedWalletTo = "wallet_to" // a transfer's destination: hard
 	NeedCategory = "category"  // soft: an uncategorized bill is valid
 	NeedPeople   = "people"    // a shared-bill draft with nobody on it: hard
+	NeedPerson   = "person"    // a debt draft with nobody named: hard
 )
 
 func readiness(p *PendingTransaction) (missing []string, canConfirm bool) {
+	missing, hard := readinessDetail(p)
+	return missing, len(hard) == 0
+}
+
+// readinessDetail is readiness with the hard ones listed: what a draft still needs before it can be confirmed.
+func readinessDetail(p *PendingTransaction) (missing, hard []string) {
 	missing = []string{}
-	hard := false
+	hard = []string{}
 	add := func(k string, isHard bool) {
 		missing = append(missing, k)
-		hard = hard || isHard
+		if isHard {
+			hard = append(hard, k)
+		}
 	}
 	d := p.Draft
 	switch p.Kind {
@@ -37,6 +46,13 @@ func readiness(p *PendingTransaction) (missing []string, canConfirm bool) {
 		}
 		if p.Kind == KindCreate {
 			switch {
+			case d.Debt != nil:
+				if d.Debt.ContactID == nil && (d.Debt.PersonName == nil || strings.TrimSpace(*d.Debt.PersonName) == "") {
+					add(NeedPerson, true)
+				}
+				if d.Debt.WithMoney && d.AccountID == nil {
+					add(NeedWallet, true)
+				}
 			case d.Type == nil:
 				add(NeedType, true)
 			case *d.Type == "transfer":
@@ -57,7 +73,7 @@ func readiness(p *PendingTransaction) (missing []string, canConfirm bool) {
 			}
 		}
 	}
-	return missing, !hard
+	return missing, hard
 }
 
 func summarize(rows []PendingTransaction) ListSummary {

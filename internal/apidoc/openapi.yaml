@@ -6586,7 +6586,20 @@ components:
         transfer_to_account_id: { $ref: '#/components/schemas/Uuid' }
         tag_ids: { $ref: '#/components/schemas/Ids' }
         goal_id: { $ref: '#/components/schemas/Uuid', description: 'kind saving: the goal (absent = spare).' }
+        saving_action: { type: string, enum: [save, allocate, move, withdraw], description: 'kind saving (the chatbot): save (default) = wallet → goal / spare; allocate = spare → goal_id; move = from_goal_id (absent = spare) → goal_id (absent = spare); withdraw = from_goal_id (absent = spare) → back to account_id. 409 INSUFFICIENT_SAVING when the source holds less.' }
+        from_goal_id: { $ref: '#/components/schemas/Uuid', description: 'saving_action move / withdraw: where it comes from (absent = spare).' }
+        recurring_id: { $ref: '#/components/schemas/Uuid', description: 'kind create (the chatbot): on submit the transaction is tied to the NEXT slot of this recurring rule (the latest past slot that is still unpaid, else the next upcoming one); the transaction keeps its own date and amount. A failed link leaves the booked transaction and only says so (submitted[].unlinked).' }
+        debt: { $ref: '#/components/schemas/DraftDebt' }
         paper: { $ref: '#/components/schemas/DraftPaper' }
+    DraftDebt:
+      type: object
+      description: 'kind create with a debt (the chatbot): on submit a person-book entry (they_owe_me = I lent, i_owe_them = I borrowed) or a repayment (they_repay, i_repay), with a transaction on account_id when with_money. No type.'
+      required: [side, with_money]
+      properties:
+        contact_id: { $ref: '#/components/schemas/Uuid' }
+        person_name: { type: string, maxLength: 100 }
+        side: { type: string, enum: [they_owe_me, i_owe_them, they_repay, i_repay] }
+        with_money: { type: boolean }
     DraftPaper:
       type: object
       description: 'The draft is a shared bill (expense or income). Confirming it creates the paper (a split bill; an event bill with project_id) from the draft''s type / amount / date / description / note and these people, then my books of it from the draft''s wallet, category and tags (`pay`, default debt). Paper errors land in last_error. The summary and budgets count my share only.'
@@ -6597,6 +6610,7 @@ components:
         people: { type: array, items: { $ref: '#/components/schemas/PaperPersonInput' } }
         event_tag_ids: { $ref: '#/components/schemas/Ids' }
         pay: { type: string, enum: [debt, wallet] }
+        new_event: { type: object, required: [name], properties: { name: { type: string, minLength: 1, maxLength: 100 } }, description: 'Make this event with the bill (the first bill; its people become members); then project_id is absent.' }
     DraftResolved:
       type: object
       description: 'Read-only; the draft''s ids resolved so the page renders without other calls. A dangling id (deleted account / category / event …) is `null` here and listed in `missing`.'
@@ -6620,7 +6634,7 @@ components:
           enum: [
             NOT_FOUND, ACCOUNT_NOT_FOUND, ACCOUNT_ARCHIVED, WALLET_NOT_TRACKED, CATEGORY_TYPE_MISMATCH, CATEGORY_NOT_FOUND,
             TAG_NOT_FOUND, TRANSACTION_NOT_FOUND, TRANSFER_SAME_ACCOUNT, TRANSFER_NEEDS_WALLETS, DEBT_NOT_FOUND, CONTACT_NOT_FOUND,
-            PROJECT_NOT_ACTIVE, PROJECT_LOCKED, GOAL_NOT_ACTIVE, MISSING_TYPE, MISSING_AMOUNT, MISSING_DATE,
+            PROJECT_NOT_ACTIVE, PROJECT_LOCKED, GOAL_NOT_ACTIVE, INSUFFICIENT_SAVING, MISSING_TYPE, MISSING_AMOUNT, MISSING_DATE,
             SUBMIT_FAILED, MISSING_ACCOUNT, DEBT_ALREADY_SETTLED, OVERPAYMENT,
             VALIDATION_ERROR, EVENT_COMPLETED, MEMBER_NOT_IN_PROJECT, FORBIDDEN_ROLE
           ]
@@ -6638,7 +6652,7 @@ components:
         target_transaction_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         source_ref: { type: [object, 'null'], description: 'What to show for a non-manual source ("Aom paid ฿300", a scanned slip …). `source` recurring | upcoming (a draft the recurring due check produced): `{item_id, recurring: {id, name, icon_code} | null, seq, total}` → the chip "🔁 Netflix · 3/12" / "ล่วงหน้า". Submitting it links the new transaction to the item; discarding it leaves the item "ยังไม่สร้าง".'}
         last_error: { oneOf: [{ $ref: '#/components/schemas/SubmitError' }, { type: 'null' }] }
-        needs_input: { type: array, items: { type: string, enum: [amount, type, date, wallet, wallet_to, category, people] }, description: 'What the draft still misses; empty = ready. amount / type / date / wallet_to (and a transfer''s wallet) / people (a shared-bill draft with nobody on it) are hard; wallet and category of an expense / income are soft (an uncategorized, wallet-less bill is valid). An amount-less เตือนจ่าย draft is valid: it just needs the amount.' }
+        needs_input: { type: array, items: { type: string, enum: [amount, type, date, wallet, wallet_to, category, people, person] }, description: 'What the draft still misses; empty = ready. amount / type / date / wallet_to (and a transfer''s wallet) / people (a shared-bill draft with nobody on it) / person (a debt draft with nobody named; with a wallet when money moves) are hard; wallet and category of an expense / income are soft (an uncategorized, wallet-less bill is valid). An amount-less เตือนจ่าย draft is valid: it just needs the amount.' }
         can_confirm: { type: boolean, description: 'false while a hard key is missing: confirm answers it in failed[] (MISSING_AMOUNT …) and the draft stays.' }
         created_at: { $ref: '#/components/schemas/DateTime' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
@@ -6727,6 +6741,7 @@ components:
             properties:
               id: { $ref: '#/components/schemas/Uuid' }
               rows: { type: array, minItems: 0, maxItems: 2, items: { $ref: '#/components/schemas/Transaction' }, description: 'The created row(s), final state (a transfer returns both rows, OUT first). [] for a saving draft.' }
+              unlinked: { type: boolean, description: 'A draft with recurring_id: the transaction is booked but could not be tied to the rule''s slot (omitted when it was tied or the draft has no recurring_id).' }
               saving_entry_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'A saving draft (kind saving): the saving entry it became.' }
         failed:
           type: array

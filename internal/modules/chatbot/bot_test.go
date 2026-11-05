@@ -18,11 +18,21 @@ import (
 )
 
 var (
-	walletA   = Wallet{ID: uuid.New(), Name: "กสิกร", Main: true}
-	walletB   = Wallet{ID: uuid.New(), Name: "ออมทรัพย์"}
-	catFood   = Category{ID: uuid.New(), Name: "อาหาร", Type: "expense"}
-	testLists = Lists{Wallets: []Wallet{walletA, walletB}, Categories: []Category{catFood}}
-	testDay   = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	walletA    = Wallet{ID: uuid.New(), Name: "กสิกร", Main: true}
+	walletB    = Wallet{ID: uuid.New(), Name: "ออมทรัพย์"}
+	catFood    = Category{ID: uuid.New(), Name: "อาหาร", Type: "expense"}
+	goalTrip   = Goal{ID: uuid.New(), Name: "เที่ยวญี่ปุ่น"}
+	goalCar    = Goal{ID: uuid.New(), Name: "รถ"}
+	contactBoy = Contact{ID: uuid.New(), Name: "บอย", Linked: true}
+	memberBoy  = Member{ID: uuid.New(), Name: "บอย"}
+	memberLee  = Member{ID: uuid.New(), Name: "ลี"}
+	memberNui  = Member{ID: uuid.New(), Name: "นุ่น"}
+	eventTrip  = Event{ID: uuid.New(), Name: "ทริปภูเก็ต", Members: []Member{{ID: uuid.New(), Name: "ฉัน", Me: true}, memberBoy, memberLee, memberNui}}
+	eventDone  = Event{ID: uuid.New(), Name: "ทริปปีใหม่", Completed: true, Members: []Member{{ID: uuid.New(), Name: "ฉัน", Me: true}}}
+	rulePower  = Rule{ID: uuid.New(), Name: "ค่าไฟ", Type: "expense", Amount: 500, AccountID: &walletB.ID, CategoryID: &catFood.ID, Slot: "2026-10-05"}
+	testLists  = Lists{Wallets: []Wallet{walletA, walletB}, Categories: []Category{catFood}, Goals: []Goal{goalTrip, goalCar},
+		Contacts: []Contact{contactBoy}, Events: []Event{eventTrip, eventDone}, Rules: []Rule{rulePower}}
+	testDay = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 )
 
 func TestParseKeywords(t *testing.T) {

@@ -180,6 +180,7 @@ func main() {
 	transactionsService.WithPaperReader(projectsService) // GET /transactions/:id carries its bill
 	pendingService.WithSubmitHook(recurringService.OnDraftSubmitted)
 	pendingService.WithSavings(savingGoalsService)
+	pendingService.WithRecurringLink(recurringService.LinkNext) // a chat payment ties to its rule's slot
 	recurringService.WithSavings(savingGoalsService)
 
 	budgetsService.WithExpected(recurringService)
@@ -258,15 +259,17 @@ func main() {
 			log.Error("llm config", "error", err)
 			os.Exit(1)
 		}
-		dbLists := chatbot.NewDBLists(dbPool)
+		dbLists := chatbot.NewDBLists(dbPool).WithRules(recurringService)
 		telegramWebhook.WithLang(dbLists)
 		chat := chatbot.New(telegramWebhook.Client(), dbLists, llmRouter,
 			cfg.LLM.PerMinute, time.Duration(cfg.LLM.TimeoutSec)*time.Second, log)
 		chat.LogBodies = cfg.LLM.LogBodies
-		chat.WithSaver(chatbot.NewPendingSaver(pendingService)) // K4: cards are pending rows (the fake provider still writes nothing)
+		if cfg.LLM.Save { // off (default): the real model, cards and buttons, nothing written; ✓ says "trial, not in the app yet"
+			chat.WithSaver(chatbot.NewPendingSaver(pendingService)) // ✓ -> the pending page (or the ledger with auto submit)
+		}
 		chat.WithMeter(chatbot.NewDBMeter(dbPool), cfg.LLM.MonthlyCap) // K2: tier, monthly cap, llm_calls
 		telegramWebhook.WithChat(chat)
-		log.Info("chatbot: on", "provider", cfg.LLM.Provider, "log_bodies", cfg.LLM.LogBodies)
+		log.Info("chatbot: on", "provider", cfg.LLM.Provider, "save", cfg.LLM.Save, "log_bodies", cfg.LLM.LogBodies)
 		// 0.4.2-4: Log In With Telegram (OIDC); the bot id is the client_id
 		client := telegramWebhook.Client()
 		connectionsService.WithTelegramLogin(connections.NewIDTokenVerifier(cfg.Telegram.BotID()),

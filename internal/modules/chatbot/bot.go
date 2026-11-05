@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/telegram"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/llm"
 )
@@ -63,7 +64,8 @@ func New(send Sender, lists ListSource, router *llm.Router, perMinute int, timeo
 		timeout: timeout, log: log, now: time.Now}
 }
 
-// WithSaver makes cards real: rows in the app's pending page (K4). The fake provider never writes.
+// WithSaver makes ✓ real (K4): rows for the app's pending page, or booked at once when the user turned auto on.
+// Nothing is written before ✓. The fake provider never writes.
 func (b *Bot) WithSaver(s Saver) { b.saver = s }
 
 func (b *Bot) saves() bool { return b.saver != nil && !b.router.Fake() }
@@ -164,18 +166,10 @@ func (b *Bot) fresh(ctx context.Context, tr turn, text string) {
 	}
 	c := Card{ID: newCardID(), UserID: tr.userID, ChatID: tr.chatID, Items: out.Items, State: CardOpen,
 		Label: tr.label, SourceID: tr.msgID, Lang: tr.lang}
-	if b.saves() {
-		ids, err := b.saver.Save(ctx, tr.userID, SaveRef{ChatID: tr.chatID, CardID: c.ID, MessageID: tr.msgID, Text: text}, out.Items)
-		if err != nil {
-			b.fail(ctx, tr, CodeDB, "save", err)
-			return
-		}
-		c.PendingIDs = ids
-	}
+	b.markMissing(&c)
 	id, err := b.send.SendCard(ctx, tr.chatID, cardText(c, lists, b.today()), tr.msgID, buttons(c.ID, tr.t))
 	if err != nil {
 		b.log.Error("chatbot: send card failed", "chat_id", tr.chatID, "error", err)
-		b.drop(ctx, c)
 		return
 	}
 	c.MessageID = id
@@ -191,16 +185,6 @@ func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
 		b.say(ctx, c.ChatID, tr.t.Handled, tr.msgID)
 		return
 	}
-	if b.saves() {
-		if n, err := b.saver.Alive(ctx, c.UserID, c.PendingIDs); err != nil {
-			b.fail(ctx, tr, CodeDB, "alive", err)
-			return
-		} else if n < len(c.PendingIDs) { // settled in the app: the card is stale
-			b.cards.close(c.ID, CardCancelled)
-			b.say(ctx, c.ChatID, tr.t.Handled, tr.msgID)
-			return
-		}
-	}
 	lists, out, ok := b.parse(ctx, tr, text, c.Items)
 	if !ok {
 		return
@@ -212,14 +196,7 @@ func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
 	}
 	before := c
 	c.Items, c.Lang = out.Items, tr.lang
-	if b.saves() {
-		ids, err := b.saver.Replace(ctx, c.UserID, c.PendingIDs, SaveRef{ChatID: c.ChatID, CardID: c.ID, MessageID: c.SourceID, Text: text}, out.Items)
-		if err != nil {
-			b.fail(ctx, tr, CodeDB, "save", err)
-			return
-		}
-		c.PendingIDs = ids
-	}
+	b.markMissing(&c)
 	id, err := b.send.SendCard(ctx, c.ChatID, cardText(c, lists, b.today()), tr.msgID, buttons(c.ID, tr.t))
 	if err != nil {
 		b.log.Error("chatbot: send card failed", "chat_id", c.ChatID, "error", err)
@@ -288,26 +265,25 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 	c, ok := b.cards.get(id)
 	t := textsFor(telegram.Lang(c.Lang, cq.From.LanguageCode))
 	mine := ok && c.ChatID == cq.Message.Chat.ID && cq.From.ID == cq.Message.Chat.ID
-	if mine && b.saves() { // rows settled in the app: the card is stale
-		if n, err := b.saver.Alive(ctx, c.UserID, c.PendingIDs); err == nil && n < len(c.PendingIDs) {
-			b.cards.close(id, CardCancelled)
-			mine = false
+	if !mine {
+		b.answer(ctx, cq.ID, t.Handled)
+		return true
+	}
+	if state == CardSaved && b.saves() {
+		if missing := b.missingNow(c); len(missing) > 0 { // not ready: say what is missing, the card stays open
+			b.answer(ctx, cq.ID, t.missing(missing))
+			return true
 		}
 	}
-	if !mine || !b.cards.close(id, state) {
+	if !b.cards.close(id, state) {
 		b.answer(ctx, cq.ID, t.Handled)
 		return true
 	}
 	b.answer(ctx, cq.ID, "")
-	lists, err := b.lists.Lists(ctx, c.UserID)
-	if err != nil {
-		b.log.Error("chatbot: lists failed", "chat_id", c.ChatID, "error", err)
-	}
-	done := t.Saved
+	done, reaction := t.Saved, reactDone
 	if state == CardCancelled {
-		done = t.Cancelled
+		done, reaction = t.Cancelled, ""
 	}
-	saved := -1 // rows booked; -1 = nothing was tried
 	switch {
 	case b.router.Fake():
 		done += TextFakeMark
@@ -316,30 +292,108 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 			done += t.TrialMark
 		}
 	case state == CardSaved:
-		n, err := b.saver.Confirm(ctx, c.UserID, c.PendingIDs)
-		if err != nil {
-			b.log.Error("chatbot: confirm failed", "chat_id", c.ChatID, "error", err)
+		text, booked, ok := b.settle(ctx, c, t)
+		if !ok { // nothing was booked: the card stays open, the user can press ✓ again
+			b.cards.reopen(c.ID)
+			return true
 		}
-		saved = n
-		if n < len(c.PendingIDs) {
-			done = fmt.Sprintf(t.Partial, n, len(c.PendingIDs))
+		done = text
+		if booked == 0 {
+			reaction = reactFail
 		}
-	default:
-		if err := b.saver.Discard(ctx, c.UserID, c.PendingIDs); err != nil {
-			b.log.Error("chatbot: discard failed", "chat_id", c.ChatID, "error", err)
-		}
+	}
+	lists, err := b.lists.Lists(ctx, c.UserID)
+	if err != nil {
+		b.log.Error("chatbot: lists failed", "chat_id", c.ChatID, "error", err)
 	}
 	if err := b.send.EditCard(ctx, c.ChatID, c.MessageID, cardText(c, lists, b.today())+"\n\n"+done, nil); err != nil {
 		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
 	}
-	if state == CardSaved && saved == 0 {
-		b.react(ctx, c.ChatID, c.SourceID, reactFail)
-	} else if state == CardSaved {
-		b.react(ctx, c.ChatID, c.SourceID, reactDone)
-	} else {
-		b.react(ctx, c.ChatID, c.SourceID, "")
-	}
+	b.react(ctx, c.ChatID, c.SourceID, reaction)
 	return true
+}
+
+// settle is ✓ on a real card: not auto → the rows wait on the pending page; auto → they are booked
+// at once. ok false = nothing happened (an error line was sent and the card stays open). A booking that
+// only partly went through closes the card and says how many.
+func (b *Bot) settle(ctx context.Context, c Card, t Texts) (text string, booked int, ok bool) {
+	ref := SaveRef{ChatID: c.ChatID, CardID: c.ID, MessageID: c.SourceID}
+	if !b.saver.Auto(ctx, c.UserID, groupTx) {
+		if err := b.saver.Queue(ctx, c.UserID, ref, c.Items); err != nil {
+			b.settleFailed(ctx, c, t, "queue", err)
+			return "", 0, false
+		}
+		return t.Queued, len(c.Items), true
+	}
+	out, err := b.saver.Book(ctx, c.UserID, ref, c.Items)
+	switch {
+	case err == nil:
+		if out.Unlinked > 0 { // booked, but not tied to the recurring slot
+			return t.Saved + "\n" + t.Unlinked, out.Booked, true
+		}
+		return t.Saved, out.Booked, true
+	case out.Booked > 0:
+		b.log.Error("chatbot: booked only part", "chat_id", c.ChatID, "booked", out.Booked, "of", len(c.Items), "error", err)
+		return fmt.Sprintf(t.PartialBooked, out.Booked, len(c.Items)), out.Booked, true
+	}
+	b.settleFailed(ctx, c, t, "book", err)
+	return "", 0, false
+}
+
+// settleFailed tells the user (a fixed line + code, only owners reach cards) and logs; no row is left behind.
+func (b *Bot) settleFailed(ctx context.Context, c Card, t Texts, stage string, err error) {
+	ref := newCardID()[:4]
+	var be *pending.BookError
+	if errors.As(err, &be) && be.Code == "INSUFFICIENT_SAVING" { // the saving it comes from holds less
+		b.log.Warn("chatbot: ✓ refused", "chat_id", c.ChatID, "code", be.Code, "ref", ref)
+		b.say(ctx, c.ChatID, c.Label+t.InsufficientSaving, c.SourceID)
+		return
+	}
+	code := CodeDB
+	if errors.As(err, &be) {
+		code = "E-BOOK " + be.Code
+	}
+	b.log.Error("chatbot: ✓ failed", "chat_id", c.ChatID, "code", code, "ref", ref, "stage", stage, "error", err)
+	b.say(ctx, c.ChatID, c.Label+t.fail(CodeDB)+"\n"+code+" #"+ref, c.SourceID)
+}
+
+// markMissing runs the pending page's readiness check on the card's items before the card goes out:
+// a field that is missing shows as "[… ?]" and ✓ will not go until the user fills it by Reply.
+func (b *Bot) markMissing(c *Card) {
+	if !b.saves() {
+		return
+	}
+	for i, codes := range b.saver.Check(c.Items) {
+		for _, code := range codes {
+			if f := unsureField(code); f != "" && !contains(c.Items[i].Unsure, f) {
+				c.Items[i].Unsure = append(c.Items[i].Unsure, f)
+			}
+		}
+	}
+}
+
+// missingNow: the distinct things the card's items still lack (checked again at ✓).
+func (b *Bot) missingNow(c Card) []string {
+	var out []string
+	for _, codes := range b.saver.Check(c.Items) {
+		for _, code := range codes {
+			if !contains(out, code) {
+				out = append(out, code)
+			}
+		}
+	}
+	return out
+}
+
+// unsureField: the card field a readiness code is shown on.
+func unsureField(code string) string {
+	switch code {
+	case "wallet", "wallet_to":
+		return "account"
+	case "amount", "date", "type":
+		return code
+	}
+	return ""
 }
 
 // fail logs a failure with a code and a short ref, and tells the user whose side it is; the code
@@ -438,15 +492,6 @@ func (l *minuteLimit) allow(user uuid.UUID, now time.Time) bool {
 	return true
 }
 
-// drop discards the rows of a card that never reached Telegram.
-func (b *Bot) drop(ctx context.Context, c Card) {
-	if !b.saves() || len(c.PendingIDs) == 0 {
-		return
-	}
-	if err := b.saver.Discard(ctx, c.UserID, c.PendingIDs); err != nil {
-		b.log.Error("chatbot: discard failed", "chat_id", c.ChatID, "error", err)
-	}
-}
 
 // record logs one model call (tokens, ms, status; never the text). A failure only logs.
 func (b *Bot) record(ctx context.Context, tr turn, pick llm.Pick, out Outcome, err error, ms int64) {

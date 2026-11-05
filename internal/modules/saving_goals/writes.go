@@ -692,6 +692,16 @@ func (s *Service) SaveFromDraftTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 	return ids[0], nil
 }
 
+// EntryFromDraftTx books one saving entry request (ออม, จัดสรร, ย้าย, ถอนออม) inside the caller's transaction:
+// a confirmed pending draft. A move or a withdrawal over several wallets makes several rows; the first id answers.
+func (s *Service) EntryFromDraftTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, r EntryRequest, source string) (uuid.UUID, error) {
+	ids, _, _, err := s.createEntriesTx(ctx, tx, userID, r, source)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return ids[0], nil
+}
+
 func (s *Service) UpdateEntryTx(ctx context.Context, tx pgx.Tx, userID, id uuid.UUID, amount *float64, date *string, note *string, noteSet bool) error {
 	r := EntryUpdateRequest{Amount: amount, Date: date, Note: note, present: map[string]bool{"note": noteSet}}
 	_, err := s.updateEntryTx(ctx, tx, userID, id, r)

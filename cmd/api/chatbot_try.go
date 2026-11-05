@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/chatbot"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/recurring"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/telegram"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/config"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/database"
@@ -64,7 +65,8 @@ func chatbotTry(args []string) int {
 		return 1
 	}
 	ctx := context.Background()
-	src := chatbot.NewDBLists(db)
+	// the recurring rules and the slot a payment would take: read only, so the service needs nothing else
+	src := chatbot.NewDBLists(db).WithRules(recurring.NewService(db, nil, nil, nil))
 	userID, err := src.UserByChat(ctx, *chat)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "no user linked to that chat:", err)

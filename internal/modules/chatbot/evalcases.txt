@@ -6,7 +6,11 @@
 #   wallet=Kbank  wallet=-  to=เงินสด  category=Dining / Take-away  category=-  date=today|yesterday|2026-11-02
 #   2:wallet=เงินสด   (a check on item 2)
 #   desc=กินบุฟเฟต์   date!=today   ("!=" = must not be)
-# Wallet and category names are the owner's own lists on the test server.
+#   kind=saving|debt|create  action=save|allocate|move|withdraw  goal=<name>|spare  from=<name>|-
+#   event=<name>|-  newevent=<name>|-  people=2  payer=me|<name>  side=they_owe_me|i_owe_them|they_repay|i_repay
+#   money=true|false  person=<name>|-  recurring=<name>|-   (the new kinds; hint=goal_missing | event_done too)
+# Wallet and category names are the owner's own lists on the test server. The saving, bill and debt groups
+# are written to pass on any account (the checks do not depend on a goal / contact / event name).
 
 [basic]
 ข้าวมันไก่ 50 | expense 50; date=today
@@ -68,3 +72,30 @@ salary 30000 | income 30000
 สามวันก่อนกินบุฟเฟต์ เงินสด หัวละ500 | desc=กินบุฟเฟต์; wallet=เงินสด
 ให้เพื่อนยืมแต่ไม่เอาคืนลงเป็นหมวดอื่นๆ 300000 kbank | expense 300000; wallet=Kbank
 ข้าว 60, กาแฟ 45 | ค่ารถ 30 | items=3
+
+[saving]
+ออม 2000 kbank | kind=saving; action=save; wallet=Kbank; goal=spare
+ออมเข้าเป้า 2000 kbank | kind=saving; action=save
+จัดสรร 2000 | hint=goal_missing
+ถอนเงินออม 500 kbank | kind=saving; action=withdraw; wallet=Kbank
+ย้าย 500 ไปรถ | hint=goal_missing
+
+[bill]
+กินข้าว 600 หารกับบอย ลี | kind=create; people=2; payer=me
+กินข้าว 600 บอยจ่าย หารกับบอย | kind=create; payer=บอย
+กินข้าว 600 หารกัน 3 คน | people=0
+ค่าเรือ 1200 ทริปเกาะพีพี | kind=create; newevent=ทริปเกาะพีพี
+ข้าว 60 | people=0; newevent=-
+
+[recurring]
+# needs a recurring item named ค่าไฟ on the account (the owner has one); the slot is the BE's pick, not checked here
+จ่ายค่าไฟ 500 | expense 500; recurring=ค่าไฟ
+จ่ายค่าไฟ 500 เงินสด เมื่อวาน | expense 500; recurring=ค่าไฟ; wallet=เงินสด; date=yesterday
+จ่ายค่าอะไรสักอย่างที่ไม่มี 500 | expense 500; recurring=-
+
+[debt]
+ให้บอยยืม 500 | kind=debt; side=they_owe_me; money=true
+บอยค้างฉัน 500 | kind=debt; side=they_owe_me; money=false
+ยืมบอย 500 | kind=debt; side=i_owe_them; money=true
+ฉันค้างบอย 500 | kind=debt; side=i_owe_them; money=false
+บอยคืน 200 | kind=debt; side=they_repay; money=true

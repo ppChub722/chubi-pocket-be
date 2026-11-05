@@ -151,6 +151,58 @@ func checkCase(checks string, out Outcome, lists Lists, today time.Time) []strin
 				got = nameOrDash(walletName(textsEN, lists, it.AccountID), it.AccountID == nil)
 			case "to":
 				got = nameOrDash(walletName(textsEN, lists, it.TransferToID), it.TransferToID == nil)
+			case "kind":
+				got = it.Kind
+			case "action":
+				got = nameOrDash(it.SavingAction, it.SavingAction == "")
+			case "goal": // where a saving goes
+				got = goalName(textsEN, lists, it.GoalID)
+				if it.GoalID == nil && !it.ToSpare && it.SavingAction != ActSave {
+					got = "-"
+				}
+			case "from": // where a move / withdrawal comes from
+				got = nameOrDash(goalName(textsEN, lists, it.FromGoalID), it.FromGoalID == nil)
+			case "event":
+				got = "-"
+				if it.Paper != nil && it.Paper.EventID != nil {
+					for _, e := range lists.Events {
+						if e.ID == *it.Paper.EventID {
+							got = e.Name
+						}
+					}
+				}
+			case "newevent":
+				got = "-"
+				if it.Paper != nil && it.Paper.NewEvent != "" {
+					got = it.Paper.NewEvent
+				}
+			case "people": // how many others are on the bill
+				got = "0"
+				if it.Paper != nil {
+					got = strconv.Itoa(len(it.Paper.People))
+				}
+			case "payer":
+				got = "me"
+				if it.Paper != nil && it.Paper.PaidBy != nil {
+					got = it.Paper.PaidBy.Name
+				}
+			case "side":
+				got = "-"
+				if it.Debt != nil {
+					got = it.Debt.Side
+				}
+			case "money": // a debt moves money (true) or is only noted (false)
+				got = "-"
+				if it.Debt != nil {
+					got = strconv.FormatBool(it.Debt.WithMoney)
+				}
+			case "person":
+				got = "-"
+				if it.Debt != nil && it.Debt.Name != "" {
+					got = it.Debt.Name
+				}
+			case "recurring":
+				got = nameOrDash(it.RecurringName, it.RecurringID == nil)
 			case "desc":
 				got = "-"
 				if it.Description != nil {

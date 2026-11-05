@@ -325,7 +325,7 @@ var registry = []Def{
 	{NothingOwed, []int{409}, InEnvelope, "Nothing is owed to or by this person now."},
 	{ItemAlreadyLinked, []int{409}, InEnvelope, "The item already has a pending draft or a transaction (details: ids, or transaction + other)."},
 	{SavingNeedsWallet, []int{400}, InEnvelope, "A saving needs a wallet."},
-	{InsufficientSaving, []int{409}, InEnvelope, "Not enough saved there (details.available)."},
+	{InsufficientSaving, []int{409}, InEnvelope | InPendingLastError, "Not enough saved there (details.available)."},
 	{GoalNotActive, []int{409}, InEnvelope | InPendingLastError, "The saving goal isn't active."},
 	{GoalReached, []int{409}, InEnvelope, "The saving goal already holds its target."},
 	{GoalHasSavings, []int{409}, InEnvelope, "The saving goal still holds money; close it first."},

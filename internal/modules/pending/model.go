@@ -33,6 +33,23 @@ type Draft struct {
 	TagIDs              []uuid.UUID `json:"tag_ids,omitempty"`
 	GoalID              *uuid.UUID  `json:"goal_id,omitempty"`
 	Paper               *DraftPaper `json:"paper,omitempty"`
+
+	// Saving (kind saving): save (the default) | allocate (spare -> goal) | move (goal -> goal / spare) | withdraw
+	// (back to the wallet). GoalID is where it goes (nil = spare), FromGoalID where it comes from (nil = spare).
+	SavingAction string     `json:"saving_action,omitempty"`
+	FromGoalID   *uuid.UUID `json:"from_goal_id,omitempty"`
+	// RecurringID — the transaction is the record of this recurring rule's next slot (the chatbot picks the slot).
+	RecurringID *uuid.UUID `json:"recurring_id,omitempty"`
+	// Debt — a person-book entry (with a transaction when WithMoney), or a repayment.
+	Debt *DraftDebt `json:"debt,omitempty"`
+}
+
+// DraftDebt — a debt row. Side: they_owe_me (I lent) | i_owe_them (I borrowed) | they_repay | i_repay.
+type DraftDebt struct {
+	ContactID  *uuid.UUID `json:"contact_id,omitempty"`
+	PersonName *string    `json:"person_name,omitempty"`
+	Side       string     `json:"side"`
+	WithMoney  bool       `json:"with_money"`
 }
 
 // DraftPaper — the draft is a shared bill: confirming it creates the paper (a split bill, or an
@@ -43,6 +60,8 @@ type DraftPaper struct {
 	People      []projects.PaperPersonInput `json:"people"`
 	EventTagIDs []uuid.UUID                 `json:"event_tag_ids,omitempty"`
 	Pay         string                      `json:"pay,omitempty"`
+	// NewEvent — make this event with the bill (the first bill, its people become members).
+	NewEvent *projects.NewEventInput `json:"new_event,omitempty"`
 }
 
 // MyShare — my part of amount on the paper (all of it while nobody is on it, 0 when I'm not).
@@ -132,6 +151,7 @@ type Submitted struct {
 	Rows          []transactions.TransactionDetail `json:"rows"`
 	TransactionID *uuid.UUID                       `json:"-"`
 	SavingEntryID *uuid.UUID                       `json:"saving_entry_id"`
+	Unlinked      bool                             `json:"unlinked,omitempty"` // a recurring link that could not be made
 }
 
 type Failed struct {
