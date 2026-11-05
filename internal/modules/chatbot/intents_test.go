@@ -120,6 +120,17 @@ func TestParseBills(t *testing.T) {
 	}
 }
 
+// A known contact the model gave by name is that contact (found on the first real run of the eval).
+func TestAContactGivenByNameIsTheContact(t *testing.T) {
+	if it := one(t, "debt by name บอย"); !eq(it.Debt.ContactID, &contactBoy.ID) || it.Debt.Name != "บอย" {
+		t.Errorf("debt by name = %+v", it.Debt)
+	}
+	p := one(t, "split by name บอย").Paper
+	if p == nil || len(p.People) != 1 || !eq(p.People[0].ContactID, &contactBoy.ID) {
+		t.Errorf("split by name = %+v", p)
+	}
+}
+
 func TestParseRecurringPayment(t *testing.T) {
 	it := one(t, "recurring")
 	if it.RecurringID == nil || *it.RecurringID != rulePower.ID || it.Amount != 500 || it.Slot != "2026-10-05" ||
@@ -274,6 +285,10 @@ func TestDraftsAndCheck(t *testing.T) {
 	// Check: a saving that touches a wallet names it; a bill has someone to share with; a debt names a person and a wallet
 	got := saver.Check([]Item{one(t, "save nowallet"), one(t, "withdraw nowallet"), one(t, "save goal"), one(t, "split nobody"),
 		one(t, "split ลี"), one(t, "debt nobody"), one(t, "debt lend")})
+	// a new event may start with only me on it: nothing is missing
+	if miss := saver.Check([]Item{one(t, "event new")}); len(miss[0]) != 0 {
+		t.Errorf("a new event alone is not ready: %v", miss[0])
+	}
 	want := []string{"wallet", "wallet", "", "people", "", "person", ""}
 	for i, w := range want {
 		if (w == "" && len(got[i]) != 0) || (w != "" && (len(got[i]) != 1 || got[i][0] != w)) {

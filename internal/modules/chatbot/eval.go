@@ -157,8 +157,8 @@ func checkCase(checks string, out Outcome, lists Lists, today time.Time) []strin
 				got = nameOrDash(it.SavingAction, it.SavingAction == "")
 			case "goal": // where a saving goes
 				got = goalName(textsEN, lists, it.GoalID)
-				if it.GoalID == nil && !it.ToSpare && it.SavingAction != ActSave {
-					got = "-"
+				if it.GoalID == nil {
+					got = "spare" // ยังไม่จัดสรร
 				}
 			case "from": // where a move / withdrawal comes from
 				got = nameOrDash(goalName(textsEN, lists, it.FromGoalID), it.FromGoalID == nil)

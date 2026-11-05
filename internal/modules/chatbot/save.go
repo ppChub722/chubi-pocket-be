@@ -122,7 +122,7 @@ func (p *PendingSaver) Check(items []Item) [][]string {
 		switch {
 		case it.Kind == KindSaving && (it.SavingAction == ActSave || it.SavingAction == ActWithdraw) && it.AccountID == nil:
 			out[i] = append(out[i], "wallet")
-		case it.Paper != nil && len(it.Paper.People) == 0:
+		case it.Paper != nil && len(it.Paper.People) == 0 && it.Paper.NewEvent == "":
 			out[i] = append(out[i], "people")
 		}
 	}

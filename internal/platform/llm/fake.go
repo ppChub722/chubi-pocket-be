@@ -122,6 +122,9 @@ var keywordAnswers = map[string]obj{
 	"debt unsure": answerOf(debt("they_owe_me", true, 500, obj{"contact_id": "p1"}, "with_money")),
 	"debt name ลี": answerOf(debt("they_owe_me", false, 500, obj{"person_name": "ลี"})),
 	"debt nobody": answerOf(debt("they_owe_me", false, 500, obj{})),
+	// the real model often gives a known contact by name instead of by alias
+	"debt by name บอย":  answerOf(debt("they_owe_me", false, 500, obj{"person_name": "บอย"})),
+	"split by name บอย": answerOf(create("type", "expense", "amount", 600.0, "paper", paper("split_mode", "equal", "people", []obj{{"person_name": "บอย"}}))),
 	"mixed":       answerOf(spend(60, "mixed", "c1"), debt("they_owe_me", false, 200, obj{"contact_id": "p1"})),
 }
 

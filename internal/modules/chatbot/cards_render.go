@@ -227,6 +227,9 @@ func paperLines(t Texts, l Lists, it Item) []string {
 		lines = append(lines, t.Card.NewEvent+p.NewEvent)
 	}
 	if len(p.People) == 0 {
+		if p.NewEvent != "" { // a new event with only me on it so far
+			return append(lines, t.Card.PaidMe)
+		}
 		return append(lines, t.Card.People+t.Card.NobodyYet)
 	}
 	n := len(p.People) + 1 // I am always in

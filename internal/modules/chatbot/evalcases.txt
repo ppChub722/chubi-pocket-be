@@ -84,14 +84,14 @@ salary 30000 | income 30000
 กินข้าว 600 หารกับบอย ลี | kind=create; people=2; payer=me
 กินข้าว 600 บอยจ่าย หารกับบอย | kind=create; payer=บอย
 กินข้าว 600 หารกัน 3 คน | people=0
-ค่าเรือ 1200 ทริปเกาะพีพี | kind=create; newevent=ทริปเกาะพีพี
+ค่าเรือ 1200 ทริปเกาะพีพี | kind=create; newevent=ทริปเกาะพีพี; people=0
 ข้าว 60 | people=0; newevent=-
 
 [recurring]
 # needs a recurring item named ค่าไฟ on the account (the owner has one); the slot is the BE's pick, not checked here
 จ่ายค่าไฟ 500 | expense 500; recurring=ค่าไฟ
 จ่ายค่าไฟ 500 เงินสด เมื่อวาน | expense 500; recurring=ค่าไฟ; wallet=เงินสด; date=yesterday
-จ่ายค่าอะไรสักอย่างที่ไม่มี 500 | expense 500; recurring=-
+ซื้อของชิ้นหนึ่ง 500 | expense 500; recurring=-
 
 [debt]
 ให้บอยยืม 500 | kind=debt; side=they_owe_me; money=true

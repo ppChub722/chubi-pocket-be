@@ -683,7 +683,7 @@ func (a *aliases) checkSaving(it Item, d answerDraft) (Item, string, bool) {
 	it.SavingAction = act
 	switch act {
 	case ActSave:
-		it.AccountID, it.GoalID = wallet, goal.id // no goal = ยังไม่จัดสรร (a goal that is not on the list too)
+		it.AccountID, it.GoalID = wallet, goal.id // no goal = ยังไม่จัดสรร; the model's own "unsure goal" stays (goal_id null does not say whether one was named)
 		if goal.named && goal.id == nil && !goal.spare && !contains(it.Unsure, "goal") {
 			it.Unsure = append(it.Unsure, "goal")
 		}
@@ -729,6 +729,10 @@ func (a *aliases) checkDebt(it Item, d answerDraft, words []string) (Item, strin
 	if db.ContactID == nil {
 		if n := verbatim(d.Debt.PersonName, maxName, words); n != nil {
 			db.Name = *n
+			if c, ok := a.contactOf(*n); ok { // a known contact the model gave by name
+				id := c.ID
+				db.ContactID, db.Name = &id, c.Name
+			}
 		}
 	}
 	if db.WithMoney {
@@ -856,6 +860,10 @@ func (a *aliases) personOf(p *answerPerson, event *Event, words []string) (Perso
 		}
 	}
 	if n := verbatim(p.PersonName, maxName, words); n != nil {
+		if c, ok := a.contactOf(*n); ok {
+			id := c.ID
+			return PersonRef{ContactID: &id, Name: c.Name}, true
+		}
 		return PersonRef{Name: *n}, true
 	}
 	return PersonRef{}, false

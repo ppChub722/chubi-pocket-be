@@ -157,9 +157,10 @@ func TestChatToLedgerOnARealDatabase(t *testing.T) {
 	if debts() != 3 || txs() != 2 {
 		t.Errorf("debts %d txs %d, want 3 / 2", debts(), txs())
 	}
+	book("event new") // a new event with only me on it
 	book("split ลี") // a split bill with a contact and a typed name
-	if n := w.count(`SELECT COUNT(*) FROM transactions WHERE user_id = $1 AND split_transaction_id IS NOT NULL`, w.user); n != 1 {
-		t.Errorf("split bill rows = %d, want 1", n)
+	if n := w.count(`SELECT COUNT(*) FROM transactions WHERE user_id = $1 AND split_transaction_id IS NOT NULL`, w.user); n != 2 { // the new event's bill and the split bill
+		t.Errorf("bill rows = %d, want 2", n)
 	}
 	// the chat leaves nothing pending, and keeps no text
 	if n := w.count(`SELECT COUNT(*) FROM pending_transactions WHERE user_id = $1`, w.user); n != 0 {
