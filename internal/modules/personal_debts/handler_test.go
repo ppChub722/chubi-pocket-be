@@ -3,6 +3,7 @@ package personal_debts
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -364,10 +365,12 @@ func TestDebtLedgerFlow(t *testing.T) {
 	if err != nil || dr.DebtEntryID == nil || dr.DebtEntryID.String() != obj(again, "entry")["id"] {
 		t.Fatalf("delete the wallet side: %+v, %v", dr, err)
 	}
-	// 0.4.1-1 D1: deleting the tx keeps the entry, ledger-only (the balance doesn't move).
-	kept := f.call("GET", "/api/v1/personal-debts/"+dr.DebtEntryID.String(), nil, "getDebtEntry", http.StatusOK)
-	if kept["transaction"] != nil || num(kept, "person_balance", "net") != 40 {
-		t.Errorf("the entry after its tx went = %v", kept)
+	// Deleting the tx deletes the entry with it (owner 2026-11-05).
+	if _, err := f.svc.GetEntry(f.ctx, f.me, *dr.DebtEntryID); !errors.Is(err, ErrEntryNotFound) {
+		t.Errorf("the entry after its tx went: err = %v, want ErrEntryNotFound", err)
+	}
+	if len(dr.Effects.RemovedDebtIDs) != 1 || dr.Effects.RemovedDebtIDs[0] != *dr.DebtEntryID {
+		t.Errorf("removed debts = %v, want the entry", dr.Effects.RemovedDebtIDs)
 	}
 }
 

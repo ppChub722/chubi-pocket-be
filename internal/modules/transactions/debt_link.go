@@ -21,7 +21,7 @@ var (
 
 type DebtLinks interface {
 	TxEditedTx(ctx context.Context, tx pgx.Tx, userID, entryID uuid.UUID, row *Transaction) error
-	// TxDeletedTx — the entry's transaction was deleted (0.4.1-1 D1): the entry stays, ledger-only.
+	// TxDeletedTx — the entry's transaction was deleted: the entry is deleted with it.
 	TxDeletedTx(ctx context.Context, tx pgx.Tx, userID, entryID uuid.UUID) (key string, err error)
 	PersonBalanceByEntry(ctx context.Context, userID, entryID uuid.UUID) (any, error)
 	PersonBalanceByKey(ctx context.Context, userID uuid.UUID, key string) (any, error)

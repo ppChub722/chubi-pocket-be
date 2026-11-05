@@ -907,12 +907,11 @@ func (s *Service) DeleteWrite(ctx context.Context, userID, id uuid.UUID) (*Delet
 			return nil, err
 		}
 	}
-	var debtIDs []uuid.UUID
-	if d.debtEntry != nil {
-		debtIDs = append(debtIDs, *d.debtEntry) // kept, ledger-only (D1)
-	}
-	if out.Effects, err = s.rowEffects(ctx, userID, nil, []uuid.UUID{id}, debtIDs, unionKeys([]string{d.debtKey}, nil), out.AccountBalances); err != nil {
+	if out.Effects, err = s.rowEffects(ctx, userID, nil, []uuid.UUID{id}, nil, unionKeys([]string{d.debtKey}, nil), out.AccountBalances); err != nil {
 		return nil, err
+	}
+	if d.debtEntry != nil { // the entry went with its tx (owner 2026-11-05)
+		out.Effects.RemovedDebtIDs = append(out.Effects.RemovedDebtIDs, *d.debtEntry)
 	}
 	if d.item != nil && s.recurring != nil { // the occurrence it filled, now skipped (R2)
 		if slot, err := s.recurring.SlotView(ctx, *d.item); err == nil {

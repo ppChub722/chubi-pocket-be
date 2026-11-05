@@ -779,15 +779,18 @@ func (s *Service) TxEditedTx(ctx context.Context, tx pgx.Tx, userID, entryID uui
 	return nil
 }
 
-// TxDeletedTx — the entry's transaction was deleted (0.4.1-1 D1: deleting my tx = disconnecting it):
-// the entry stays, ledger-only, so the person's balance doesn't move.
+// TxDeletedTx — the entry's transaction was deleted: the entry goes with it (owner 2026-11-05;
+// before, 0.4.1-1 D1, it stayed ledger-only). Returns the person's key for the balance.
 func (s *Service) TxDeletedTx(ctx context.Context, tx pgx.Tx, userID, entryID uuid.UUID) (string, error) {
-	e, err := getEntry(ctx, tx, userID, entryID, false)
+	e, err := getEntry(ctx, tx, userID, entryID, true)
 	if errors.Is(err, ErrEntryNotFound) {
 		return "", nil
 	}
 	if err != nil {
 		return "", err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM personal_debts WHERE id = $1 AND user_id = $2`, e.ID, userID); err != nil {
+		return "", fmt.Errorf("delete entry: %w", err)
 	}
 	return e.Key(), nil
 }

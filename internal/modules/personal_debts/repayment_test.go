@@ -1,6 +1,7 @@
 package personal_debts
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"testing"
@@ -168,17 +169,17 @@ func TestRepaymentLeeScenario(t *testing.T) {
 		t.Fatalf("counterparty_key=n:lee = %d rows (%v), want 2", len(res.Data), err)
 	}
 
-	// Deleting the repayment's tx keeps the repayment (D1): balance unchanged, wallet back.
+	// Deleting the repayment's tx deletes the repayment with it (owner 2026-11-05): the 300 comes
+	// off the person's balance, the wallet is back.
 	del, err := f.txs.DeleteWrite(f.ctx, f.me, w.Rows[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pb, ok := del.PersonBalance.(DebtPerson); !ok || pb.Net != -330 || f.balance() != 1500 {
-		t.Errorf("after deleting the repayment tx: %+v (wallet %v), want −330 / 1500", del.PersonBalance, f.balance())
+	if pb, ok := del.PersonBalance.(DebtPerson); !ok || pb.Net != -630 || f.balance() != 1500 {
+		t.Errorf("after deleting the repayment tx: %+v (wallet %v), want −630 / 1500", del.PersonBalance, f.balance())
 	}
-	got, err := f.svc.GetEntry(f.ctx, f.me, uuid.MustParse(entry["id"].(string)))
-	if err != nil || got.Transaction != nil || got.Entry.Amount != 300 {
-		t.Errorf("the repayment after its tx went = %+v (%v), want ledger-only 300", got, err)
+	if _, err := f.svc.GetEntry(f.ctx, f.me, uuid.MustParse(entry["id"].(string))); !errors.Is(err, ErrEntryNotFound) {
+		t.Errorf("the repayment after its tx went: err = %v, want ErrEntryNotFound", err)
 	}
 }
 
