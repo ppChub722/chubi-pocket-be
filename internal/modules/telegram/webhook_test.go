@@ -69,7 +69,7 @@ func TestWebhookGoodUpdate(t *testing.T) {
 	if rec.Body.Len() != 0 {
 		t.Errorf("body %q, want empty (Telegram would run a method from it)", rec.Body.String())
 	}
-	if len(s.sent) != 1 || s.sent[0].text != TextReceived || s.sent[0].chatID != linkedChat || s.sent[0].replyTo != 3 {
+	if len(s.sent) != 1 || s.sent[0].text != TextsFor(Lang("", "")).Received || s.sent[0].chatID != linkedChat || s.sent[0].replyTo != 3 {
 		t.Errorf("sent = %+v", s.sent)
 	}
 	if strings.Contains(logs.String(), "ข้าวมันไก่") {

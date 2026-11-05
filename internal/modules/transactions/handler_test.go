@@ -239,7 +239,8 @@ func TestCreateGetListHandlers(t *testing.T) {
 		t.Errorf("transfer balances = %+v, want A -350 / B 50", tr.AccountBalances)
 	}
 
-	// Errors: someone else's tag (nothing is written), a transfer without a destination.
+	// Errors: someone else's tag (nothing is written), a transfer with no wallet at all (one wallet is a
+	// withdrawal or a deposit, since 000004).
 	e := f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
 		"type": "expense", "account_id": f.walletA, "amount": 10, "date": "2026-10-12",
 		"tag_ids": []uuid.UUID{f.otherTag},
@@ -248,7 +249,7 @@ func TestCreateGetListHandlers(t *testing.T) {
 		t.Errorf("foreign tag: code %s, balance %v (want TAG_NOT_FOUND, -350)", errCode(t, e), f.balance(f.walletA))
 	}
 	f.call("createTransaction", "POST", "/api/v1/transactions", map[string]any{
-		"type": "transfer", "account_id": f.walletA, "amount": 10, "date": "2026-10-12",
+		"type": "transfer", "amount": 10, "date": "2026-10-12",
 	}, http.StatusBadRequest)
 
 	list := decode[transactions.ListResponse](t, f.call("listTransactions", "GET", "/api/v1/transactions", nil, http.StatusOK))
