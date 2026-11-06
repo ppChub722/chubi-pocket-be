@@ -105,7 +105,9 @@ salary 30000 | income 30000
 จ่ายค่าไฟ 500 เงินสด เมื่อวาน | expense 500; recurring=ค่าไฟ; wallet=เงินสด; date=yesterday
 จ่ายค่าน้ำ 180 | expense 180; recurring=ค่าน้ำ
 จ่ายค่าเน็ต 599 | expense 599; recurring=ค่าเน็ตบ้าน
-ผ่อนโซฟา 2500 | expense 2500; recurring=ผ่อนโซฟา
+จ่าย Netflix 419 | expense 419; recurring=Netflix
+# ผ่อนโซฟา is paid up (6 of 6 installments made, none left to pay), so the BE leaves the payment untied
+ผ่อนโซฟา 2500 | expense 2500; recurring=-
 ซื้อของชิ้นหนึ่ง 500 | expense 500; recurring=-
 
 [debt]
@@ -113,5 +115,7 @@ salary 30000 | income 30000
 ต้นค้างฉัน 500 | kind=debt; side=they_owe_me; money=false; person=ต้น ทดสอบ
 ยืมฝน 500 | kind=debt; side=i_owe_them; money=true; person=ฝน ทดสอบ
 ฉันค้างฝน 500 | kind=debt; side=i_owe_them; money=false; person=ฝน ทดสอบ
+ฝนยืม 500 | kind=debt; side=they_owe_me; money=true; person=ฝน ทดสอบ
+ขอยืมต้น 300 | kind=debt; side=i_owe_them; money=true; person=ต้น ทดสอบ
 ต้นคืน 200 | kind=debt; side=they_repay; money=true; person=ต้น ทดสอบ
 ให้บอยยืม 500 | kind=debt; side=they_owe_me; money=true

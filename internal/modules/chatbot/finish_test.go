@@ -146,3 +146,24 @@ func TestBotReplyOnForgottenCard(t *testing.T) {
 		t.Fatalf("reply on a plain bot message = %+v", s.last())
 	}
 }
+
+// "Xยืม" = X borrows from us; "ยืมX" = we borrow from X. The words decide, whatever the model said.
+func TestBorrowSide(t *testing.T) {
+	cases := []struct{ text, name, side, want string }{
+		{"ยืมฝน 500", "ฝน ทดสอบ", SideTheyOweMe, SideIOweThem},
+		{"ขอยืมฝน 500", "ฝน ทดสอบ", SideTheyOweMe, SideIOweThem},
+		{"ฝนยืม 500", "ฝน ทดสอบ", SideIOweThem, SideTheyOweMe},
+		{"ให้ฝนยืม 500", "ฝน ทดสอบ", SideIOweThem, SideTheyOweMe},
+		{"ให้ยืมฝน 500", "ฝน ทดสอบ", SideIOweThem, SideIOweThem}, // "ให้ยืม" = lend: left to the model
+		{"ยืมฝน 500", "ฝน", SideIOweThem, SideIOweThem},
+		{"ฝนค้างฉัน 500", "ฝน", SideTheyOweMe, SideTheyOweMe},      // no "ยืม": the model's answer stands
+		{"ฝนยืมต้น 500\nต้นยืมฝน 200", "ต้น", SideTheyOweMe, SideTheyOweMe}, // both for one name: not decided here
+		{"ยืมฝน 500", "ฝน", SideTheyRepay, SideTheyRepay},          // a repayment is not touched
+		{"ยืม 500", "", SideTheyOweMe, SideTheyOweMe},
+	}
+	for _, c := range cases {
+		if got := borrowSide(c.text, c.name, c.side); got != c.want {
+			t.Errorf("borrowSide(%q, %q, %s) = %s, want %s", c.text, c.name, c.side, got, c.want)
+		}
+	}
+}

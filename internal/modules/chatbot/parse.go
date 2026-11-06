@@ -757,8 +757,34 @@ func (a *aliases) checkDebt(it Item, d answerDraft, words []string) (Item, strin
 			it.AccountID = &a.main.ID
 		}
 	}
+	db.Side = borrowSide(words[0], db.Name, db.Side)
 	it.Debt = db
 	return it, "", true
+}
+
+// borrowSide applies the owner's rule to a debt whose person is named in the user's own words: "Xยืม" = X borrows
+// from the user (they_owe_me), "ยืมX" / "ขอยืมX" = the user borrows from X (i_owe_them). The model once read "ยืมฝน"
+// backwards, which turns the money around, so when the words say it the code decides. Repayments and a message
+// that fits neither (or both) are left as the model answered.
+func borrowSide(text, name, side string) string {
+	if name == "" || (side != SideTheyOweMe && side != SideIOweThem) {
+		return side
+	}
+	forms := []string{name}
+	if first, _, ok := strings.Cut(name, " "); ok && utf8.RuneCountInString(first) >= 2 {
+		forms = append(forms, first) // the user says "ฝน" for the contact "ฝน ทดสอบ"
+	}
+	for _, n := range forms {
+		borrows := strings.Contains(text, "ยืม"+n) && !strings.Contains(text, "ให้ยืม"+n) // ยืมX, ขอยืมX
+		lends := strings.Contains(text, n+"ยืม") || strings.Contains(text, n+" ยืม")      // Xยืม, ให้Xยืม
+		switch {
+		case borrows && !lends:
+			return SideIOweThem
+		case lends && !borrows:
+			return SideTheyOweMe
+		}
+	}
+	return side
 }
 
 // newEventName: only a name that says it is an event makes a new one ("ทริปภูเก็ต", "อีเวนต์งานแต่ง", "trip …");
