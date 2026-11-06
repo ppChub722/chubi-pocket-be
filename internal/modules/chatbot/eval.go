@@ -84,6 +84,9 @@ func RunEval(ctx context.Context, c llm.Client, lists Lists, lang string, today 
 			} else {
 				fmt.Fprintf(w, "  answer:   hint=%s fail=%s\n", out.Hint, out.Fail)
 			}
+			if len(out.Unclear) > 0 {
+				fmt.Fprintf(w, "  unclear:  %q\n", out.Unclear)
+			}
 			problems = checkCase(ec.Checks, out, lists, today)
 		}
 		mark := "✓"
@@ -133,6 +136,8 @@ func checkCase(checks string, out Outcome, lists Lists, today time.Time) []strin
 		switch key {
 		case "items":
 			got = strconv.Itoa(len(out.Items))
+		case "unclear":
+			got = strconv.Itoa(len(out.Unclear))
 		case "hint":
 			got = out.Hint
 			if len(out.Items) > 0 || out.Fail != "" {

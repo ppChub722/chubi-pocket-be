@@ -92,6 +92,8 @@ const (
 	KindCreate = "create" // a transaction (expense, income, transfer; maybe a bill or tied to a recurring rule)
 	KindSaving = "saving" // a saving entry
 	KindDebt   = "debt"   // a person-book entry or a repayment
+	// KindUnclear: a part of the message whose intent cannot be told; it never becomes a card item.
+	KindUnclear = "unclear"
 )
 
 // Saving actions (the pending Draft's saving_action).
@@ -163,14 +165,15 @@ type Item struct {
 
 // Outcome of one parse. Items empty → Hint says why.
 type Outcome struct {
-	Items []Item
-	Hint  string
-	Fail  string   // an error code when the model gave no usable answer (refused, cut off, bad JSON)
-	Picks []string // the aliases the model gave per item, as given (for the log)
-	Sent  string   // the per-user request (lists + date + message), for LogBodies
-	Raw   string   // the model's answer as it came, for LogBodies
-	Usage llm.Usage
-	Model string
+	Items   []Item
+	Hint    string
+	Unclear []string // the user's words of each part whose intent is not clear ("" when they did not check out)
+	Fail    string   // an error code when the model gave no usable answer (refused, cut off, bad JSON)
+	Picks   []string // the aliases the model gave per item, as given (for the log)
+	Sent    string   // the per-user request (lists + date + message), for LogBodies
+	Raw     string   // the model's answer as it came, for LogBodies
+	Usage   llm.Usage
+	Model   string
 }
 
 // answer is the model's JSON (the contract in now/briefs/0.4.2-chatbot.md): every item is a pending row, kind + draft.
@@ -295,6 +298,14 @@ func Parse(ctx context.Context, c llm.Client, today time.Time, lists Lists, text
 			break
 		}
 		out.Picks = append(out.Picks, picksOf(ai))
+		if ai.Kind == KindUnclear {
+			part := ""
+			if s := verbatim(ai.Draft.Description, maxDesc, []string{text}); s != nil {
+				part = *s
+			}
+			out.Unclear = append(out.Unclear, part)
+			continue
+		}
 		if it, why, ok := al.check(ai, today, words); ok {
 			out.Items = append(out.Items, it)
 		} else if why != "" && dropHint == "" {
@@ -309,6 +320,9 @@ func Parse(ctx context.Context, c llm.Client, today time.Time, lists Lists, text
 		// finished event) says so, whatever hint the model gave
 		if dropHint != "" {
 			out.Hint = dropHint
+		}
+		if len(out.Unclear) > 0 && dropHint == "" {
+			out.Hint = HintUnclear
 		}
 	}
 	return out, nil

@@ -18,61 +18,62 @@ type Texts struct {
 	FailAI, FailServer, FailRefused, FailTrunc, Off, Thinking     string
 	Saved, Cancelled, TrialMark, ButtonOK, ButtonCancel, Edited   string
 	TierFree, CapReached                                          string
-	Items, PartialBooked, Queued                                                string // "%d รายการ"; "บันทึก %d จาก %d รายการ …"
-	MissingFmt                                                  string
-	MissingNames                                                map[string]string
+	Items, PartialBooked, Queued                                  string // "%d รายการ"; "บันทึก %d จาก %d รายการ …"
+	MissingFmt                                                    string
+	MissingNames                                                  map[string]string
 	Expense, Income, Transfer, Today, Yesterday, None             string
 	Category, Wallet                                              string // line labels, with a trailing space
-	GoalMissing, EventDone, Unlinked, InsufficientSaving          string
+	GoalMissing, EventDone, Unlinked, InsufficientSaving, Unclear string
+	UnclearPart                                                   string // "...: %s"
 	Card                                                          CardWords
 }
 
 // CardWords are the fixed words of the cards of the saving, bill, recurring and debt rows.
 type CardWords struct {
-	Save, Allocate, Move, Withdraw             string // titles of a saving row
-	Goal, Spare, BackTo                        string // "🐷 เป้า: ", "ยังไม่จัดสรร", "👛 กลับเข้า: "
-	Event, NewEvent, People, Me                string // "🏝️ อีเวนต์: ", "🆕 อีเวนต์ใหม่: ", "👥 ", "ฉัน"
-	PaidMe, PaidBy, Equal                      string // "💳 ฉันจ่ายเอง", "💳 %sจ่าย", "หารเท่ากัน %d คน"
-	MyShare, Notify, NobodyYet                 string // "🧮 ส่วนของฉัน %s", "📨 แจ้ง: ", "[ใคร ?]"
-	Recurring, Slot                            string // "🔄 รายการประจำ: ", "งวด %s"
-	Debt, IOwe, OwesMe, Everyone               string // "🤝 รายการหนี้: ", "เราติด%s %s", "%sติดเรา %s", "ทุกคนติดเราคนละ %s"
-	Lend, Borrow, OwesMeTitle, IOweTitle       string // debt titles with a name
-	RepayIn, RepayOut                          string // "%sคืนเงิน", "คืนเงิน%s"
+	Save, Allocate, Move, Withdraw                 string // titles of a saving row
+	Goal, Spare, BackTo                            string // "🐷 เป้า: ", "ยังไม่จัดสรร", "👛 กลับเข้า: "
+	Event, NewEvent, People, Me                    string // "🏝️ อีเวนต์: ", "🆕 อีเวนต์ใหม่: ", "👥 ", "ฉัน"
+	PaidMe, PaidBy, Equal                          string // "💳 ฉันจ่ายเอง", "💳 %sจ่าย", "หารเท่ากัน %d คน"
+	MyShare, Notify, NobodyYet                     string // "🧮 ส่วนของฉัน %s", "📨 แจ้ง: ", "[ใคร ?]"
+	Recurring, Slot                                string // "🔄 รายการประจำ: ", "งวด %s"
+	Debt, IOwe, OwesMe, Everyone                   string // "🤝 รายการหนี้: ", "เราติด%s %s", "%sติดเรา %s", "ทุกคนติดเราคนละ %s"
+	Lend, Borrow, OwesMeTitle, IOweTitle           string // debt titles with a name
+	RepayIn, RepayOut                              string // "%sคืนเงิน", "คืนเงิน%s"
 	MoneyOut, MoneyIn, NoOut, NoIn, NotOutOfWallet string // "💸 รายจ่าย: ออกจาก %s %s", … "➖ ไม่มีรายจ่าย"
-	Months                                     [12]string
+	Months                                         [12]string
 }
-
 
 // Thai texts as constants (tests read them).
 const (
-	TextNoAmount       = "ไม่เห็นยอดเงินครับ ลองพิมพ์ใหม่ เช่น ข้าว 60"
-	TextNotMoney       = "จดได้แค่รายรับ รายจ่าย และการโอนครับ"
-	TextGoalMissing    = "บอกเป้าหมายด้วยครับ"
-	TextEventDone      = "อีเวนต์นี้จบแล้วครับ"
-	TextUnlinked       = "บันทึกแล้ว แต่ผูกกับรายการประจำไม่ได้"
+	TextNoAmount        = "ไม่เห็นยอดเงินครับ ลองพิมพ์ใหม่ เช่น ข้าว 60"
+	TextNotMoney        = "จดได้แค่รายรับ รายจ่าย และการโอนครับ"
+	TextGoalMissing     = "บอกเป้าหมายด้วยครับ"
+	TextUnclear         = "เจตนาไม่ชัดครับ ระบุให้ชัดอีกนิดว่าจะให้จดอะไร\nเช่น ข้าว 60 kbank | ออมเที่ยวญี่ปุ่น 2000 | บอยยืม 500"
+	TextEventDone       = "อีเวนต์นี้จบแล้วครับ"
+	TextUnlinked        = "บันทึกแล้ว แต่ผูกกับรายการประจำไม่ได้"
 	TextNotEnoughSaving = "เงินออมในที่ที่จะย้ายออกไม่พอครับ"
-	TextTransferWallet = "บอกกระเป๋าด้วยครับ และว่าเงินออกหรือเข้า เช่น ถอน 500 จากกสิกร"
-	TextTooLong        = "ข้อความยาวเกินไปครับ"
-	TextTooFast        = "ส่งเร็วไปนิดครับ รอสักครู่แล้วลองใหม่"
-	TextTierFree       = "🔒 ฟีเจอร์นี้ยังไม่เปิดให้ใช้ครับ"
-	TextCapReached     = "📊 เดือนนี้ใช้ครบโควตาแล้วครับ ใช้ได้อีกวันที่ 1"
-	TextHandled        = "รายการนี้จัดการไปแล้วครับ"
-	TextFailAI         = "🤖 ระบบ AI มีปัญหาชั่วคราว ลองใหม่อีกครั้งนะครับ"
-	TextFailServer     = "🛠️ ระบบของเรามีปัญหา ลองใหม่ภายหลังนะครับ"
-	TextFailRefused    = "🙅 ข้อความนี้จดไม่ได้ ลองพิมพ์ใหม่นะครับ"
-	TextFailTrunc      = "📏 รายการเยอะเกินไป ลองแบ่งส่งทีละน้อยนะครับ"
-	TextOff            = "🛠️ ยังไม่เปิดจดรายการครับ"
-	TextThinking       = "⏳ กำลังอ่านรายการ…"
-	TextSaved          = "บันทึกแล้ว ✓"
-	TextCancelled      = "ยกเลิกแล้ว"
-	TextTrialMark      = " (ทดลอง ยังไม่ลงแอป)"
-	TextQueued         = "ส่งไปรอยืนยันในแอปแล้ว ✓"
-	TextPartialBooked  = "⚠️ บันทึกได้ %d จาก %d รายการ รายการที่เหลือบันทึกไม่สำเร็จ"
-	TextMissing        = "ยังขาด: %s · Reply บนการ์ดเพื่อเติม"
-	TextFakeMark       = " (fake)"
-	TextEdited         = "✏️ แก้แล้ว ดูการ์ดใหม่ด้านล่าง"
-	ButtonOK           = "✓ ยืนยัน"
-	ButtonCancel       = "✗ ยกเลิก"
+	TextTransferWallet  = "บอกกระเป๋าด้วยครับ และว่าเงินออกหรือเข้า เช่น ถอน 500 จากกสิกร"
+	TextTooLong         = "ข้อความยาวเกินไปครับ"
+	TextTooFast         = "ส่งเร็วไปนิดครับ รอสักครู่แล้วลองใหม่"
+	TextTierFree        = "🔒 ฟีเจอร์นี้ยังไม่เปิดให้ใช้ครับ"
+	TextCapReached      = "📊 เดือนนี้ใช้ครบโควตาแล้วครับ ใช้ได้อีกวันที่ 1"
+	TextHandled         = "รายการนี้จัดการไปแล้วครับ"
+	TextFailAI          = "🤖 ระบบ AI มีปัญหาชั่วคราว ลองใหม่อีกครั้งนะครับ"
+	TextFailServer      = "🛠️ ระบบของเรามีปัญหา ลองใหม่ภายหลังนะครับ"
+	TextFailRefused     = "🙅 ข้อความนี้จดไม่ได้ ลองพิมพ์ใหม่นะครับ"
+	TextFailTrunc       = "📏 รายการเยอะเกินไป ลองแบ่งส่งทีละน้อยนะครับ"
+	TextOff             = "🛠️ ยังไม่เปิดจดรายการครับ"
+	TextThinking        = "⏳ กำลังอ่านรายการ…"
+	TextSaved           = "บันทึกแล้ว ✓"
+	TextCancelled       = "ยกเลิกแล้ว"
+	TextTrialMark       = " (ทดลอง ยังไม่ลงแอป)"
+	TextQueued          = "ส่งไปรอยืนยันในแอปแล้ว ✓"
+	TextPartialBooked   = "⚠️ บันทึกได้ %d จาก %d รายการ รายการที่เหลือบันทึกไม่สำเร็จ"
+	TextMissing         = "ยังขาด: %s · Reply บนการ์ดเพื่อเติม"
+	TextFakeMark        = " (fake)"
+	TextEdited          = "✏️ แก้แล้ว ดูการ์ดใหม่ด้านล่าง"
+	ButtonOK            = "✓ ยืนยัน"
+	ButtonCancel        = "✗ ยกเลิก"
 
 	sep       = " | "
 	separator = "──────────" // under the head line and between items
@@ -88,6 +89,7 @@ var textsTH = Texts{
 	Expense: "รายจ่าย", Income: "รายรับ", Transfer: "โอน", Today: "วันนี้", Yesterday: "เมื่อวาน", None: "ไม่ระบุ",
 	Category: "หมวด: ", Wallet: "กระเป๋า: ",
 	GoalMissing: TextGoalMissing, EventDone: TextEventDone, Unlinked: TextUnlinked, InsufficientSaving: TextNotEnoughSaving,
+	Unclear: TextUnclear, UnclearPart: "เจตนาไม่ชัด: %s\nระบุให้ชัดอีกนิดแล้วส่งใหม่ได้เลยครับ",
 	Card: CardWords{
 		Save: "ออมเงิน", Allocate: "จัดสรร", Move: "ย้ายเป้า", Withdraw: "ถอนเงินออม",
 		Goal: "🐷 เป้า: ", Spare: "ยังไม่จัดสรร", BackTo: "👛 กลับเข้า: ",
@@ -100,7 +102,7 @@ var textsTH = Texts{
 		RepayIn: "%sคืนเงิน", RepayOut: "คืนเงิน%s",
 		MoneyOut: "💸 รายจ่าย: ออกจาก %s %s", MoneyIn: "💸 รายรับ: เข้า %s %s", NoOut: "➖ ไม่มีรายจ่าย", NoIn: "➖ ไม่มีรายรับ",
 		NotOutOfWallet: "💸 รายจ่าย: ไม่ออกจากกระเป๋า",
-		Months: [12]string{"ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."},
+		Months:         [12]string{"ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."},
 	},
 }
 
@@ -133,6 +135,8 @@ var textsEN = Texts{
 	Expense:        "Expense", Income: "Income", Transfer: "Transfer", Today: "today", Yesterday: "yesterday",
 	None:     "none",
 	Category: "Category: ", Wallet: "Wallet: ",
+	Unclear:     "I can't tell what you want to log. Please say it more clearly.\nFor example: lunch 60 kbank | save for Japan 2000 | Boy borrowed 500",
+	UnclearPart: "Not clear: %s\nSay it more clearly and send it again.",
 	GoalMissing: "Tell me which goal, please.", EventDone: "That event is finished.", Unlinked: "Booked, but it could not be tied to the recurring item", InsufficientSaving: "There is not enough saved to take that out.",
 	Card: CardWords{
 		Save: "Saving", Allocate: "Allocate", Move: "Move between goals", Withdraw: "Withdraw savings",
@@ -146,7 +150,7 @@ var textsEN = Texts{
 		RepayIn: "%s paid back", RepayOut: "Paid back %s",
 		MoneyOut: "💸 Expense: out of %s %s", MoneyIn: "💸 Income: into %s %s", NoOut: "➖ No expense", NoIn: "➖ No income",
 		NotOutOfWallet: "💸 Expense: not out of a wallet",
-		Months: [12]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"},
+		Months:         [12]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"},
 	},
 }
 
@@ -184,6 +188,7 @@ const (
 	HintNotMoney       = "not_money"
 	HintTransferWallet = "transfer_wallet_missing"
 	HintGoalMissing    = "goal_missing"
+	HintUnclear        = "unclear_intent" // about money, but which kind of row cannot be told
 	HintEventDone      = "event_done"
 	HintUnknown        = "unknown" // items present; with no items it reads as not_money
 )
@@ -198,6 +203,8 @@ func (t Texts) hint(h string) string {
 		return t.EventDone
 	case HintTransferWallet:
 		return t.TransferWallet
+	case HintUnclear:
+		return t.Unclear
 	}
 	return t.NotMoney
 }

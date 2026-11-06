@@ -30,6 +30,7 @@ Rules:
 - Paying something the user already has as a recurring item (the recurring list): kind "create", draft.recurring_id = its alias, amount = what the user paid (null when they gave none).
 - unsure: the fields you guessed and are not sure of, from: type, amount, date, account, category, goal, recurring, with_money (e.g. "หัวละ300" without how many people, "เดือนที่แล้ว" without a day). A field the user simply left out is not unsure.
 - When a "current card" is given, the message edits that card: answer with the whole card after the edit.
+- A part of the message that is about money but you cannot tell what the user wants done with it (an expense, a saving or a debt: "บอย 500", "ญี่ปุ่น 2000"): do not guess. Give that part one row: kind "unclear", draft.description = the user's words of that part copied exactly, every other field null. The clear parts stay normal rows.
 - reply_hint says why items is empty; when items is not empty, reply_hint is "unknown".`
 
 // unsureFields: what the model may say it guessed; the card shows each as "[value ?]" (owner 2026-11-04).
@@ -77,7 +78,7 @@ var answerSchema = map[string]any{
 		"items": map[string]any{
 			"type": "array",
 			"items": obj(map[string]any{
-				"kind": map[string]any{"type": "string", "enum": []string{KindCreate, KindSaving, KindDebt, "settle_debt"}},
+				"kind": map[string]any{"type": "string", "enum": []string{KindCreate, KindSaving, KindDebt, "settle_debt", KindUnclear}},
 				"draft": obj(map[string]any{
 					"type":                   nullableEnum("expense", "income", "transfer", "saving"),
 					"amount":                 nullable("number"),
@@ -111,7 +112,7 @@ var answerSchema = map[string]any{
 			}, "kind", "draft", "unsure"),
 		},
 		"reply_hint": map[string]any{"type": "string",
-			"enum": []string{HintNoAmount, HintNotMoney, HintTransferWallet, HintUnknown}},
+			"enum": []string{HintNoAmount, HintNotMoney, HintTransferWallet, HintUnclear, HintUnknown}},
 	},
 }
 

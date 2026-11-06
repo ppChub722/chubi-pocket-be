@@ -86,6 +86,7 @@ func TestParseKeywords(t *testing.T) {
 			}
 		}},
 		{"no amount", 0, HintNoAmount, nil},
+		{"unclear", 0, HintUnclear, nil},
 		{"not money", 0, HintNotMoney, nil},
 		{"transfer missing", 0, HintTransferWallet, nil},
 		{"สวัสดี", 0, HintNotMoney, nil},
@@ -196,6 +197,16 @@ func TestCardUnsureMarks(t *testing.T) {
 	want := "🧾 1 รายการ | [เมื่อวาน ?]\n──────────\nรายจ่าย [-฿300 ?]\nหมวด: [🏷️ อาหาร ?]\nกระเป๋า: 👛 [กสิกร ?]"
 	if got != want {
 		t.Errorf("card =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// A part whose intent is not clear gets its own line after the card of the clear parts.
+func TestBotUnclearPart(t *testing.T) {
+	b, s := newTestBot(0)
+	b.Text(context.Background(), uuid.New(), text(1, "part unclear", 0))
+	if len(s.log) != 2 || s.log[0].kind != "card" || s.log[1].kind != "msg" ||
+		!strings.HasPrefix(s.log[1].text, "เจตนาไม่ชัด: unclear") {
+		t.Fatalf("log = %+v", s.log)
 	}
 }
 

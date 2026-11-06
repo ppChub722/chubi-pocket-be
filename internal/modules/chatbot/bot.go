@@ -174,6 +174,25 @@ func (b *Bot) fresh(ctx context.Context, tr turn, text string) {
 	}
 	c.MessageID = id
 	b.cards.put(&c)
+	b.sayUnclear(ctx, tr, out.Unclear)
+}
+
+// sayUnclear answers the parts of a message whose intent is not clear, after the card of the clear ones.
+func (b *Bot) sayUnclear(ctx context.Context, tr turn, parts []string) {
+	if len(parts) == 0 {
+		return
+	}
+	var named []string
+	for _, p := range parts {
+		if p != "" {
+			named = append(named, p)
+		}
+	}
+	text := tr.t.Unclear
+	if len(named) > 0 {
+		text = fmt.Sprintf(tr.t.UnclearPart, strings.Join(named, sep))
+	}
+	b.say(ctx, tr.chatID, tr.label+text, tr.msgID)
 }
 
 // edit — a Reply on a card: the card's items + the edit text → the whole card again, sent as a new
@@ -208,6 +227,7 @@ func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
 		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
 	}
 	b.react(ctx, c.ChatID, tr.msgID, reactDone)
+	b.sayUnclear(ctx, tr, out.Unclear)
 }
 
 func (b *Bot) parse(ctx context.Context, tr turn, text string, current []Item) (Lists, Outcome, bool) {
@@ -491,7 +511,6 @@ func (l *minuteLimit) allow(user uuid.UUID, now time.Time) bool {
 	l.hits[user] = append(keep, now)
 	return true
 }
-
 
 // record logs one model call (tokens, ms, status; never the text). A failure only logs.
 func (b *Bot) record(ctx context.Context, tr turn, pick llm.Pick, out Outcome, err error, ms int64) {

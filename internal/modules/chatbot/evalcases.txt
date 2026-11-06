@@ -50,6 +50,12 @@
 ฝากเงิน 1000 เข้าเงินสด | transfer 1000; wallet=-; to=เงินสด
 โอน 500 | hint=transfer_wallet_missing
 
+[unclear]
+บอย 500 | hint=unclear_intent
+ญี่ปุ่น 2000 | hint=unclear_intent
+กสิกร 300 | hint=unclear_intent
+ข้าว 60\nบอย 500 | items=1; unclear=1; expense 60
+
 [reject]
 กินข้าว | hint=no_amount
 สวัสดี | hint=not_money
