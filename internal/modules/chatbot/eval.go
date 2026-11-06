@@ -26,11 +26,31 @@ type EvalCase struct {
 	Checks string
 }
 
-// EvalCases reads the embedded file, keeping the groups / ids asked for (none = all).
-func EvalCases(groups []string, ids []int) []EvalCase {
+//go:embed evalcases-tester.txt
+var evalCasesTester string
+
+//go:embed evalcases-tester1.txt
+var evalCasesTester1 string
+
+// EvalSets are the names EvalCasesFor knows besides "" (the owner's account).
+var EvalSets = []string{"tester", "tester1"}
+
+// EvalCases reads the owner's file, keeping the groups / ids asked for (none = all).
+func EvalCases(groups []string, ids []int) []EvalCase { return EvalCasesFor("", groups, ids) }
+
+// EvalCasesFor is EvalCases for a named set: "" = the owner's account (evalcases.txt), "tester" / "tester1" = the
+// seeded test users (evalcases-tester.txt, evalcases-tester1.txt).
+func EvalCasesFor(set string, groups []string, ids []int) []EvalCase {
+	file := evalCasesFile
+	switch set {
+	case "tester":
+		file = evalCasesTester
+	case "tester1":
+		file = evalCasesTester1
+	}
 	var out []EvalCase
 	group, id := "", 0
-	for _, line := range strings.Split(strings.ReplaceAll(evalCasesFile, "\r\n", "\n"), "\n") {
+	for _, line := range strings.Split(strings.ReplaceAll(file, "\r\n", "\n"), "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case line == "" || strings.HasPrefix(line, "#"):

@@ -57,6 +57,13 @@ func (d *DBLists) UserByChat(ctx context.Context, chatID int64) (uuid.UUID, erro
 	return id, err
 }
 
+// UserByName is the user with a username (the eval can run as an account that has no Telegram chat).
+func (d *DBLists) UserByName(ctx context.Context, username string) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := d.db.QueryRow(ctx, `SELECT id FROM users WHERE username = $1`, username).Scan(&id)
+	return id, err
+}
+
 func (d *DBLists) Lists(ctx context.Context, userID uuid.UUID) (Lists, error) {
 	var l Lists
 	_ = d.db.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, userID).Scan(&l.Currency)
