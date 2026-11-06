@@ -172,6 +172,9 @@ func (f *KeywordFake) Complete(ctx context.Context, r Request) (Result, error) {
 		return Result{Stop: StopRefused, Model: "keywords"}, nil
 	case "error":
 		return Result{}, ErrFakeDown
+	case "hang": // never answers: waits for the stop button (the bot gives it no timeout)
+		<-ctx.Done()
+		return Result{}, ctx.Err()
 	case "slow":
 		select {
 		case <-time.After(f.SlowFor):

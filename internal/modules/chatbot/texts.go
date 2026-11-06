@@ -5,6 +5,7 @@ package chatbot
 
 import (
 	"fmt"
+	"html"
 	"strings"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/telegram"
@@ -15,6 +16,10 @@ import (
 // Telegram's, else English (owner 2026-11-04; telegram.Lang).
 type Texts struct {
 	NoAmount, NotMoney, TransferWallet, TooLong, TooFast, Handled string
+	Expired                                                       string // a button of a card the bot no longer holds
+	ButtonEdit, ButtonEdited, ToastSaved, ToastQueued             string // ToastX: "%d รายการ" shown when a button is tapped
+	EditPrompt, EditPlaceholder, Stopped, ReplyClosed             string // ReplyClosed: a Reply on a card that cannot be edited any more
+	Cur                                                           string // the currency sign before an amount (set from the user's currency when a card is drawn)
 	FailAI, FailServer, FailRefused, FailTrunc, Off, Thinking     string
 	Saved, Cancelled, TrialMark, ButtonOK, ButtonCancel, Edited   string
 	TierFree, CapReached                                          string
@@ -58,6 +63,7 @@ const (
 	TextTierFree        = "🔒 ฟีเจอร์นี้ยังไม่เปิดให้ใช้ครับ"
 	TextCapReached      = "📊 เดือนนี้ใช้ครบโควตาแล้วครับ ใช้ได้อีกวันที่ 1"
 	TextHandled         = "รายการนี้จัดการไปแล้วครับ"
+	TextExpired         = "⌛ การ์ดนี้หมดอายุแล้ว (บอทเพิ่งรีสตาร์ท) ส่งรายการใหม่ได้เลยครับ"
 	TextFailAI          = "🤖 ระบบ AI มีปัญหาชั่วคราว ลองใหม่อีกครั้งนะครับ"
 	TextFailServer      = "🛠️ ระบบของเรามีปัญหา ลองใหม่ภายหลังนะครับ"
 	TextFailRefused     = "🙅 ข้อความนี้จดไม่ได้ ลองพิมพ์ใหม่นะครับ"
@@ -81,10 +87,13 @@ const (
 
 var textsTH = Texts{
 	NoAmount: TextNoAmount, NotMoney: TextNotMoney, TransferWallet: TextTransferWallet,
-	TooLong: TextTooLong, TooFast: TextTooFast, Handled: TextHandled, TierFree: TextTierFree, CapReached: TextCapReached,
+	TooLong: TextTooLong, TooFast: TextTooFast, Handled: TextHandled, Expired: TextExpired, TierFree: TextTierFree, CapReached: TextCapReached,
 	FailAI: TextFailAI, FailServer: TextFailServer, FailRefused: TextFailRefused, FailTrunc: TextFailTrunc,
 	Off: TextOff, Thinking: TextThinking, Saved: TextSaved, Cancelled: TextCancelled, TrialMark: TextTrialMark, PartialBooked: TextPartialBooked, Queued: TextQueued, MissingFmt: TextMissing, MissingNames: missingTH,
 	ButtonOK: ButtonOK, ButtonCancel: ButtonCancel, Edited: TextEdited,
+	ButtonEdit: "✏️ แก้", ButtonEdited: "✏️ แก้แล้ว", ToastSaved: "บันทึก %d รายการแล้ว", ToastQueued: "ส่งไปรอยืนยัน %d รายการแล้ว",
+	EditPrompt: "✏️ พิมพ์ส่วนที่จะแก้ได้เลยครับ", EditPlaceholder: "เช่น ยอด 70 | เปลี่ยนเป็นกสิกร", Stopped: "⏹️ หยุดแล้วครับ", Cur: "฿",
+	ReplyClosed: "การ์ดนี้จบแล้ว แก้ต่อไม่ได้ครับ พิมพ์เป็นข้อความใหม่ได้เลย",
 	Items:   "%d รายการ",
 	Expense: "รายจ่าย", Income: "รายรับ", Transfer: "โอน", Today: "วันนี้", Yesterday: "เมื่อวาน", None: "ไม่ระบุ",
 	Category: "หมวด: ", Wallet: "กระเป๋า: ",
@@ -115,6 +124,7 @@ var textsEN = Texts{
 	TierFree:       "🔒 This feature isn't open yet.",
 	CapReached:     "📊 You've used this month's quota. You can use it again on the 1st.",
 	Handled:        "This card is already done.",
+	Expired:        "⌛ This card has expired (the bot restarted). Send the items again.",
 	FailAI:         "🤖 The AI service has a problem. Please try again.",
 	FailServer:     "🛠️ Our server has a problem. Please try again later.",
 	FailRefused:    "🙅 I can't log this message. Try writing it differently.",
@@ -130,6 +140,15 @@ var textsEN = Texts{
 	MissingNames:   missingEN,
 	ButtonOK:       "✓ Confirm",
 	ButtonCancel:   "✗ Cancel",
+	ButtonEdit:     "✏️ Edit",
+	ButtonEdited:   "✏️ Edited",
+	ToastSaved:     "Saved %d items",
+	ToastQueued:    "Sent %d items to confirm",
+	EditPrompt:     "✏️ Type what to change",
+	EditPlaceholder: "e.g. amount 70 | change to Kbank",
+	Stopped:        "⏹️ Stopped.",
+	ReplyClosed:    "This card is finished and can't be edited. Send it as a new message.",
+	Cur:            "฿",
 	Edited:         "✏️ Edited, see the new card below",
 	Items:          "%d items",
 	Expense:        "Expense", Income: "Income", Transfer: "Transfer", Today: "today", Yesterday: "yesterday",
@@ -224,4 +243,22 @@ func (t Texts) missing(codes []string) string {
 		}
 	}
 	return fmt.Sprintf(t.MissingFmt, strings.Join(names, ", "))
+}
+
+// htmlFixed writes a fixed line as Telegram HTML: escaped, and an example the line ends with in monospace
+// (tap to copy). Only for the bot's own words, never for text the user wrote.
+func htmlFixed(s string) string {
+	for _, m := range []string{"เช่น ", "e.g. ", "For example: "} {
+		i := strings.Index(s, m)
+		if i < 0 {
+			continue
+		}
+		head, ex := s[:i+len(m)], s[i+len(m):]
+		tail := ""
+		if strings.HasSuffix(ex, ".") {
+			ex, tail = strings.TrimSuffix(ex, "."), "."
+		}
+		return html.EscapeString(head) + "<code>" + html.EscapeString(ex) + "</code>" + tail
+	}
+	return html.EscapeString(s)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"strings"
@@ -139,9 +140,26 @@ func (f *fakeSender) add(s sent) {
 	f.log = append(f.log, s)
 }
 
-func (f *fakeSender) SendMessage(_ context.Context, chatID int64, text string, _ int64) error {
-	f.add(sent{kind: "msg", chatID: chatID, text: text})
+// plain turns the bot's Telegram HTML back into the text a user reads (the tests compare words, not markup).
+func plain(s string) string {
+	for _, tag := range []string{"<b>", "</b>", "<code>", "</code>"} {
+		s = strings.ReplaceAll(s, tag, "")
+	}
+	return html.UnescapeString(s)
+}
+
+func (f *fakeSender) SendHTML(_ context.Context, chatID int64, text string, _ int64) error {
+	f.add(sent{kind: "msg", chatID: chatID, text: plain(text)})
 	return nil
+}
+
+func (f *fakeSender) SendForceReply(_ context.Context, chatID int64, text string, _ int64, placeholder string) (int64, error) {
+	f.mu.Lock()
+	f.next++
+	id := 1000 + f.next
+	f.mu.Unlock()
+	f.add(sent{kind: "force", chatID: chatID, msgID: id, text: text + "|" + placeholder})
+	return id, nil
 }
 
 func (f *fakeSender) SendCard(_ context.Context, chatID int64, text string, _ int64, b []telegram.Button) (int64, error) {
@@ -149,12 +167,12 @@ func (f *fakeSender) SendCard(_ context.Context, chatID int64, text string, _ in
 	f.next++
 	id := 1000 + f.next
 	f.mu.Unlock()
-	f.add(sent{kind: "card", chatID: chatID, msgID: id, text: text, buttons: b})
+	f.add(sent{kind: "card", chatID: chatID, msgID: id, text: plain(text), buttons: b})
 	return id, nil
 }
 
 func (f *fakeSender) EditCard(_ context.Context, chatID, msgID int64, text string, b []telegram.Button) error {
-	f.add(sent{kind: "edit", chatID: chatID, msgID: msgID, text: text, buttons: b})
+	f.add(sent{kind: "edit", chatID: chatID, msgID: msgID, text: plain(text), buttons: b})
 	return nil
 }
 
@@ -171,7 +189,7 @@ func (f *fakeSender) SetReaction(_ context.Context, _, msgID int64, emoji string
 	return nil
 }
 
-func (f *fakeSender) SendDraft(_ context.Context, _, _ int64, text string) error {
+func (f *fakeSender) SendDraft(_ context.Context, _, _ int64, text string, _ bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.drafts = append(f.drafts, text)
@@ -257,7 +275,7 @@ func TestBotCardFlow(t *testing.T) {
 
 	b.Text(ctx, user, text(1, "normal tx", 0))
 	card := s.last()
-	if card.kind != "card" || card.text != "🧾 1 รายการ | วันนี้\n──────────\nnormal -฿60\nหมวด: 🏷️ อาหาร\nกระเป๋า: 👛 กสิกร" || len(card.buttons) != 2 {
+	if card.kind != "card" || card.text != "🧾 1 รายการ | วันนี้\n──────────\nnormal -฿60\nหมวด: 🏷️ อาหาร\nกระเป๋า: 👛 กสิกร" || len(card.buttons) != 3 {
 		t.Fatalf("card = %+v", card)
 	}
 
@@ -265,10 +283,10 @@ func TestBotCardFlow(t *testing.T) {
 	// buttons and points down
 	b.Text(ctx, user, text(2, "edit", card.msgID))
 	newCard, old := s.log[len(s.log)-2], s.last()
-	if newCard.kind != "card" || !strings.Contains(newCard.text, "-฿50") || len(newCard.buttons) != 2 {
+	if newCard.kind != "card" || !strings.Contains(newCard.text, "-฿50") || len(newCard.buttons) != 3 {
 		t.Fatalf("new card = %+v", newCard)
 	}
-	if old.kind != "edit" || old.msgID != card.msgID || len(old.buttons) != 0 || !strings.HasSuffix(old.text, TextEdited) {
+	if old.kind != "edit" || old.msgID != card.msgID || len(old.buttons) != 1 || old.buttons[0].Data != cbDone || !strings.HasSuffix(old.text, TextEdited) {
 		t.Fatalf("old card = %+v", old)
 	}
 	card = newCard
@@ -284,7 +302,7 @@ func TestBotCardFlow(t *testing.T) {
 	}
 	// ✓ closes the card: buttons gone, "(fake)" mark
 	b.Tap(ctx, tap(card.buttons[0].Data, card.msgID, chat))
-	if e := s.last(); e.kind != "edit" || len(e.buttons) != 0 || !strings.HasSuffix(e.text, TextSaved+TextFakeMark) {
+	if e := s.last(); e.kind != "edit" || len(e.buttons) != 1 || e.buttons[0].Data != cbDone || !strings.HasSuffix(e.text, TextSaved+TextFakeMark) {
 		t.Fatalf("saved = %+v", e)
 	}
 	// a second tap (✗) on the closed card
@@ -294,7 +312,7 @@ func TestBotCardFlow(t *testing.T) {
 	}
 	// a Reply on the closed card
 	b.Text(ctx, user, text(4, "edit", card.msgID))
-	if m := s.last(); m.text != TextHandled {
+	if m := s.last(); m.text != textsTH.ReplyClosed {
 		t.Fatalf("reply on closed = %+v", m)
 	}
 	// ✗ on a new card
@@ -303,6 +321,14 @@ func TestBotCardFlow(t *testing.T) {
 	b.Tap(ctx, tap(c2.buttons[1].Data, c2.msgID, chat))
 	if e := s.last(); !strings.HasSuffix(e.text, TextCancelled+TextFakeMark) {
 		t.Fatalf("cancelled = %+v", e)
+	}
+	// after a restart the bot holds no card: a tap says it expired and takes the buttons off
+	b.Text(ctx, user, text(6, "income", 0))
+	c3 := s.last()
+	b.Text(ctx, user, text(7, "forget cards", 0))
+	b.Tap(ctx, tap(c3.buttons[0].Data, c3.msgID, chat))
+	if e := s.last(); e.kind != "edit" || e.msgID != c3.msgID || len(e.buttons) != 0 || !strings.HasSuffix(e.text, textsEN.Expired) { // no app language to read for a forgotten card: Telegram's, else English
+		t.Fatalf("expired = %+v", e)
 	}
 	// not a card button
 	if b.Tap(ctx, tap("li:abc", 1, chat)) {

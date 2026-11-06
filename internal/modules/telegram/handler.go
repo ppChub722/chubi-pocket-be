@@ -76,6 +76,8 @@ type Accounts interface {
 type Chatbot interface {
 	Text(ctx context.Context, userID uuid.UUID, m *Message)
 	Tap(ctx context.Context, cq *CallbackQuery) bool
+	// Stop cancels the model call of the message whose "reading" draft had its stop button pressed.
+	Stop(chatID, draftID int64)
 }
 
 // chatTimeout bounds one chatbot turn; it runs after Telegram has its 200 (a model call may take
@@ -104,6 +106,14 @@ func NewHandler(send sender, store saver, accounts Accounts, log *slog.Logger) *
 // An update_id is handled once (in memory, plus the table's unique key for kept texts). The log
 // line never holds the text.
 func (h *Handler) HandleUpdate(ctx context.Context, u Update) Outcome {
+	if s := u.StoppedMessageGeneration; s != nil && s.Chat.Type == "private" {
+		if h.chat != nil && h.seen.add(u.UpdateID) {
+			h.chat.Stop(s.Chat.ID, s.DraftID)
+		}
+		h.log.Info("telegram update", "update_id", u.UpdateID, "outcome", string(OutcomeChat),
+			"chat_id", s.Chat.ID, "kind", "stop")
+		return OutcomeChat
+	}
 	if cq := u.CallbackQuery; cq != nil && cq.Message != nil && cq.Message.Chat.Type == "private" {
 		if !h.seen.add(u.UpdateID) {
 			h.logLine(u, cq.Message, false, OutcomeDuplicate)
@@ -150,6 +160,8 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) Outcome {
 		return h.reply(ctx, u, m, false, h.texts(ctx, m).LinkFirst, OutcomeLinkFirst)
 	case isCommand(m.Text, "/start"):
 		return h.reply(ctx, u, m, true, h.texts(ctx, m).Welcome, OutcomeStart)
+	case isCommand(m.Text, "/help"):
+		return h.reply(ctx, u, m, true, h.texts(ctx, m).Help, OutcomeStart)
 	case !chatOn:
 		return h.reply(ctx, u, m, true, h.texts(ctx, m).ChatOff, OutcomeChatOff)
 	case m.Text == "":

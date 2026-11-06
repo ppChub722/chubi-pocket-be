@@ -59,6 +59,7 @@ func (d *DBLists) UserByChat(ctx context.Context, chatID int64) (uuid.UUID, erro
 
 func (d *DBLists) Lists(ctx context.Context, userID uuid.UUID) (Lists, error) {
 	var l Lists
+	_ = d.db.QueryRow(ctx, `SELECT currency FROM users WHERE id = $1`, userID).Scan(&l.Currency)
 	rows, err := d.db.Query(ctx, `
 		SELECT a.id, a.name, a.id = s.default_account_id
 		  FROM accounts a

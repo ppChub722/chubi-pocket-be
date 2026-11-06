@@ -105,7 +105,7 @@ func TestBotSettlesOnTick(t *testing.T) {
 	}
 	// ✓ without auto: the rows are queued for the pending page, the card says so, a second tap is "handled"
 	b.Tap(ctx, tap(card.buttons[0].Data, card.msgID, chat))
-	if e := s.last(); e.kind != "edit" || !strings.HasSuffix(e.text, TextQueued) || len(e.buttons) != 0 {
+	if e := s.last(); e.kind != "edit" || !strings.HasSuffix(e.text, TextQueued) || len(e.buttons) != 1 {
 		t.Fatalf("queued = %+v", e)
 	}
 	if len(m.queued) != 1 || len(m.queued[0]) != 3 || len(m.booked) != 0 || m.refs[0].ChatID != chat || m.refs[0].MessageID != 1 {

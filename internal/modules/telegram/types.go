@@ -12,6 +12,14 @@ type Update struct {
 	Message       *Message       `json:"message,omitempty"`
 	EditedMessage *Message       `json:"edited_message,omitempty"`
 	CallbackQuery *CallbackQuery `json:"callback_query,omitempty"`
+	// StoppedMessageGeneration — the user pressed the stop button of a draft (Bot API 10.3).
+	StoppedMessageGeneration *MessageGenerationStopped `json:"stopped_message_generation,omitempty"`
+}
+
+// MessageGenerationStopped names the draft whose stop button was pressed.
+type MessageGenerationStopped struct {
+	Chat    Chat  `json:"chat"`
+	DraftID int64 `json:"draft_id"`
 }
 
 // CallbackQuery — a tap on an inline button (1b-2 login). Message = the bot's message with it.

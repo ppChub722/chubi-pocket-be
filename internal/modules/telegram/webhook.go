@@ -117,6 +117,7 @@ func (w *Webhook) Start() {
 			w.log.Error("telegram: setWebhook failed", "url", w.webhookURL, "error", err)
 			return
 		}
+		w.setProfile(ctx)
 		info, err := w.client.GetWebhookInfo(ctx)
 		if err != nil {
 			w.log.Warn("telegram: getWebhookInfo failed", "error", err)
@@ -125,4 +126,18 @@ func (w *Webhook) Start() {
 		w.log.Info("telegram: webhook", "url", info.URL, "pending", info.PendingUpdateCount,
 			"last_error", info.LastErrorMessage)
 	}()
+}
+
+// setProfile puts the command menu and the bot's description in place (Thai, English, and English for every
+// other language); a failure only logs.
+func (w *Webhook) setProfile(ctx context.Context) {
+	for _, l := range []struct{ code, lang string }{{"", LangEnglish}, {LangEnglish, LangEnglish}, {LangThai, LangThai}} {
+		t := TextsFor(l.lang)
+		if err := w.client.SetCommands(ctx, l.code, t.Commands, CommandOrder); err != nil {
+			w.log.Warn("telegram: setMyCommands failed", "lang", l.code, "error", err)
+		}
+		if err := w.client.SetAbout(ctx, l.code, t.About, t.AboutShort); err != nil {
+			w.log.Warn("telegram: bot description failed", "lang", l.code, "error", err)
+		}
+	}
 }

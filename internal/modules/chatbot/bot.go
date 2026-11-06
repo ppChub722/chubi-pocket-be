@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"strings"
 	"sync"
@@ -19,12 +20,13 @@ import (
 
 // Sender is the part of the Telegram client the bot uses.
 type Sender interface {
-	SendMessage(ctx context.Context, chatID int64, text string, replyTo int64) error
+	SendHTML(ctx context.Context, chatID int64, text string, replyTo int64) error // text is Telegram HTML
 	SendCard(ctx context.Context, chatID int64, text string, replyTo int64, buttons []telegram.Button) (int64, error)
 	EditCard(ctx context.Context, chatID, messageID int64, text string, buttons []telegram.Button) error
+	SendForceReply(ctx context.Context, chatID int64, text string, replyTo int64, placeholder string) (int64, error)
 	AnswerCallback(ctx context.Context, callbackID, text string) error
 	SetReaction(ctx context.Context, chatID, messageID int64, emoji string) error
-	SendDraft(ctx context.Context, chatID, draftID int64, text string) error
+	SendDraft(ctx context.Context, chatID, draftID int64, text string, canStop bool) error
 }
 
 // ListSource reads the user's wallets, categories and app language.
@@ -37,7 +39,12 @@ const (
 	cbPrefix = "c:"
 	cbOK     = "c:ok:"
 	cbNo     = "c:no:"
+	cbEdit   = "c:ed:"
+	cbDone   = "c:dn" // the grey button of a card that is finished: tapping it only says so
 )
+
+// How long a fake "hang" waits between two "reading" drafts (Telegram drops a draft after about 30 s).
+const draftRefresh = 20 * time.Second
 
 var bangkok = time.FixedZone("ICT", 7*3600)
 
@@ -53,6 +60,7 @@ type Bot struct {
 	timeout time.Duration
 	log     *slog.Logger
 	now     func() time.Time
+	calls   *callSet // model calls in flight, by the draft the stop button belongs to
 
 	// LogBodies logs each call's request (lists, date, the user's text) and the model's raw
 	// answer. It writes the user's own words to the log: debug only (LLM_LOG_BODIES).
@@ -61,7 +69,37 @@ type Bot struct {
 
 func New(send Sender, lists ListSource, router *llm.Router, perMinute int, timeout time.Duration, log *slog.Logger) *Bot {
 	return &Bot{send: send, lists: lists, router: router, cards: newMemCards(2000), limit: newMinuteLimit(perMinute),
-		timeout: timeout, log: log, now: time.Now}
+		timeout: timeout, log: log, now: time.Now, calls: newCallSet()}
+}
+
+// callSet holds the cancel of each model call in flight, so the stop button can end one.
+type callSet struct {
+	mu sync.Mutex
+	m  map[[2]int64]context.CancelFunc
+}
+
+func newCallSet() *callSet { return &callSet{m: map[[2]int64]context.CancelFunc{}} }
+
+func (s *callSet) add(chatID, draftID int64, cancel context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[[2]int64{chatID, draftID}] = cancel
+}
+
+func (s *callSet) remove(chatID, draftID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.m, [2]int64{chatID, draftID})
+}
+
+// Stop ends the model call whose "reading" draft had its stop button pressed (nothing in flight = nothing happens).
+func (b *Bot) Stop(chatID, draftID int64) {
+	b.calls.mu.Lock()
+	cancel := b.calls.m[[2]int64{chatID, draftID}]
+	b.calls.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // WithSaver makes ✓ real (K4): rows for the app's pending page, or booked at once when the user turned auto on.
@@ -133,7 +171,7 @@ func (b *Bot) Text(ctx context.Context, userID uuid.UUID, m *telegram.Message) {
 	}
 	b.react(ctx, tr.chatID, tr.msgID, reactRead)
 	// The draft bubble goes when the card (or a line) is sent.
-	if err := b.send.SendDraft(ctx, tr.chatID, tr.msgID, tr.t.Thinking); err != nil {
+	if err := b.send.SendDraft(ctx, tr.chatID, tr.msgID, tr.t.Thinking, true); err != nil {
 		b.log.Warn("chatbot: draft failed", "chat_id", tr.chatID, "error", err)
 	}
 	if r := m.ReplyToMessage; r != nil {
@@ -141,6 +179,16 @@ func (b *Bot) Text(ctx context.Context, userID uuid.UUID, m *telegram.Message) {
 			b.edit(ctx, tr, c, m.Text)
 			return
 		}
+		if isCardMessage(r) { // a card the bot no longer holds (restart, or already edited): not a new message
+			b.react(ctx, tr.chatID, tr.msgID, reactFail)
+			b.say(ctx, tr.chatID, tr.t.ReplyClosed, tr.msgID)
+			return
+		}
+	}
+	if b.router.Fake() && strings.EqualFold(strings.TrimSpace(m.Text), "forget cards") { // as after a restart
+		b.cards.forgetAll()
+		b.say(ctx, tr.chatID, "forgot every card", tr.msgID)
+		return
 	}
 	if b.router.Fake() && strings.EqualFold(strings.TrimSpace(m.Text), "all") {
 		for _, kw := range llm.FakeKeywords {
@@ -153,6 +201,15 @@ func (b *Bot) Text(ctx context.Context, userID uuid.UUID, m *telegram.Message) {
 	b.fresh(ctx, tr, m.Text)
 }
 
+// isCardMessage: the message a Reply points at is one of the bot's cards (its first line holds the card head).
+func isCardMessage(r *telegram.Message) bool {
+	if r.From == nil || !r.From.IsBot {
+		return false
+	}
+	first, _, _ := strings.Cut(r.Text, "\n")
+	return strings.Contains(first, emojiCard)
+}
+
 // fresh — a new message: parse, then one card or one fixed line.
 func (b *Bot) fresh(ctx context.Context, tr turn, text string) {
 	lists, out, ok := b.parse(ctx, tr, text, nil)
@@ -161,13 +218,13 @@ func (b *Bot) fresh(ctx context.Context, tr turn, text string) {
 	}
 	if len(out.Items) == 0 {
 		b.react(ctx, tr.chatID, tr.msgID, reactFail)
-		b.say(ctx, tr.chatID, tr.label+tr.t.hint(out.Hint), tr.msgID)
+		b.sayFixed(ctx, tr.chatID, tr.label, tr.t.hint(out.Hint), tr.msgID)
 		return
 	}
 	c := Card{ID: newCardID(), UserID: tr.userID, ChatID: tr.chatID, Items: out.Items, State: CardOpen,
 		Label: tr.label, SourceID: tr.msgID, Lang: tr.lang}
 	b.markMissing(&c)
-	id, err := b.send.SendCard(ctx, tr.chatID, cardText(c, lists, b.today()), tr.msgID, buttons(c.ID, tr.t))
+	id, err := b.send.SendCard(ctx, tr.chatID, cardHTML(c, lists, b.today()), tr.msgID, buttons(c.ID, tr.t))
 	if err != nil {
 		b.log.Error("chatbot: send card failed", "chat_id", tr.chatID, "error", err)
 		return
@@ -188,11 +245,11 @@ func (b *Bot) sayUnclear(ctx context.Context, tr turn, parts []string) {
 			named = append(named, p)
 		}
 	}
-	text := tr.t.Unclear
-	if len(named) > 0 {
-		text = fmt.Sprintf(tr.t.UnclearPart, strings.Join(named, sep))
+	if len(named) == 0 {
+		b.sayFixed(ctx, tr.chatID, tr.label, tr.t.Unclear, tr.msgID)
+		return
 	}
-	b.say(ctx, tr.chatID, tr.label+text, tr.msgID)
+	b.say(ctx, tr.chatID, tr.label+fmt.Sprintf(tr.t.UnclearPart, strings.Join(named, sep)), tr.msgID)
 }
 
 // edit — a Reply on a card: the card's items + the edit text → the whole card again, sent as a new
@@ -201,7 +258,8 @@ func (b *Bot) sayUnclear(ctx context.Context, tr turn, parts []string) {
 func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
 	tr.label = c.Label
 	if c.State != CardOpen {
-		b.say(ctx, c.ChatID, tr.t.Handled, tr.msgID)
+		b.react(ctx, c.ChatID, tr.msgID, reactFail)
+		b.say(ctx, c.ChatID, tr.t.ReplyClosed, tr.msgID)
 		return
 	}
 	lists, out, ok := b.parse(ctx, tr, text, c.Items)
@@ -210,20 +268,20 @@ func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
 	}
 	if len(out.Items) == 0 {
 		b.react(ctx, c.ChatID, tr.msgID, reactFail)
-		b.say(ctx, c.ChatID, c.Label+tr.t.hint(out.Hint), tr.msgID)
+		b.sayFixed(ctx, c.ChatID, c.Label, tr.t.hint(out.Hint), tr.msgID)
 		return
 	}
 	before := c
 	c.Items, c.Lang = out.Items, tr.lang
 	b.markMissing(&c)
-	id, err := b.send.SendCard(ctx, c.ChatID, cardText(c, lists, b.today()), tr.msgID, buttons(c.ID, tr.t))
+	id, err := b.send.SendCard(ctx, c.ChatID, cardHTML(c, lists, b.today()), tr.msgID, buttons(c.ID, tr.t))
 	if err != nil {
 		b.log.Error("chatbot: send card failed", "chat_id", c.ChatID, "error", err)
 		return
 	}
 	c.MessageID = id
 	b.cards.repoint(&c, before.MessageID)
-	if err := b.send.EditCard(ctx, c.ChatID, before.MessageID, cardText(before, lists, b.today())+"\n\n"+tr.t.Edited, nil); err != nil {
+	if err := b.send.EditCard(ctx, c.ChatID, before.MessageID, cardWith(before, lists, b.today(), tr.t.Edited), doneButtons(tr.t.ButtonEdited)); err != nil {
 		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
 	}
 	b.react(ctx, c.ChatID, tr.msgID, reactDone)
@@ -237,11 +295,18 @@ func (b *Bot) parse(ctx context.Context, tr turn, text string, current []Item) (
 		return Lists{}, Outcome{}, false
 	}
 	pick := b.router.For(ctx, tr.userID)
-	cctx, cancel := context.WithTimeout(ctx, b.timeout)
+	cctx, cancel := b.callContext(ctx, tr, text)
 	defer cancel()
+	b.calls.add(tr.chatID, tr.msgID, cancel)
+	defer b.calls.remove(tr.chatID, tr.msgID)
 	start := time.Now()
 	out, err := Parse(cctx, pick.Client, b.today(), lists, text, current)
 	ms := time.Since(start).Milliseconds()
+	if err != nil && errors.Is(err, context.Canceled) && ctx.Err() == nil { // the stop button: not an error, not counted
+		b.react(ctx, tr.chatID, tr.msgID, "")
+		b.say(ctx, tr.chatID, tr.label+tr.t.Stopped, tr.msgID)
+		return Lists{}, Outcome{}, false
+	}
 	if b.metering() && !errors.Is(err, llm.ErrOff) {
 		b.record(ctx, tr, pick, out, err, ms)
 	}
@@ -273,10 +338,37 @@ func (b *Bot) parse(ctx context.Context, tr turn, text string, current []Item) (
 	return lists, out, true
 }
 
+// callContext is the context of one model call. Its timeout is b.timeout; the fake mode's "hang" has none
+// (and keeps its draft alive), so the stop button can be tried for as long as wanted.
+func (b *Bot) callContext(ctx context.Context, tr turn, text string) (context.Context, context.CancelFunc) {
+	if b.router.Fake() && strings.EqualFold(strings.TrimSpace(text), "hang") {
+		cctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		go func() {
+			for {
+				select {
+				case <-cctx.Done():
+					return
+				case <-time.After(draftRefresh):
+					_ = b.send.SendDraft(cctx, tr.chatID, tr.msgID, tr.t.Thinking, true)
+				}
+			}
+		}()
+		return cctx, cancel
+	}
+	return context.WithTimeout(ctx, b.timeout)
+}
+
 // Tap handles a button of a card; false = not a card button (telegram handles it).
 func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 	if !strings.HasPrefix(cq.Data, cbPrefix) || cq.Message == nil {
 		return false
+	}
+	if cq.Data == cbDone { // the grey button of a finished card
+		b.answer(ctx, cq.ID, textsFor(telegram.Lang("", cq.From.LanguageCode)).Handled)
+		return true
+	}
+	if strings.HasPrefix(cq.Data, cbEdit) {
+		return b.tapEdit(ctx, cq, strings.TrimPrefix(cq.Data, cbEdit))
 	}
 	state, id := CardSaved, strings.TrimPrefix(cq.Data, cbOK)
 	if strings.HasPrefix(cq.Data, cbNo) {
@@ -284,8 +376,10 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 	}
 	c, ok := b.cards.get(id)
 	t := textsFor(telegram.Lang(c.Lang, cq.From.LanguageCode))
-	mine := ok && c.ChatID == cq.Message.Chat.ID && cq.From.ID == cq.Message.Chat.ID
-	if !mine {
+	if !ok && b.expired(ctx, cq, t) {
+		return true
+	}
+	if !b.mine(c, ok, cq) {
 		b.answer(ctx, cq.ID, t.Handled)
 		return true
 	}
@@ -299,10 +393,9 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 		b.answer(ctx, cq.ID, t.Handled)
 		return true
 	}
-	b.answer(ctx, cq.ID, "")
-	done, reaction := t.Saved, reactDone
+	done, reaction, toast := t.Saved, reactDone, fmt.Sprintf(t.ToastSaved, len(c.Items))
 	if state == CardCancelled {
-		done, reaction = t.Cancelled, ""
+		done, reaction, toast = t.Cancelled, "", t.Cancelled
 	}
 	switch {
 	case b.router.Fake():
@@ -315,21 +408,71 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 		text, booked, ok := b.settle(ctx, c, t)
 		if !ok { // nothing was booked: the card stays open, the user can press ✓ again
 			b.cards.reopen(c.ID)
+			b.answer(ctx, cq.ID, "")
 			return true
 		}
-		done = text
+		done, toast = text, fmt.Sprintf(t.ToastSaved, booked)
+		if text == t.Queued {
+			toast = fmt.Sprintf(t.ToastQueued, booked)
+		}
 		if booked == 0 {
-			reaction = reactFail
+			reaction, toast = reactFail, ""
 		}
 	}
+	b.answer(ctx, cq.ID, toast)
 	lists, err := b.lists.Lists(ctx, c.UserID)
 	if err != nil {
 		b.log.Error("chatbot: lists failed", "chat_id", c.ChatID, "error", err)
 	}
-	if err := b.send.EditCard(ctx, c.ChatID, c.MessageID, cardText(c, lists, b.today())+"\n\n"+done, nil); err != nil {
+	label := t.Saved
+	if state == CardCancelled {
+		label = t.Cancelled
+	}
+	if err := b.send.EditCard(ctx, c.ChatID, c.MessageID, cardWith(c, lists, b.today(), done), doneButtons(label)); err != nil {
 		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
 	}
 	b.react(ctx, c.ChatID, c.SourceID, reaction)
+	return true
+}
+
+// mine: the card exists and the tap came from the private chat it was sent to.
+func (b *Bot) mine(c Card, found bool, cq *telegram.CallbackQuery) bool {
+	return found && c.ChatID == cq.Message.Chat.ID && cq.From.ID == cq.Message.Chat.ID
+}
+
+// expired answers a tap on a card the bot no longer holds (a restart): says so and takes the buttons off.
+// false = the tap is not from the chat itself, so the caller treats it as any foreign tap.
+func (b *Bot) expired(ctx context.Context, cq *telegram.CallbackQuery, t Texts) bool {
+	if cq.From.ID != cq.Message.Chat.ID {
+		return false
+	}
+	b.answer(ctx, cq.ID, t.Expired)
+	text := html.EscapeString(cq.Message.Text) + "\n\n" + html.EscapeString(t.Expired)
+	if err := b.send.EditCard(ctx, cq.Message.Chat.ID, cq.Message.MessageID, text, nil); err != nil {
+		b.log.Error("chatbot: edit expired card failed", "chat_id", cq.Message.Chat.ID, "error", err)
+	}
+	return true
+}
+
+// tapEdit — ✏️: opens the reply box on the user's side (a force reply with a placeholder); what they send
+// there is an edit of this card, the same as a Reply on the card.
+func (b *Bot) tapEdit(ctx context.Context, cq *telegram.CallbackQuery, id string) bool {
+	c, ok := b.cards.get(id)
+	t := textsFor(telegram.Lang(c.Lang, cq.From.LanguageCode))
+	if !ok && b.expired(ctx, cq, t) {
+		return true
+	}
+	if !b.mine(c, ok, cq) || c.State != CardOpen {
+		b.answer(ctx, cq.ID, t.Handled)
+		return true
+	}
+	b.answer(ctx, cq.ID, "")
+	prompt, err := b.send.SendForceReply(ctx, c.ChatID, t.EditPrompt, c.MessageID, t.EditPlaceholder)
+	if err != nil {
+		b.log.Error("chatbot: edit prompt failed", "chat_id", c.ChatID, "error", err)
+		return true
+	}
+	b.cards.alias(c.ChatID, prompt, c.ID)
 	return true
 }
 
@@ -466,11 +609,35 @@ func unsureOf(items []Item) []string {
 }
 
 func buttons(id string, t Texts) []telegram.Button {
-	return []telegram.Button{{Text: t.ButtonOK, Data: cbOK + id}, {Text: t.ButtonCancel, Data: cbNo + id}}
+	return []telegram.Button{
+		{Text: t.ButtonOK, Data: cbOK + id, Style: "success"},
+		{Text: t.ButtonCancel, Data: cbNo + id, Style: "danger"},
+		{Text: t.ButtonEdit, Data: cbEdit + id},
+	}
 }
 
+// doneButtons: the one grey button a finished card keeps in place of its buttons.
+func doneButtons(label string) []telegram.Button {
+	return []telegram.Button{{Text: label, Data: cbDone}}
+}
+
+// cardWith is the card as HTML with a fixed line (what happened to it) under it.
+func cardWith(c Card, lists Lists, today time.Time, line string) string {
+	return cardHTML(c, lists, today) + "\n\n" + html.EscapeString(line)
+}
+
+// say sends a plain line (escaped: it may hold the user's own words).
 func (b *Bot) say(ctx context.Context, chatID int64, text string, replyTo int64) {
-	if err := b.send.SendMessage(ctx, chatID, text, replyTo); err != nil {
+	b.sayHTML(ctx, chatID, html.EscapeString(text), replyTo)
+}
+
+// sayFixed sends one of the bot's own lines; an example in it goes in monospace.
+func (b *Bot) sayFixed(ctx context.Context, chatID int64, label, text string, replyTo int64) {
+	b.sayHTML(ctx, chatID, html.EscapeString(label)+htmlFixed(text), replyTo)
+}
+
+func (b *Bot) sayHTML(ctx context.Context, chatID int64, text string, replyTo int64) {
+	if err := b.send.SendHTML(ctx, chatID, text, replyTo); err != nil {
 		b.log.Error("chatbot: reply failed", "chat_id", chatID, "error", err)
 	}
 }

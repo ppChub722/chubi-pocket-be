@@ -53,8 +53,34 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string, rep
 
 // Button — one inline keyboard button; Data comes back in a callback_query.
 type Button struct {
-	Text string `json:"text"`
-	Data string `json:"callback_data"`
+	Text  string `json:"text"`
+	Data  string `json:"callback_data"`
+	Style string `json:"style,omitempty"` // "success" green | "danger" red | "primary" blue; empty = Telegram's grey
+}
+
+// SendHTML posts text in HTML parse mode (the caller escapes anything that is not markup), as a reply
+// to replyTo when it is > 0.
+func (c *Client) SendHTML(ctx context.Context, chatID int64, text string, replyTo int64) error {
+	body := map[string]any{"chat_id": chatID, "text": text, "parse_mode": "HTML"}
+	if replyTo > 0 {
+		body["reply_parameters"] = map[string]any{"message_id": replyTo, "allow_sending_without_reply": true}
+	}
+	return c.call(ctx, "sendMessage", body, nil)
+}
+
+// SendForceReply posts text that opens the reply box on the user's side, with a placeholder in it; the
+// message answers replyTo. It returns the new message's id.
+func (c *Client) SendForceReply(ctx context.Context, chatID int64, text string, replyTo int64, placeholder string) (int64, error) {
+	body := map[string]any{"chat_id": chatID, "text": text,
+		"reply_markup": map[string]any{"force_reply": true, "input_field_placeholder": placeholder}}
+	if replyTo > 0 {
+		body["reply_parameters"] = map[string]any{"message_id": replyTo, "allow_sending_without_reply": true}
+	}
+	var sent struct {
+		MessageID int64 `json:"message_id"`
+	}
+	err := c.call(ctx, "sendMessage", body, &sent)
+	return sent.MessageID, err
 }
 
 // SendButtons posts text with one row of inline buttons, as a reply to replyTo.
@@ -70,7 +96,7 @@ func (c *Client) SendButtons(ctx context.Context, chatID int64, text string, rep
 // SendCard posts text with one row of inline buttons and returns the new message's id (a chatbot
 // card, edited later).
 func (c *Client) SendCard(ctx context.Context, chatID int64, text string, replyTo int64, buttons []Button) (int64, error) {
-	body := map[string]any{"chat_id": chatID, "text": text,
+	body := map[string]any{"chat_id": chatID, "text": text, "parse_mode": "HTML",
 		"reply_markup": map[string]any{"inline_keyboard": [][]Button{buttons}}}
 	if replyTo > 0 {
 		body["reply_parameters"] = map[string]any{"message_id": replyTo, "allow_sending_without_reply": true}
@@ -82,9 +108,9 @@ func (c *Client) SendCard(ctx context.Context, chatID int64, text string, replyT
 	return sent.MessageID, err
 }
 
-// EditCard replaces a message's text and its button row; no buttons = the row goes.
+// EditCard replaces a message's text (HTML) and its button row; no buttons = the row goes.
 func (c *Client) EditCard(ctx context.Context, chatID, messageID int64, text string, buttons []Button) error {
-	body := map[string]any{"chat_id": chatID, "message_id": messageID, "text": text}
+	body := map[string]any{"chat_id": chatID, "message_id": messageID, "text": text, "parse_mode": "HTML"}
 	if len(buttons) > 0 {
 		body["reply_markup"] = map[string]any{"inline_keyboard": [][]Button{buttons}}
 	}
@@ -113,8 +139,40 @@ func (c *Client) SetReaction(ctx context.Context, chatID, messageID int64, emoji
 
 // SendDraft shows a temporary bubble in a private chat while a reply is being made; it goes when
 // the bot sends a message, or after about 30 s.
-func (c *Client) SendDraft(ctx context.Context, chatID, draftID int64, text string) error {
-	return c.call(ctx, "sendMessageDraft", map[string]any{"chat_id": chatID, "draft_id": draftID, "text": text}, nil)
+// canStop adds Telegram's stop button (Bot API 10.3); a press comes back as a stopped_message_generation update.
+func (c *Client) SendDraft(ctx context.Context, chatID, draftID int64, text string, canStop bool) error {
+	body := map[string]any{"chat_id": chatID, "draft_id": draftID, "text": text}
+	if canStop {
+		body["can_stop"] = true
+	}
+	return c.call(ctx, "sendMessageDraft", body, nil)
+}
+
+// SetCommands sets the command menu for a language ("" = the default for everyone else).
+func (c *Client) SetCommands(ctx context.Context, lang string, cmds map[string]string, order []string) error {
+	list := make([]map[string]string, 0, len(order))
+	for _, name := range order {
+		list = append(list, map[string]string{"command": name, "description": cmds[name]})
+	}
+	body := map[string]any{"commands": list}
+	if lang != "" {
+		body["language_code"] = lang
+	}
+	return c.call(ctx, "setMyCommands", body, nil)
+}
+
+// SetAbout sets the bot's description (the empty-chat text) and short description (profile line) for a
+// language ("" = default).
+func (c *Client) SetAbout(ctx context.Context, lang, description, short string) error {
+	body := map[string]any{"description": description}
+	sbody := map[string]any{"short_description": short}
+	if lang != "" {
+		body["language_code"], sbody["language_code"] = lang, lang
+	}
+	if err := c.call(ctx, "setMyDescription", body, nil); err != nil {
+		return err
+	}
+	return c.call(ctx, "setMyShortDescription", sbody, nil)
 }
 
 // EditText replaces a message's text (its buttons go).
@@ -124,12 +182,20 @@ func (c *Client) EditText(ctx context.Context, chatID, messageID int64, text str
 
 // SetWebhook points Telegram at url; every call then carries secret in
 // X-Telegram-Bot-Api-Secret-Token. Messages and button taps (1b-2 login) are asked for.
+// The stop button's press (stopped_message_generation) is asked for too; if Telegram does not know that
+// update, the webhook is set again without it so the bot never loses its messages.
 func (c *Client) SetWebhook(ctx context.Context, webhookURL, secret string) error {
-	return c.call(ctx, "setWebhook", map[string]any{
-		"url":             webhookURL,
-		"secret_token":    secret,
-		"allowed_updates": []string{"message", "callback_query"},
-	}, nil)
+	set := func(updates ...string) error {
+		return c.call(ctx, "setWebhook", map[string]any{
+			"url":             webhookURL,
+			"secret_token":    secret,
+			"allowed_updates": updates,
+		}, nil)
+	}
+	if err := set("message", "callback_query", "stopped_message_generation"); err != nil {
+		return set("message", "callback_query")
+	}
+	return nil
 }
 
 func (c *Client) GetWebhookInfo(ctx context.Context) (WebhookInfo, error) {

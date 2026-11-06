@@ -2,6 +2,7 @@ package chatbot
 
 import (
 	"fmt"
+	"html"
 	"strings"
 	"time"
 
@@ -11,8 +12,21 @@ import (
 // cardText renders the card (brief "Card, texts and errors") in the card's language: a head line,
 // then each item with its lines, a line between parts. Shared wallet / date go into the head line.
 // A value the model guessed (unsure) shows as "[value ?]" (owner 2026-11-04).
-func cardText(c Card, lists Lists, today time.Time) string {
+func cardText(c Card, lists Lists, today time.Time) string { return renderCard(c, lists, today, false) }
+
+// cardHTML is the same card as Telegram HTML: the head line and each item's title in bold, everything
+// else escaped (the user's own words are in it).
+func cardHTML(c Card, lists Lists, today time.Time) string { return renderCard(c, lists, today, true) }
+
+func renderCard(c Card, lists Lists, today time.Time, rich bool) string {
+	esc := func(s string) string { return s }
+	bold := func(s string) string { return s }
+	if rich {
+		esc = html.EscapeString
+		bold = func(s string) string { return "<b>" + html.EscapeString(s) + "</b>" }
+	}
 	t := textsFor(c.Lang)
+	t.Cur = currencySymbol(lists.Currency)
 	multi := len(c.Items) > 1
 	head := []string{c.Label + emojiCard + " " + fmt.Sprintf(t.Items, len(c.Items))}
 	wallet, oneWallet := sharedWallet(c.Items)
@@ -25,7 +39,7 @@ func cardText(c Card, lists Lists, today time.Time) string {
 		head = append(head, unsureMark(dayLabel(t, c.Items[0].Date, today), c.Items[0], "date"))
 	}
 	var b strings.Builder
-	b.WriteString(strings.Join(head, sep))
+	b.WriteString(bold(strings.Join(head, sep)))
 	for i, it := range c.Items {
 		num, indent := "", ""
 		if multi {
@@ -35,9 +49,9 @@ func cardText(c Card, lists Lists, today time.Time) string {
 		if !oneDay {
 			title += sep + unsureMark(dayLabel(t, it.Date, today), it, "date")
 		}
-		b.WriteString("\n" + separator + "\n" + num + title)
+		b.WriteString("\n" + separator + "\n" + esc(num) + bold(title))
 		for _, line := range itemLines(t, lists, it, oneWallet) {
-			b.WriteString("\n" + indent + line)
+			b.WriteString("\n" + esc(indent+line))
 		}
 	}
 	return b.String()
@@ -56,11 +70,11 @@ func itemTitle(t Texts, it Item) string {
 		case ActWithdraw:
 			name = t.Card.Withdraw
 		}
-		return name + " ฿" + money(it.Amount)
+		return name + " " + t.Cur + money(it.Amount)
 	case KindDebt:
 		return debtTitle(t, it)
 	}
-	money := signedMoney(it)
+	money := signedMoney(t, it)
 	if contains(it.Unsure, "amount") || contains(it.Unsure, "type") {
 		money = "[" + money + " ?]"
 	}
@@ -101,7 +115,7 @@ func debtTitle(t Texts, it Item) string {
 	if !db.WithMoney {
 		sign = ""
 	}
-	return title + " " + sign + "฿" + amt
+	return title + " " + sign + t.Cur + amt
 }
 
 func goalName(t Texts, l Lists, id *uuid.UUID) string {
@@ -172,7 +186,7 @@ func debtLines(t Texts, l Lists, it Item) []string {
 	if db == nil {
 		return nil
 	}
-	n, amt := debtName(t, db), "฿"+money(it.Amount)
+	n, amt := debtName(t, db), t.Cur+money(it.Amount)
 	var debt string
 	switch db.Side {
 	case SideTheyOweMe:
@@ -243,10 +257,10 @@ func paperLines(t Texts, l Lists, it Item) []string {
 		names = append(names, personName(x))
 	}
 	lines = append(lines, payer+" · "+fmt.Sprintf(t.Card.Equal, n), t.Card.People+strings.Join(names, " · "))
-	share := "฿" + money(it.Amount/float64(n))
+	share := t.Cur + money(it.Amount/float64(n))
 	if p.PaidBy == nil {
 		lines = append(lines, t.Card.Debt+fmt.Sprintf(t.Card.Everyone, share),
-			fmt.Sprintf(t.Card.MoneyOut, walletName(t, l, it.AccountID), "฿"+money(it.Amount)),
+			fmt.Sprintf(t.Card.MoneyOut, walletName(t, l, it.AccountID), t.Cur+money(it.Amount)),
 			fmt.Sprintf(t.Card.MyShare, share))
 	} else {
 		lines = append(lines, t.Card.Debt+fmt.Sprintf(t.Card.IOwe, paidBy, share), t.Card.NotOutOfWallet,
@@ -320,15 +334,15 @@ func itemName(t Texts, it Item) string {
 	return t.Expense
 }
 
-// signedMoney: expense -฿60, income +฿500, transfer ฿5,000 (Telegram has no text colour).
-func signedMoney(it Item) string {
+// signedMoney: expense -฿60, income +฿500, transfer ฿5,000 (Telegram has no text colour); ฿ is the user's currency symbol.
+func signedMoney(t Texts, it Item) string {
 	switch it.Type {
 	case "expense":
-		return "-฿" + money(it.Amount)
+		return "-" + t.Cur + money(it.Amount)
 	case "income":
-		return "+฿" + money(it.Amount)
+		return "+" + t.Cur + money(it.Amount)
 	}
-	return "฿" + money(it.Amount)
+	return t.Cur + money(it.Amount)
 }
 
 func dayLabel(t Texts, date string, today time.Time) string {
@@ -370,6 +384,24 @@ func categoryLine(t Texts, l Lists, id *uuid.UUID) string {
 		}
 	}
 	return emojiCategory + " " + t.None
+}
+
+var currencySymbols = map[string]string{
+	"THB": "฿", "USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "CNY": "¥", "KRW": "₩", "INR": "₹",
+	"VND": "₫", "PHP": "₱", "AUD": "A$", "CAD": "C$", "SGD": "S$", "HKD": "HK$", "NZD": "NZ$",
+}
+
+// currencySymbol: the sign before an amount; a code with no sign of its own is written "CHF "; unset → ฿
+// (the app's default).
+func currencySymbol(code string) string {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if code == "" {
+		return "฿"
+	}
+	if s, ok := currencySymbols[code]; ok {
+		return s
+	}
+	return code + " "
 }
 
 // money: 1234.5 → "1,234.50"; whole numbers without decimals.

@@ -85,6 +85,7 @@ type Lists struct {
 	Contacts   []Contact
 	Events     []Event
 	Rules      []Rule
+	Currency   string // the user's ISO code; only the card's symbol reads it
 }
 
 // Item kinds: the pending row each one becomes.

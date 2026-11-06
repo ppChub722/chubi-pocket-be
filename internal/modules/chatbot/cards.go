@@ -30,7 +30,7 @@ type Card struct {
 }
 
 // memCards keeps cards in memory (the fake mode: nothing is written to the database). A restart
-// forgets them; a tap on a forgotten card reads as already handled.
+// forgets them; a tap on a forgotten card says it expired and takes the buttons off.
 type memCards struct {
 	mu    sync.Mutex
 	byID  map[string]*Card
@@ -94,6 +94,20 @@ func (s *memCards) byMessage(chatID, messageID int64) (Card, bool) {
 		return Card{}, false
 	}
 	return s.get(id)
+}
+
+// alias makes a Reply on messageID count as a Reply on the card (the ✏️ prompt is one).
+func (s *memCards) alias(chatID, messageID int64, cardID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.byMsg[[2]int64{chatID, messageID}] = cardID
+}
+
+// forgetAll empties the store, the way a restart does (the fake mode's "forget cards").
+func (s *memCards) forgetAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.byID, s.byMsg, s.order = map[string]*Card{}, map[[2]int64]string{}, nil
 }
 
 // reopen puts a closed card back to open (a ✓ whose booking failed, so the user can try again).
