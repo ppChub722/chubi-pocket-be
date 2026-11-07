@@ -32,6 +32,8 @@ type LLMConfig struct {
 	PerMinute  int    // LLM_PER_MINUTE, calls per user per minute
 	Effort     string // LLM_EFFORT, default low (a short extraction needs little thinking)
 	Save       bool   // CHATBOT_SAVE: ✓ writes (the pending page, or the ledger with auto submit); off (default) = cards only, ✓ says "trial, not in the app yet"
+	APITiers   []string // CHATBOT_API_TIERS: tiers (comma list, default owner,tester) that may use the chatbot with the real API; other tiers get the "not yet" line
+	SaveTiers  []string // CHATBOT_SAVE_TIERS: tiers (comma list, default owner,tester) whose ✓ writes when CHATBOT_SAVE is on; other tiers stay in trial
 	LogBodies  bool   // LLM_LOG_BODIES: log what is sent and what comes back (the user's own text); debug only
 }
 
@@ -159,6 +161,8 @@ func Load() (*Config, error) {
 			PerMinute:  getEnvAsInt("LLM_PER_MINUTE", 10),
 			Effort:     getEnv("LLM_EFFORT", "low"),
 			Save:       getEnv("CHATBOT_SAVE", "false") == "true",
+			APITiers:   splitList(getEnv("CHATBOT_API_TIERS", "owner,tester")),
+			SaveTiers:  splitList(getEnv("CHATBOT_SAVE_TIERS", "owner,tester")),
 			LogBodies:  getEnv("LLM_LOG_BODIES", "false") == "true",
 		},
 	}
@@ -210,6 +214,16 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func getEnvAsInt(key string, defaultValue int) int {

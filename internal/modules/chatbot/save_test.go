@@ -252,3 +252,26 @@ func TestBotTrialModeWritesNothing(t *testing.T) {
 		}
 	}
 }
+
+// A save gate that refuses a user keeps that user in trial: ✓ writes nothing, and the card says so.
+func TestBotSaveGate(t *testing.T) {
+	b, s, m := newSavingBot()
+	allowed := map[uuid.UUID]bool{}
+	b.WithSaveGate(func(_ context.Context, u uuid.UUID) bool { return allowed[u] })
+	user, ctx := uuid.New(), context.Background()
+
+	b.Text(ctx, user, text(1, "income", 0))
+	card := s.last()
+	b.Tap(ctx, tap(card.buttons[0].Data, card.msgID, chat))
+	if e := s.last(); !strings.HasSuffix(e.text, TextTrialMark) || len(m.queued)+len(m.booked) != 0 {
+		t.Fatalf("refused user: %+v queued %d booked %d", e, len(m.queued), len(m.booked))
+	}
+
+	allowed[user] = true
+	b.Text(ctx, user, text(2, "income", 0))
+	card = s.last()
+	b.Tap(ctx, tap(card.buttons[0].Data, card.msgID, chat))
+	if len(m.queued) != 1 {
+		t.Fatalf("allowed user queued %d", len(m.queued))
+	}
+}

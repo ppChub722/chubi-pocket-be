@@ -23,7 +23,6 @@ type Sender interface {
 	SendHTML(ctx context.Context, chatID int64, text string, replyTo int64) error // text is Telegram HTML
 	SendCard(ctx context.Context, chatID int64, text string, replyTo int64, buttons []telegram.Button) (int64, error)
 	EditCard(ctx context.Context, chatID, messageID int64, text string, buttons []telegram.Button) error
-	SendForceReply(ctx context.Context, chatID int64, text string, replyTo int64, placeholder string) (int64, error)
 	AnswerCallback(ctx context.Context, callbackID, text string) error
 	SetReaction(ctx context.Context, chatID, messageID int64, emoji string) error
 	SendDraft(ctx context.Context, chatID, draftID int64, text string, canStop bool) error
@@ -39,7 +38,6 @@ const (
 	cbPrefix = "c:"
 	cbOK     = "c:ok:"
 	cbNo     = "c:no:"
-	cbEdit   = "c:ed:"
 	cbDone   = "c:dn" // the grey button of a card that is finished: tapping it only says so
 )
 
@@ -49,18 +47,20 @@ const draftRefresh = 20 * time.Second
 var bangkok = time.FixedZone("ICT", 7*3600)
 
 type Bot struct {
-	send    Sender
-	lists   ListSource
-	router  *llm.Router
-	cards   *memCards
-	saver   Saver // nil = nothing is written (fake mode, tests)
-	meter   Meter // nil = no tier check, cap or call log
-	cap     int   // model calls per user per month; 0 = no cap
-	limit   *minuteLimit
-	timeout time.Duration
-	log     *slog.Logger
-	now     func() time.Time
-	calls   *callSet // model calls in flight, by the draft the stop button belongs to
+	send     Sender
+	lists    ListSource
+	router   *llm.Router
+	cards    *memCards
+	saver    Saver                                            // nil = nothing is written (fake mode, tests)
+	apiTiers []string // tiers that may use the chatbot (metered mode)
+	saveGate func(ctx context.Context, userID uuid.UUID) bool // nil = every user saves
+	meter    Meter                                            // nil = no tier check, cap or call log
+	cap      int                                              // model calls per user per month; 0 = no cap
+	limit    *minuteLimit
+	timeout  time.Duration
+	log      *slog.Logger
+	now      func() time.Time
+	calls    *callSet // model calls in flight, by the draft the stop button belongs to
 
 	// LogBodies logs each call's request (lists, date, the user's text) and the model's raw
 	// answer. It writes the user's own words to the log: debug only (LLM_LOG_BODIES).
@@ -69,7 +69,7 @@ type Bot struct {
 
 func New(send Sender, lists ListSource, router *llm.Router, perMinute int, timeout time.Duration, log *slog.Logger) *Bot {
 	return &Bot{send: send, lists: lists, router: router, cards: newMemCards(2000), limit: newMinuteLimit(perMinute),
-		timeout: timeout, log: log, now: time.Now, calls: newCallSet()}
+		timeout: timeout, log: log, now: time.Now, calls: newCallSet(), apiTiers: []string{TierOwner}}
 }
 
 // callSet holds the cancel of each model call in flight, so the stop button can end one.
@@ -106,7 +106,19 @@ func (b *Bot) Stop(chatID, draftID int64) {
 // Nothing is written before ✓. The fake provider never writes.
 func (b *Bot) WithSaver(s Saver) { b.saver = s }
 
-func (b *Bot) saves() bool { return b.saver != nil && !b.router.Fake() }
+// WithAPITiers sets the tiers that may use the chatbot with the real API (default: owner).
+func (b *Bot) WithAPITiers(tiers []string) { b.apiTiers = tiers }
+
+// WithSaveGate limits real saving to the users it accepts; everyone else stays in trial (cards only).
+// Without a gate every user saves.
+func (b *Bot) WithSaveGate(g func(ctx context.Context, userID uuid.UUID) bool) { b.saveGate = g }
+
+func (b *Bot) saves(ctx context.Context, userID uuid.UUID) bool {
+	if b.saver == nil || b.router.Fake() {
+		return false
+	}
+	return b.saveGate == nil || b.saveGate(ctx, userID)
+}
 
 // WithMeter turns on the tier check, the monthly cap and the call log (K2). The fake provider skips all three.
 func (b *Bot) WithMeter(m Meter, monthlyCap int) { b.meter, b.cap = m, monthlyCap }
@@ -149,7 +161,7 @@ func (b *Bot) Text(ctx context.Context, userID uuid.UUID, m *telegram.Message) {
 			b.fail(ctx, tr, CodeDB, "tier", err)
 			return
 		}
-		if tier != TierOwner {
+		if !contains(b.apiTiers, tier) {
 			b.say(ctx, tr.chatID, tr.t.TierFree, tr.msgID)
 			return
 		}
@@ -221,9 +233,9 @@ func (b *Bot) fresh(ctx context.Context, tr turn, text string) {
 		b.sayFixed(ctx, tr.chatID, tr.label, tr.t.hint(out.Hint), tr.msgID)
 		return
 	}
-	c := Card{ID: newCardID(), UserID: tr.userID, ChatID: tr.chatID, Items: out.Items, State: CardOpen,
+	c := Card{ID: newCardID(), UserID: tr.userID, ChatID: tr.chatID, Items: out.Items, Unclear: out.Unclear, State: CardOpen,
 		Label: tr.label, SourceID: tr.msgID, Lang: tr.lang}
-	b.markMissing(&c)
+	b.markMissing(ctx, &c)
 	id, err := b.send.SendCard(ctx, tr.chatID, cardHTML(c, lists, b.today()), tr.msgID, buttons(c.ID, tr.t))
 	if err != nil {
 		b.log.Error("chatbot: send card failed", "chat_id", tr.chatID, "error", err)
@@ -231,25 +243,6 @@ func (b *Bot) fresh(ctx context.Context, tr turn, text string) {
 	}
 	c.MessageID = id
 	b.cards.put(&c)
-	b.sayUnclear(ctx, tr, out.Unclear)
-}
-
-// sayUnclear answers the parts of a message whose intent is not clear, after the card of the clear ones.
-func (b *Bot) sayUnclear(ctx context.Context, tr turn, parts []string) {
-	if len(parts) == 0 {
-		return
-	}
-	var named []string
-	for _, p := range parts {
-		if p != "" {
-			named = append(named, p)
-		}
-	}
-	if len(named) == 0 {
-		b.sayFixed(ctx, tr.chatID, tr.label, tr.t.Unclear, tr.msgID)
-		return
-	}
-	b.say(ctx, tr.chatID, tr.label+fmt.Sprintf(tr.t.UnclearPart, strings.Join(named, sep)), tr.msgID)
 }
 
 // edit — a Reply on a card: the card's items + the edit text → the whole card again, sent as a new
@@ -262,7 +255,7 @@ func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
 		b.say(ctx, c.ChatID, tr.t.ReplyClosed, tr.msgID)
 		return
 	}
-	lists, out, ok := b.parse(ctx, tr, text, c.Items)
+	lists, out, ok := b.parse(ctx, tr, text, append(append([]Item{}, c.Items...), unclearRows(c.Unclear)...))
 	if !ok {
 		return
 	}
@@ -272,8 +265,8 @@ func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
 		return
 	}
 	before := c
-	c.Items, c.Lang = out.Items, tr.lang
-	b.markMissing(&c)
+	c.Items, c.Unclear, c.Lang = out.Items, out.Unclear, tr.lang
+	b.markMissing(ctx, &c)
 	id, err := b.send.SendCard(ctx, c.ChatID, cardHTML(c, lists, b.today()), tr.msgID, buttons(c.ID, tr.t))
 	if err != nil {
 		b.log.Error("chatbot: send card failed", "chat_id", c.ChatID, "error", err)
@@ -285,7 +278,6 @@ func (b *Bot) edit(ctx context.Context, tr turn, c Card, text string) {
 		b.log.Error("chatbot: edit card failed", "chat_id", c.ChatID, "error", err)
 	}
 	b.react(ctx, c.ChatID, tr.msgID, reactDone)
-	b.sayUnclear(ctx, tr, out.Unclear)
 }
 
 func (b *Bot) parse(ctx context.Context, tr turn, text string, current []Item) (Lists, Outcome, bool) {
@@ -367,9 +359,6 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 		b.answer(ctx, cq.ID, textsFor(telegram.Lang("", cq.From.LanguageCode)).Handled)
 		return true
 	}
-	if strings.HasPrefix(cq.Data, cbEdit) {
-		return b.tapEdit(ctx, cq, strings.TrimPrefix(cq.Data, cbEdit))
-	}
 	state, id := CardSaved, strings.TrimPrefix(cq.Data, cbOK)
 	if strings.HasPrefix(cq.Data, cbNo) {
 		state, id = CardCancelled, strings.TrimPrefix(cq.Data, cbNo)
@@ -383,7 +372,8 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 		b.answer(ctx, cq.ID, t.Handled)
 		return true
 	}
-	if state == CardSaved && b.saves() {
+	saves := b.saves(ctx, c.UserID)
+	if state == CardSaved && saves {
 		if missing := b.missingNow(c); len(missing) > 0 { // not ready: say what is missing, the card stays open
 			b.answer(ctx, cq.ID, t.missing(missing))
 			return true
@@ -400,7 +390,7 @@ func (b *Bot) Tap(ctx context.Context, cq *telegram.CallbackQuery) bool {
 	switch {
 	case b.router.Fake():
 		done += TextFakeMark
-	case !b.saves():
+	case !saves:
 		if state == CardSaved {
 			done += t.TrialMark
 		}
@@ -454,28 +444,6 @@ func (b *Bot) expired(ctx context.Context, cq *telegram.CallbackQuery, t Texts) 
 	return true
 }
 
-// tapEdit — ✏️: opens the reply box on the user's side (a force reply with a placeholder); what they send
-// there is an edit of this card, the same as a Reply on the card.
-func (b *Bot) tapEdit(ctx context.Context, cq *telegram.CallbackQuery, id string) bool {
-	c, ok := b.cards.get(id)
-	t := textsFor(telegram.Lang(c.Lang, cq.From.LanguageCode))
-	if !ok && b.expired(ctx, cq, t) {
-		return true
-	}
-	if !b.mine(c, ok, cq) || c.State != CardOpen {
-		b.answer(ctx, cq.ID, t.Handled)
-		return true
-	}
-	b.answer(ctx, cq.ID, "")
-	prompt, err := b.send.SendForceReply(ctx, c.ChatID, t.EditPrompt, c.MessageID, t.EditPlaceholder)
-	if err != nil {
-		b.log.Error("chatbot: edit prompt failed", "chat_id", c.ChatID, "error", err)
-		return true
-	}
-	b.cards.alias(c.ChatID, prompt, c.ID)
-	return true
-}
-
 // settle is ✓ on a real card: not auto → the rows wait on the pending page; auto → they are booked
 // at once. ok false = nothing happened (an error line was sent and the card stays open). A booking that
 // only partly went through closes the card and says how many.
@@ -522,8 +490,8 @@ func (b *Bot) settleFailed(ctx context.Context, c Card, t Texts, stage string, e
 
 // markMissing runs the pending page's readiness check on the card's items before the card goes out:
 // a field that is missing shows as "[… ?]" and ✓ will not go until the user fills it by Reply.
-func (b *Bot) markMissing(c *Card) {
-	if !b.saves() {
+func (b *Bot) markMissing(ctx context.Context, c *Card) {
+	if !b.saves(ctx, c.UserID) {
 		return
 	}
 	for i, codes := range b.saver.Check(c.Items) {
@@ -612,7 +580,6 @@ func buttons(id string, t Texts) []telegram.Button {
 	return []telegram.Button{
 		{Text: t.ButtonOK, Data: cbOK + id, Style: "success"},
 		{Text: t.ButtonCancel, Data: cbNo + id, Style: "danger"},
-		{Text: t.ButtonEdit, Data: cbEdit + id},
 	}
 }
 

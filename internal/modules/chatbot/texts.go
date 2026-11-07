@@ -17,8 +17,9 @@ import (
 type Texts struct {
 	NoAmount, NotMoney, TransferWallet, TooLong, TooFast, Handled string
 	Expired                                                       string // a button of a card the bot no longer holds
-	ButtonEdit, ButtonEdited, ToastSaved, ToastQueued             string // ToastX: "%d รายการ" shown when a button is tapped
-	EditPrompt, EditPlaceholder, Stopped, ReplyClosed             string // ReplyClosed: a Reply on a card that cannot be edited any more
+	ButtonEdited, ToastSaved, ToastQueued             string // ToastX: "%d รายการ" shown when a button is tapped
+	CardUnclear, CardUnclearAny                                   string // foot of a card: "%s" = the parts that are not clear
+	Stopped, ReplyClosed                                          string // ReplyClosed: a Reply on a card that cannot be edited any more
 	Cur                                                           string // the currency sign before an amount (set from the user's currency when a card is drawn)
 	FailAI, FailServer, FailRefused, FailTrunc, Off, Thinking     string
 	Saved, Cancelled, TrialMark, ButtonOK, ButtonCancel, Edited   string
@@ -91,8 +92,9 @@ var textsTH = Texts{
 	FailAI: TextFailAI, FailServer: TextFailServer, FailRefused: TextFailRefused, FailTrunc: TextFailTrunc,
 	Off: TextOff, Thinking: TextThinking, Saved: TextSaved, Cancelled: TextCancelled, TrialMark: TextTrialMark, PartialBooked: TextPartialBooked, Queued: TextQueued, MissingFmt: TextMissing, MissingNames: missingTH,
 	ButtonOK: ButtonOK, ButtonCancel: ButtonCancel, Edited: TextEdited,
-	ButtonEdit: "✏️ แก้", ButtonEdited: "✏️ แก้แล้ว", ToastSaved: "บันทึก %d รายการแล้ว", ToastQueued: "ส่งไปรอยืนยัน %d รายการแล้ว",
-	EditPrompt: "✏️ พิมพ์ส่วนที่จะแก้ได้เลยครับ", EditPlaceholder: "เช่น ยอด 70 | เปลี่ยนเป็นกสิกร", Stopped: "⏹️ หยุดแล้วครับ", Cur: "฿",
+	ButtonEdited: "✏️ แก้แล้ว", ToastSaved: "บันทึก %d รายการแล้ว", ToastQueued: "ส่งไปรอยืนยัน %d รายการแล้ว",
+	CardUnclear: "⚠️ เจตนาไม่ชัด: %s\nReply บนการ์ดนี้เพื่อบอกให้ชัด", CardUnclearAny: "⚠️ มีบางส่วนที่เจตนาไม่ชัด\nReply บนการ์ดนี้เพื่อบอกให้ชัด",
+	Stopped: "⏹️ หยุดแล้วครับ", Cur: "฿",
 	ReplyClosed: "การ์ดนี้จบแล้ว แก้ต่อไม่ได้ครับ พิมพ์เป็นข้อความใหม่ได้เลย",
 	Items:   "%d รายการ",
 	Expense: "รายจ่าย", Income: "รายรับ", Transfer: "โอน", Today: "วันนี้", Yesterday: "เมื่อวาน", None: "ไม่ระบุ",
@@ -140,13 +142,12 @@ var textsEN = Texts{
 	MissingNames:   missingEN,
 	ButtonOK:       "✓ Confirm",
 	ButtonCancel:   "✗ Cancel",
-	ButtonEdit:     "✏️ Edit",
 	ButtonEdited:   "✏️ Edited",
 	ToastSaved:     "Saved %d items",
 	ToastQueued:    "Sent %d items to confirm",
-	EditPrompt:     "✏️ Type what to change",
-	EditPlaceholder: "e.g. amount 70 | change to Kbank",
 	Stopped:        "⏹️ Stopped.",
+	CardUnclear:    "⚠️ Not clear: %s\nReply on this card to make it clear",
+	CardUnclearAny: "⚠️ Some parts are not clear\nReply on this card to make it clear",
 	ReplyClosed:    "This card is finished and can't be edited. Send it as a new message.",
 	Cur:            "฿",
 	Edited:         "✏️ Edited, see the new card below",

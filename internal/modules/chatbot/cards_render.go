@@ -54,7 +54,37 @@ func renderCard(c Card, lists Lists, today time.Time, rich bool) string {
 			b.WriteString("\n" + esc(indent+line))
 		}
 	}
+	if len(c.Unclear) > 0 {
+		b.WriteString("\n" + separator + "\n" + esc(unclearFoot(t, c.Unclear)))
+	}
 	return b.String()
+}
+
+// unclearFoot: the line at the foot of a card for the parts the bot could not place (the user's own words).
+func unclearFoot(t Texts, parts []string) string {
+	var named []string
+	for _, p := range parts {
+		if p != "" {
+			named = append(named, p)
+		}
+	}
+	if len(named) == 0 {
+		return t.CardUnclearAny
+	}
+	return fmt.Sprintf(t.CardUnclear, strings.Join(named, sep))
+}
+
+// unclearRows are the parts the card could not place, as rows of kind unclear: sent back to the model with the
+// card, so a Reply can settle them.
+func unclearRows(parts []string) []Item {
+	var out []Item
+	for _, p := range parts {
+		p := p
+		if p != "" {
+			out = append(out, Item{Kind: KindUnclear, Description: &p})
+		}
+	}
+	return out
 }
 
 // itemTitle: the name and the signed amount of one item.

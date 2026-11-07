@@ -46,7 +46,7 @@ const TextHelp = "จดรายการด้วยการพิมพ์�
 	"โอน 5000 จากกสิกรไปเงินสด\n" +
 	"ออมเที่ยวญี่ปุ่น 2000\n" +
 	"บอยยืม 500\n\n" +
-	"บอทจะส่งการ์ดมาให้ กด ✓ เพื่อยืนยัน ✏️ เพื่อแก้ หรือ ✗ เพื่อยกเลิก\n" +
+	"บอทจะส่งการ์ดมาให้ กด ✓ เพื่อยืนยัน หรือ ✗ เพื่อยกเลิก แก้ได้โดย Reply บนการ์ดว่าจะแก้อะไร เช่น ยอด 70\n" +
 	"ส่งหลายรายการในข้อความเดียวได้ แยกด้วยบรรทัดใหม่\n\n" +
 	"/unlink ยกเลิกการเชื่อมบัญชี"
 
@@ -77,7 +77,7 @@ var textsEN = Texts{
 		"transfer 5000 from Kbank to cash\n" +
 		"save for Japan 2000\n" +
 		"Boy borrowed 500\n\n" +
-		"I'll send a card: tap ✓ to confirm, ✏️ to edit, or ✗ to cancel.\n" +
+		"I'll send a card: tap ✓ to confirm or ✗ to cancel. To change something, Reply on the card, e.g. amount 70.\n" +
 		"You can send several items in one message, one per line.\n\n" +
 		"/unlink unlinks your account",
 	About: "Log income, expenses, transfers, savings and debts in chubiPocket by typing in this chat.\n\n" +

@@ -153,15 +153,6 @@ func (f *fakeSender) SendHTML(_ context.Context, chatID int64, text string, _ in
 	return nil
 }
 
-func (f *fakeSender) SendForceReply(_ context.Context, chatID int64, text string, _ int64, placeholder string) (int64, error) {
-	f.mu.Lock()
-	f.next++
-	id := 1000 + f.next
-	f.mu.Unlock()
-	f.add(sent{kind: "force", chatID: chatID, msgID: id, text: text + "|" + placeholder})
-	return id, nil
-}
-
 func (f *fakeSender) SendCard(_ context.Context, chatID int64, text string, _ int64, b []telegram.Button) (int64, error) {
 	f.mu.Lock()
 	f.next++
@@ -218,12 +209,12 @@ func TestCardUnsureMarks(t *testing.T) {
 	}
 }
 
-// A part whose intent is not clear gets its own line after the card of the clear parts.
+// A part whose intent is not clear rides at the foot of the one card, not in a message of its own.
 func TestBotUnclearPart(t *testing.T) {
 	b, s := newTestBot(0)
 	b.Text(context.Background(), uuid.New(), text(1, "part unclear", 0))
-	if len(s.log) != 2 || s.log[0].kind != "card" || s.log[1].kind != "msg" ||
-		!strings.HasPrefix(s.log[1].text, "เจตนาไม่ชัด: unclear") {
+	if len(s.log) != 1 || s.log[0].kind != "card" ||
+		!strings.Contains(s.log[0].text, "⚠️ เจตนาไม่ชัด: unclear\nReply บนการ์ดนี้เพื่อบอกให้ชัด") {
 		t.Fatalf("log = %+v", s.log)
 	}
 }
@@ -275,7 +266,7 @@ func TestBotCardFlow(t *testing.T) {
 
 	b.Text(ctx, user, text(1, "normal tx", 0))
 	card := s.last()
-	if card.kind != "card" || card.text != "🧾 1 รายการ | วันนี้\n──────────\nnormal -฿60\nหมวด: 🏷️ อาหาร\nกระเป๋า: 👛 กสิกร" || len(card.buttons) != 3 {
+	if card.kind != "card" || card.text != "🧾 1 รายการ | วันนี้\n──────────\nnormal -฿60\nหมวด: 🏷️ อาหาร\nกระเป๋า: 👛 กสิกร" || len(card.buttons) != 2 {
 		t.Fatalf("card = %+v", card)
 	}
 
@@ -283,7 +274,7 @@ func TestBotCardFlow(t *testing.T) {
 	// buttons and points down
 	b.Text(ctx, user, text(2, "edit", card.msgID))
 	newCard, old := s.log[len(s.log)-2], s.last()
-	if newCard.kind != "card" || !strings.Contains(newCard.text, "-฿50") || len(newCard.buttons) != 3 {
+	if newCard.kind != "card" || !strings.Contains(newCard.text, "-฿50") || len(newCard.buttons) != 2 {
 		t.Fatalf("new card = %+v", newCard)
 	}
 	if old.kind != "edit" || old.msgID != card.msgID || len(old.buttons) != 1 || old.buttons[0].Data != cbDone || !strings.HasSuffix(old.text, TextEdited) {

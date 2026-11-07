@@ -25,6 +25,7 @@ type Card struct {
 	SourceID  int64  // the user's message the card answers (its reaction follows the card)
 	Lang      string // the language the card is written in (telegram.Lang)
 	Items     []Item
+	Unclear   []string // the user's words of the parts the bot could not place: shown at the foot of the card, fixed by a Reply
 	State     CardState
 	Label     string // "[keyword] " in the fake's all mode
 }
@@ -94,13 +95,6 @@ func (s *memCards) byMessage(chatID, messageID int64) (Card, bool) {
 		return Card{}, false
 	}
 	return s.get(id)
-}
-
-// alias makes a Reply on messageID count as a Reply on the card (the ✏️ prompt is one).
-func (s *memCards) alias(chatID, messageID int64, cardID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.byMsg[[2]int64{chatID, messageID}] = cardID
 }
 
 // forgetAll empties the store, the way a restart does (the fake mode's "forget cards").

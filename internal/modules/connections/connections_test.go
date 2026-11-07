@@ -110,7 +110,7 @@ func TestListAndLinkFlow(t *testing.T) {
 	if line.Available || line.Permissions[0].Available {
 		t.Errorf("line must be เร็วๆ นี้: %+v", line)
 	}
-	if p := tg.Permissions; len(p) != 4 || p[0].Key != "chat" || !p[0].Available || p[0].On || p[1].Available {
+	if p := tg.Permissions; len(p) != 5 || p[0].Key != "chat" || !p[0].Available || p[0].On || p[1].Key != "auto" || !p[1].Available || p[1].On || p[2].Available {
 		t.Errorf("telegram permissions = %+v", p)
 	}
 

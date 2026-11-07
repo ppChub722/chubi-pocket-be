@@ -264,9 +264,15 @@ func main() {
 		chat := chatbot.New(telegramWebhook.Client(), dbLists, llmRouter,
 			cfg.LLM.PerMinute, time.Duration(cfg.LLM.TimeoutSec)*time.Second, log)
 		chat.LogBodies = cfg.LLM.LogBodies
-		if cfg.LLM.Save { // off (default): the real model, cards and buttons, nothing written; ✓ says "trial, not in the app yet"
-			chat.WithSaver(chatbot.NewPendingSaver(pendingService)) // ✓ -> the pending page (or the ledger with auto submit)
+		// Apart from LLM_PROVIDER (fake = no API; anthropic = the real API, for the tiers in CHATBOT_API_TIERS, default owner,tester).
+		// CHATBOT_SAVE off (default): the model answers, cards and buttons, nothing written; ✓ says "trial, not in the app yet".
+		// CHATBOT_SAVE on: ✓ writes (pending page, or the ledger with the user's auto switch) only for the
+		// users of the tiers in CHATBOT_SAVE_TIERS (default owner,tester); other tiers stay in trial.
+		if cfg.LLM.Save {
+			chat.WithSaver(chatbot.NewPendingSaver(pendingService).WithDB(dbPool))
+			chat.WithSaveGate(chatbot.NewTierGate(dbPool, cfg.LLM.SaveTiers))
 		}
+		chat.WithAPITiers(cfg.LLM.APITiers)
 		chat.WithMeter(chatbot.NewDBMeter(dbPool), cfg.LLM.MonthlyCap) // K2: tier, monthly cap, llm_calls
 		telegramWebhook.WithChat(chat)
 		log.Info("chatbot: on", "provider", cfg.LLM.Provider, "save", cfg.LLM.Save, "log_bodies", cfg.LLM.LogBodies)

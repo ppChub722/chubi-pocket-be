@@ -68,21 +68,6 @@ func (c *Client) SendHTML(ctx context.Context, chatID int64, text string, replyT
 	return c.call(ctx, "sendMessage", body, nil)
 }
 
-// SendForceReply posts text that opens the reply box on the user's side, with a placeholder in it; the
-// message answers replyTo. It returns the new message's id.
-func (c *Client) SendForceReply(ctx context.Context, chatID int64, text string, replyTo int64, placeholder string) (int64, error) {
-	body := map[string]any{"chat_id": chatID, "text": text,
-		"reply_markup": map[string]any{"force_reply": true, "input_field_placeholder": placeholder}}
-	if replyTo > 0 {
-		body["reply_parameters"] = map[string]any{"message_id": replyTo, "allow_sending_without_reply": true}
-	}
-	var sent struct {
-		MessageID int64 `json:"message_id"`
-	}
-	err := c.call(ctx, "sendMessage", body, &sent)
-	return sent.MessageID, err
-}
-
 // SendButtons posts text with one row of inline buttons, as a reply to replyTo.
 func (c *Client) SendButtons(ctx context.Context, chatID int64, text string, replyTo int64, buttons []Button) error {
 	body := map[string]any{"chat_id": chatID, "text": text,

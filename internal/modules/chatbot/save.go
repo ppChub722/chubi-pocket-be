@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
@@ -38,7 +39,10 @@ type Saver interface {
 }
 
 // PendingSaver is the Saver over the pending service.
-type PendingSaver struct{ svc *pending.Service }
+type PendingSaver struct {
+	svc *pending.Service
+	db  *pgxpool.Pool
+}
 
 func NewPendingSaver(svc *pending.Service) *PendingSaver { return &PendingSaver{svc: svc} }
 
@@ -129,8 +133,29 @@ func (p *PendingSaver) Check(items []Item) [][]string {
 	return out
 }
 
-// Auto is off for everyone until the user setting exists (migration + app switch).
-func (p *PendingSaver) Auto(context.Context, uuid.UUID, string) bool { return false }
+// NewTierGate accepts the users whose tier is in the list (CHATBOT_SAVE_TIERS); an empty list accepts nobody.
+func NewTierGate(db *pgxpool.Pool, tiers []string) func(context.Context, uuid.UUID) bool {
+	return func(ctx context.Context, userID uuid.UUID) bool {
+		var ok bool
+		err := db.QueryRow(ctx, `SELECT tier = ANY($2) FROM users WHERE id = $1`, userID, tiers).Scan(&ok)
+		return err == nil && ok
+	}
+}
+
+// WithDB lets Auto read the user's switch (the Telegram "auto" permission); without it auto submit is off for everyone.
+func (p *PendingSaver) WithDB(db *pgxpool.Pool) *PendingSaver { p.db = db; return p }
+
+// Auto: the user's Telegram switch "auto" (the app's connection page) is on. One switch for now, so every group
+// reads it; absent = off.
+func (p *PendingSaver) Auto(ctx context.Context, userID uuid.UUID, _ string) bool {
+	if p.db == nil {
+		return false
+	}
+	var on bool
+	err := p.db.QueryRow(ctx, `SELECT COALESCE((permissions ->> 'auto')::boolean, false) FROM user_connections
+		WHERE user_id = $1 AND provider = 'telegram'`, userID).Scan(&on)
+	return err == nil && on
+}
 
 func (p *PendingSaver) Queue(ctx context.Context, userID uuid.UUID, ref SaveRef, items []Item) error {
 	_, err := p.svc.CreateFrom(ctx, userID, pending.SourceTelegram, refJSON(ref), drafts(items))

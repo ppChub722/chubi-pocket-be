@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TierOwner may use the chatbot; every other tier (free) may not yet.
+// TierOwner is the default tier allowed to use the chatbot (Bot.WithAPITiers widens it).
 const TierOwner = "owner"
 
 // Call is one model call, for the usage log. Never the user's text.

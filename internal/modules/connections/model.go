@@ -15,6 +15,8 @@ const (
 	ProviderGoogle   = "google"
 
 	PermChat = "chat"
+	// PermAutoSubmit: ✓ in the Telegram bot books straight to the ledger (off = the app's pending page).
+	PermAutoSubmit = "auto"
 
 	// logoVersion is the ?v= of every logo_url; bump it when a logo file changes.
 	logoVersion = 1
@@ -35,7 +37,7 @@ type provider struct {
 
 // providers in display order. Colours and words are the mock's (owner 2026-10-28).
 var providers = []provider{
-	{ProviderTelegram, "Telegram", "#26A5E4", []permDef{{PermChat, true}, {"ask", false}, {"slip", false}, {"notify", false}}},
+	{ProviderTelegram, "Telegram", "#26A5E4", []permDef{{PermChat, true}, {PermAutoSubmit, true}, {"ask", false}, {"slip", false}, {"notify", false}}},
 	{ProviderLine, "LINE", "#06C755", []permDef{{PermChat, false}, {"ask", false}, {"slip", false}, {"notify", false}}},
 	{ProviderGoogle, "Google", "#4285F4", []permDef{{"login", false}, {"sheets", false}, {"calendar", false}}},
 }

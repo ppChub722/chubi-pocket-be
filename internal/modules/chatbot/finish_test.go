@@ -55,29 +55,25 @@ func TestHTMLFixed(t *testing.T) {
 	}
 }
 
-// ✏️ opens a force reply; what the user sends there edits the card.
-func TestBotEditButton(t *testing.T) {
+// The card has two buttons, ✓ and ✗; an edit is a Reply on the card, and a finished card does not take one.
+func TestBotCardButtons(t *testing.T) {
 	b, s := newTestBot(0)
 	user := uuid.New()
 	ctx := context.Background()
 	b.Text(ctx, user, text(1, "normal tx", 0))
 	card := s.last()
-	if len(card.buttons) != 3 || card.buttons[0].Style != "success" || card.buttons[1].Style != "danger" {
+	if len(card.buttons) != 2 || card.buttons[0].Style != "success" || card.buttons[1].Style != "danger" {
 		t.Fatalf("buttons = %+v", card.buttons)
 	}
-	b.Tap(ctx, tap(card.buttons[2].Data, card.msgID, chat))
-	prompt := s.last()
-	if prompt.kind != "force" || !strings.HasPrefix(prompt.text, textsTH.EditPrompt) {
-		t.Fatalf("prompt = %+v", prompt)
+	b.Text(ctx, user, text(2, "edit", card.msgID))
+	newCard := s.log[len(s.log)-2]
+	if newCard.kind != "card" || !strings.Contains(newCard.text, "-฿50") {
+		t.Fatalf("edited card = %+v", newCard)
 	}
-	b.Text(ctx, user, text(2, "edit", prompt.msgID))
-	if n := s.log[len(s.log)-2]; n.kind != "card" || !strings.Contains(n.text, "-฿50") {
-		t.Fatalf("edited card = %+v", n)
-	}
-	// the old card is finished: a tap on its ✏️ says so
-	b.Tap(ctx, tap(card.buttons[2].Data, card.msgID, chat))
-	if a := s.last(); a.kind != "answer" || a.text != TextHandled {
-		t.Fatalf("✏️ on a finished card = %+v", a)
+	b.Tap(ctx, tap(newCard.buttons[0].Data, newCard.msgID, chat))
+	b.Text(ctx, user, text(3, "edit", newCard.msgID)) // a Reply on a finished card
+	if m := s.last(); m.text != textsTH.ReplyClosed {
+		t.Fatalf("reply on a finished card = %+v", m)
 	}
 	// the grey button of a finished card only answers
 	b.Tap(ctx, tap(cbDone, card.msgID, chat))
