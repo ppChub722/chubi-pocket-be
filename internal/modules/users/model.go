@@ -39,6 +39,7 @@ type Profile struct {
 }
 
 type UpdateProfileRequest struct {
+	Username                *string                `json:"username"     binding:"omitempty,min=3,max=50"`
 	DisplayName             *string                `json:"display_name" binding:"omitempty,min=1,max=100"`
 	Currency                *string                `json:"currency" binding:"omitempty,len=3,alpha"`
 	IconCode                *shared.IconCode       `json:"icon_code"    binding:"omitempty"`

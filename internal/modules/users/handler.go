@@ -61,6 +61,11 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		case errors.Is(err, ErrCurrencyLocked):
 			response.Fail(c, http.StatusConflict, apierr.CurrencyLocked,
 				"The currency can't be changed", nil)
+		case errors.Is(err, auth.ErrInvalidUsername):
+			response.ValidationErr(c, err)
+		case errors.Is(err, auth.ErrUsernameExists):
+			response.Fail(c, http.StatusConflict, apierr.UsernameExists,
+				"Username already registered", nil)
 		case errors.Is(err, ErrEmailExists):
 			response.Fail(c, http.StatusConflict, apierr.EmailExists,
 				"Email already registered", nil)

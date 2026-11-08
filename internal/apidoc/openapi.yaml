@@ -2529,7 +2529,7 @@ paths:
             "$ref": "#/components/responses/Unauthorized"
           },
           "409": {
-            "description": "CURRENCY_LOCKED (another currency than mine), AVATAR_SOURCE_UNAVAILABLE, EMAIL_EXISTS.",
+            "description": "CURRENCY_LOCKED (another currency than mine), AVATAR_SOURCE_UNAVAILABLE, EMAIL_EXISTS, USERNAME_EXISTS.",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/Error" }
@@ -9482,7 +9482,8 @@ components:
           "username": {
             "type": "string",
             "minLength": 3,
-            "maxLength": 50
+            "maxLength": 50,
+            "description": "A-Z a-z 0-9 _ - . ; a dot is never first, last or doubled; case counts. A bad value → 400 VALIDATION_ERROR."
           },
           "password": {
             "type": "string",
@@ -9744,6 +9745,12 @@ components:
     UpdateProfileRequest: {
         "type": "object",
         "properties": {
+          "username": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 50,
+            "description": "Change my @username (owner 2026-11-09). A-Z a-z 0-9 _ - . ; a dot is never first, last or doubled; case counts (\"Alice\" and \"alice\" are two names). A bad value → 400 VALIDATION_ERROR; taken → 409 USERNAME_EXISTS. No limit on how often; the old name is free at once and login with it stops."
+          },
           "currency": {
             "$ref": "#/components/schemas/CurrencyCode",
             "description": "Locked (0.4.2-3): the current currency is accepted as a no-op; any other → 409 CURRENCY_LOCKED."

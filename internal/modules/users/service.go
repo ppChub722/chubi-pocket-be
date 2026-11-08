@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -66,6 +67,9 @@ func (s *Service) GetProfile(ctx context.Context, id uuid.UUID) (*Profile, error
 }
 
 func (s *Service) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfileRequest) (*Profile, error) {
+	if req.Username != nil && !auth.ValidUsername(*req.Username) {
+		return nil, auth.ErrInvalidUsername
+	}
 	if len(req.Preferences) > 0 {
 		if k, ok := ValidatePreferenceKeys(req.Preferences); !ok {
 			return nil, fmt.Errorf("%w: %q", ErrUnknownPreferenceKey, k)

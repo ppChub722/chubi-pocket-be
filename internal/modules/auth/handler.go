@@ -31,6 +31,8 @@ func (h *Handler) Register(c *gin.Context) {
 	resp, err := h.service.Register(c.Request.Context(), req)
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrInvalidUsername):
+			response.ValidationErr(c, err)
 		case errors.Is(err, ErrUsernameExists):
 			response.Fail(c, http.StatusConflict, apierr.UsernameExists, "Username already registered", nil)
 		case errors.Is(err, ErrEmailExists):

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
@@ -106,9 +107,14 @@ func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfi
 		}
 	}
 
-	if req.DisplayName != nil || req.IconCode != nil || req.Email != nil {
+	if req.Username != nil || req.DisplayName != nil || req.IconCode != nil || req.Email != nil {
 		q := `UPDATE users SET updated_by_user_id = $1`
 		args := []any{id}
+
+		if req.Username != nil {
+			args = append(args, *req.Username)
+			q += fmt.Sprintf(", username = $%d", len(args))
+		}
 
 		if req.DisplayName != nil {
 			args = append(args, *req.DisplayName)
@@ -130,9 +136,13 @@ func (s *Store) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdateProfi
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "23505" &&
-				strings.Contains(pgErr.ConstraintName, "email") {
-				return ErrEmailExists
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				if strings.Contains(pgErr.ConstraintName, "username") {
+					return auth.ErrUsernameExists
+				}
+				if strings.Contains(pgErr.ConstraintName, "email") {
+					return ErrEmailExists
+				}
 			}
 			return fmt.Errorf("update users: %w", err)
 		}

@@ -32,6 +32,9 @@ var ErrWrongPassword = errors.New("current password is incorrect")
 var ErrSamePassword = apierr.Invalid("new password must differ from current", "new_password", apierr.FieldInvalid)
 
 func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthResponse, error) {
+	if !ValidUsername(req.Username) {
+		return nil, ErrInvalidUsername
+	}
 	hash, err := utils.HashPassword(req.Password)
 	if err != nil {
 		return nil, err
@@ -173,10 +176,10 @@ func (s *Service) CreateExternalUserTx(ctx context.Context, tx pgx.Tx, in Extern
 	return user.ID, nil
 }
 
-// UsernameTaken — for the sign-up suggestion.
+// UsernameTaken — for the sign-up suggestion (exact match: "Alice" and "alice" are two names).
 func (s *Service) UsernameTaken(ctx context.Context, username string) (bool, error) {
 	var taken bool
-	err := s.store.Pool().QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE LOWER(username) = LOWER($1))`,
+	err := s.store.Pool().QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE username = $1)`,
 		username).Scan(&taken)
 	return taken, err
 }
