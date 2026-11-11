@@ -9509,7 +9509,7 @@ components:
           "language": {
             "type": "string",
             "maxLength": 16,
-            "description": "The app language at sign-up (th | en; th-TH / en_US also fine). Picks the language of the starter categories' names and descriptions; anything else or absent = en. Not stored and not changed afterwards."
+            "description": "The app language at sign-up (th | en; th-TH / en_US also fine). Picks the language of the starter categories' names and descriptions; anything else or absent = en. Not stored here; the saved app language is preferences.language, and PUT /users/me with a new preferences.language rewrites the starter categories' names and descriptions into it (only those the user has not edited; one that would clash with a sibling's name is skipped)."
           }
         },
         "required": [

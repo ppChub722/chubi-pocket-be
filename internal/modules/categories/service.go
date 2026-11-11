@@ -439,3 +439,13 @@ func (s *Service) decorateOne(ctx context.Context, userID uuid.UUID, c *Category
 	*c = out[0]
 	return c, nil
 }
+
+// Relocalize — the user changed the app language: their untouched starter categories follow it.
+func (s *Service) Relocalize(ctx context.Context, userID uuid.UUID, lang string) error {
+	return s.store.Relocalize(ctx, userID, lang)
+}
+
+// BackfillSeedKeys — one start-up pass keying starter rows seeded before seed_key existed.
+func (s *Service) BackfillSeedKeys(ctx context.Context) (int, error) {
+	return s.store.BackfillSeedKeys(ctx)
+}

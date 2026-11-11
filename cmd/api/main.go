@@ -214,6 +214,12 @@ func main() {
 		return nil
 	}
 	usersService.WithFeeCategoryCheck(isExpenseCategory)
+	usersService.WithLanguageChange(categoriesService.Relocalize)
+	if n, err := categoriesService.BackfillSeedKeys(context.Background()); err != nil {
+		log.Error("backfill category seed keys", "err", err)
+	} else if n > 0 {
+		log.Info("backfilled category seed keys", "rows", n)
+	}
 	importsHandler.WithDraftContext(func(ctx context.Context, userID uuid.UUID) (imports.DraftContext, error) {
 		var dc imports.DraftContext
 		accs, err := accountsService.List(ctx, userID, accounts.StatusActive, "")

@@ -371,9 +371,9 @@ func (s *Store) SeedForUserLangTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 		INSERT INTO categories
 			(id, user_id, name, type, parent_id, is_system, system_kind,
 			 icon_code, sort_order, include_in_report, description,
-			created_by_user_id)
+			created_by_user_id, seed_key)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11,
-			$12)`
+			$12, $13)`
 
 	systemSortByType := map[string]int{"income": 0, "expense": 0}
 	for _, sc := range systemCatalog {
@@ -390,6 +390,7 @@ func (s *Store) SeedForUserLangTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 			id, userID, sc.Name, sc.Type, nil, true, kind,
 			iconJSON, systemSortByType[sc.Type], sc.IncludeInReport, nil,
 			nil, // created_by_user_id = NULL (system row)
+			nil, // seed_key: a system row is keyed by system_kind
 		)
 		if err != nil {
 			return fmt.Errorf("seed system %s: %w", sc.Kind, err)
@@ -408,12 +409,12 @@ func (s *Store) SeedForUserLangTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 			return fmt.Errorf("marshal icon_code: %w", err)
 		}
 		_, err = tx.Exec(ctx, insertCategory,
-			rootID, userID, pick(lang, root.Name, root.NameTH), "expense", nil, false, nil,
+			rootID, userID, root.Name.In(lang), "expense", nil, false, nil,
 			rootIconJSON, rootSortExpense, true, nil,
-			userID,
+			userID, root.Key,
 		)
 		if err != nil {
-			return fmt.Errorf("seed root %s: %w", root.Name, err)
+			return fmt.Errorf("seed root %s: %w", root.Key, err)
 		}
 		rootSortExpense++
 
@@ -427,12 +428,12 @@ func (s *Store) SeedForUserLangTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 				return fmt.Errorf("marshal icon_code: %w", err)
 			}
 			_, err = tx.Exec(ctx, insertCategory,
-				childID, userID, pick(lang, child.Name, child.NameTH), "expense", rootID, false, nil,
-				childIconJSON, ci, child.IncludeInReport, pick(lang, child.Description, child.DescriptionTH),
-				userID,
+				childID, userID, child.Name.In(lang), "expense", rootID, false, nil,
+				childIconJSON, ci, child.IncludeInReport, child.Description.In(lang),
+				userID, child.Key,
 			)
 			if err != nil {
-				return fmt.Errorf("seed child %s/%s: %w", root.Name, child.Name, err)
+				return fmt.Errorf("seed child %s/%s: %w", root.Key, child.Key, err)
 			}
 		}
 	}
@@ -448,12 +449,12 @@ func (s *Store) SeedForUserLangTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 			return fmt.Errorf("marshal icon_code: %w", err)
 		}
 		_, err = tx.Exec(ctx, insertCategory,
-			id, userID, pick(lang, in.Name, in.NameTH), "income", nil, false, nil,
-			iconJSON, incomeSort, in.IncludeInReport, pick(lang, in.Description, in.DescriptionTH),
-			userID,
+			id, userID, in.Name.In(lang), "income", nil, false, nil,
+			iconJSON, incomeSort, in.IncludeInReport, in.Description.In(lang),
+			userID, in.Key,
 		)
 		if err != nil {
-			return fmt.Errorf("seed income %s: %w", in.Name, err)
+			return fmt.Errorf("seed income %s: %w", in.Key, err)
 		}
 		incomeSort++
 	}

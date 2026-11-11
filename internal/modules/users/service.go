@@ -18,6 +18,14 @@ import (
 type Service struct {
 	store            *Store
 	feeCategoryCheck func(ctx context.Context, userID, categoryID uuid.UUID) error
+	onLanguageChange func(ctx context.Context, userID uuid.UUID, lang string) error
+}
+
+// WithLanguageChange registers what runs after the user saves a new app language (the starter
+// categories follow it). It runs once the preference is saved; an error is returned to the caller,
+// and saving the same language again repeats it.
+func (s *Service) WithLanguageChange(fn func(ctx context.Context, userID uuid.UUID, lang string) error) {
+	s.onLanguageChange = fn
 }
 
 func (s *Service) WithFeeCategoryCheck(fn func(ctx context.Context, userID, categoryID uuid.UUID) error) {
@@ -137,6 +145,12 @@ func (s *Service) UpdateProfile(ctx context.Context, id uuid.UUID, req UpdatePro
 	}
 	if err := s.store.UpdateProfile(ctx, id, req); err != nil {
 		return nil, err
+	}
+	if v, ok := req.Preferences[PrefLanguage]; ok && v != nil && s.onLanguageChange != nil {
+		lang, _ := v.(string)
+		if err := s.onLanguageChange(ctx, id, lang); err != nil {
+			return nil, fmt.Errorf("follow language %q: %w", lang, err)
+		}
 	}
 	return s.store.GetProfile(ctx, id)
 }
