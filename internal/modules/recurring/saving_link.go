@@ -24,8 +24,8 @@ func checkSavingTx(ctx context.Context, q rowQuerier, userID uuid.UUID, account,
 	if account == nil {
 		return ErrSavingNeedsWallet
 	}
-	var tracked bool
-	if err := q.QueryRow(ctx, `SELECT track_balance FROM accounts WHERE id = $1`, *account).Scan(&tracked); err != nil {
+	var tracked, autoSave bool
+	if err := q.QueryRow(ctx, `SELECT track_balance, auto_save FROM accounts WHERE id = $1`, *account).Scan(&tracked, &autoSave); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrAccountNotFound
 		}
@@ -35,6 +35,10 @@ func checkSavingTx(ctx context.Context, q rowQuerier, userID uuid.UUID, account,
 		return saving_goals.ErrWalletNotTracked
 	}
 	if goal == nil {
+		// A savings wallet books no unallocated saving: only a goal allocation.
+		if autoSave {
+			return saving_goals.ErrAutoSaveWallet
+		}
 		return nil
 	}
 	var status string

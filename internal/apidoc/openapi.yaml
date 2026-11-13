@@ -7998,9 +7998,13 @@ components:
             "type": "boolean",
             "description": "\"ติดตามยอดเงิน\" (owner 2026-10-12). false = the app shows no balance for it (list / pickers / hero), it is left out of every total / net worth and can't be adjusted; transfers still work and its transactions still count in income / expense reports. `balance` is still the running sum."
           },
+          "auto_save": {
+            "type": "boolean",
+            "description": "A savings wallet (owner 2026-11-13): the WHOLE balance counts as saved. Goals still hold their part; the rest is the unallocated saving, derived from the balance (money in raises it, money out lowers it, nothing is booked per transaction). Only a tracked, non-card wallet without other members can be one."
+          },
           "savings": {
             "$ref": "#/components/schemas/WalletSavings",
-            "description": "The caller's saving buckets in this wallet (saved / available / the red over-balance flag)."
+            "description": "The caller's saving buckets in this wallet (saved / available / the red over-balance flag). Never set the red flag on a credit_card / pay_later wallet."
           },
           "month_in": { "$ref": "#/components/schemas/Money", "description": "This month's cash IN on the wallet (income rows of every author; transfers and opening / adjustment rows are not money in / out), up to today. On a credit card / pay-later wallet the transfers IN count too: they are the payments of the card. Month = the user's timezone." },
           "month_out": { "$ref": "#/components/schemas/Money", "description": "This month's cash OUT (expense rows)." },
@@ -8034,6 +8038,7 @@ components:
           "my_report_scope",
           "can_edit",
           "track_balance",
+          "auto_save",
           "savings",
           "month_in", "month_out", "due_date_next", "days_until_due", "credit_used_pct", "credit_available",
           "created_at",
@@ -8266,6 +8271,25 @@ components:
             "type": "boolean",
             "description": "Default true. false = a wallet without a balance (no opening balance asked)."
           },
+          "report_scope": {
+            "type": "string",
+            "enum": [
+              "none",
+              "own",
+              "all"
+            ],
+            "description": "The creator's own report scope (as PUT /accounts/{id}/report-scope). Default all."
+          },
+          "invite_contact_ids": {
+            "type": "array",
+            "maxItems": 50,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Linked contacts invited in the same transaction (as POST /accounts/{id}/members per contact). Any bad contact fails the whole create: 404 CONTACT_NOT_FOUND, 409 CONTACT_ARCHIVED, 422 CONTACT_NOT_LINKED, 409 USER_ALREADY_MEMBER (a contact linked to the caller)."
+          },
           "icon_code": {
             "oneOf": [
               {
@@ -8439,6 +8463,10 @@ components:
           "track_balance": {
             "type": "boolean",
             "description": "Turn \"ติดตามยอดเงิน\" off / on."
+          },
+          "auto_save": {
+            "type": "boolean",
+            "description": "Turn the savings wallet on / off (only the owner). On: the wallet's booked unallocated saving is cleared (a withdrawal entry) and the whole balance counts as saved. Off: goal allocations stay, the unallocated part is available again. 400 VALIDATION_ERROR when the wallet is untracked, a credit_card / pay_later, or has other members (invites are refused while it is on)."
           },
           "current_balance": {
             "type": "number",

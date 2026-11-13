@@ -131,6 +131,8 @@ func mapError(c *gin.Context, err error) {
 		response.BadRequest(c, apierr.WalletNotTracked, err.Error(), nil)
 	case errors.Is(err, ErrGoalNotActive):
 		response.Fail(c, http.StatusConflict, apierr.GoalNotActive, err.Error(), nil)
+	case errors.Is(err, ErrAutoSaveWallet):
+		response.Fail(c, http.StatusConflict, apierr.InvalidTransition, err.Error(), nil)
 	case errors.Is(err, ErrGoalHasSavings):
 		response.Fail(c, http.StatusConflict, apierr.GoalHasSavings, err.Error(), nil)
 	case errors.Is(err, ErrInvalidTransition):

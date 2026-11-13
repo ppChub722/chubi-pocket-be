@@ -33,7 +33,7 @@ var (
 const accountColumns = `id, user_id, name, type, balance, currency, icon_code, logo_url,
 	description, note, status,
 	credit_limit, statement_date, payment_due_date, minimum_payment,
-	sort_order, created_at, updated_at, identifiers, track_balance`
+	sort_order, created_at, updated_at, identifiers, track_balance, auto_save`
 
 // accountReadColumns is the same list for a read from `accounts a`: `balance`
 // is the wallet's balance as of the caller's today (future transactions are
@@ -42,7 +42,7 @@ func accountReadColumns(userParam string) string {
 	return `a.id, a.user_id, a.name, a.type, ` + shared.EffectiveBalanceSQL("a.balance", "a.id", userParam) + `, a.currency, a.icon_code, a.logo_url,
 	a.description, a.note, a.status,
 	a.credit_limit, a.statement_date, a.payment_due_date, a.minimum_payment,
-	a.sort_order, a.created_at, a.updated_at, a.identifiers, a.track_balance`
+	a.sort_order, a.created_at, a.updated_at, a.identifiers, a.track_balance, a.auto_save`
 }
 
 func scanAccount(row pgx.Row) (*Account, error) {
@@ -52,7 +52,7 @@ func scanAccount(row pgx.Row) (*Account, error) {
 		&a.ID, &a.UserID, &a.Name, &a.Type, &a.Balance, &a.Currency, &iconBytes, &a.LogoURL,
 		&a.Description, &a.Note, &a.Status,
 		&a.CreditLimit, &a.StatementDate, &a.PaymentDueDate, &a.MinimumPayment,
-		&a.SortOrder, &a.CreatedAt, &a.UpdatedAt, &identifiersBytes, &a.TrackBalance,
+		&a.SortOrder, &a.CreatedAt, &a.UpdatedAt, &identifiersBytes, &a.TrackBalance, &a.AutoSave,
 	)
 	if err != nil {
 		return nil, err

@@ -269,6 +269,9 @@ func (s *Service) Close(ctx context.Context, userID, id uuid.UUID, r CloseReques
 			FromGoalID: &g.ID, ToBucket: BucketAvailable, Amount: round2(amt), Date: today, Source: SourceManual}
 		if r.To == BucketSpare {
 			e.Kind, e.ToBucket = KindMove, BucketSpare
+			if err := adaptToSavingsWallet(ctx, tx, e); err != nil {
+				return nil, err
+			}
 		}
 		if err := s.store.insertEntry(ctx, tx, e); err != nil {
 			return nil, err
@@ -414,6 +417,15 @@ func (s *Service) createEntriesTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 				return nil, nil, nil, err
 			}
 			walletID = *r.WalletID
+			if r.GoalID == nil {
+				on, err := shared.IsAutoSaveWallet(ctx, tx, walletID)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				if on {
+					return nil, nil, nil, ErrAutoSaveWallet
+				}
+			}
 		}
 		if err := s.checkGoalTarget(ctx, tx, userID, r.GoalID); err != nil {
 			return nil, nil, nil, err
@@ -444,6 +456,18 @@ func (s *Service) createEntriesTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		if r.Kind == KindMove && r.GoalID == nil {
+			// A savings wallet's unallocated part can be allocated to a goal (booked as a save, below).
+			auto, err := shared.LoadAutoSaveWallets(ctx, tx, userID)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			for id, w := range auto {
+				if w.Spare > 0.004 {
+					per[id] = w.Spare
+				}
+			}
+		}
 		splits, err := splitsFor(per, r.Amount, r.Splits)
 		if err != nil {
 			return nil, nil, nil, err
@@ -462,6 +486,9 @@ func (s *Service) createEntriesTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 	}
 	var ids, wallets []uuid.UUID
 	for _, e := range rows {
+		if err := adaptToSavingsWallet(ctx, tx, e); err != nil {
+			return nil, nil, nil, err
+		}
 		if err := s.store.insertEntry(ctx, tx, e); err != nil {
 			return nil, nil, nil, err
 		}
@@ -471,6 +498,27 @@ func (s *Service) createEntriesTx(ctx context.Context, tx pgx.Tx, userID uuid.UU
 		}
 	}
 	return ids, goals, wallets, nil
+}
+
+// adaptToSavingsWallet books a move on a savings wallet (accounts.auto_save) without a spare bucket,
+// which is derived there: spare → goal is a save from the wallet, goal → spare is a withdrawal.
+func adaptToSavingsWallet(ctx context.Context, q shared.Querier, e *entryRow) error {
+	if e.AccountID == uuid.Nil || e.Kind != KindMove {
+		return nil
+	}
+	if e.FromBucket != BucketSpare && e.ToBucket != BucketSpare {
+		return nil
+	}
+	on, err := shared.IsAutoSaveWallet(ctx, q, e.AccountID)
+	if err != nil || !on {
+		return err
+	}
+	if e.FromBucket == BucketSpare {
+		e.Kind, e.FromBucket = KindSave, BucketAvailable
+	} else {
+		e.Kind, e.ToBucket, e.ToGoalID = KindWithdraw, BucketAvailable, nil
+	}
+	return nil
 }
 
 func (s *Service) CreateEntry(ctx context.Context, userID uuid.UUID, r EntryRequest) (*WriteResult, error) {

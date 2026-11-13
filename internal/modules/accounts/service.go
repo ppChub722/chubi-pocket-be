@@ -250,6 +250,14 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 	if err != nil {
 		return nil, err
 	}
+	invitees, err := s.createInviteTargets(ctx, userID, req.InviteContactIDs)
+	if err != nil {
+		return nil, err
+	}
+	scope := ReportScopeAll
+	if req.ReportScope != nil {
+		scope = *req.ReportScope
+	}
 
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
@@ -280,9 +288,14 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 
 	now := time.Now()
 	if _, err := s.store.InsertMemberTx(ctx, tx,
-		created.ID, userID, MemberRoleOwner, ReportScopeAll, &now, userID,
+		created.ID, userID, MemberRoleOwner, scope, &now, userID,
 	); err != nil {
 		return nil, err
+	}
+	for _, target := range invitees {
+		if _, err := s.inviteTx(ctx, tx, userID, created.ID, created.Name, target); err != nil {
+			return nil, err
+		}
 	}
 
 	// Opening balance auto-transaction (none for a wallet without a balance)
@@ -350,8 +363,17 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		return nil, ErrCurrentBalanceAlone
 	}
 
+	if err := s.checkAutoSave(ctx, userID, current, req, effectiveType); err != nil {
+		return nil, err
+	}
+
 	if _, err := s.store.Update(ctx, userID, id, req, clearCreditFields); err != nil {
 		return nil, err
+	}
+	if req.AutoSave != nil && *req.AutoSave != current.AutoSave {
+		if err := s.store.SetAutoSave(ctx, userID, id, *req.AutoSave); err != nil {
+			return nil, err
+		}
 	}
 	if req.CurrentBalance != nil {
 		if _, err := s.AdjustBalance(ctx, userID, id, AdjustBalanceRequest{NewBalance: req.CurrentBalance}); err != nil &&

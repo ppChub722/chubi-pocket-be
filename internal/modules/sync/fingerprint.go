@@ -172,6 +172,9 @@ var sources = map[string][]source{
 		ts(`saving_entries x WHERE x.user_id = $1`),
 		// a goal's month plan comes from its recurring saving settings
 		ts(`recurring_rules x WHERE x.user_id = $1 AND x.type = 'saving'`),
+		// a savings wallet's unallocated part is derived from its balance
+		ts(`accounts x WHERE x.user_id = $1`),
+		ts(`transactions x WHERE x.account_id IN (SELECT a.id FROM accounts a WHERE a.user_id = $1 AND a.auto_save)`),
 	},
 	Pending: {
 		ts(`pending_transactions x WHERE x.user_id = $1`),

@@ -63,34 +63,8 @@ func (s *Service) InviteMember(
 	}
 	defer tx.Rollback(ctx)
 
-	member, err := s.store.InsertMemberTx(ctx, tx,
-		accountID, *targetID, MemberRoleMember, ReportScopeNone, nil, callerUserID,
-	)
+	member, err := s.inviteTx(ctx, tx, callerUserID, accountID, a.Name, *targetID)
 	if err != nil {
-		return nil, err
-	}
-
-	// The invitee's auto-accept switch (F2): joined at once, the notice (if not muted) already answered.
-	d, err := s.notifs.DeliveryFor(ctx, tx, *targetID, &callerUserID, notifications.TypeAccountInvite)
-	if err != nil {
-		return nil, err
-	}
-	if d.AcceptRequest {
-		if member, err = s.joinTx(ctx, tx, member, *targetID); err != nil {
-			return nil, err
-		}
-	}
-
-	var inviterName string
-	_ = tx.QueryRow(ctx, `SELECT display_name FROM users WHERE id = $1`, callerUserID).Scan(&inviterName)
-	if err := s.notifs.DispatchAccountInvite(ctx, tx, *targetID, callerUserID,
-		notifications.AccountInvitePayload{
-			AccountMemberID:    member.ID,
-			AccountID:          accountID,
-			AccountName:        a.Name,
-			InviterUserID:      callerUserID,
-			InviterDisplayName: inviterName,
-		}, d.AcceptRequest); err != nil {
 		return nil, err
 	}
 
@@ -98,6 +72,81 @@ func (s *Service) InviteMember(
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return member, nil
+}
+
+// inviteTx adds a pending member and sends the invite; shared by
+// InviteMember and Create (invite_contact_ids).
+func (s *Service) inviteTx(
+	ctx context.Context, tx pgx.Tx, callerUserID, accountID uuid.UUID, accountName string, targetID uuid.UUID,
+) (*AccountMember, error) {
+	var autoSave bool
+	if err := tx.QueryRow(ctx, `SELECT auto_save FROM accounts WHERE id = $1`, accountID).Scan(&autoSave); err != nil {
+		return nil, fmt.Errorf("read auto_save: %w", err)
+	}
+	if autoSave {
+		return nil, ErrSharedAutoSave
+	}
+	member, err := s.store.InsertMemberTx(ctx, tx,
+		accountID, targetID, MemberRoleMember, ReportScopeNone, nil, callerUserID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// The invitee's auto-accept switch (F2): joined at once, the notice (if not muted) already answered.
+	d, err := s.notifs.DeliveryFor(ctx, tx, targetID, &callerUserID, notifications.TypeAccountInvite)
+	if err != nil {
+		return nil, err
+	}
+	if d.AcceptRequest {
+		if member, err = s.joinTx(ctx, tx, member, targetID); err != nil {
+			return nil, err
+		}
+	}
+
+	var inviterName string
+	_ = tx.QueryRow(ctx, `SELECT display_name FROM users WHERE id = $1`, callerUserID).Scan(&inviterName)
+	if err := s.notifs.DispatchAccountInvite(ctx, tx, targetID, callerUserID,
+		notifications.AccountInvitePayload{
+			AccountMemberID:    member.ID,
+			AccountID:          accountID,
+			AccountName:        accountName,
+			InviterUserID:      callerUserID,
+			InviterDisplayName: inviterName,
+		}, d.AcceptRequest); err != nil {
+		return nil, err
+	}
+	return member, nil
+}
+
+// createInviteTargets resolves invite_contact_ids to user ids before the
+// create starts: one bad contact fails the whole create.
+func (s *Service) createInviteTargets(
+	ctx context.Context, callerUserID uuid.UUID, contactIDs []uuid.UUID,
+) ([]uuid.UUID, error) {
+	if len(contactIDs) == 0 {
+		return nil, nil
+	}
+	if s.notifs == nil {
+		return nil, errors.New("notifications module not wired")
+	}
+	seen := map[uuid.UUID]bool{}
+	var targets []uuid.UUID
+	for _, cid := range contactIDs {
+		target, err := s.inviteTarget(ctx, callerUserID, InviteMemberRequest{ContactID: &cid})
+		if err != nil {
+			return nil, err
+		}
+		if *target == callerUserID {
+			return nil, ErrAlreadyMember
+		}
+		// Two contacts linked to one person: one invite.
+		if !seen[*target] {
+			seen[*target] = true
+			targets = append(targets, *target)
+		}
+	}
+	return targets, nil
 }
 
 func (s *Service) inviteTarget(

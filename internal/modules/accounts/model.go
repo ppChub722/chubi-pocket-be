@@ -63,6 +63,7 @@ type Account struct {
 	MyRole          string               `json:"my_role"`
 	CanEdit         bool                 `json:"can_edit"`
 	TrackBalance    bool                 `json:"track_balance"`
+	AutoSave        bool                 `json:"auto_save"`
 	Savings         shared.WalletSavings `json:"savings"`
 	MonthIn         float64              `json:"month_in"`
 	MonthOut        float64              `json:"month_out"`
@@ -133,6 +134,10 @@ type CreateRequest struct {
 	MinimumPayment *float64         `json:"minimum_payment"  binding:"omitempty,gte=0"`
 	Identifiers    []Identifier     `json:"identifiers"`
 	TrackBalance   *bool            `json:"track_balance"`
+	// The creator's own scope; absent = all.
+	ReportScope *string `json:"report_scope" binding:"omitempty,oneof=none own all"`
+	// Linked contacts invited in the same transaction as the create.
+	InviteContactIDs []uuid.UUID `json:"invite_contact_ids" binding:"omitempty,max=50,unique"`
 }
 
 type UpdateRequest struct {
@@ -150,6 +155,7 @@ type UpdateRequest struct {
 	Identifiers    *[]Identifier    `json:"identifiers"`
 	TrackBalance   *bool            `json:"track_balance"`
 	CurrentBalance *float64         `json:"current_balance"`
+	AutoSave       *bool            `json:"auto_save"`
 
 	iconCodePresent    bool
 	logoURLPresent     bool

@@ -268,6 +268,9 @@ func mapServiceError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusConflict, apierr.BalanceNotTracked, err.Error(), nil)
 	case errors.Is(err, ErrCurrentBalanceAlone):
 		response.ValidationErr(c, err)
+	case errors.Is(err, ErrAutoSaveNeedsTracked), errors.Is(err, ErrAutoSaveCreditType),
+		errors.Is(err, ErrAutoSaveShared), errors.Is(err, ErrSharedAutoSave):
+		response.ValidationErr(c, err)
 	default:
 		response.InternalError(c, "Account operation failed", err)
 	}

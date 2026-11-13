@@ -276,15 +276,29 @@ func (s *Service) spare(ctx context.Context, q shared.Querier, userID uuid.UUID)
 	if err != nil {
 		return Spare{}, err
 	}
-	return s.spareOf(ctx, bals)
+	auto, err := shared.LoadAutoSaveWallets(ctx, q, userID)
+	if err != nil {
+		return Spare{}, err
+	}
+	derived := map[uuid.UUID]float64{}
+	for id, w := range auto {
+		derived[id] = w.Spare
+	}
+	return s.spareOf(ctx, bals, derived)
 }
 
-// spareOf is the unallocated pool, per wallet, from balances already read.
-func (s *Service) spareOf(ctx context.Context, bals []shared.SavingBalanceRow) (Spare, error) {
+// spareOf is the unallocated pool, per wallet, from balances already read. A savings wallet
+// (auto_save: a key of auto) adds its derived unallocated part instead of any booked spare.
+func (s *Service) spareOf(ctx context.Context, bals []shared.SavingBalanceRow, auto map[uuid.UUID]float64) (Spare, error) {
 	per := map[uuid.UUID]float64{}
 	for _, b := range bals {
-		if b.Bucket == "spare" {
+		if _, savings := auto[b.AccountID]; b.Bucket == "spare" && !savings {
 			per[b.AccountID] += b.Amount
+		}
+	}
+	for id, d := range auto {
+		if d > 0.004 {
+			per[id] = d
 		}
 	}
 	by, total, err := s.shares(ctx, per)
@@ -596,11 +610,11 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, status, sortBy, mo
 	if out.Data, err = s.goalViewsWith(ctx, userID, goals, today, month, facts); err != nil {
 		return nil, err
 	}
-	if out.Spare, err = s.spareOf(ctx, facts.bals); err != nil {
+	t, autoSpare, err := shared.SavingTotalsAuto(ctx, s.store.db, userID, facts.bals)
+	if err != nil {
 		return nil, err
 	}
-	t, err := shared.SavingTotalsOf(ctx, s.store.db, userID, facts.bals)
-	if err != nil {
+	if out.Spare, err = s.spareOf(ctx, facts.bals, autoSpare); err != nil {
 		return nil, err
 	}
 	out.Summary.Currency = facts.currency

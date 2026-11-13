@@ -25,6 +25,9 @@ var (
 	ErrGoalHasSavings     = errors.New("this goal still holds money; close it first")
 	ErrInvalidTransition  = errors.New("this action doesn't apply in the goal's current state")
 	ErrInsufficientSaving = errors.New("not enough saved there")
+	// ErrAutoSaveWallet — an unallocated saving booked on a savings wallet (accounts.auto_save): its
+	// balance is already saved, so only goal allocations are booked there.
+	ErrAutoSaveWallet = errors.New("this wallet saves automatically; its balance is already saved, so only goal allocations are booked")
 	// ErrGoalReached — a recurring saving into a goal that already holds its target.
 	ErrGoalReached = errors.New("this goal already holds its target")
 )

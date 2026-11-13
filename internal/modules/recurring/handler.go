@@ -146,6 +146,8 @@ func mapError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusConflict, apierr.InsufficientSaving, err.Error(), nil)
 	case errors.Is(err, saving_goals.ErrWalletNotTracked):
 		response.BadRequest(c, apierr.WalletNotTracked, err.Error(), nil)
+	case errors.Is(err, saving_goals.ErrAutoSaveWallet):
+		response.Fail(c, http.StatusConflict, apierr.InvalidTransition, err.Error(), nil)
 	case errors.Is(err, saving_goals.ErrGoalNotFound):
 		response.NotFound(c, apierr.NotFound, "Saving goal not found")
 	case errors.Is(err, saving_goals.ErrGoalNotActive):
