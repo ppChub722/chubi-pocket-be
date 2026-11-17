@@ -29,7 +29,7 @@ type OccBulkRequest struct {
 }
 
 type OccBulkItem struct {
-	RuleID uuid.UUID `json:"rule_id"`
+	RuleID uuid.UUID `json:"recurring_rule_id"`
 	Slot   string    `json:"slot"`
 	// Amount — confirm and mark_paid (0.4.1-1 R5): the amount typed for an occurrence that has
 	// none (or overrides it).
@@ -37,7 +37,7 @@ type OccBulkItem struct {
 }
 
 type OccLeftOut struct {
-	RuleID uuid.UUID `json:"rule_id"`
+	RuleID uuid.UUID `json:"recurring_rule_id"`
 	Slot   string    `json:"slot"`
 	Reason string    `json:"reason"` // needs_amount | refused | not_found | already_recorded
 }
@@ -46,7 +46,7 @@ type OccBulkResult struct {
 	Items           []Item                 `json:"items"`
 	LeftOut         []OccLeftOut           `json:"left_out"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
-	Settings        []Recurring            `json:"settings"`
+	Settings        []ItemPage             `json:"settings"`
 	Effects         shared.Effects         `json:"effects"`
 }
 
@@ -62,7 +62,7 @@ func validateBulk(req *OccBulkRequest) ([]time.Time, error) {
 	slots := make([]time.Time, len(req.Items))
 	for i, it := range req.Items {
 		if it.RuleID == uuid.Nil {
-			return nil, apierr.Wrap(ErrValidation, fmt.Sprintf("items[%d].rule_id is required", i), apierr.Field(fmt.Sprintf("items[%d].rule_id", i), apierr.FieldRequired))
+			return nil, apierr.Wrap(ErrValidation, fmt.Sprintf("items[%d].recurring_rule_id is required", i), apierr.Field(fmt.Sprintf("items[%d].recurring_rule_id", i), apierr.FieldRequired))
 		}
 		d, err := time.Parse(dateLayout, it.Slot)
 		if err != nil {
@@ -96,7 +96,7 @@ func (s *Service) SettleOccurrences(ctx context.Context, userID uuid.UUID, req O
 	}
 	defer tx.Rollback(ctx)
 
-	out := &OccBulkResult{Items: []Item{}, LeftOut: []OccLeftOut{}, Settings: []Recurring{}}
+	out := &OccBulkResult{Items: []Item{}, LeftOut: []OccLeftOut{}, Settings: []ItemPage{}}
 	rules := map[uuid.UUID]*Rule{}
 	var touched []uuid.UUID
 	type done struct {
@@ -152,12 +152,17 @@ func (s *Service) SettleOccurrences(ctx context.Context, userID uuid.UUID, req O
 			hit = append(hit, rules[d.rule])
 		}
 	}
-	if len(hit) > 0 {
-		views, err := s.recurringViews(ctx, userID, today, hit)
+	itemSeen := map[uuid.UUID]bool{}
+	for _, r := range hit { // the items the rounds belong to (0.4.3), each once
+		if itemSeen[r.RecurringID] {
+			continue
+		}
+		itemSeen[r.RecurringID] = true
+		p, err := s.GetRecurring(ctx, userID, r.RecurringID, tz)
 		if err != nil {
 			return nil, err
 		}
-		out.Settings = append(out.Settings, views...)
+		out.Settings = append(out.Settings, *p)
 	}
 	out.Effects = s.effectsOf(ctx, userID, out.Items, nil, nil, out.AccountBalances)
 	return out, nil

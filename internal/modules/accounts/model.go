@@ -37,40 +37,43 @@ const (
 )
 
 type Account struct {
-	ID              uuid.UUID            `json:"id"`
-	UserID          uuid.UUID            `json:"-"`
-	Name            string               `json:"name"`
-	Type            string               `json:"type"`
-	Group           string               `json:"group"`
-	Balance         float64              `json:"balance"`
-	Currency        string               `json:"currency"`
-	IconCode        *shared.IconCode     `json:"icon_code"`
-	LogoURL         *string              `json:"logo_url"`
-	Description     *string              `json:"description"`
-	Note            *string              `json:"note"`
-	Status          string               `json:"status"`
-	CreditLimit     *float64             `json:"credit_limit"`
-	StatementDate   *int                 `json:"statement_date"`
-	PaymentDueDate  *int                 `json:"payment_due_date"`
-	MinimumPayment  *float64             `json:"minimum_payment"`
-	SortOrder       int                  `json:"sort_order"`
-	CreatedAt       time.Time            `json:"created_at"`
-	UpdatedAt       time.Time            `json:"updated_at"`
-	Identifiers     []Identifier         `json:"identifiers"`
-	Members         []MemberView         `json:"members"`
-	MyReportScope   string               `json:"my_report_scope"`
-	IsShared        bool                 `json:"is_shared"`
-	MyRole          string               `json:"my_role"`
-	CanEdit         bool                 `json:"can_edit"`
-	TrackBalance    bool                 `json:"track_balance"`
-	AutoSave        bool                 `json:"auto_save"`
-	Savings         shared.WalletSavings `json:"savings"`
-	MonthIn         float64              `json:"month_in"`
-	MonthOut        float64              `json:"month_out"`
-	DueDateNext     *string              `json:"due_date_next"`
-	DaysUntilDue    *int                 `json:"days_until_due"`
-	CreditUsedPct   *int                 `json:"credit_used_pct"`
-	CreditAvailable *float64             `json:"credit_available"`
+	ID             uuid.UUID        `json:"id"`
+	UserID         uuid.UUID        `json:"-"`
+	Name           string           `json:"name"`
+	Type           string           `json:"type"`
+	Group          string           `json:"group"`
+	Balance        float64          `json:"balance"`
+	Currency       string           `json:"currency"`
+	IconCode       *shared.IconCode `json:"icon_code"`
+	LogoURL        *string          `json:"logo_url"`
+	Description    *string          `json:"description"`
+	Note           *string          `json:"note"`
+	Status         string           `json:"status"`
+	CreditLimit    *float64         `json:"credit_limit"`
+	StatementDate  *int             `json:"statement_date"`
+	PaymentDueDate *int             `json:"payment_due_date"`
+	MinimumPayment *float64         `json:"minimum_payment"`
+	SortOrder      int              `json:"sort_order"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+	Identifiers    []Identifier     `json:"identifiers"`
+	Members        []MemberView     `json:"members"`
+	MyReportScope  string           `json:"my_report_scope"`
+	IsShared       bool             `json:"is_shared"`
+	MyRole         string           `json:"my_role"`
+	CanEdit        bool             `json:"can_edit"`
+	TrackBalance   bool             `json:"track_balance"`
+	AutoSave       bool             `json:"auto_save"`
+	// InstitutionID / Institution (0.4.3) — the bank / card issuer / finance company it belongs to.
+	InstitutionID   *uuid.UUID             `json:"institution_id"`
+	Institution     *shared.InstitutionRef `json:"institution"`
+	Savings         shared.WalletSavings   `json:"savings"`
+	MonthIn         float64                `json:"month_in"`
+	MonthOut        float64                `json:"month_out"`
+	DueDateNext     *string                `json:"due_date_next"`
+	DaysUntilDue    *int                   `json:"days_until_due"`
+	CreditUsedPct   *int                   `json:"credit_used_pct"`
+	CreditAvailable *float64               `json:"credit_available"`
 }
 
 type AccountMember struct {
@@ -135,7 +138,8 @@ type CreateRequest struct {
 	Identifiers    []Identifier     `json:"identifiers"`
 	TrackBalance   *bool            `json:"track_balance"`
 	// The creator's own scope; absent = all.
-	ReportScope *string `json:"report_scope" binding:"omitempty,oneof=none own all"`
+	ReportScope   *string    `json:"report_scope" binding:"omitempty,oneof=none own all"`
+	InstitutionID *uuid.UUID `json:"institution_id"`
 	// Linked contacts invited in the same transaction as the create.
 	InviteContactIDs []uuid.UUID `json:"invite_contact_ids" binding:"omitempty,max=50,unique"`
 }
@@ -156,8 +160,11 @@ type UpdateRequest struct {
 	TrackBalance   *bool            `json:"track_balance"`
 	CurrentBalance *float64         `json:"current_balance"`
 	AutoSave       *bool            `json:"auto_save"`
+	// InstitutionID — null unlinks it; absent leaves it.
+	InstitutionID *uuid.UUID `json:"institution_id"`
 
 	iconCodePresent    bool
+	institutionPresent bool
 	logoURLPresent     bool
 	descriptionPresent bool
 	notePresent        bool
@@ -176,6 +183,7 @@ func (r *UpdateRequest) UnmarshalJSON(data []byte) error {
 	_, r.logoURLPresent = probe["logo_url"]
 	_, r.descriptionPresent = probe["description"]
 	_, r.notePresent = probe["note"]
+	_, r.institutionPresent = probe["institution_id"]
 	return nil
 }
 
@@ -189,6 +197,11 @@ func (r *UpdateRequest) LogoURLChange() (*string, bool) {
 
 func (r *UpdateRequest) DescriptionChange() (*string, bool) {
 	return shared.CleanText(r.Description), r.descriptionPresent
+}
+
+// InstitutionChange — the new institution (nil = unlink) and whether the key was sent.
+func (r *UpdateRequest) InstitutionChange() (*uuid.UUID, bool) {
+	return r.InstitutionID, r.institutionPresent
 }
 
 func (r *UpdateRequest) NoteChange() (*string, bool) {

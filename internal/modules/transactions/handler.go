@@ -357,6 +357,12 @@ func MapError(c *gin.Context, err error) { mapServiceError(c, err) }
 
 func mapServiceError(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, ErrInstallmentNotCard):
+		response.ValidationErr(c, err)
+	case errors.Is(err, ErrInstallmentNeedsInstitution):
+		response.BadRequest(c, apierr.InstallmentNeedsInstitution, err.Error(), nil)
+	case errors.Is(err, ErrInstallmentInvalid):
+		response.Fail(c, http.StatusBadRequest, apierr.PlanInvalid, "Invalid installment plan", apierr.FieldsOf(err))
 	case errors.Is(err, ErrTxNotFound):
 		response.NotFound(c, apierr.NotFound, "Transaction not found")
 	case errors.Is(err, ErrAccountArchived):

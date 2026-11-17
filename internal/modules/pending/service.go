@@ -31,13 +31,13 @@ type submitErr struct {
 func (e *submitErr) Error() string { return e.msg }
 
 type Service struct {
-	store    *Store
-	txs      *transactions.Service
-	tags     *tags.Service
-	debts    *personal_debts.Service
-	projects *projects.Service
-	onSubmit SubmitHook
-	savings  *saving_goals.Service
+	store         *Store
+	txs           *transactions.Service
+	tags          *tags.Service
+	debts         *personal_debts.Service
+	projects      *projects.Service
+	onSubmit      SubmitHook
+	savings       *saving_goals.Service
 	recurringLink RecurringLink
 }
 
@@ -238,7 +238,7 @@ func (s *Service) Submit(ctx context.Context, userID uuid.UUID, req SubmitReques
 		if p.Draft.RecurringID != nil && txID != nil && s.recurringLink != nil {
 			if lerr := s.recurringLink(ctx, userID, *p.Draft.RecurringID, *txID); lerr != nil {
 				unlinked = true // the transaction is booked; only the link to the slot failed
-				slog.Warn("pending: recurring link failed", "rule_id", *p.Draft.RecurringID, "error", lerr)
+				slog.Warn("pending: recurring link failed", "recurring_rule_id", *p.Draft.RecurringID, "error", lerr)
 			}
 		}
 		out.Submitted = append(out.Submitted, Submitted{ID: id, Rows: rows, TransactionID: txID, Unlinked: unlinked})
@@ -415,7 +415,7 @@ func (s *Service) submitPaperTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID
 			SplitMode: p.SplitMode, People: p.People, TagIDs: p.EventTagIDs,
 		},
 		NewEvent: p.NewEvent,
-		MyBooks: &projects.ClaimInput{Pay: pay, AccountID: d.AccountID, CategoryID: d.CategoryID, TagIDs: d.TagIDs},
+		MyBooks:  &projects.ClaimInput{Pay: pay, AccountID: d.AccountID, CategoryID: d.CategoryID, TagIDs: d.TagIDs},
 	}, &eff)
 	if err != nil {
 		return uuid.Nil, err

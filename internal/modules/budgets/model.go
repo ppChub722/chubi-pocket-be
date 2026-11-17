@@ -127,8 +127,8 @@ type Period struct {
 	Status     string    `json:"status"`
 	Tone       string    `json:"tone"`
 	DaysLeft   *int      `json:"days_left"`
-	PacePct *int `json:"pace_pct"`
-	OnPace bool `json:"on_pace_to_exceed"`
+	PacePct    *int      `json:"pace_pct"`
+	OnPace     bool      `json:"on_pace_to_exceed"`
 }
 
 type Actions struct {
@@ -192,10 +192,10 @@ type Forecast struct {
 	ThisMonth              *float64 `json:"this_month"`
 	HistoryAvg             *float64 `json:"history_avg"`
 	HistoryCount           int      `json:"history_count"`
-	Available    float64  `json:"available"`
-	ProjectedEnd *float64 `json:"projected_end"`
-	DaysLeft     *int     `json:"days_left"`
-	PacePct      *int     `json:"pace_pct"`
+	Available              float64  `json:"available"`
+	ProjectedEnd           *float64 `json:"projected_end"`
+	DaysLeft               *int     `json:"days_left"`
+	PacePct                *int     `json:"pace_pct"`
 }
 
 type SourceRow struct {
@@ -243,7 +243,7 @@ type Item struct {
 	Recurring   *ItemRecurring      `json:"recurring"`
 	// RuleID / Slot name a recurring occurrence (the id of its setting and its
 	// original date); set for the รอจ่าย rows read from computed occurrences.
-	RuleID *uuid.UUID `json:"rule_id"`
+	RuleID *uuid.UUID `json:"recurring_rule_id"`
 	Slot   *string    `json:"slot"`
 	Reason string     `json:"reason"`
 }
@@ -264,12 +264,12 @@ type RecentPeriods struct {
 }
 
 type Detail struct {
-	Budget     View          `json:"budget"`
-	Forecast   Forecast      `json:"forecast"`
-	BySource   []SourceRow   `json:"by_source"`
-	ByCategory []CategoryRow `json:"by_category"`
-	Periods    RecentPeriods `json:"periods"`
-	Items      ItemList      `json:"items"`
+	Budget        View           `json:"budget"`
+	Forecast      Forecast       `json:"forecast"`
+	BySource      []SourceRow    `json:"by_source"`
+	ByCategory    []CategoryRow  `json:"by_category"`
+	Periods       RecentPeriods  `json:"periods"`
+	Items         ItemList       `json:"items"`
 	DeletePreview *DeletePreview `json:"delete_preview"`
 }
 

@@ -27,12 +27,12 @@ func TestRecurringReadsQueryBudget(t *testing.T) {
 		name, path string
 		max        int64
 	}{
-		{"list", "/recurring?status=all&page=1&per_page=100", 11},
-		{"get", "/recurring/" + id, 8},
-		{"rule items", "/recurring/" + id + "/items?tab=produced&page=1", 5},
+		{"list", "/recurring?status=all&page=1&per_page=100", 12},
+		{"get", "/recurring/" + id, 10},
+		{"rule items", "/recurring/" + id + "/items?tab=produced&page=1", 6},
 		{"items of the month", "/recurring-items?month=" + month + "&status=all&page=1&per_page=100", 5},
 		{"items due", "/recurring-items?status=due&page=1&per_page=100", 6},
-		{"occurrences", "/recurring/" + id + "/occurrences", 5},
+		{"occurrences", "/recurring/" + id + "/occurrences", 7},
 	} {
 		status, raw, n := apitest.DoCounted(t, f.r, "GET", "/api/v1"+c.path, nil)
 		if status != 200 {

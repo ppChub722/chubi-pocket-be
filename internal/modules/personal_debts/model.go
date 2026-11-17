@@ -44,9 +44,18 @@ type Entry struct {
 	DueDate           *string // YYYY-MM-DD; "กำหนดจ่าย" (0.4.0-3)
 	// DisconnectedAt (0.4.1-1 D9) — the cross-user pair was disconnected (either side).
 	DisconnectedAt *time.Time
+	// 0.4.3: an institution counterparty (PersonName = its name as display copy); the recurring item
+	// the row belongs to (null = a general debt).
+	InstitutionID *uuid.UUID
+	RecurringID   *uuid.UUID
 }
 
-func (e *Entry) Key() string { return shared.DebtKey(e.ContactID, e.PersonName) }
+func (e *Entry) Key() string {
+	if e.InstitutionID != nil {
+		return shared.InstitutionKey(*e.InstitutionID)
+	}
+	return shared.DebtKey(e.ContactID, e.PersonName)
+}
 
 func (e *Entry) Signed() float64 {
 	if e.Direction == DirectionPaid {
@@ -101,6 +110,18 @@ type DebtEntry struct {
 	Bills []DebtBillPart `json:"bills"`
 	// InSync — every part holds what its paper says now.
 	InSync *bool `json:"in_sync"`
+	// Recurring (0.4.3) — the recurring item the row belongs to (its tag "ผ่อนโทรศัพท์ 3/12"); null =
+	// a general debt.
+	Recurring *EntryRecurring `json:"recurring"`
+}
+
+// EntryRecurring — the recurring item a debt row belongs to, and the installment it ticked.
+type EntryRecurring struct {
+	ID               uuid.UUID        `json:"id"`
+	Name             string           `json:"name"`
+	IconCode         *shared.IconCode `json:"icon_code"`
+	InstallmentSeq   *int             `json:"installment_seq"`
+	InstallmentCount *int             `json:"installment_count"`
 }
 
 // DebtBillPart — one paper's part of a debt, as my book holds it, against the paper now.
@@ -133,6 +154,36 @@ type DebtPerson struct {
 	// NextDueDate — the earliest due date among the unpaid debts on the person's current side
 	// (net > 0: paid entries; net < 0: received); null when even or none has one.
 	NextDueDate *string `json:"next_due_date"`
+	// 0.4.3: person | institution (key i:); the institution; the first 3 open debts (nearest due,
+	// then the largest; the list's group shows them, "ดูทั้ง N" = entry_count); an institution's
+	// card debts (its page only, [] elsewhere).
+	Kind           string                 `json:"kind"`
+	Institution    *shared.InstitutionRef `json:"institution"`
+	EntriesPreview []EntryPreview         `json:"entries_preview"`
+	CardDebts      []CardDebt             `json:"card_debts"`
+}
+
+const (
+	KindPerson      = "person"
+	KindInstitution = "institution"
+)
+
+// EntryPreview — an open debt as the debts list shows it under its counterparty.
+type EntryPreview struct {
+	ID          uuid.UUID       `json:"id"`
+	Direction   string          `json:"direction"`
+	Amount      float64         `json:"amount"`
+	Date        string          `json:"date"`
+	DueDate     *string         `json:"due_date"`
+	Description *string         `json:"description"`
+	Recurring   *EntryRecurring `json:"recurring"`
+}
+
+// CardDebt — "หนี้บัตรเครดิต" on an institution's page: a card wallet of it, what is owed on the
+// card minus the principal of its card installments not billed yet (those show in their plans).
+type CardDebt struct {
+	Account shared.AccountRef `json:"account"`
+	Amount  float64           `json:"amount"`
 }
 
 // LastActivity — a person's latest line (a debt or a repayment), for the people list row.
@@ -158,6 +209,10 @@ type DebtTotals struct {
 	ReceivableTotal float64      `json:"receivable_total"`
 	PayableTotal    float64      `json:"payable_total"`
 	Counts          PeopleCounts `json:"counts"`
+	// PayThisMonth / ReceiveThisMonth (0.4.3) — this month's rounds of the debt items still to book:
+	// money out (I lend / pay back) and in.
+	PayThisMonth     float64 `json:"pay_this_month"`
+	ReceiveThisMonth float64 `json:"receive_this_month"`
 }
 
 // PeopleCounts — the filter chips of the debts list (people shown by default).
@@ -209,6 +264,8 @@ type StatementItem struct {
 	// lines: date, created_at, id).
 	RunningBalance float64     `json:"running_balance"`
 	Origin         *DebtOrigin `json:"origin"` // debts only (the มาจาก card); null on a repayment
+	// Recurring (0.4.3) — the recurring item the row belongs to; null = a general debt.
+	Recurring *EntryRecurring `json:"recurring"`
 }
 
 // StatementDay — one day of the statement page: the balance change of that day's lines and the
@@ -256,6 +313,10 @@ type RepaymentRequest struct {
 	PersonName  *string `json:"person_name"  binding:"omitempty,min=1,max=100"`
 	// Notify — tell the partner (the other book of a paper debt) that I paid / got paid back.
 	Notify bool `json:"notify"`
+	// RecurringID (0.4.3) — a payment of this debt item of the counterparty; MarkInstallments — the
+	// installments it ticks ([] = none; absent = the oldest open one).
+	RecurringID      *uuid.UUID `json:"recurring_id"`
+	MarkInstallments *[]int     `json:"mark_installments"`
 }
 
 // DebtPreview — POST …/entries or …/repayments with ?preview=true (the debt quick create's result
@@ -278,8 +339,9 @@ type PersonPage struct {
 	AutoSyncDebts bool `json:"auto_sync_debts"`
 	// AutoAcceptDebts — my debts auto-accept switch (0.4.1-2, owner 2026-10-28).
 	AutoAcceptDebts bool `json:"auto_accept_debts"`
-	// Recurring — the person's "หนี้" recurring settings (0.4.1-2 K13), newest first.
-	Recurring []shared.PersonRecurring `json:"recurring"`
+	// Recurrings (0.4.3) — the counterparty's recurring items (its plans, its lines), newest first;
+	// the recurring module's RecurringSummary + plan + lines.
+	Recurrings any `json:"recurrings"`
 }
 
 type EntryList struct {
@@ -330,6 +392,8 @@ type CreateEntryRequest struct {
 	MarkPaidIDs       []uuid.UUID `json:"mark_paid_ids"`
 	PersonName        *string     `json:"person_name"  binding:"omitempty,min=1,max=100"`
 	DueDate           *string     `json:"due_date"     binding:"omitempty,datetime=2006-01-02"`
+	// RecurringID (0.4.3) — the row belongs to this debt item of the counterparty.
+	RecurringID *uuid.UUID `json:"recurring_id"`
 }
 
 type UpdateEntryRequest struct {
@@ -373,6 +437,7 @@ func (r *UpdateEntryRequest) moneyChange() bool {
 }
 
 type PeopleFilter struct {
+	Section string // 0.4.3: person | institution | "" = both
 	Q       string
 	All     bool
 	Side    string // owed_to_me | i_owe

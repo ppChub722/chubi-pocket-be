@@ -92,7 +92,11 @@ func (s *Service) recordSavingTx(ctx context.Context, tx pgx.Tx, row *itemRow, w
 }
 
 func checkRuleRefsTx(ctx context.Context, q rowQuerier, userID uuid.UUID, r *Rule) error {
-	if err := checkRefsTx(ctx, q, userID, r.Type, r.AccountID, r.ToAccountID, r.CategoryID, r.TagIDs); err != nil {
+	typ := r.Type
+	if typ == typeDebt { // its category is the one of its person-paid rounds (my expense)
+		typ = "expense"
+	}
+	if err := checkRefsTx(ctx, q, userID, typ, r.AccountID, r.ToAccountID, r.CategoryID, r.TagIDs); err != nil {
 		return err
 	}
 	if r.Type == typeSaving {

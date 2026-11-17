@@ -17,13 +17,15 @@ const SchemeBOT = "bot"
 
 type Provider struct {
 	ID        uuid.UUID `json:"id"`
-	Kind      string    `json:"kind"` // bank | e_wallet | card_issuer | other
+	Kind      string    `json:"kind"` // bank | e_wallet | card_issuer | finance | store | other
 	Scheme    string    `json:"scheme"`
 	Code      string    `json:"code"`
 	NameTH    string    `json:"name_th"`
 	NameEN    string    `json:"name_en"`
 	ShortName *string   `json:"short_name"`
 	Color     *string   `json:"color"`
+	Phone     *string   `json:"phone"`
+	Website   *string   `json:"website"`
 	CreatedAt time.Time `json:"-"`
 	UpdatedAt time.Time `json:"-"`
 }
@@ -39,7 +41,7 @@ func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 
 func (s *Store) List(ctx context.Context) ([]Provider, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id, kind, scheme, code, name_th, name_en, short_name, color, created_at, updated_at
+		SELECT id, kind, scheme, code, name_th, name_en, short_name, color, phone, website, created_at, updated_at
 		FROM payment_providers
 		ORDER BY (kind <> 'bank'), scheme, code`)
 	if err != nil {
@@ -50,7 +52,7 @@ func (s *Store) List(ctx context.Context) ([]Provider, error) {
 	for rows.Next() {
 		var p Provider
 		if err := rows.Scan(&p.ID, &p.Kind, &p.Scheme, &p.Code, &p.NameTH, &p.NameEN,
-			&p.ShortName, &p.Color, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			&p.ShortName, &p.Color, &p.Phone, &p.Website, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

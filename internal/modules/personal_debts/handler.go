@@ -39,12 +39,18 @@ func (h *Handler) People(c *gin.Context) {
 	}
 	f := PeopleFilter{
 		Q: c.Query("q"), All: c.Query("all") == "true", Side: c.Query("side"), Sort: c.Query("sort"),
-		Page: atoiOr(c.Query("page"), 1), PerPage: atoiOr(c.Query("per_page"), 30),
+		Page: atoiOr(c.Query("page"), 1), PerPage: atoiOr(c.Query("per_page"), 30), Section: c.Query("section"),
 	}
 	switch f.Sort {
-	case "", "oldest", "amount", "recent":
+	case "", "oldest", "amount", "recent", "due":
 	default:
-		response.Validation(c, "sort must be oldest, amount or recent", apierr.Field("sort", apierr.FieldInvalid))
+		response.Validation(c, "sort must be oldest, amount, recent or due", apierr.Field("sort", apierr.FieldInvalid))
+		return
+	}
+	switch f.Section {
+	case "", KindPerson, KindInstitution:
+	default:
+		response.Validation(c, "section must be person or institution", apierr.Field("section", apierr.FieldInvalid))
 		return
 	}
 	switch f.Side {
@@ -339,6 +345,8 @@ func mapServiceError(c *gin.Context, err error) {
 		response.BadRequest(c, apierr.InvalidPersonKey, err.Error(), nil)
 	case errors.Is(err, ErrContactNotFound):
 		response.BadRequest(c, apierr.ContactNotFound, "Contact not found", nil)
+	case errors.Is(err, ErrInstitutionNotFound):
+		response.NotFound(c, apierr.InstitutionNotFound, "Institution not found")
 	case errors.Is(err, ErrTagsNeedWallet):
 		response.BadRequest(c, apierr.TagsNeedWallet, err.Error(), nil)
 	case errors.Is(err, ErrDueBeforeDate):

@@ -453,8 +453,8 @@ func (s *Service) entryViews(ctx context.Context, rows []*entryRow) ([]Entry, er
 		return nil, err
 	}
 	links := map[uuid.UUID]shared.RecurringItemLink{}
-	q, err := s.store.db.Query(ctx, `SELECT ri.saving_entry_id, ri.id, ri.seq, r.id, r.name, r.icon_code, r.total_count
-		FROM recurring_items ri LEFT JOIN recurring_rules r ON r.id = ri.rule_id WHERE ri.saving_entry_id = ANY($1)`, ids)
+	q, err := s.store.db.Query(ctx, `SELECT ri.saving_entry_id, ri.id, ri.seq, r.id, r.name, r.icon_code, r.total_count, r.recurring_id
+		FROM recurring_items ri LEFT JOIN recurring_rules r ON r.id = ri.recurring_rule_id WHERE ri.saving_entry_id = ANY($1)`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("entry links: %w", err)
 	}
@@ -463,6 +463,7 @@ func (s *Service) entryViews(ctx context.Context, rows []*entryRow) ([]Entry, er
 			eid, iid uuid.UUID
 			seq, tot *int32
 			rid      *uuid.UUID
+			itemID   *uuid.UUID
 			name     *string
 			icon     []byte
 			l        shared.RecurringItemLink
@@ -474,13 +475,13 @@ func (s *Service) entryViews(ctx context.Context, rows []*entryRow) ([]Entry, er
 				return &v
 			}
 		)
-		if err := q.Scan(&eid, &iid, &seq, &rid, &name, &icon, &tot); err != nil {
+		if err := q.Scan(&eid, &iid, &seq, &rid, &name, &icon, &tot, &itemID); err != nil {
 			q.Close()
 			return nil, err
 		}
 		l.ItemID, l.Seq, l.Total = iid, intOrNil(seq), intOrNil(tot)
-		if rid != nil && name != nil {
-			l.Recurring = &shared.RecurringRef{ID: *rid, Name: *name, IconCode: shared.IconFromJSON(icon)}
+		if rid != nil && name != nil && itemID != nil {
+			l.Recurring = &shared.RecurringRef{ID: *itemID, RecurringRuleID: *rid, Name: *name, IconCode: shared.IconFromJSON(icon)}
 		}
 		links[eid] = l
 	}

@@ -19,14 +19,9 @@ type Service struct {
 	store  *Store
 	txs    *transactions.Service
 	notifs *notifications.Service // optional — paper debts' notices
-	// recurringFor — the person's "หนี้" recurring settings for the person page (0.4.1-2 K13;
-	// a hook: recurring imports this module).
-	recurringFor func(ctx context.Context, userID uuid.UUID, key string) ([]shared.PersonRecurring, error)
-}
-
-// WithRecurring wires the person page's list of "หนี้" recurring settings.
-func (s *Service) WithRecurring(fn func(ctx context.Context, userID uuid.UUID, key string) ([]shared.PersonRecurring, error)) {
-	s.recurringFor = fn
+	// recurringsFor / monthFor — the recurring module's hooks (0.4.3, counterparty.go).
+	recurringsFor func(ctx context.Context, userID uuid.UUID, key string) (any, error)
+	monthFor      func(ctx context.Context, userID uuid.UUID) (pay, receive float64, err error)
 }
 
 func NewService(store *Store, txs *transactions.Service) *Service {
@@ -67,7 +62,10 @@ func (s *Service) people(ctx context.Context, userID uuid.UUID, f PeopleFilter, 
 	if err != nil {
 		return nil, err
 	}
-	totals, err := s.store.totals(ctx, s.store.db, userID)
+	if err := s.store.fillPreviews(ctx, s.store.db, userID, rows); err != nil {
+		return nil, err
+	}
+	totals, err := s.Totals(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +73,11 @@ func (s *Service) people(ctx context.Context, userID uuid.UUID, f PeopleFilter, 
 }
 
 func (s *Service) Totals(ctx context.Context, userID uuid.UUID) (DebtTotals, error) {
-	return s.store.totals(ctx, s.store.db, userID)
+	t, err := s.store.totals(ctx, s.store.db, userID)
+	if err != nil {
+		return t, err
+	}
+	return t, s.monthTotals(ctx, userID, &t)
 }
 
 func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey, cycle string, page, perPage int) (*PersonPage, error) {
@@ -88,10 +90,16 @@ func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey, cycle st
 		return nil, err
 	}
 	if !found {
-		if k.ContactID == nil || bal.Person.ContactID == nil {
+		if (k.ContactID == nil || bal.Person.ContactID == nil) && bal.Institution == nil {
 			return nil, ErrPersonNotFound
 		}
 	}
+	if bal.Institution != nil {
+		if bal.CardDebts, err = s.store.cardDebts(ctx, s.store.db, userID, bal.Institution.ID); err != nil {
+			return nil, err
+		}
+	}
+
 	page, perPage = clampPage(page, perPage, 30)
 	if cycle == "" {
 		cycle = "current" // the page shows the current cycle; earlier ones are "load more"
@@ -122,9 +130,10 @@ func (s *Service) Person(ctx context.Context, userID uuid.UUID, rawKey, cycle st
 		return nil, err
 	}
 	out := &PersonPage{DebtPerson: bal, Counts: counts, Items: items, Days: statementDays(items), SummaryMessage: msg,
-		Pagination: shared.NewPage(page, perPage, total), AutoSyncDebts: prefs.AutoSyncDebts, AutoAcceptDebts: prefs.AutoAcceptDebts, Recurring: []shared.PersonRecurring{}}
-	if s.recurringFor != nil {
-		if out.Recurring, err = s.recurringFor(ctx, userID, bal.Key); err != nil {
+		Pagination: shared.NewPage(page, perPage, total), AutoSyncDebts: prefs.AutoSyncDebts, AutoAcceptDebts: prefs.AutoAcceptDebts,
+		Recurrings: []any{}}
+	if s.recurringsFor != nil {
+		if out.Recurrings, err = s.recurringsFor(ctx, userID, bal.Key); err != nil {
 			return nil, err
 		}
 	}
@@ -175,6 +184,34 @@ func today(ctx context.Context, tx pgx.Tx) (string, error) {
 	var d string
 	err := tx.QueryRow(ctx, `SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD')`).Scan(&d)
 	return d, err
+}
+
+// counterparty — who a write's key names: a contact, a typed name, or (0.4.3) an institution
+// (InstitutionID set, Name = its name as the rows' display copy).
+type counterparty struct {
+	ContactID     *uuid.UUID
+	Name          string
+	InstitutionID *uuid.UUID
+}
+
+func resolveCounterparty(ctx context.Context, q querier, userID uuid.UUID, rawKey string, personName *string) (counterparty, error) {
+	k, err := shared.ParseDebtKey(rawKey)
+	if err != nil {
+		return counterparty{}, err
+	}
+	if k.InstitutionID != nil {
+		var name string
+		err := q.QueryRow(ctx, `SELECT name FROM institutions WHERE id = $1 AND user_id = $2`, *k.InstitutionID, userID).Scan(&name)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return counterparty{}, ErrInstitutionNotFound
+		}
+		if err != nil {
+			return counterparty{}, fmt.Errorf("institution: %w", err)
+		}
+		return counterparty{Name: name, InstitutionID: k.InstitutionID}, nil
+	}
+	cid, name, err := resolvePerson(ctx, q, userID, rawKey, personName)
+	return counterparty{ContactID: cid, Name: name}, err
 }
 
 func resolvePerson(ctx context.Context, q querier, userID uuid.UUID, rawKey string, personName *string) (*uuid.UUID, string, error) {
@@ -270,8 +307,11 @@ func (s *Service) createEntryTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID
 	if req.CreateTransaction == nil && req.AccountID == nil && req.LinkTransactionID == nil && len(req.TagIDs) > 0 {
 		return nil, nil, ErrTagsNeedWallet // the old contract, for clients that don't send create_transaction
 	}
-	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
+	cp, err := resolveCounterparty(ctx, tx, userID, rawKey, req.PersonName)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := checkRecurringTx(ctx, tx, userID, req.RecurringID, rawKey); err != nil {
 		return nil, nil, err
 	}
 	date := ""
@@ -281,10 +321,10 @@ func (s *Service) createEntryTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID
 		return nil, nil, err
 	}
 	e, wallets, err := s.insertRowTx(ctx, tx, userID, EntryInput{
-		Kind: KindDebt, Direction: req.Direction, ContactID: contactID, PersonName: name,
+		Kind: KindDebt, Direction: req.Direction, ContactID: cp.ContactID, PersonName: cp.Name, InstitutionID: cp.InstitutionID,
 		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note, DueDate: req.DueDate,
 		CreateTransaction: wantsTx(req.CreateTransaction, req.AccountID), AccountID: req.AccountID, TagIDs: req.TagIDs,
-		LinkTransactionID: req.LinkTransactionID,
+		LinkTransactionID: req.LinkTransactionID, RecurringID: req.RecurringID,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -517,9 +557,11 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 		return nil, ErrDueBeforeDate
 	}
 	if req.Key != nil {
-		if next.ContactID, next.PersonName, err = resolvePerson(ctx, tx, userID, *req.Key, req.PersonName); err != nil {
+		cp, err := resolveCounterparty(ctx, tx, userID, *req.Key, req.PersonName)
+		if err != nil {
 			return nil, err
 		}
+		next.ContactID, next.PersonName, next.InstitutionID = cp.ContactID, cp.Name, cp.InstitutionID
 	} else if req.PersonName != nil && e.ContactID == nil && strings.EqualFold(strings.TrimSpace(*req.PersonName), strings.TrimSpace(e.PersonName)) {
 		next.PersonName = strings.TrimSpace(*req.PersonName) // a respelling of the same typed name
 	}
@@ -567,9 +609,10 @@ func (s *Service) UpdateEntry(ctx context.Context, userID, id uuid.UUID, req Upd
 	if _, err := tx.Exec(ctx, `UPDATE personal_debts
 		SET direction = $2, amount = $3, date = $4::date, description = $5, note = $6, paid = $7,
 		    counterparty_contact_id = $8, counterparty_person_name = $9, updated_by_user_id = $10,
-		    due_date = $11::date
+		    due_date = $11::date, counterparty_institution_id = $12,
+		    recurring_id = CASE WHEN $13 THEN recurring_id END
 		WHERE id = $1`, e.ID, next.Direction, next.Amount, next.Date, next.Description, next.Note,
-		next.Paid, next.ContactID, next.PersonName, userID, next.DueDate); err != nil {
+		next.Paid, next.ContactID, next.PersonName, userID, next.DueDate, next.InstitutionID, next.Key() == e.Key()); err != nil {
 		return nil, fmt.Errorf("update entry: %w", err)
 	}
 
@@ -714,8 +757,11 @@ func repayDirection(kind string) string {
 }
 
 func (s *Service) createRepaymentTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, rawKey string, req RepaymentRequest) (*Entry, []uuid.UUID, error) {
-	contactID, name, err := resolvePerson(ctx, tx, userID, rawKey, req.PersonName)
+	cp, err := resolveCounterparty(ctx, tx, userID, rawKey, req.PersonName)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := checkRecurringTx(ctx, tx, userID, req.RecurringID, rawKey); err != nil {
 		return nil, nil, err
 	}
 	date := ""
@@ -725,13 +771,18 @@ func (s *Service) createRepaymentTx(ctx context.Context, tx pgx.Tx, userID uuid.
 		return nil, nil, err
 	}
 	e, wallets, err := s.insertRowTx(ctx, tx, userID, EntryInput{
-		Kind: KindRepayment, Direction: repayDirection(req.Kind), ContactID: contactID, PersonName: strings.TrimSpace(name),
-		Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note,
+		Kind: KindRepayment, Direction: repayDirection(req.Kind), ContactID: cp.ContactID, PersonName: strings.TrimSpace(cp.Name),
+		InstitutionID: cp.InstitutionID, Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note,
 		CreateTransaction: wantsTx(req.CreateTransaction, req.AccountID), AccountID: req.AccountID, TagIDs: req.TagIDs,
-		LinkTransactionID: req.LinkTransactionID,
+		LinkTransactionID: req.LinkTransactionID, RecurringID: req.RecurringID,
 	})
 	if err != nil {
 		return nil, nil, err
+	}
+	if req.RecurringID != nil { // 0.4.3: a payment of a plan item ticks its installments
+		if err := tickInstallmentsTx(ctx, tx, userID, *req.RecurringID, req.MarkInstallments, e.ID); err != nil {
+			return nil, nil, err
+		}
 	}
 	if err := markPaidTx(ctx, tx, userID, e.Key(), req.MarkPaidIDs); err != nil {
 		return nil, nil, err

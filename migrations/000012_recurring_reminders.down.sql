@@ -1,0 +1,5 @@
+DELETE FROM notifications WHERE type = 'recurring_due_soon';
+ALTER TABLE notifications DROP CONSTRAINT notifications_type_check;
+ALTER TABLE notifications ADD CONSTRAINT notifications_type_check CHECK (((type)::text = ANY (ARRAY[('contact_link_request'::character varying)::text, ('account_invite'::character varying)::text, ('project_invite'::character varying)::text, ('recurring_due'::character varying)::text, ('recurring_ending'::character varying)::text, ('recurring_auto_created'::character varying)::text, ('debt_disconnected'::character varying)::text, ('debt_repaid'::character varying)::text, ('event_completed'::character varying)::text, ('event_member_removed'::character varying)::text, ('event_deleted'::character varying)::text, ('bill_invite'::character varying)::text, ('bill_new'::character varying)::text, ('bill_changed'::character varying)::text, ('bill_removed'::character varying)::text, ('bill_owner_changed'::character varying)::text, ('bill_moved'::character varying)::text])));
+DROP TABLE IF EXISTS recurring_reminder_sends;
+DROP TABLE IF EXISTS recurring_reminders;

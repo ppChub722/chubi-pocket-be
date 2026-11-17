@@ -26,12 +26,13 @@ func NewStore(db *pgxpool.Pool) *Store {
 func (s *Store) Pool() *pgxpool.Pool { return s.db }
 
 var (
-	ErrEntryNotFound      = errors.New("debt entry not found")
-	ErrPersonNotFound     = errors.New("no entries with this person")
-	ErrContactNotFound    = errors.New("contact not found")
-	ErrTagsNeedWallet     = errors.New("tags go on the wallet transaction: pick a wallet first")
-	ErrLedgerOnlyNoWallet = errors.New("a ledger-only entry has no wallet or tags: turn create_transaction on to use them")
-	ErrMarkPaidNotFound   = errors.New("an entry to mark paid is not one of this person's")
+	ErrEntryNotFound       = errors.New("debt entry not found")
+	ErrPersonNotFound      = errors.New("no entries with this person")
+	ErrContactNotFound     = errors.New("contact not found")
+	ErrInstitutionNotFound = errors.New("institution not found")
+	ErrTagsNeedWallet      = errors.New("tags go on the wallet transaction: pick a wallet first")
+	ErrLedgerOnlyNoWallet  = errors.New("a ledger-only entry has no wallet or tags: turn create_transaction on to use them")
+	ErrMarkPaidNotFound    = errors.New("an entry to mark paid is not one of this person's")
 	// ErrManagedByTx — a paid-by debt is one record with its expense: edit or delete the transaction.
 	ErrManagedByTx   = errors.New("this debt is the paid-by part of a transaction: edit or delete the transaction instead")
 	ErrDueBeforeDate = apierr.Invalid("due_date can't be before the entry's date", "due_date", apierr.FieldOutOfRange)
@@ -67,7 +68,7 @@ const entryColumns = `id, user_id, kind, direction,
 	counterparty_contact_id, counterparty_person_name, project_id,
 	amount, currency, to_char(date, 'YYYY-MM-DD'), paid, source_kind, description, note,
 	created_at, updated_at, counterpart_debt_id, to_char(due_date, 'YYYY-MM-DD'),
-	disconnected_at`
+	disconnected_at, counterparty_institution_id, recurring_id`
 
 func scanEntry(row pgx.Row) (*Entry, error) {
 	var e Entry
@@ -76,7 +77,7 @@ func scanEntry(row pgx.Row) (*Entry, error) {
 		&e.ContactID, &e.PersonName, &e.ProjectID,
 		&e.Amount, &e.Currency, &e.Date, &e.Paid, &e.SourceKind, &e.Description, &e.Note,
 		&e.CreatedAt, &e.UpdatedAt, &e.CounterpartDebtID, &e.DueDate,
-		&e.DisconnectedAt,
+		&e.DisconnectedAt, &e.InstitutionID, &e.RecurringID,
 	)
 	return &e, err
 }
@@ -121,12 +122,12 @@ func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 	row, err := scanEntry(tx.QueryRow(ctx, `INSERT INTO personal_debts
 		(id, user_id, direction, counterparty_contact_id, counterparty_person_name, project_id,
 		 amount, currency, date, paid, source_kind, description, note,
-		 created_by_user_id, updated_by_user_id, due_date, kind)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13, $2, $2, $14::date, $15)
+		 created_by_user_id, updated_by_user_id, due_date, kind, counterparty_institution_id, recurring_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13, $2, $2, $14::date, $15, $16, $17)
 		RETURNING `+entryColumns,
 		id, e.UserID, e.Direction, e.ContactID, strings.TrimSpace(e.PersonName), e.ProjectID,
 		e.Amount, strings.ToUpper(e.Currency), e.Date, e.Paid, e.SourceKind,
-		shared.CleanText(e.Description), shared.CleanText(e.Note), e.DueDate, e.Kind))
+		shared.CleanText(e.Description), shared.CleanText(e.Note), e.DueDate, e.Kind, e.InstitutionID, e.RecurringID))
 	if err != nil {
 		return nil, fmt.Errorf("insert entry: %w", err)
 	}
@@ -154,7 +155,7 @@ func peopleSQL(keyFilter string) string {
 			SELECT e2.*, MAX(CASE WHEN ABS(run) < 0.005 THEN rn END) OVER (PARTITION BY key) AS cleared_rn
 			FROM e2
 		), g AS (
-			SELECT key, (ARRAY_AGG(cid))[1] AS cid,
+			SELECT key, (ARRAY_AGG(cid))[1] AS cid, (ARRAY_AGG(iid))[1] AS iid,
 			       (ARRAY_AGG(snap ORDER BY created_at DESC))[1] AS snap,
 			       SUM(signed) AS net,
 			       COUNT(*) FILTER (WHERE NOT paid) AS open_count,
@@ -171,8 +172,9 @@ func peopleSQL(keyFilter string) string {
 			       (ARRAY_AGG(descr ORDER BY rn DESC))[1] AS last_descr
 			FROM e3 GROUP BY key
 		)
-		SELECT g.key, g.cid, COALESCE(` + shared.PersonNameSQL("c", "lu") + `, g.snap) AS name,
+		SELECT g.key, g.cid, COALESCE(ins.name, ` + shared.PersonNameSQL("c", "lu") + `, g.snap) AS name,
 		       CASE WHEN c.id IS NOT NULL THEN ` + shared.PersonAvatarSQL("c", "lu") + ` END AS icon,
+		       g.iid, ins.kind AS ikind, ins.icon_code AS iicon,
 		       lu.id AS linked, g.net, g.open_count, g.entry_count, g.last,
 		       to_char(g.cleared, 'YYYY-MM-DD') AS cleared_at,
 		       (` + todayInUserTZ + ` - g.oldest_open) AS days_out,
@@ -181,7 +183,8 @@ func peopleSQL(keyFilter string) string {
 		               'YYYY-MM-DD') AS next_due
 		FROM g
 		LEFT JOIN contacts c ON c.id = g.cid AND c.user_id = $1
-		LEFT JOIN users lu ON lu.id = c.linked_user_id`
+		LEFT JOIN users lu ON lu.id = c.linked_user_id
+		LEFT JOIN institutions ins ON ins.id = g.iid`
 }
 
 const todayInUserTZ = `(NOW() AT TIME ZONE COALESCE(
@@ -194,7 +197,7 @@ const openSQL = `(ABS(p.net) > 0.005 OR p.open_count > 0)`
 
 // peopleCols — the columns scanPerson reads from peopleSQL (alias p).
 const peopleCols = `key, cid, name, icon, linked, net, open_count, entry_count, to_char(last, 'YYYY-MM-DD'), cleared_at, days_out,
-	first_at, last_kind, last_id, last_signed, last_descr, next_due`
+	first_at, last_kind, last_id, last_signed, last_descr, next_due, iid, ikind, iicon`
 
 func scanPerson(rows pgx.Rows) (DebtPerson, error) {
 	var (
@@ -208,15 +211,24 @@ func scanPerson(rows pgx.Rows) (DebtPerson, error) {
 		lkind  *string
 		lid    *uuid.UUID
 		signed *float64
+		iid    *uuid.UUID
+		ikind  *string
+		iicon  []byte
 	)
 	if err := rows.Scan(&p.Key, &cid, &name, &icon, &linked, &p.Net, &p.OpenCount, &p.EntryCount, &last, &p.ClearedAt, &p.DaysOutstanding,
-		&p.FirstActivityAt, &lkind, &lid, &signed, &la.Title, &p.NextDueDate); err != nil {
+		&p.FirstActivityAt, &lkind, &lid, &signed, &la.Title, &p.NextDueDate, &iid, &ikind, &iicon); err != nil {
 		return p, err
 	}
 	p.Net = round2(p.Net)
 	p.Side = shared.DebtSide(p.Net)
 	p.Person = shared.PersonRef{Name: name, ContactID: cid, Linked: linked != nil, LinkedUserID: linked,
 		Avatar: shared.AvatarFromSrc(name, icon)}
+	p.Kind, p.EntriesPreview, p.CardDebts = KindPerson, []EntryPreview{}, []CardDebt{}
+	if iid != nil && ikind != nil {
+		ic := shared.IconFromJSON(iicon)
+		p.Kind, p.Institution = KindInstitution, &shared.InstitutionRef{ID: *iid, Name: name, Kind: *ikind, IconCode: ic}
+		p.Person = shared.PersonRef{Name: name, Avatar: shared.AvatarFromIcon(name, ic)}
+	}
 	p.LastActivityAt = last
 	if lkind != nil && lid != nil && signed != nil && last != nil {
 		la.Kind, la.ID, la.SignedAmount, la.Date = *lkind, *lid, round2(*signed), *last
@@ -247,6 +259,12 @@ func (s *Store) listPeople(ctx context.Context, userID uuid.UUID, f PeopleFilter
 	if q := strings.TrimSpace(f.Q); q != "" {
 		args = append(args, "%"+shared.EscapeLike(q)+"%")
 		where = append(where, fmt.Sprintf("p.name ILIKE $%d", len(args)))
+	}
+	switch f.Section { // 0.4.3: the debts list's two sections
+	case KindInstitution:
+		where = append(where, "p.key LIKE 'i:%'")
+	case KindPerson:
+		where = append(where, "p.key NOT LIKE 'i:%'")
 	}
 	base := `SELECT ` + peopleCols + `
 		FROM (` + peopleSQL("") + `) p WHERE ` + strings.Join(where, " AND ")
@@ -323,7 +341,18 @@ func (s *Store) personBalance(ctx context.Context, q shared.Querier, userID uuid
 	if found {
 		return p, true, nil
 	}
-	p = DebtPerson{Key: key, Person: shared.PersonRef{Name: k.Name}, Side: shared.DebtSide(0)}
+	p = DebtPerson{Key: key, Person: shared.PersonRef{Name: k.Name}, Side: shared.DebtSide(0), Kind: KindPerson,
+		EntriesPreview: []EntryPreview{}, CardDebts: []CardDebt{}}
+	if k.InstitutionID != nil {
+		refs, err := shared.LoadInstitutionRefs(ctx, q, []uuid.UUID{*k.InstitutionID})
+		if err != nil {
+			return DebtPerson{}, false, err
+		}
+		if ref, ok := refs[*k.InstitutionID]; ok {
+			p.Kind, p.Institution = KindInstitution, &ref
+			p.Person = shared.PersonRef{Name: ref.Name, Avatar: shared.AvatarFromIcon(ref.Name, ref.IconCode)}
+		}
+	}
 	if k.ContactID != nil {
 		persons, err := shared.LoadPersons(ctx, q, userID, []uuid.UUID{*k.ContactID})
 		if err != nil {
@@ -351,8 +380,13 @@ const entryViewSQL = `SELECT pd.id, pd.kind, pd.direction, pd.counterparty_conta
 		CASE WHEN pd.source_kind = 'paper' THEN COALESCE(ev.name, fp.description) ELSE COALESCE(t.description, tc.name) END,
 		(CASE WHEN pd.source_kind = 'paper' THEN fp.amount ELSE t.amount END)::float8,
 		to_char(CASE WHEN pd.source_kind = 'paper' THEN fp.date ELSE t.date END, 'YYYY-MM-DD'),
-		CASE WHEN pd.source_kind = 'paper' THEN NULL ELSE t.account_id END
+		CASE WHEN pd.source_kind = 'paper' THEN NULL ELSE t.account_id END,
+		-- 0.4.3: an institution counterparty; the recurring item the row belongs to (+ its installment)
+		pd.counterparty_institution_id, pd.recurring_id, rg.name, rg.icon_code,
+		(SELECT di.seq FROM debt_installments di WHERE di.personal_debt_id = pd.id ORDER BY di.seq LIMIT 1),
+		rg.plan_count
 	FROM personal_debts pd
+	LEFT JOIN recurrings rg ON rg.id = pd.recurring_id
 	LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id
 	LEFT JOIN categories tc ON tc.id = t.category_id
 	LEFT JOIN LATERAL (SELECT b.split_transaction_id, b.transaction_id FROM personal_debt_bills b
@@ -392,14 +426,35 @@ func loadViews(ctx context.Context, q shared.Querier, tail string, args ...any) 
 			oKind     *string
 			oAccount  *uuid.UUID
 			connected bool
+			instID    *uuid.UUID
+			recID     *uuid.UUID
+			recName   *string
+			recIcon   []byte
+			recSeq    *int32
+			recCount  *int32
 		)
 		if err := rows.Scan(&v.ID, &v.Kind, &v.Direction, &cid, &name, &v.Amount, &v.Date, &v.Description, &v.Note, &v.PrivateNote,
 			&v.Paid, &kind, &sourceID, &title, &txID, &accID, &connected, &v.CreatedAt, &v.UpdatedAt, &v.DueDate, &v.PartnerLinked, &v.DisconnectedAt,
-			&oKind, &o.TransactionID, &o.PaperID, &o.EventID, &o.Title, &o.Amount, &o.Date, &oAccount); err != nil {
+			&oKind, &o.TransactionID, &o.PaperID, &o.EventID, &o.Title, &o.Amount, &o.Date, &oAccount,
+			&instID, &recID, &recName, &recIcon, &recSeq, &recCount); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("entries scan: %w", err)
 		}
 		v.Key = shared.DebtKey(cid, name)
+		if instID != nil {
+			v.Key = shared.InstitutionKey(*instID)
+		}
+		if recID != nil && recName != nil {
+			v.Recurring = &EntryRecurring{ID: *recID, Name: *recName, IconCode: shared.IconFromJSON(recIcon)}
+			if recSeq != nil {
+				n := int(*recSeq)
+				v.Recurring.InstallmentSeq = &n
+			}
+			if recCount != nil {
+				n := int(*recCount)
+				v.Recurring.InstallmentCount = &n
+			}
+		}
 		if kind != nil {
 			v.Source = &DebtSource{Kind: *kind, ID: sourceID, Title: title}
 		}
@@ -641,7 +696,7 @@ func debtItem(d DebtEntry) StatementItem {
 	it := StatementItem{
 		Kind: d.Kind, ID: d.ID, Key: d.Key, Direction: d.Direction, Amount: d.Amount, SignedAmount: signed,
 		Date: d.Date, Description: d.Description, Note: d.Note, Source: d.Source,
-		Transaction: d.Transaction, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Origin: d.Origin,
+		Transaction: d.Transaction, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Origin: d.Origin, Recurring: d.Recurring,
 	}
 	if d.Kind != KindRepayment {
 		paid := d.Paid
@@ -775,6 +830,8 @@ func round2(f float64) float64 {
 
 func peopleOrder(sort string) string {
 	switch sort {
+	case "due": // 0.4.3: nearest due first, then the largest
+		return `p.next_due ASC NULLS LAST, ABS(p.net) DESC, p.key`
 	case "amount":
 		return `ABS(p.net) DESC, p.last DESC NULLS LAST`
 	case "recent":

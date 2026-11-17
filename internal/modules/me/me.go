@@ -172,7 +172,7 @@ func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string)
 		todayStr := today.Format("2006-01-02")
 		until := today.AddDate(0, 0, upcomingDays).Format("2006-01-02")
 		if err := s.db.QueryRow(ctx, `SELECT
-		(SELECT COUNT(*) FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.rule_id
+		(SELECT COUNT(*) FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.recurring_rule_id
 		 WHERE i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
 		   AND NOT i.archived AND i.date > $2::date AND i.date <= $3::date
 		   AND r.status = 'active')`, userID, todayStr, until).Scan(

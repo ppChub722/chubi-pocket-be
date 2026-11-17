@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +14,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
@@ -29,6 +29,7 @@ type Service struct {
 	notifs  *notifications.Service
 	savings *saving_goals.Service
 	debts   *personal_debts.Service // the "หนี้" kind's person book (0.4.1-2 K)
+	papers  *projects.Service       // person-paid rounds (0.4.3)
 }
 
 func NewService(db *pgxpool.Pool, txs *transactions.Service, p *pending.Service, n *notifications.Service) *Service {
@@ -404,10 +405,10 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 		byRule[it.RuleID] = append(byRule[it.RuleID], it)
 	}
 	avg := map[uuid.UUID]float64{}
-	arows, err := s.db.Query(ctx, `SELECT i.rule_id, AVG(COALESCE(t.amount, e.amount))::float8 FROM recurring_items i
+	arows, err := s.db.Query(ctx, `SELECT i.recurring_rule_id, AVG(COALESCE(t.amount, e.amount))::float8 FROM recurring_items i
 		LEFT JOIN transactions t ON t.id = i.transaction_id
 		LEFT JOIN saving_entries e ON e.id = i.saving_entry_id
-		WHERE i.user_id = $1 AND i.rule_id = ANY($2) AND (t.id IS NOT NULL OR e.id IS NOT NULL) GROUP BY i.rule_id`, userID, ids)
+		WHERE i.user_id = $1 AND i.recurring_rule_id = ANY($2) AND (t.id IS NOT NULL OR e.id IS NOT NULL) GROUP BY i.recurring_rule_id`, userID, ids)
 	if err != nil {
 		return nil, fmt.Errorf("avg amounts: %w", err)
 	}
@@ -559,7 +560,7 @@ func (s *Service) stats(ctx context.Context, userID uuid.UUID, r *Rule, stored [
 	rows, err := s.db.Query(ctx, `SELECT COALESCE(i.slot, i.date), i.date, COALESCE(t.amount, e.amount)::float8 FROM recurring_items i
 		LEFT JOIN transactions t ON t.id = i.transaction_id
 		LEFT JOIN saving_entries e ON e.id = i.saving_entry_id
-		WHERE i.user_id = $1 AND i.rule_id = $2 AND (t.id IS NOT NULL OR e.id IS NOT NULL)
+		WHERE i.user_id = $1 AND i.recurring_rule_id = $2 AND (t.id IS NOT NULL OR e.id IS NOT NULL)
 		ORDER BY COALESCE(i.slot, i.date)`, userID, r.ID)
 	if err != nil {
 		return st, fmt.Errorf("stats: %w", err)
@@ -645,18 +646,6 @@ func (s *Service) pageOccs(ctx context.Context, userID uuid.UUID, today time.Tim
 	return &ItemList{Data: items, Pagination: shared.NewPage(page, perPage, total)}, nil
 }
 
-// ruleItems — one setting's items. tab produced = the history (recorded, paid,
-// skipped, legacy pending, and the ones due, newest first); tab upcoming = what
-// is still to come (oldest first): a setting WITHOUT an end shows `months`
-// months from `from` (default today, 12), one with an end shows all of it.
-func (s *Service) ruleItems(ctx context.Context, userID uuid.UUID, r *Rule, today time.Time, tab string, page, perPage int, from *time.Time, months int) (*ItemList, error) {
-	stored, err := s.storedRows(ctx, s.db, userID, []uuid.UUID{r.ID}, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	return s.ruleItemsOf(ctx, userID, r, stored, today, tab, page, perPage, from, months)
-}
-
 // ruleItemsOf is ruleItems over the rule's stored rows, already loaded.
 func (s *Service) ruleItemsOf(ctx context.Context, userID uuid.UUID, r *Rule, stored []*itemRow, today time.Time, tab string, page, perPage int, from *time.Time, months int) (*ItemList, error) {
 	page, perPage = clampPage(page, perPage)
@@ -719,109 +708,6 @@ func (s *Service) ruleItemsOf(ctx context.Context, userID uuid.UUID, r *Rule, st
 	return out, nil
 }
 
-func (s *Service) List(ctx context.Context, userID uuid.UUID, status, q, forType string, hint PickerHint, kind string, page, perPage int, tz string) (*RecurringList, error) {
-	return s.list(ctx, userID, status, q, forType, hint, kind, page, perPage, tz, false)
-}
-
-// ListAll — every rule in one page (the sync dataset); no 100-row cap.
-func (s *Service) ListAll(ctx context.Context, userID uuid.UUID, tz string) (*RecurringList, error) {
-	return s.list(ctx, userID, "all", "", "", PickerHint{}, "", 1, unlimitedPerPage, tz, true)
-}
-
-func (s *Service) list(ctx context.Context, userID uuid.UUID, status, q, forType string, hint PickerHint, kind string, page, perPage int, tz string, unlimited bool) (*RecurringList, error) {
-	today, err := s.today(ctx, userID, tz)
-	if err != nil {
-		return nil, err
-	}
-	if !unlimited {
-		page, perPage = clampPage(page, perPage)
-	}
-	cond := `status IN ('active', 'paused')`
-	switch status {
-	case "archived":
-		cond = `status = 'archived'`
-	case "all":
-		cond = `TRUE`
-	}
-	args := []any{userID}
-	if forType != "" { // the picker: ACTIVE settings that can take a transaction of this type
-		args = append(args, forType)
-		cond = fmt.Sprintf(`status = 'active' AND type = $%d`, len(args))
-	}
-	if kind != "" {
-		args = append(args, kind)
-		cond += fmt.Sprintf(` AND kind = $%d`, len(args))
-	}
-	if q = strings.TrimSpace(q); q != "" {
-		args = append(args, "%"+shared.EscapeLike(q)+"%")
-		cond += fmt.Sprintf(` AND name ILIKE $%d`, len(args))
-	}
-	out := &RecurringList{Data: []Recurring{}}
-	if out.Summary, err = s.summary(ctx, userID, today); err != nil {
-		return nil, err
-	}
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FILTER (WHERE status <> 'archived'),
-		COUNT(*) FILTER (WHERE status = 'archived'), COUNT(*) FROM recurring_rules WHERE user_id = $1`, userID).Scan(
-		&out.Counts.Current, &out.Counts.Archived, &out.Counts.All); err != nil {
-		return nil, err
-	}
-	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1 AND `+cond, args...)
-	if err != nil {
-		return nil, err
-	}
-	var rules []*Rule
-	for rows.Next() {
-		r, err := scanRule(rows)
-		if err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rules = append(rules, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	views, err := s.recurringViews(ctx, userID, today, rules)
-	if err != nil {
-		return nil, err
-	}
-	likely := map[uuid.UUID]bool{}
-	if forType != "" {
-		for i := range views {
-			amt := rules[i].Amount
-			views[i].Likely = hint.likely(rules[i].CategoryID, &amt)
-			likely[views[i].ID] = views[i].Likely
-		}
-	}
-	// the picker: likely first; then the nearest due first (overdue, then the next
-	// one coming, none last), then by name.
-	sort.SliceStable(views, func(i, j int) bool {
-		if forType != "" && likely[views[i].ID] != likely[views[j].ID] {
-			return likely[views[i].ID]
-		}
-		ki, kj := dueKey(&views[i]), dueKey(&views[j])
-		if ki != kj {
-			return ki < kj
-		}
-		return strings.ToLower(views[i].Name) < strings.ToLower(views[j].Name)
-	})
-	total := len(views)
-	if !unlimited {
-		lo, hi := (page-1)*perPage, page*perPage
-		if lo > total {
-			lo = total
-		}
-		if hi > total {
-			hi = total
-		}
-		views = views[lo:hi]
-	}
-	out.Data = views
-	out.Pagination = shared.NewPage(page, perPage, total)
-	return out, nil
-}
-
 // dueKey orders settings: overdue first (oldest first), then by the next date,
 // settings with nothing coming last.
 func dueKey(v *Recurring) string {
@@ -837,42 +723,12 @@ func dueKey(v *Recurring) string {
 	return "2"
 }
 
-func (s *Service) Get(ctx context.Context, userID, id uuid.UUID, page, perPage int, tz string, withDeletePreview bool) (*Detail, error) {
-	today, err := s.today(ctx, userID, tz)
-	if err != nil {
-		return nil, err
-	}
-	d, err := s.detail(ctx, userID, id, today, page, perPage, nil)
-	if err != nil || !withDeletePreview {
-		return d, err
-	}
-	p := &DeletePreview{}
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE transaction_id IS NOT NULL OR saving_entry_id IS NOT NULL OR debt_entry_id IS NOT NULL), COUNT(*) FILTER (WHERE pending_id IS NOT NULL)
-		FROM recurring_items WHERE rule_id = $1 AND user_id = $2`, id, userID).Scan(&p.Items, &p.LinkedTransactions, &p.PendingDrafts); err != nil {
-		return nil, err
-	}
-	d.DeletePreview = p
-	return d, nil
-}
-
-func (s *Service) RuleItems(ctx context.Context, userID, id uuid.UUID, tab string, page, perPage int, from *time.Time, months int, tz string) (*ItemList, error) {
-	r, err := getRule(ctx, s.db, userID, id, false)
-	if err != nil {
-		return nil, err
-	}
-	today, err := s.today(ctx, userID, tz)
-	if err != nil {
-		return nil, err
-	}
-	return s.ruleItems(ctx, userID, r, today, tab, page, perPage, from, months)
-}
-
 // Items lists occurrences across the settings. status: upcoming (default, the
 // next 120 days) | due (overdue + due today + this month's upcoming ones with
 // no amount yet, flagged needs_amount) | done | paid | skipped | pending
 // (stored rows, newest first) | all (needs a month). month = every occurrence
 // dated in it, oldest first.
-func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, month string, ruleID *uuid.UUID, page, perPage int, tz string) (*ItemList, error) {
+func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, month string, ruleID, itemID *uuid.UUID, page, perPage int, tz string) (*ItemList, error) {
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
 		return nil, err
@@ -885,7 +741,7 @@ func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, mon
 		status = StatusSkipped
 	}
 	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1
-		AND ($2::uuid IS NULL OR id = $2)`, userID, ruleID)
+		AND ($2::uuid IS NULL OR id = $2) AND ($3::uuid IS NULL OR recurring_id = $3)`, userID, ruleID, itemID)
 	if err != nil {
 		return nil, err
 	}
@@ -902,7 +758,7 @@ func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, mon
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if ruleID != nil && len(rules) == 0 {
+	if (ruleID != nil || itemID != nil) && len(rules) == 0 {
 		return nil, ErrNotFound
 	}
 	var occs []*occ
@@ -1099,6 +955,8 @@ func absDays(a, b time.Time) int {
 type OccurrencesResult struct {
 	Data          []Item  `json:"data"`
 	SuggestedSlot *string `json:"suggested_slot"`
+	// SuggestedRuleID — the line of the suggested round (0.4.3: an item's rounds of every line).
+	SuggestedRuleID *uuid.UUID `json:"suggested_recurring_rule_id"`
 }
 
 type PickerHint struct {
@@ -1113,9 +971,9 @@ func (h PickerHint) likely(catID *uuid.UUID, amount *float64) bool {
 	return h.Amount != nil && *h.Amount > 0 && amount != nil && math.Abs(*amount-*h.Amount) <= *h.Amount*0.05+0.004
 }
 
-// settingOf — the setting view the items of a write belong to (no re-fetch after a write): nil
-// unless every given rule id is the same one.
-func (s *Service) settingOf(ctx context.Context, userID uuid.UUID, ruleIDs ...*uuid.UUID) *Recurring {
+// settingOf — the item page the rounds of a write belong to (no re-fetch after a write): nil
+// unless every given line is of the same item.
+func (s *Service) settingOf(ctx context.Context, userID uuid.UUID, ruleIDs ...*uuid.UUID) *ItemPage {
 	var id *uuid.UUID
 	for _, r := range ruleIDs {
 		if r == nil || (id != nil && *id != *r) {
@@ -1126,24 +984,21 @@ func (s *Service) settingOf(ctx context.Context, userID uuid.UUID, ruleIDs ...*u
 	if id == nil {
 		return nil
 	}
-	today, err := s.today(ctx, userID, "")
+	item, err := itemOfLine(ctx, s.db, userID, *id)
 	if err != nil {
 		return nil
 	}
-	r, err := getRule(ctx, s.db, userID, *id, false)
+	p, err := s.GetRecurring(ctx, userID, item, shared.HeaderTZ(ctx))
 	if err != nil {
 		return nil
 	}
-	views, err := s.recurringViews(ctx, userID, today, []*Rule{r})
-	if err != nil || len(views) == 0 {
-		return nil
-	}
-	return &views[0]
+	return p
 }
 
+// ruleOf — the line of a round.
 func ruleOf(it *Item) *uuid.UUID {
 	if it.Recurring == nil {
 		return nil
 	}
-	return &it.Recurring.ID
+	return &it.RuleID
 }

@@ -143,9 +143,10 @@ func TestBudgetRecurringCategory(t *testing.T) {
 	if f.today.Before(end) {
 		// A stored occurrence of an active rule (an item always has a rule).
 		t.Cleanup(func() { _, _ = f.pool.Exec(f.ctx, `DELETE FROM recurring_rules WHERE user_id = $1`, f.me) })
-		f.exec(`WITH r AS (INSERT INTO recurring_rules (id, user_id, name, type, amount, account_id, freq, start_date, status)
-				VALUES (gen_random_uuid(), $1, 'Rent', 'expense', 50, $4, 'monthly', $2, 'active') RETURNING id)
-			INSERT INTO recurring_items (id, user_id, rule_id, seq, slot, date, draft)
+		f.exec(`WITH g AS (INSERT INTO recurrings (id, user_id, name, type) VALUES (gen_random_uuid(), $1, 'Rent', 'expense') RETURNING id),
+			r AS (INSERT INTO recurring_rules (id, recurring_id, user_id, name, type, amount, account_id, freq, start_date, status)
+				SELECT id, id, $1, 'Rent', 'expense', 50, $4, 'monthly', $2, 'active' FROM g RETURNING id)
+			INSERT INTO recurring_items (id, user_id, recurring_rule_id, seq, slot, date, draft)
 			SELECT gen_random_uuid(), $1, id, 1, $2, $2,
 				jsonb_build_object('type', 'expense', 'amount', 50, 'category_id', $3::text) FROM r`, f.me, end, f.food, f.wallet)
 	}

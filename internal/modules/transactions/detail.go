@@ -28,7 +28,8 @@ type rowFacts struct {
 	recItemID     *uuid.UUID
 	recItemUser   *uuid.UUID
 	recItemSeq    *int
-	recID         *uuid.UUID
+	recID         *uuid.UUID // the line
+	recItem       *uuid.UUID // its recurring item
 	recName       *string
 	recIcon       []byte
 	recTotal      *int
@@ -137,8 +138,8 @@ func buildDetails(
 		}
 		if f.recItemID != nil && f.recItemUser != nil && *f.recItemUser == callerID {
 			link := &shared.RecurringItemLink{ItemID: *f.recItemID, Seq: f.recItemSeq, Total: f.recTotal}
-			if f.recID != nil {
-				link.Recurring = &shared.RecurringRef{ID: *f.recID, IconCode: shared.IconFromJSON(f.recIcon)}
+			if f.recID != nil && f.recItem != nil {
+				link.Recurring = &shared.RecurringRef{ID: *f.recItem, RecurringRuleID: *f.recID, IconCode: shared.IconFromJSON(f.recIcon)}
 				if f.recName != nil {
 					link.Recurring.Name = *f.recName
 				}
@@ -219,10 +220,10 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		       u.display_name, `+shared.AvatarSQL("u.id", "NULL")+`,
 		       peer.id, peer.account_id, c.system_kind, pc.system_kind,
 		       de.counterparty_contact_id, de.counterparty_person_name, de.direction, de.paid, de.kind,
-		       ri.id, ri.user_id, ri.seq, rr.id, rr.name, rr.icon_code, rr.total_count
+		       ri.id, ri.user_id, ri.seq, rr.id, rr.name, rr.icon_code, rr.total_count, rr.recurring_id
 		FROM transactions t
 		LEFT JOIN recurring_items ri ON ri.transaction_id = t.id
-		LEFT JOIN recurring_rules rr ON rr.id = ri.rule_id
+		LEFT JOIN recurring_rules rr ON rr.id = ri.recurring_rule_id
 		LEFT JOIN personal_debts de ON de.id = t.source_personal_debt_id
 		JOIN users u ON u.id = t.user_id
 		LEFT JOIN accounts a ON a.id = t.account_id
@@ -247,7 +248,7 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		if err := rows.Scan(&id, &f.currency, &f.billable, &f.activeMembers, &f.callerActive,
 			&f.authorName, &f.authorIcon, &f.peerID, &f.peerAccountID, &f.kind, &f.peerKind,
 			&f.debtContactID, &f.debtName, &f.debtDirection, &f.debtPaid, &f.debtKind,
-			&f.recItemID, &f.recItemUser, &f.recItemSeq, &f.recID, &f.recName, &f.recIcon, &f.recTotal); err != nil {
+			&f.recItemID, &f.recItemUser, &f.recItemSeq, &f.recID, &f.recName, &f.recIcon, &f.recTotal, &f.recItem); err != nil {
 			return nil, fmt.Errorf("row facts scan: %w", err)
 		}
 		out[id] = f

@@ -154,9 +154,10 @@ func TestMyCountsTileFigures(t *testing.T) {
 		days   int
 		status string
 	}{{"soon", 3, "active"}, {"later", 60, "active"}, {"paused", 3, "paused"}} {
-		exec(`WITH r AS (INSERT INTO recurring_rules (id, user_id, name, type, amount, account_id, freq, start_date, status)
-				VALUES (gen_random_uuid(), $1, $2, 'expense', 10, $3, 'monthly', CURRENT_DATE + $4::int, $5) RETURNING id)
-			INSERT INTO recurring_items (id, user_id, rule_id, seq, slot, date, draft)
+		exec(`WITH g AS (INSERT INTO recurrings (id, user_id, name, type, status) VALUES (gen_random_uuid(), $1, $2, 'expense', $5) RETURNING id),
+			r AS (INSERT INTO recurring_rules (id, recurring_id, user_id, name, type, amount, account_id, freq, start_date, status)
+				SELECT id, id, $1, $2, 'expense', 10, $3, 'monthly', CURRENT_DATE + $4::int, $5 FROM g RETURNING id)
+			INSERT INTO recurring_items (id, user_id, recurring_rule_id, seq, slot, date, draft)
 			SELECT gen_random_uuid(), $1, id, 1, CURRENT_DATE + $4::int, CURRENT_DATE + $4::int, '{}' FROM r`,
 			uid, c.name, acct, c.days, c.status)
 	}

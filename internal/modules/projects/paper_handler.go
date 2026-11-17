@@ -319,19 +319,6 @@ func (h *Handler) SyncDebt(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
-// UnlinkDebt — POST /personal-debts/:id/unlink-paper.
-func (h *Handler) UnlinkDebt(c *gin.Context) {
-	userID, id, ok := h.bindProjectID(c)
-	if !ok {
-		return
-	}
-	if err := h.service.UnlinkMyDebt(c.Request.Context(), userID, id); err != nil {
-		mapServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"id": id})
-}
-
 // --- event members ---
 
 // MergeMember — POST /projects/:id/members/:member_id/merge {into}.

@@ -70,6 +70,7 @@ var pageTypes = []struct{ Type, Group string }{
 	{TypeRecurringDue, GroupRecurring},
 	{TypeRecurringEnding, GroupRecurring},
 	{TypeRecurringAutoCreated, GroupRecurring},
+	{TypeRecurringDueSoon, GroupRecurring},
 	{TypeProjectInvite, GroupRequest},
 	{TypeContactLinkRequest, GroupRequest},
 	{TypeAccountInvite, GroupRequest},

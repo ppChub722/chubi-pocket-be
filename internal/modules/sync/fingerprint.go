@@ -112,6 +112,8 @@ var sources = map[string][]source{
 	DebtPeople: {
 		ts(`personal_debts x WHERE x.user_id = $1`),
 		ts(`contacts x WHERE x.user_id = $1`),
+		ts(`institutions x WHERE x.user_id = $1`),
+		ts(`recurrings x WHERE x.user_id = $1 AND x.type = 'debt'`),
 		ts(`users x WHERE x.id IN ` + linkedUser),
 	},
 	Projects: {
@@ -124,8 +126,11 @@ var sources = map[string][]source{
 		ts(`tags x WHERE x.user_id = $1`),
 	},
 	Recurring: {
+		ts(`recurrings x WHERE x.user_id = $1`),
 		ts(`recurring_rules x WHERE x.user_id = $1`),
 		ts(`recurring_items x WHERE x.user_id = $1`),
+		ts(`debt_installments x WHERE x.user_id = $1`),
+		ts(`institutions x WHERE x.user_id = $1`),
 		ts(`accounts x WHERE x.id IN ` + visAcc),
 		ts(`categories x WHERE x.user_id = $1`),
 		ts(`tags x WHERE x.user_id = $1`),

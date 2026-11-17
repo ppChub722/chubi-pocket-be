@@ -70,7 +70,9 @@ func ruleBaseDraft(r *Rule) pending.Draft {
 	case typeSaving:
 		d.GoalID, d.CategoryID, d.TagIDs = r.GoalID, nil, nil
 	case typeDebt: // the entry's transaction takes the system debt category
-		d.CategoryID, d.TagIDs = nil, nil
+		if r.PaidByPersonName == nil { // 0.4.3: a person-paid round is my expense in the item's category
+			d.CategoryID, d.TagIDs = nil, nil
+		}
 	}
 	return d
 }
@@ -142,7 +144,7 @@ func (s *Service) storedRows(ctx context.Context, q shared.Querier, userID uuid.
 	if len(ruleIDs) == 0 {
 		return nil, nil
 	}
-	sql := `SELECT ` + itemColumns + ` FROM recurring_items WHERE user_id = $1 AND rule_id = ANY($2)`
+	sql := `SELECT ` + itemColumns + ` FROM recurring_items WHERE user_id = $1 AND recurring_rule_id = ANY($2)`
 	args := []any{userID, ruleIDs}
 	if from != nil && to != nil {
 		sql += ` AND ((date BETWEEN $3 AND $4) OR (slot BETWEEN $3 AND $4))`
@@ -393,7 +395,7 @@ func (s *Service) expectedBetween(ctx context.Context, userID uuid.UUID, from, t
 			continue
 		}
 		e := shared.ExpectedOccurrence{
-			RuleID: o.rule.ID, RuleName: o.rule.Name, RuleIcon: o.rule.IconCode, Slot: o.slot, Date: o.date,
+			RecurringID: o.rule.RecurringID, RuleID: o.rule.ID, RuleName: o.rule.Name, RuleIcon: o.rule.IconCode, Slot: o.slot, Date: o.date,
 			AccountID: o.draft.AccountID, CategoryID: o.draft.CategoryID, TagIDs: o.draft.TagIDs,
 			Seq: o.seq, Total: o.rule.TotalCount, Name: derefStr(o.draft.Description), Due: !o.date.After(today),
 		}
@@ -466,7 +468,7 @@ func (s *Service) store(ctx context.Context, tx pgx.Tx, o *occ) (*itemRow, error
 	}
 	if id == uuid.Nil { // someone stored it in the meantime
 		var existing uuid.UUID
-		if err := tx.QueryRow(ctx, `SELECT id FROM recurring_items WHERE rule_id = $1 AND slot = $2`, o.rule.ID, slot).Scan(&existing); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT id FROM recurring_items WHERE recurring_rule_id = $1 AND slot = $2`, o.rule.ID, slot).Scan(&existing); err != nil {
 			return nil, err
 		}
 		return getItem(ctx, tx, o.rule.UserID, existing, true)
@@ -616,8 +618,8 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 		}
 		it := Item{
 			RuleID: o.rule.ID, Slot: o.slot.Format(dateLayout), Stored: o.row != nil, Status: o.status,
-			Recurring: &shared.RecurringRef{ID: o.rule.ID, Name: o.rule.Name, IconCode: o.rule.IconCode, Kind: o.rule.Kind,
-				PauseReason: o.rule.pauseReason()},
+			Recurring: &shared.RecurringRef{ID: o.rule.RecurringID, RecurringRuleID: o.rule.ID, Name: o.rule.Name, IconCode: o.rule.IconCode,
+				Kind: o.rule.Kind, PauseReason: o.rule.pauseReason()},
 			Seq: o.seq, Date: date.Format(dateLayout), DaysUntil: int(date.Sub(today).Hours() / 24),
 			Account: r.Account, ToAccount: r.TransferToAccount, Category: r.Category,
 			Tags: r.Tags, GoalID: d.GoalID, Goal: r.Goal, Description: d.Description, Note: d.Note,

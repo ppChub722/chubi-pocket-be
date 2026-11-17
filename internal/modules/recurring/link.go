@@ -31,7 +31,7 @@ type LinkResult struct {
 	RuleAmount        *float64               `json:"rule_amount"`
 	TransactionAmount float64                `json:"transaction_amount"`
 	AccountBalances   []shared.WalletBalance `json:"account_balances"`
-	Setting           *Recurring             `json:"setting"`
+	Setting           *ItemPage              `json:"setting"`
 	Effects           shared.Effects         `json:"effects"`
 }
 
@@ -193,7 +193,7 @@ func (h *Handler) Link(c *gin.Context) {
 
 type UnlinkResult struct {
 	Item    Item           `json:"item"`
-	Setting *Recurring     `json:"setting"`
+	Setting *ItemPage      `json:"setting"`
 	Effects shared.Effects `json:"effects"`
 }
 

@@ -117,9 +117,10 @@ func (f *goalFix) savingRule(goal *uuid.UUID, amount float64, monthDay int, inte
 		m := "day"
 		freq, mode, day, interval = "monthly", &m, &monthDay, 1
 	}
-	f.exec(`INSERT INTO recurring_rules (id, user_id, name, type, kind, amount, account_id, goal_id, freq, interval_n,
+	f.exec(`INSERT INTO recurrings (id, user_id, name, type, goal_id) VALUES ($1, $2, 'ออม', 'saving', $3)`, id, f.me, goal)
+	f.exec(`INSERT INTO recurring_rules (id, recurring_id, user_id, name, type, kind, amount, account_id, goal_id, freq, interval_n,
 		monthly_mode, month_day, start_date, status)
-		VALUES ($1, $2, 'ออม', 'saving', 'saving', $3, $4, $5, $6, $7, $8, $9, $10, 'active')`,
+		VALUES ($1, $1, $2, 'ออม', 'saving', 'saving', $3, $4, $5, $6, $7, $8, $9, $10, 'active')`,
 		id, f.me, amount, f.kbank, goal, freq, interval, mode, day, start)
 	return id
 }

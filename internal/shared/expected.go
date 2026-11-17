@@ -13,21 +13,22 @@ import (
 // budgets (รอจ่าย), the dashboard and the counts read instead of materialized
 // items.
 type ExpectedOccurrence struct {
-	RuleID     uuid.UUID
-	RuleName   string
-	RuleIcon   *IconCode
-	ItemID     *uuid.UUID // the stored row, nil while the occurrence is only computed
-	Slot       time.Time  // the occurrence's original date
-	Date       time.Time  // its date now (an edit may have moved it)
-	Type       string     // expense | income | transfer | saving (a saving is never money spent or received)
-	Amount     float64    // 0 = not known yet
-	AccountID  *uuid.UUID
-	CategoryID *uuid.UUID
-	TagIDs     []uuid.UUID
-	Seq        *int // n of N, only for a setting with an end
-	Total      *int
-	Name       string // the occurrence's name (the transaction description it would get)
-	Due        bool   // date <= today
+	RecurringID uuid.UUID // the item (0.4.3); RuleID = its line
+	RuleID      uuid.UUID
+	RuleName    string
+	RuleIcon    *IconCode
+	ItemID      *uuid.UUID // the stored row, nil while the occurrence is only computed
+	Slot        time.Time  // the occurrence's original date
+	Date        time.Time  // its date now (an edit may have moved it)
+	Type        string     // expense | income | transfer | saving (a saving is never money spent or received)
+	Amount      float64    // 0 = not known yet
+	AccountID   *uuid.UUID
+	CategoryID  *uuid.UUID
+	TagIDs      []uuid.UUID
+	Seq         *int // n of N, only for a setting with an end
+	Total       *int
+	Name        string // the occurrence's name (the transaction description it would get)
+	Due         bool   // date <= today
 }
 
 // Expecter lists the occurrences still to be recorded whose date is in

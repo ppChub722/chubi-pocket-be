@@ -166,6 +166,16 @@ const (
 	GoalReached        Code = "GOAL_REACHED"
 	GoalHasSavings     Code = "GOAL_HAS_SAVINGS"
 
+	// debts + recurring 0.4.3: institutions, lines, plans
+	InstitutionNotFound         Code = "INSTITUTION_NOT_FOUND"
+	InstitutionInUse            Code = "INSTITUTION_IN_USE"
+	RecurringLineNotFound       Code = "RECURRING_LINE_NOT_FOUND"
+	RecurringLastLine           Code = "RECURRING_LAST_LINE"
+	RecurringSourceInvalid      Code = "RECURRING_SOURCE_INVALID"
+	PlanInvalid                 Code = "PLAN_INVALID"
+	InstallmentNotFound         Code = "INSTALLMENT_NOT_FOUND"
+	InstallmentNeedsInstitution Code = "INSTALLMENT_NEEDS_INSTITUTION"
+
 	// imports
 	UnsupportedImage Code = "UNSUPPORTED_IMAGE"
 	OcrUnavailable   Code = "OCR_UNAVAILABLE"
@@ -329,6 +339,16 @@ var registry = []Def{
 	{GoalNotActive, []int{409}, InEnvelope | InPendingLastError, "The saving goal isn't active."},
 	{GoalReached, []int{409}, InEnvelope, "The saving goal already holds its target."},
 	{GoalHasSavings, []int{409}, InEnvelope, "The saving goal still holds money; close it first."},
+
+	// debts + recurring 0.4.3
+	{InstitutionNotFound, []int{404, 400}, InEnvelope, "The institution does not exist or is not the caller's (400 when it is referenced in a body)."},
+	{InstitutionInUse, []int{409}, InEnvelope, "Debts, recurring items or wallets still point at this institution; archive it instead."},
+	{RecurringLineNotFound, []int{404}, InEnvelope, "No such line on this recurring item."},
+	{RecurringLastLine, []int{409}, InEnvelope, "A recurring item keeps at least one line; delete the item instead."},
+	{RecurringSourceInvalid, []int{400}, InEnvelope, "A line pays from exactly one source: a wallet, or a person paying for me (expense / bill / debt only)."},
+	{PlanInvalid, []int{400}, InEnvelope, "The plan is invalid (details = FieldError[])."},
+	{InstallmentNotFound, []int{404}, InEnvelope, "No such installment on this recurring item."},
+	{InstallmentNeedsInstitution, []int{400}, InEnvelope, "An installment on a card needs the wallet linked to an institution first."},
 
 	// imports
 	{UnsupportedImage, []int{400}, InEnvelope, "The image is not a PNG / JPEG or could not be decoded."},

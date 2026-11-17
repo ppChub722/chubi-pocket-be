@@ -42,7 +42,7 @@ func (f *budFix) withExpected(e shared.Expecter) {
 func (f *budFix) occ(rule uuid.UUID, n int, amount float64, cat, acct *uuid.UUID, tags ...uuid.UUID) shared.ExpectedOccurrence {
 	d := f.today.AddDate(0, 0, n)
 	return shared.ExpectedOccurrence{
-		RuleID: rule, RuleName: "Rent", Name: "Rent ประจำเดือน", Slot: d, Date: d, Type: "expense",
+		RecurringID: rule, RuleID: rule, RuleName: "Rent", Name: "Rent ประจำเดือน", Slot: d, Date: d, Type: "expense",
 		Amount: amount, AccountID: acct, CategoryID: cat, TagIDs: tags,
 	}
 }
@@ -194,7 +194,7 @@ func TestBudgetComputedOccurrencesNeedAKnownExpense(t *testing.T) {
 	income := f.occ(rule, 1, 500, nil, nil)
 	income.Type = "income"
 	f.withExpected(fakeExpected{occs: []shared.ExpectedOccurrence{
-		income,                   // not an expense
+		income,                      // not an expense
 		f.occ(rule, 2, 0, nil, nil), // amount not known yet
 		f.occ(rule, 3, 25, nil, nil),
 	}})

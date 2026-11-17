@@ -167,7 +167,11 @@ func draftType(d pending.Draft) string {
 }
 
 func checkDraftRefsTx(ctx context.Context, q rowQuerier, userID uuid.UUID, d pending.Draft) error {
-	if err := checkRefsTx(ctx, q, userID, draftType(d), d.AccountID, d.TransferToAccountID, d.CategoryID, d.TagIDs); err != nil {
+	typ := draftType(d)
+	if typ == typeDebt { // a debt round's category is the one of a person-paid round: my expense
+		typ = "expense"
+	}
+	if err := checkRefsTx(ctx, q, userID, typ, d.AccountID, d.TransferToAccountID, d.CategoryID, d.TagIDs); err != nil {
 		return err
 	}
 	if draftType(d) == typeSaving {
@@ -230,176 +234,6 @@ func (s *Service) afterWrite(ctx context.Context, userID, id uuid.UUID, tz strin
 	return s.detail(ctx, userID, id, today, 1, 20, touched)
 }
 
-func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateRequest, tz string) (*Detail, error) {
-	name := strings.TrimSpace(req.Name)
-	if name == "" || len([]rune(name)) > 100 || req.Rule == nil {
-		return nil, ErrValidation
-	}
-	kind := ""
-	if req.Kind != nil {
-		if !validKind(*req.Kind) {
-			return nil, ErrValidation
-		}
-		kind = *req.Kind
-	}
-	if req.present == nil {
-		req.present = map[string]bool{}
-	}
-	if req.Type == nil { // the kind implies the money type
-		if kind == "" {
-			return nil, ErrValidation
-		}
-		t := typeForKind(kind)
-		req.Type, req.present["type"] = &t, true
-	}
-	if req.Amount == nil { // only a reminder may start without an amount
-		if kind != KindReminder && !(kind == "" && *req.Type == "transfer") {
-			return nil, ErrValidation
-		}
-		zero := 0.0
-		req.Amount, req.present["amount"] = &zero, true
-	}
-	if err := validateFields(&req.Fields); err != nil {
-		return nil, err
-	}
-	start, err := parseDate(req.StartDate)
-	if err != nil {
-		return nil, ErrValidation
-	}
-	today, err := s.today(ctx, userID, tz)
-	if err != nil {
-		return nil, err
-	}
-	r := &Rule{UserID: userID, Name: name, IconCode: req.IconCode, Status: "active", TagIDs: []uuid.UUID{}}
-	r.StartDate = start
-	r.TrackedFrom, r.DueNotifiedUntil = today, &today
-	applyToRule(r, &req.Fields)
-	if err := r.applyRule(*req.Rule); err != nil {
-		return nil, err
-	}
-	if err := r.applyEnd(req.End); err != nil {
-		return nil, err
-	}
-	if err := r.setTrial(req.TrialUntil); err != nil {
-		return nil, err
-	}
-	if err := r.finishKind(req.Kind); err != nil {
-		return nil, err
-	}
-	if err := r.limits(today); err != nil {
-		return nil, err
-	}
-	if req.AutoCreate != nil && *req.AutoCreate {
-		r.AutoCreate = true
-		yesterday := today.AddDate(0, 0, -1)
-		r.AutoCreatedUntil = &yesterday
-	}
-	tx, err := s.begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-	if err := checkRuleRefsTx(ctx, tx, userID, r); err != nil {
-		return nil, err
-	}
-	if err := saveRuleTx(ctx, tx, r); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	return s.afterWrite(ctx, userID, r.ID, tz, nil)
-}
-
-// Update edits a setting. Its computed occurrences follow at once; stored
-// ones (edited, recorded, skipped) stay as they are, and a filled one never
-// changes: it reads its transaction (0.4.1-1 R6).
-func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequest, tz string) (*Detail, error) {
-	if err := validateFields(&req.Fields); err != nil {
-		return nil, err
-	}
-	today, err := s.today(ctx, userID, tz)
-	if err != nil {
-		return nil, err
-	}
-	tx, err := s.begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-	r, err := getRule(ctx, tx, userID, id, true)
-	if err != nil {
-		return nil, err
-	}
-	old := *r
-	f := &req.Fields
-	if f.has("amount") && f.Amount == nil {
-		return nil, ErrValidation // a setting's amount can't be cleared (0 for a reminder)
-	}
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" || len([]rune(name)) > 100 {
-			return nil, ErrValidation
-		}
-		r.Name = name
-	}
-	if req.has("icon_code") {
-		r.IconCode = req.IconCode
-	}
-	applyToRule(r, f)
-	rebuild := false
-	if req.Rule != nil {
-		if err := r.applyRule(*req.Rule); err != nil {
-			return nil, err
-		}
-		rebuild = true
-	}
-	if req.StartDate != nil {
-		if r.StartDate, err = parseDate(*req.StartDate); err != nil {
-			return nil, ErrValidation
-		}
-		rebuild = true
-	}
-	if req.has("end") {
-		if err := r.applyEnd(req.End); err != nil {
-			return nil, err
-		}
-		rebuild = true
-	}
-	if req.TrialUntil != nil {
-		if err := r.setTrial(req.TrialUntil); err != nil {
-			return nil, err
-		}
-	}
-	if err := r.finishKind(req.Kind); err != nil {
-		return nil, err
-	}
-	if (old.Type == typeSaving) != (r.Type == typeSaving) || (old.Type == typeDebt) != (r.Type == typeDebt) {
-		return nil, ErrValidation // a saving / debt setting stays one (and a money one never becomes one)
-	}
-	if rebuild {
-		r.GeneratedUntil, r.EndingNotified = nil, false
-		if err := r.limits(today); err != nil {
-			return nil, err
-		}
-	}
-	if req.AutoCreate != nil && *req.AutoCreate != r.AutoCreate {
-		r.AutoCreate = *req.AutoCreate
-		yesterday := today.AddDate(0, 0, -1)
-		r.AutoCreatedUntil = &yesterday // switching on / off never back-creates
-	}
-	if err := checkRuleRefsTx(ctx, tx, userID, r); err != nil {
-		return nil, err
-	}
-	if err := saveRuleTx(ctx, tx, r); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	return s.afterWrite(ctx, userID, r.ID, tz, nil)
-}
-
 func seqPtr(m map[string]int, slot time.Time) *int {
 	if n, ok := m[slot.Format(dateLayout)]; ok {
 		return &n
@@ -431,49 +265,6 @@ func prefixed(cols, p string) string {
 		parts[i] = p + strings.TrimSpace(c)
 	}
 	return strings.Join(parts, ", ")
-}
-
-func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID, deleteLinked bool) (*DeleteResult, error) {
-	tx, err := s.begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := getRule(ctx, tx, userID, id, true); err != nil {
-		return nil, err
-	}
-	out := &DeleteResult{ID: id}
-	var touched []uuid.UUID
-	var removed []uuid.UUID
-	if deleteLinked {
-		items, err := s.lockItems(ctx, tx, `WHERE i.rule_id = $1 AND i.user_id = $2
-			AND (i.pending_id IS NOT NULL OR i.transaction_id IS NOT NULL OR i.saving_entry_id IS NOT NULL)`, id, userID)
-		if err != nil {
-			return nil, err
-		}
-		for _, it := range items {
-			txID, t, err := s.unlinkTx(ctx, tx, it)
-			if err != nil {
-				return nil, err
-			}
-			if txID != nil {
-				out.DeletedTransactionCount++
-				removed = append(removed, *txID)
-			}
-			touched = append(touched, t...)
-		}
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM recurring_rules WHERE id = $1 AND user_id = $2`, id, userID); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	if out.AccountBalances, err = shared.LoadWalletBalances(ctx, s.db, uniqueIDs(touched)); err != nil {
-		return nil, err
-	}
-	out.Effects = s.effectsOf(ctx, userID, nil, nil, removed, out.AccountBalances)
-	return out, nil
 }
 
 func (s *Service) transition(ctx context.Context, userID, id uuid.UUID, tz string, fn func(tx pgx.Tx, r *Rule, today time.Time) error) (*Detail, error) {

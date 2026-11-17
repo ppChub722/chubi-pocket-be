@@ -1103,19 +1103,6 @@ func (s *Service) SyncMyDebt(ctx context.Context, userID, debtID uuid.UUID) (*Pa
 	return last, nil
 }
 
-// UnlinkMyDebt — my debt stops following its papers (a plain debt).
-func (s *Service) UnlinkMyDebt(ctx context.Context, userID, debtID uuid.UUID) error {
-	tx, err := s.store.Pool().Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	if err := s.debts.UnlinkPaperDebtTx(ctx, tx, userID, debtID); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
 // --- answers ---
 
 // finishWrite — commit, then the paper as the writer sees it and the write's effects (wallets).

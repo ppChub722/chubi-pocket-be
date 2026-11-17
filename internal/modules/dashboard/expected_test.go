@@ -57,7 +57,7 @@ type upcomingJSON struct {
 			Type    string     `json:"type"`
 			Amount  float64    `json:"amount"`
 			DueDate string     `json:"due_date"`
-			RuleID  *uuid.UUID `json:"rule_id"`
+			RuleID  *uuid.UUID `json:"recurring_rule_id"`
 			Slot    *string    `json:"slot"`
 		} `json:"items"`
 		TotalExpense float64 `json:"total_expense"`
@@ -82,9 +82,9 @@ func TestDashboardUpcomingReadsComputedOccurrences(t *testing.T) {
 	editedRow := occ(other, "Gym", 5, 300, false)
 	editedRow.ItemID = &stored
 	f := fakeExpected{occs: []shared.ExpectedOccurrence{
-		occ(rule, "Netflix", 3, 100, false), // computed, not due: listed
-		editedRow,                           // a stored (edited) row: listed with its own id
-		occ(rule, "Netflix", 0, 100, true),  // due: it is in ต้องจัดการ, not upcoming
+		occ(rule, "Netflix", 3, 100, false),  // computed, not due: listed
+		editedRow,                            // a stored (edited) row: listed with its own id
+		occ(rule, "Netflix", 0, 100, true),   // due: it is in ต้องจัดการ, not upcoming
 		occ(rule, "Netflix", 20, 100, false), // past the 14 days: not asked for
 	}}
 
@@ -126,9 +126,10 @@ func TestDashboardUpcomingWithoutExpecterKeepsStoredItems(t *testing.T) {
 		_, _ = e.pool.Exec(context.Background(), `DELETE FROM recurring_items WHERE user_id = $1`, e.uid)
 		_, _ = e.pool.Exec(context.Background(), `DELETE FROM recurring_rules WHERE user_id = $1`, e.uid)
 	})
-	e.exec(t, `WITH r AS (INSERT INTO recurring_rules (id, user_id, name, type, amount, account_id, freq, start_date, status)
-			VALUES (gen_random_uuid(), $1, 'Stored', 'expense', 10, $2, 'monthly', CURRENT_DATE + 3, 'active') RETURNING id)
-		INSERT INTO recurring_items (id, user_id, rule_id, seq, slot, date, draft)
+	e.exec(t, `WITH g AS (INSERT INTO recurrings (id, user_id, name, type) VALUES (gen_random_uuid(), $1, 'Stored', 'expense') RETURNING id),
+		r AS (INSERT INTO recurring_rules (id, recurring_id, user_id, name, type, amount, account_id, freq, start_date, status)
+			SELECT id, id, $1, 'Stored', 'expense', 10, $2, 'monthly', CURRENT_DATE + 3, 'active' FROM g RETURNING id)
+		INSERT INTO recurring_items (id, user_id, recurring_rule_id, seq, slot, date, draft)
 		SELECT gen_random_uuid(), $1, id, 1, CURRENT_DATE + 3, CURRENT_DATE + 3, '{"type":"expense","amount":10}' FROM r`, e.uid, e.acct)
 
 	r := e.router(t, nil)

@@ -45,7 +45,7 @@ func TestDebtKindBooksEntries(t *testing.T) {
 
 	// K2: no category / tags / goal; a person and both choices are needed; never a money kind
 	for _, bad := range []map[string]any{
-		{"category_id": f.food}, {"person_name": nil}, {"debt_kind": "loan"}, {"direction": "up"}, {"amount": 0},
+		{"person_name": nil}, {"debt_kind": "loan"}, {"direction": "up"}, {"amount": 0}, // 0.4.3: a debt item may have a category
 	} {
 		body := map[string]any{"name": "Bad", "kind": "debt", "person_name": "Mom", "debt_kind": "debt", "direction": "paid",
 			"amount": 10, "rule": map[string]any{"freq": "daily", "interval": 1}, "start_date": f.day(0)}
@@ -84,7 +84,7 @@ func TestDebtKindBooksEntries(t *testing.T) {
 		t.Errorf("after the entry was deleted = %+v", skipped.Data)
 	}
 	var amt float64
-	if err := f.pool.QueryRow(f.ctx, `SELECT (draft->>'amount')::float8 FROM recurring_items WHERE rule_id = $1 AND slot = $2`,
+	if err := f.pool.QueryRow(f.ctx, `SELECT (draft->>'amount')::float8 FROM recurring_items WHERE recurring_rule_id = $1 AND slot = $2`,
 		r.ID, f.day(0)).Scan(&amt); err != nil || amt != 40 {
 		t.Errorf("kept amount = %v (%v)", amt, err)
 	}
@@ -114,15 +114,16 @@ func TestDebtKindBooksEntries(t *testing.T) {
 		t.Errorf("Cee net after mark-paid-ready = %v", n)
 	}
 
-	// K13: the person page lists the person's debt settings
-	f.debts.WithRecurring(f.svc.PersonRecurring)
+	// K13 / 0.4.3: the counterparty page lists its recurring items (plan + lines)
+	f.debts.WithCounterpartyRecurring(f.svc.CounterpartyItems, f.svc.DebtMonth)
 	page, err := f.debts.Person(f.ctx, f.me, "n:mom", "", 1, 30)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Recurring) != 1 || page.Recurring[0].ID != r.ID || page.Recurring[0].DebtKind != DebtKindDebt ||
-		page.Recurring[0].Direction != "paid" || page.Recurring[0].Amount != 100 {
-		t.Errorf("person page recurring = %+v", page.Recurring)
+	items, _ := page.Recurrings.([]CounterpartyItem)
+	if len(items) != 1 || items[0].ID != r.ID || len(items[0].Lines) != 1 || *items[0].Lines[0].DebtKind != DebtKindDebt ||
+		*items[0].Lines[0].Amount != 100 || items[0].Counterparty == nil || items[0].Counterparty.Key != "n:mom" {
+		t.Errorf("person page recurrings = %+v", page.Recurrings)
 	}
 }
 

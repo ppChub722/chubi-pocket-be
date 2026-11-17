@@ -103,7 +103,7 @@ type UpcomingItem struct {
 	LogoURL   *string          `json:"logo_url"`
 	// RuleID / Slot say which occurrence a recurring row is (its setting and its
 	// original date): the id alone repeats for a daily setting. Null for card_due.
-	RuleID *uuid.UUID `json:"rule_id"`
+	RuleID *uuid.UUID `json:"recurring_rule_id"`
 	Slot   *string    `json:"slot"`
 }
 

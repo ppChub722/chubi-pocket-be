@@ -43,6 +43,8 @@ type Service struct {
 	debtLinks DebtLinks
 	recurring RecurringLinks
 	papers    PaperReader
+	// installments — 0.4.3 quick create "ผ่อน" (installment.go).
+	installments Installments
 }
 
 func NewService(s *Store, cats *categories.Service) *Service {
@@ -172,24 +174,34 @@ func buildTransferResponse(
 }
 
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateRequest) (any, error) {
+	res, _, err := s.create(ctx, userID, req)
+	return res, err
+}
+
+// create — the rows, and with `installment` its item (0.4.3), in one DB transaction.
+func (s *Service) create(ctx context.Context, userID uuid.UUID, req CreateRequest) (any, *uuid.UUID, error) {
 	tx, err := s.store.Pool().Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+		return nil, nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
 	res, err := s.CreateInTx(ctx, tx, userID, req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	item, err := s.installmentTx(ctx, tx, userID, req, res)
+	if err != nil {
+		return nil, nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit tx: %w", err)
+		return nil, nil, fmt.Errorf("commit tx: %w", err)
 	}
-	return res, nil
+	return res, item, nil
 }
 
 func (s *Service) CreateWrite(ctx context.Context, userID uuid.UUID, req CreateRequest) (*WriteResult, error) {
-	res, err := s.Create(ctx, userID, req)
+	res, item, err := s.create(ctx, userID, req)
 	if err != nil {
 		return nil, err
 	}
@@ -215,6 +227,7 @@ func (s *Service) CreateWrite(ctx context.Context, userID uuid.UUID, req CreateR
 	if out.Effects, err = s.rowEffects(ctx, userID, rows, nil, nil, nil, out.AccountBalances); err != nil {
 		return nil, err
 	}
+	out.RecurringID = item
 	return out, nil
 }
 

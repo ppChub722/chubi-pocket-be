@@ -17,6 +17,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/projects"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/saving_goals"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/tags"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
@@ -64,35 +65,54 @@ func newRecFix(t *testing.T) *recFix {
 	f.svc.WithSavings(f.savings)
 	f.debts = personal_debts.NewService(personal_debts.NewStore(pool), f.txs)
 	f.svc.WithDebts(f.debts)
+	prj := projects.NewService(projects.NewStore(pool))
+	prj.WithTransactionsService(f.txs)
+	prj.WithDebts(f.debts)
+	prj.WithNotificationService(notifications.NewService(notifications.NewStore(pool)))
+	f.svc.WithPapers(prj)
+	f.txs.WithInstallments(f.svc.CardInstallmentTx)
 
 	h := NewHandler(f.svc)
 	th := transactions.NewHandler(f.txs)
 	f.r = apitest.CountedEngine(f.me, func(g *gin.RouterGroup) {
-		g.GET("/recurring", h.List)
-		g.POST("/recurring", h.Create)
+		g.GET("/recurring", h.ListRecurring)
+		g.POST("/recurring", h.CreateRecurring)
+		g.POST("/recurring/plan-preview", h.PlanPreview)
 		g.POST("/recurring/occurrences/bulk", h.SettleOccurrences)
-		g.GET("/recurring/:id", h.Get)
-		g.PUT("/recurring/:id", h.Update)
-		g.DELETE("/recurring/:id", h.Delete)
-		g.GET("/recurring/:id/items", h.RuleItems)
-		g.POST("/recurring/:id/pause", h.Pause)
-		g.POST("/recurring/:id/resume", h.Resume)
-		g.POST("/recurring/:id/archive", h.Archive)
-		g.POST("/recurring/:id/restore", h.Restore)
-		g.POST("/recurring/:id/extend", h.Extend)
-		g.POST("/recurring/:id/duplicate", h.Duplicate)
-		g.GET("/recurring/:id/occurrences", h.Occurrences)
-		g.POST("/recurring/:id/occurrences/confirm-ready", h.ConfirmReady)
-		g.POST("/recurring/:id/occurrences/mark-paid-ready", h.MarkPaidReady)
-		g.POST("/recurring/:id/occurrences/skip-ready", h.SkipReady)
-		g.PUT("/recurring/:id/occurrences/:slot", h.EditOcc)
-		g.POST("/recurring/:id/occurrences/:slot/confirm", h.ConfirmOcc)
-		g.POST("/recurring/:id/occurrences/:slot/skip", h.SkipOcc)
-		g.POST("/recurring/:id/occurrences/:slot/restore", h.RestoreOcc)
-		g.POST("/recurring/:id/occurrences/:slot/mark-paid", h.MarkPaidOcc)
-		g.POST("/recurring/:id/occurrences/:slot/unmark-paid", h.UnmarkPaidOcc)
-		g.POST("/recurring/:id/occurrences/:slot/link", h.LinkOcc)
-		g.POST("/recurring/:id/occurrences/:slot/unlink", h.UnlinkOcc)
+		g.GET("/recurring/:id", h.GetRecurring)
+		g.PUT("/recurring/:id", h.UpdateRecurring)
+		g.DELETE("/recurring/:id", h.DeleteRecurring)
+		g.GET("/recurring/:id/items", h.ItemRounds)
+		g.POST("/recurring/:id/pause", h.PauseRecurring)
+		g.POST("/recurring/:id/resume", h.ResumeRecurring)
+		g.POST("/recurring/:id/archive", h.ArchiveRecurring)
+		g.POST("/recurring/:id/restore", h.RestoreRecurring)
+		g.POST("/recurring/:id/duplicate", h.DuplicateRecurring)
+		g.POST("/recurring/:id/lines", h.AddLine)
+		g.PUT("/recurring/:id/lines/:line_id", h.UpdateLine)
+		g.DELETE("/recurring/:id/lines/:line_id", h.DeleteLine)
+		g.POST("/recurring/:id/lines/:line_id/pause", h.PauseLine)
+		g.POST("/recurring/:id/lines/:line_id/resume", h.ResumeLine)
+		g.POST("/recurring/:id/lines/:line_id/archive", h.ArchiveLine)
+		g.POST("/recurring/:id/lines/:line_id/restore", h.RestoreLine)
+		g.POST("/recurring/:id/lines/:line_id/extend", h.ExtendLine)
+		g.GET("/recurring/:id/occurrences", h.ItemOccurrences)
+		g.POST("/recurring/:id/occurrences/confirm-ready", h.ConfirmReadyItem)
+		g.POST("/recurring/:id/occurrences/mark-paid-ready", h.MarkPaidReadyItem)
+		g.POST("/recurring/:id/occurrences/skip-ready", h.SkipReadyItem)
+		g.PUT("/recurring/:id/lines/:line_id/occurrences/:slot", h.EditOcc)
+		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/confirm", h.ConfirmOcc)
+		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/skip", h.SkipOcc)
+		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/restore", h.RestoreOcc)
+		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/mark-paid", h.MarkPaidOcc)
+		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/unmark-paid", h.UnmarkPaidOcc)
+		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/link", h.LinkOcc)
+		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/unlink", h.UnlinkOcc)
+		g.GET("/recurring/:id/installments", h.Installments)
+		g.PUT("/recurring/:id/installments/:seq", h.EditInstallment)
+		g.POST("/recurring/:id/installments/:seq/mark", h.MarkInstallment)
+		g.POST("/recurring/:id/plan/close", h.ClosePlan)
+		g.DELETE("/recurring/:id/plan", h.DeletePlan)
 		g.GET("/recurring-items", h.Items)
 		g.POST("/recurring-items", h.CreateItem)
 		g.GET("/recurring-items/:id", h.GetItem)
@@ -108,7 +128,7 @@ func newRecFix(t *testing.T) *recFix {
 	})
 	t.Cleanup(func() {
 		_, _ = pool.Exec(ctx, `DELETE FROM recurring_items WHERE user_id = $1`, f.me)
-		_, _ = pool.Exec(ctx, `DELETE FROM recurring_rules WHERE user_id = $1`, f.me)
+		_, _ = pool.Exec(ctx, `DELETE FROM recurrings WHERE user_id = $1`, f.me)
 		_, _ = pool.Exec(ctx, `DELETE FROM personal_debts WHERE user_id = $1`, f.me)
 		_, _ = pool.Exec(ctx, `DELETE FROM pending_transactions WHERE user_id = $1`, f.me)
 		_, _ = pool.Exec(ctx, `DELETE FROM notifications WHERE recipient_user_id = $1`, f.me)
@@ -128,12 +148,17 @@ func (f *recFix) day(n int) string { return f.today.AddDate(0, 0, n).Format(date
 
 func (f *recFix) call(method, path, op string, body any, want int, out any) []byte {
 	f.t.Helper()
+	path, op, body = f.shim(method, path, op, body)
 	status, raw := apitest.Do(f.t, f.r, method, "/api/v1"+path, body)
 	if status != want {
 		f.t.Fatalf("%s %s: status %d, want %d: %s", method, path, status, want, raw)
 	}
 	if op != "" {
 		apitest.Conform(f.t, op, status, raw)
+	}
+	if d, ok := out.(*Detail); ok && status < 300 {
+		f.fillDetail(path, raw, d)
+		return raw
 	}
 	if out != nil {
 		if err := json.Unmarshal(raw, out); err != nil {
@@ -177,7 +202,7 @@ func (f *recFix) createWeekly(count int) Detail {
 		"rule": map[string]any{"freq": "daily", "interval": 7}, "start_date": f.day(-14),
 		"end": map[string]any{"kind": "count", "count": count},
 	}
-	apitest.ConformRequest(f.t, "createRecurring", body)
+	apitest.ConformRequest(f.t, "createRecurring", legacyCreate(body))
 	var d Detail
 	f.call("POST", "/recurring", "createRecurring", body, 201, &d)
 	return d
@@ -208,7 +233,7 @@ func (f *recFix) newTx(amount float64, day int) uuid.UUID {
 func (f *recFix) storedRows(id uuid.UUID) int {
 	f.t.Helper()
 	var n int
-	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM recurring_items WHERE rule_id = $1`, id).Scan(&n); err != nil {
+	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM recurring_items WHERE recurring_rule_id = $1`, id).Scan(&n); err != nil {
 		f.t.Fatal(err)
 	}
 	return n
@@ -485,7 +510,7 @@ func TestSettleOccurrences(t *testing.T) {
 		return out
 	}
 	item := func(rule uuid.UUID, slot string, amount ...float64) map[string]any {
-		m := map[string]any{"rule_id": rule, "slot": slot}
+		m := map[string]any{"recurring_rule_id": rule, "slot": slot}
 		if len(amount) > 0 {
 			m["amount"] = amount[0]
 		}
@@ -664,7 +689,7 @@ func TestDueNoticeResumeAndEdit(t *testing.T) {
 	}
 	// clear them, pause "since" 8 days ago, resume: the next one is today's (its period holds
 	// today); -7 is in the gap and never made (R8)
-	f.exec(`DELETE FROM recurring_items WHERE rule_id = $1`, id)
+	f.exec(`DELETE FROM recurring_items WHERE recurring_rule_id = $1`, id)
 	f.exec(`UPDATE recurring_rules SET paused_from = $2 WHERE id = $1`, id, f.today.AddDate(0, 0, -8))
 	f.call("POST", "/recurring/"+id.String()+"/resume", "resumeRecurring", nil, 200, &d)
 	var tf string
@@ -723,7 +748,7 @@ func TestFilledOccurrenceReadsItsTx(t *testing.T) {
 		t.Fatalf("filled occurrence = %+v", it)
 	}
 	var draft []byte
-	_ = f.pool.QueryRow(f.ctx, `SELECT draft FROM recurring_items WHERE rule_id = $1 AND slot = $2`, id, f.day(-14)).Scan(&draft)
+	_ = f.pool.QueryRow(f.ctx, `SELECT draft FROM recurring_items WHERE recurring_rule_id = $1 AND slot = $2`, id, f.day(-14)).Scan(&draft)
 	if contains(draft, "mine") || contains(draft, "130") {
 		t.Errorf("the tx values were copied into the draft: %s", draft)
 	}
@@ -850,10 +875,10 @@ func TestRecurringKinds(t *testing.T) {
 	}
 	sub := mk(map[string]any{"kind": "subscription", "amount": 100, "account_id": f.wallet, "trial_until": f.day(14)}, 201)
 	if sub.Recurring.Kind != "subscription" || sub.Recurring.Type != "expense" || sub.Recurring.YearlyCost != 1200 ||
-		sub.Recurring.TrialUntil == nil || *sub.Recurring.TrialUntil != f.day(14) {
+		sub.Recurring.TrialUntil != nil { // 0.4.3: the free trial is gone
 		t.Errorf("subscription = %+v", sub.Recurring)
 	}
-	mk(map[string]any{"kind": "installment", "amount": 500}, 400)
+	// 0.4.3: "installment" is an expense item with a count end; without one it is a plain expense
 	inst := mk(map[string]any{"name": "Phone", "kind": "installment", "amount": 500, "account_id": f.wallet,
 		"end": map[string]any{"kind": "count", "count": 6}}, 201)
 	if inst.Recurring.Kind != "installment" || inst.Recurring.YearlyCost != 3000 || inst.Recurring.Progress.Total == nil ||
@@ -864,7 +889,7 @@ func TestRecurringKinds(t *testing.T) {
 	if inc.Recurring.Type != "income" || inc.Recurring.YearlyCost != 360000 {
 		t.Errorf("income = %+v", inc.Recurring)
 	}
-	mk(map[string]any{"kind": "income", "type": "expense", "amount": 5}, 400) // an income kind is an income
+	// 0.4.3: one type per item (no kind / type pair to contradict)
 	rem := mk(map[string]any{"name": "Electricity", "kind": "reminder", "account_id": f.wallet}, 201)
 	if rem.Recurring.Kind != "reminder" || rem.Recurring.Amount != nil || rem.Recurring.YearlyCost != 0 {
 		t.Errorf("reminder = %+v", rem.Recurring)
@@ -990,7 +1015,7 @@ func TestRecurringSaving(t *testing.T) {
 		t.Errorf("untracked wallet: %s", raw)
 	}
 
-	apitest.ConformRequest(t, "createRecurring", body())
+	apitest.ConformRequest(t, "createRecurring", legacyCreate(body()))
 	var d Detail
 	f.call("POST", "/recurring", "createRecurring", body(), 201, &d)
 	r := d.Recurring

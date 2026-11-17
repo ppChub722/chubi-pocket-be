@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/institutions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
@@ -250,6 +251,11 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 	if err != nil {
 		return nil, err
 	}
+	if req.InstitutionID != nil {
+		if err := institutions.CheckOwned(ctx, s.store.Pool(), userID, *req.InstitutionID, true); err != nil {
+			return nil, err
+		}
+	}
 	invitees, err := s.createInviteTargets(ctx, userID, req.InviteContactIDs)
 	if err != nil {
 		return nil, err
@@ -280,6 +286,7 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 		MinimumPayment: req.MinimumPayment,
 		Identifiers:    identifiers,
 		TrackBalance:   req.TrackBalance == nil || *req.TrackBalance,
+		InstitutionID:  req.InstitutionID,
 	}
 	created, err := s.store.InsertTx(ctx, tx, row)
 	if err != nil {
@@ -352,6 +359,11 @@ func (s *Service) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRe
 		}
 	}
 
+	if inst, present := req.InstitutionChange(); present && inst != nil {
+		if err := institutions.CheckOwned(ctx, s.store.Pool(), userID, *inst, true); err != nil {
+			return nil, err
+		}
+	}
 	if req.Identifiers != nil {
 		norm, err := NormalizeIdentifiers(*req.Identifiers)
 		if err != nil {

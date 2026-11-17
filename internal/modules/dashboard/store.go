@@ -37,7 +37,7 @@ func (s *Store) UpcomingItems(ctx context.Context, userID uuid.UUID, today, unti
 	rows, err := s.db.Query(ctx, `
 		SELECT i.id, COALESCE(r.name, i.draft->>'description', ''), COALESCE(i.draft->>'type', 'expense'),
 		       COALESCE((i.draft->>'amount')::numeric, 0), to_char(i.date, 'YYYY-MM-DD'), r.icon_code, NULL::text
-		FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.rule_id
+		FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.recurring_rule_id
 		WHERE i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
 		  AND NOT i.archived AND i.date > $2::date AND i.date <= $3::date
 		  AND r.status = 'active' AND r.type <> 'saving'

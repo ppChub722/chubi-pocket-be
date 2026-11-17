@@ -101,3 +101,27 @@ type RecurringEnd struct {
 	Date  *string `json:"date,omitempty"`
 	Count *int    `json:"count,omitempty"`
 }
+
+// RecurringDueSoonPayload — a reminder of a recurring item (0.4.3): "{name} จะตัด {amount} {when}"
+// (the app words it from date / days_before). anchor due = a round of the line recurring_rule_id;
+// start / end = the item's start / end (no line, amount null).
+type RecurringDueSoonPayload struct {
+	RecurringID     uuid.UUID  `json:"recurring_id"`
+	RecurringRuleID *uuid.UUID `json:"recurring_rule_id"`
+	Name            string     `json:"name"`
+	Date            string     `json:"date"`
+	Amount          *float64   `json:"amount"`
+	DaysBefore      int        `json:"days_before"`
+	Anchor          string     `json:"anchor"`
+}
+
+func (s *Service) RecurringDueSoonTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, p RecurringDueSoonPayload) error {
+	d, err := s.DeliveryFor(ctx, tx, userID, nil, TypeRecurringDueSoon)
+	if err != nil || !d.Deliver {
+		return err
+	}
+	payload, _ := json.Marshal(p)
+	link := fmt.Sprintf("/recurring/%s", p.RecurringID)
+	_, err = s.store.InsertTx(ctx, tx, userID, TypeRecurringDueSoon, nil, payload, &link, false)
+	return err
+}

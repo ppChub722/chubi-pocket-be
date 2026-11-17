@@ -225,7 +225,6 @@ func (f *fx) engine(as uuid.UUID) http.Handler {
 		g.POST("/transactions/:id/paper-sync", h.SyncTransaction)
 		g.POST("/transactions/:id/unlink-paper", h.UnlinkTransaction)
 		g.POST("/personal-debts/:id/paper-sync", h.SyncDebt)
-		g.POST("/personal-debts/:id/unlink-paper", h.UnlinkDebt)
 	})
 }
 

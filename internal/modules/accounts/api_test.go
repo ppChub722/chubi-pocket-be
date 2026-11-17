@@ -606,8 +606,11 @@ func TestAccountHardDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	var recurringID uuid.UUID = uuid.New()
-	if _, err := e.pool.Exec(ctx, `INSERT INTO recurring_rules (id, user_id, name, type, amount, account_id, freq, start_date)
-		VALUES ($1, $2, 'Rent', 'expense', 10, $3, 'monthly', '2026-10-01')`, recurringID, owner, doomed); err != nil {
+	if _, err := e.pool.Exec(ctx, `INSERT INTO recurrings (id, user_id, name, type) VALUES ($1, $2, 'Rent', 'expense')`, recurringID, owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `INSERT INTO recurring_rules (id, recurring_id, user_id, name, type, amount, account_id, freq, start_date)
+		VALUES ($1, $1, $2, 'Rent', 'expense', 10, $3, 'monthly', '2026-10-01')`, recurringID, owner, doomed); err != nil {
 		t.Fatal(err)
 	}
 

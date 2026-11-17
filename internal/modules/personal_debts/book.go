@@ -47,6 +47,10 @@ type EntryInput struct {
 	LinkTransactionID *uuid.UUID
 	// ProjectID — the event a payback paper's repayment row belongs to (lump bookkeeping).
 	ProjectID *uuid.UUID
+	// 0.4.3: an institution counterparty (ContactID nil, PersonName = its name) and the recurring
+	// item the row belongs to.
+	InstitutionID *uuid.UUID
+	RecurringID   *uuid.UUID
 }
 
 // CreateEntryTx writes the row (and its transaction) inside the caller's DB transaction and answers
@@ -94,7 +98,10 @@ func (s *Service) insertRowTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, 
 	entry := &Entry{
 		UserID: userID, Kind: in.Kind, Direction: in.Direction, ContactID: in.ContactID, PersonName: in.PersonName,
 		Amount: in.Amount, Date: in.Date, Description: in.Description, Note: in.Note, DueDate: in.DueDate,
-		ProjectID: in.ProjectID,
+		ProjectID: in.ProjectID, InstitutionID: in.InstitutionID, RecurringID: in.RecurringID,
+	}
+	if entry.InstitutionID != nil {
+		entry.ContactID = nil
 	}
 	e, err := insertEntryTx(ctx, tx, entry)
 	if err != nil {
@@ -292,4 +299,56 @@ func (s *Service) DebtEffectsTx(ctx context.Context, q shared.Querier, userID uu
 		persons = append(persons, b)
 	}
 	return debts, persons, nil
+}
+
+// checkRecurringTx — a row's recurring item (0.4.3): a debt item of mine whose counterparty is the
+// page's key.
+func checkRecurringTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, id *uuid.UUID, rawKey string) error {
+	if id == nil {
+		return nil
+	}
+	k, err := shared.ParseDebtKey(rawKey)
+	if err != nil {
+		return err
+	}
+	var key *string
+	err = tx.QueryRow(ctx, `SELECT CASE WHEN counterparty_institution_id IS NOT NULL THEN 'i:' || counterparty_institution_id::text
+			WHEN counterparty_contact_id IS NOT NULL THEN 'c:' || counterparty_contact_id::text
+			ELSE 'n:' || LOWER(TRIM(counterparty_person_name)) END
+		FROM recurrings WHERE id = $1 AND user_id = $2 AND type = 'debt'`, *id, userID).Scan(&key)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (key == nil || *key != k.Key())) {
+		return invalid("recurring_id is not a debt item of this counterparty")
+	}
+	return err
+}
+
+// tickInstallmentsTx — the installments a repayment of a plan item ticks: seqs, or (nil) the
+// oldest unticked one; nothing when the item has no plan.
+func tickInstallmentsTx(ctx context.Context, tx pgx.Tx, userID, itemID uuid.UUID, seqs *[]int, debtID uuid.UUID) error {
+	var list []int
+	if seqs != nil {
+		list = *seqs
+	} else {
+		var seq int
+		err := tx.QueryRow(ctx, `SELECT seq FROM debt_installments WHERE recurring_id = $1 AND user_id = $2
+			AND paid_at IS NULL AND NOT skipped ORDER BY seq LIMIT 1`, itemID, userID).Scan(&seq)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		list = []int{seq}
+	}
+	for _, seq := range list {
+		tag, err := tx.Exec(ctx, `UPDATE debt_installments SET paid_at = COALESCE(paid_at, NOW()), skipped = FALSE,
+			personal_debt_id = $4 WHERE recurring_id = $1 AND user_id = $2 AND seq = $3`, itemID, userID, seq, debtID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return invalid(fmt.Sprintf("installment %d is not on this item", seq))
+		}
+	}
+	return nil
 }

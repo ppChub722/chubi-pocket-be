@@ -69,6 +69,7 @@ func (s *Service) recordDebtTx(ctx context.Context, tx pgx.Tx, r *Rule, row *ite
 	in := personal_debts.EntryInput{
 		Kind: *r.DebtKind, Direction: *r.DebtDirection, ContactID: r.ContactID, PersonName: *r.PersonName,
 		Amount: amount, Date: when.Format(dateLayout), Description: truncRunes(desc, 200), Note: d.Note,
+		InstitutionID: r.InstitutionID, RecurringID: &r.RecurringID,
 	}
 	var touched []uuid.UUID
 	if withTx && d.AccountID != nil {
@@ -78,6 +79,11 @@ func (s *Service) recordDebtTx(ctx context.Context, tx pgx.Tx, r *Rule, row *ite
 	e, _, err := s.debts.CreateEntryTx(ctx, tx, r.UserID, in)
 	if err != nil {
 		return nil, nil, err
+	}
+	if r.isRepayment() { // 0.4.3: a payment of a plan item ticks its installments (default: the oldest open one)
+		if err := MarkInstallmentsTx(ctx, tx, r.UserID, r.RecurringID, marksOf(ctx), &e.ID); err != nil {
+			return nil, nil, err
+		}
 	}
 	now := time.Now()
 	row.DebtEntryID, row.ProducedAt = &e.ID, &now
@@ -171,7 +177,9 @@ func debtItemViews(ctx context.Context, q shared.Querier, userID uuid.UUID, occs
 }
 
 // ruleKeySQL — a debt setting's person key (alias r), as shared.DebtKey writes it.
-const ruleKeySQL = `(CASE WHEN r.contact_id IS NOT NULL THEN 'c:' || r.contact_id::text
+const ruleKeySQL = `(CASE WHEN (SELECT x.counterparty_institution_id FROM recurrings x WHERE x.id = r.recurring_id) IS NOT NULL
+		THEN 'i:' || (SELECT x.counterparty_institution_id FROM recurrings x WHERE x.id = r.recurring_id)::text
+	WHEN r.contact_id IS NOT NULL THEN 'c:' || r.contact_id::text
 	ELSE 'n:' || LOWER(TRIM(r.person_name)) END)`
 
 // noBalanceOwedSQL — TRUE when a no_balance setting's person owes something its way again
@@ -363,54 +371,6 @@ func (s *Service) linkDebtOcc(ctx context.Context, userID, ruleID uuid.UUID, slo
 	return out, nil
 }
 
-// PersonRecurring — K13: the person's "หนี้" settings (not archived) for the person page, newest
-// first. One query when there are none.
-func (s *Service) PersonRecurring(ctx context.Context, userID uuid.UUID, key string) ([]shared.PersonRecurring, error) {
-	out := []shared.PersonRecurring{}
-	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules r
-		WHERE r.user_id = $1 AND r.type = 'debt' AND r.status <> 'archived' AND `+ruleKeySQL+` = $2
-		ORDER BY r.created_at DESC, r.id`, userID, key)
-	if err != nil {
-		return nil, fmt.Errorf("person recurring: %w", err)
-	}
-	var rules []*Rule
-	for rows.Next() {
-		r, err := scanRule(rows)
-		if err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rules = append(rules, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil || len(rules) == 0 {
-		return out, err
-	}
-	today, err := s.today(ctx, userID, shared.HeaderTZ(ctx))
-	if err != nil {
-		return nil, err
-	}
-	views, err := s.recurringViews(ctx, userID, today, rules)
-	if err != nil {
-		return nil, err
-	}
-	for _, v := range views {
-		p := shared.PersonRecurring{ID: v.ID, Name: v.Name, IconCode: v.IconCode, NextDate: v.NextDate,
-			NextAmount: v.NextAmount, DueCount: v.DueCount, Status: v.Status, PauseReason: v.PauseReason}
-		if v.DebtKind != nil {
-			p.DebtKind = *v.DebtKind
-		}
-		if v.Direction != nil {
-			p.Direction = *v.Direction
-		}
-		if v.Amount != nil {
-			p.Amount = *v.Amount
-		}
-		out = append(out, p)
-	}
-	return out, nil
-}
-
 // markPaidDebt — mark-paid on a debt occurrence books its entry without a transaction (Q-K2).
 func (s *Service) markPaidDebt(ctx context.Context, userID uuid.UUID, r *Rule, o *occ, amount *float64) ([]uuid.UUID, error) {
 	tx, err := s.begin(ctx)
@@ -448,10 +408,14 @@ func (r *Rule) isRepayment() bool {
 	return r.isDebt() && r.DebtKind != nil && *r.DebtKind == DebtKindRepayment
 }
 
-// debtKey — the person key (c:<contact> | n:<name>) of a debt setting; "" for other kinds.
+// debtKey — the counterparty key (c:<contact> | n:<name> | i:<institution>) of a debt line; ""
+// for other kinds.
 func (r *Rule) debtKey() string {
 	if !r.isDebt() {
 		return ""
+	}
+	if r.InstitutionID != nil {
+		return shared.InstitutionKey(*r.InstitutionID)
 	}
 	name := ""
 	if r.PersonName != nil {

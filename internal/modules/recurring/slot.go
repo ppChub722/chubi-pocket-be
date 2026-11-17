@@ -18,6 +18,9 @@ import (
 
 type ConfirmRequest struct {
 	Fields
+	// MarkInstallments — a payment round of an item with a plan: the installments it ticks
+	// ([] = none); absent = the oldest open one (0.4.3).
+	MarkInstallments *[]int `json:"mark_installments"`
 }
 
 // MarkPaidRequest — paid without a transaction keeps an amount (0.4.1-1 R5): the
@@ -36,15 +39,16 @@ type LinkSlotRequest struct {
 }
 
 type LeftOut struct {
-	Slot   string `json:"slot"`
-	Reason string `json:"reason"` // needs_amount
+	RuleID uuid.UUID `json:"recurring_rule_id"`
+	Slot   string    `json:"slot"`
+	Reason string    `json:"reason"` // needs_amount
 }
 
 type BulkResult struct {
 	Items           []Item                 `json:"items"`
 	LeftOut         []LeftOut              `json:"left_out"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
-	Setting         *Recurring             `json:"setting"`
+	Setting         *ItemPage              `json:"setting"`
 	Effects         shared.Effects         `json:"effects"`
 }
 
@@ -127,6 +131,9 @@ func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, ro
 	d := row.Draft
 	if d.Type == nil {
 		return nil, nil, ErrValidation
+	}
+	if r.PaidByPersonName != nil { // 0.4.3: a person paid it for me (my tx without wallet money + my debt)
+		return s.recordPaidByTx(ctx, tx, r, row, date, auto, lang)
 	}
 	if *d.Type == typeDebt { // K4: a person-book entry (+ its transaction when the setting has a wallet)
 		return s.recordDebtTx(ctx, tx, r, row, date, auto, true, lang)
@@ -316,7 +323,7 @@ func (s *Service) Confirm(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 		d, _ := parseDate(*req.Date)
 		date = &d
 	}
-	touched, txRow, err := s.recordOccurrenceTx(ctx, tx, r, row, date, false, s.lang(ctx, userID))
+	touched, txRow, err := s.recordOccurrenceTx(withMarks(ctx, req.MarkInstallments), tx, r, row, date, false, s.lang(ctx, userID))
 	if err != nil {
 		return nil, err
 	}

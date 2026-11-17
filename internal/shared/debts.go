@@ -8,14 +8,21 @@ import (
 	"github.com/google/uuid"
 )
 
-var ErrInvalidPersonKey = errors.New("person key must be c:<contact_id> or n:<name>")
+var ErrInvalidPersonKey = errors.New("person key must be c:<contact_id>, n:<name> or i:<institution_id>")
 
+// DebtPersonKey — a counterparty: a contact, a typed name or (0.4.3) an institution.
 type DebtPersonKey struct {
-	ContactID *uuid.UUID
-	Name      string
+	ContactID     *uuid.UUID
+	Name          string
+	InstitutionID *uuid.UUID
 }
 
-func (k DebtPersonKey) Key() string { return DebtKey(k.ContactID, k.Name) }
+func (k DebtPersonKey) Key() string {
+	if k.InstitutionID != nil {
+		return InstitutionKey(*k.InstitutionID)
+	}
+	return DebtKey(k.ContactID, k.Name)
+}
 
 func ParseDebtKey(s string) (DebtPersonKey, error) {
 	switch {
@@ -25,6 +32,12 @@ func ParseDebtKey(s string) (DebtPersonKey, error) {
 			return DebtPersonKey{}, ErrInvalidPersonKey
 		}
 		return DebtPersonKey{ContactID: &id}, nil
+	case strings.HasPrefix(s, "i:"):
+		id, err := uuid.Parse(strings.TrimSpace(s[2:]))
+		if err != nil {
+			return DebtPersonKey{}, ErrInvalidPersonKey
+		}
+		return DebtPersonKey{InstitutionID: &id}, nil
 	case strings.HasPrefix(s, "n:"):
 		name := strings.TrimSpace(s[2:])
 		if name == "" || len([]rune(name)) > 100 {
@@ -48,9 +61,11 @@ func personKeySQL(contactCol, nameCol string) string {
 		ELSE 'n:' || LOWER(TRIM(%[2]s)) END)`, contactCol, nameCol)
 }
 
-// DebtKeySQL — the person key of a personal_debts row (alias a).
+// DebtKeySQL — the counterparty key of a personal_debts row (alias a): c: / n: / i: (0.4.3).
 func DebtKeySQL(a string) string {
-	return personKeySQL(a+".counterparty_contact_id", a+".counterparty_person_name")
+	return fmt.Sprintf(`(CASE WHEN %[1]s.counterparty_institution_id IS NOT NULL
+		THEN 'i:' || %[1]s.counterparty_institution_id::text
+		ELSE %[2]s END)`, a, personKeySQL(a+".counterparty_contact_id", a+".counterparty_person_name"))
 }
 
 func DebtSignedSQL(a string) string {
@@ -68,7 +83,8 @@ func DebtLedgerSQL(userParam string) string {
 		       lpd.counterparty_contact_id AS cid, lpd.counterparty_person_name AS snap,
 		       ` + DebtSignedSQL("lpd") + ` AS signed, (lpd.paid OR lpd.kind = 'repayment') AS paid,
 		       lpd.date, lpd.created_at, lpd.description AS descr,
-		       CASE WHEN lpd.kind = 'debt' THEN lpd.due_date END AS due_date
+		       CASE WHEN lpd.kind = 'debt' THEN lpd.due_date END AS due_date,
+		       lpd.counterparty_institution_id AS iid
 		FROM personal_debts lpd WHERE lpd.user_id = ` + userParam
 }
 
@@ -96,9 +112,11 @@ type DebtLink struct {
 }
 
 type RecurringRef struct {
-	ID       uuid.UUID `json:"id"`
-	Name     string    `json:"name"`
-	IconCode *IconCode `json:"icon_code"`
+	// ID — the recurring ITEM (0.4.3: /recurring/{id}); RecurringRuleID — its line.
+	ID              uuid.UUID `json:"id"`
+	RecurringRuleID uuid.UUID `json:"recurring_rule_id"`
+	Name            string    `json:"name"`
+	IconCode        *IconCode `json:"icon_code"`
 	// Kind — subscription | installment | income | reminder (set by the recurring module only).
 	Kind string `json:"kind,omitempty"`
 	// PauseReason — manual | overdue_limit | goal_inactive while paused (0.4.1-1 R7; recurring

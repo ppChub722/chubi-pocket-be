@@ -15,6 +15,23 @@ func (s *Service) decorate(ctx context.Context, userID uuid.UUID, accs []Account
 	if len(accs) == 0 {
 		return nil
 	}
+	var instIDs []uuid.UUID
+	for _, a := range accs {
+		if a.InstitutionID != nil {
+			instIDs = append(instIDs, *a.InstitutionID)
+		}
+	}
+	insts, err := shared.LoadInstitutionRefs(ctx, s.store.Pool(), instIDs)
+	if err != nil {
+		return err
+	}
+	for i := range accs {
+		if accs[i].InstitutionID != nil {
+			if r, ok := insts[*accs[i].InstitutionID]; ok {
+				accs[i].Institution = &r
+			}
+		}
+	}
 	today, err := shared.UserToday(ctx, s.store.Pool(), userID, tz)
 	if err != nil {
 		return err

@@ -33,7 +33,7 @@ var (
 const accountColumns = `id, user_id, name, type, balance, currency, icon_code, logo_url,
 	description, note, status,
 	credit_limit, statement_date, payment_due_date, minimum_payment,
-	sort_order, created_at, updated_at, identifiers, track_balance, auto_save`
+	sort_order, created_at, updated_at, identifiers, track_balance, auto_save, institution_id`
 
 // accountReadColumns is the same list for a read from `accounts a`: `balance`
 // is the wallet's balance as of the caller's today (future transactions are
@@ -42,7 +42,7 @@ func accountReadColumns(userParam string) string {
 	return `a.id, a.user_id, a.name, a.type, ` + shared.EffectiveBalanceSQL("a.balance", "a.id", userParam) + `, a.currency, a.icon_code, a.logo_url,
 	a.description, a.note, a.status,
 	a.credit_limit, a.statement_date, a.payment_due_date, a.minimum_payment,
-	a.sort_order, a.created_at, a.updated_at, a.identifiers, a.track_balance, a.auto_save`
+	a.sort_order, a.created_at, a.updated_at, a.identifiers, a.track_balance, a.auto_save, a.institution_id`
 }
 
 func scanAccount(row pgx.Row) (*Account, error) {
@@ -52,7 +52,7 @@ func scanAccount(row pgx.Row) (*Account, error) {
 		&a.ID, &a.UserID, &a.Name, &a.Type, &a.Balance, &a.Currency, &iconBytes, &a.LogoURL,
 		&a.Description, &a.Note, &a.Status,
 		&a.CreditLimit, &a.StatementDate, &a.PaymentDueDate, &a.MinimumPayment,
-		&a.SortOrder, &a.CreatedAt, &a.UpdatedAt, &identifiersBytes, &a.TrackBalance, &a.AutoSave,
+		&a.SortOrder, &a.CreatedAt, &a.UpdatedAt, &identifiersBytes, &a.TrackBalance, &a.AutoSave, &a.InstitutionID,
 	)
 	if err != nil {
 		return nil, err
@@ -191,16 +191,16 @@ func (s *Store) InsertTx(ctx context.Context, tx pgx.Tx, a *Account) (*Account, 
 		(id, user_id, name, type, balance, currency, icon_code, logo_url,
 		 description, note, status,
 		 credit_limit, statement_date, payment_due_date, minimum_payment,
-		 sort_order, created_by_user_id, identifiers, track_balance)
+		 sort_order, created_by_user_id, identifiers, track_balance, institution_id)
 		VALUES ($1, $2, $3, $4, 0, $5, $6::jsonb, $7,
 		        $8, $9, 'active',
-		        $10, $11, $12, $13, $14, $2, $15::jsonb, $16)
+		        $10, $11, $12, $13, $14, $2, $15::jsonb, $16, $17)
 		RETURNING ` + accountColumns
 	created, err := scanAccount(tx.QueryRow(ctx, q,
 		a.ID, a.UserID, a.Name, a.Type, a.Currency, iconJSON, a.LogoURL,
 		shared.CleanText(a.Description), shared.CleanText(a.Note),
 		a.CreditLimit, a.StatementDate, a.PaymentDueDate, a.MinimumPayment,
-		a.SortOrder, identifiersJSON, a.TrackBalance))
+		a.SortOrder, identifiersJSON, a.TrackBalance, a.InstitutionID))
 	if err != nil {
 		return nil, fmt.Errorf("insert account: %w", err)
 	}
@@ -241,6 +241,9 @@ func (s *Store) Update(ctx context.Context, userID, id uuid.UUID, req UpdateRequ
 	}
 	if note, present := req.NoteChange(); present {
 		add("note", note)
+	}
+	if inst, present := req.InstitutionChange(); present {
+		add("institution_id", inst)
 	}
 	if clearCreditFields {
 		q += ", credit_limit = NULL, statement_date = NULL, payment_due_date = NULL, minimum_payment = NULL"

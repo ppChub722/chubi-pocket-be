@@ -33,6 +33,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/dashboard"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/imports/ocr"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/institutions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/me"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/pending"
@@ -131,8 +132,10 @@ func main() {
 	pendingHandler := pending.NewHandler(pendingService)
 
 	recurringService := recurring.NewService(dbPool, transactionsService, pendingService, notificationsService).
-		WithDebts(personalDebtsService) // 0.4.1-2 K: the "หนี้" kind books person-book entries
-	personalDebtsService.WithRecurring(recurringService.PersonRecurring) // K13: the person page lists them
+		WithDebts(personalDebtsService). // 0.4.1-2 K: the "หนี้" kind books person-book entries
+		WithPapers(projectsService)      // 0.4.3: a person-paid round is a จ่ายแทน paper
+	// 0.4.3: a counterparty's page lists its recurring items; the list hero has this month's rounds
+	personalDebtsService.WithCounterpartyRecurring(recurringService.CounterpartyItems, recurringService.DebtMonth)
 	recurringHandler := recurring.NewHandler(recurringService)
 
 	ocrReader := ocr.NewTesseract(ocr.Config{
@@ -149,6 +152,7 @@ func main() {
 	// doesn't know, and slips it can't read yet.
 	providersStore := providers.NewStore(dbPool)
 	providersHandler := providers.NewHandler(providersStore)
+	institutionsHandler := institutions.NewHandler(institutions.NewService(dbPool)) // 0.4.3
 	importsHandler.WithImportLogs(imports.NewLogStore(dbPool).Write, providersStore.Known)
 	importsHandler.WithResolver(pending.NewResolver(dbPool).Resolve)
 	if cfg.OCR.Dump && cfg.App.Env != "production" {
@@ -177,7 +181,8 @@ func main() {
 	projectsService.WithDebts(personalDebtsService) // claims and settles write debts and repayments
 
 	transactionsService.WithRecurringLinks(recurringService)
-	transactionsService.WithPaperReader(projectsService) // GET /transactions/:id carries its bill
+	transactionsService.WithInstallments(recurringService.CardInstallmentTx) // 0.4.3 quick create "ผ่อน"
+	transactionsService.WithPaperReader(projectsService)                     // GET /transactions/:id carries its bill
 	pendingService.WithSubmitHook(recurringService.OnDraftSubmitted)
 	pendingService.WithSavings(savingGoalsService)
 	pendingService.WithRecurringLink(recurringService.LinkNext) // a chat payment ties to its rule's slot
@@ -479,7 +484,6 @@ func main() {
 			protected.POST("/personal-debts/:id/unlink", personalDebtsHandler.UnlinkTx)
 			protected.POST("/personal-debts/:id/disconnect", personalDebtsHandler.Disconnect)
 			protected.POST("/personal-debts/:id/paper-sync", projectsHandler.SyncDebt)
-			protected.POST("/personal-debts/:id/unlink-paper", projectsHandler.UnlinkDebt)
 
 			protected.GET("/notifications", notificationsHandler.List)
 			protected.GET("/notifications/unread-count", notificationsHandler.UnreadCount)
@@ -571,31 +575,45 @@ func main() {
 			protected.POST("/budgets/:id/archive", budgetsHandler.Archive)
 			protected.POST("/budgets/:id/restore", budgetsHandler.Restore)
 
-			protected.GET("/recurring", recurringHandler.List)
-			protected.POST("/recurring", recurringHandler.Create)
+			// 0.4.3: /recurring/:id = the ITEM; its lines under /lines/:line_id; rounds per line
+			protected.GET("/recurring", recurringHandler.ListRecurring)
+			protected.POST("/recurring", recurringHandler.CreateRecurring)
+			protected.POST("/recurring/plan-preview", recurringHandler.PlanPreview)
 			protected.POST("/recurring/occurrences/bulk", recurringHandler.SettleOccurrences)
-			protected.GET("/recurring/:id", recurringHandler.Get)
-			protected.PUT("/recurring/:id", recurringHandler.Update)
-			protected.DELETE("/recurring/:id", recurringHandler.Delete)
-			protected.GET("/recurring/:id/items", recurringHandler.RuleItems)
-			protected.POST("/recurring/:id/pause", recurringHandler.Pause)
-			protected.POST("/recurring/:id/resume", recurringHandler.Resume)
-			protected.POST("/recurring/:id/archive", recurringHandler.Archive)
-			protected.POST("/recurring/:id/restore", recurringHandler.Restore)
-			protected.POST("/recurring/:id/extend", recurringHandler.Extend)
-			protected.POST("/recurring/:id/duplicate", recurringHandler.Duplicate)
-			protected.GET("/recurring/:id/occurrences", recurringHandler.Occurrences)
-			protected.POST("/recurring/:id/occurrences/confirm-ready", recurringHandler.ConfirmReady)
-			protected.POST("/recurring/:id/occurrences/mark-paid-ready", recurringHandler.MarkPaidReady)
-			protected.POST("/recurring/:id/occurrences/skip-ready", recurringHandler.SkipReady)
-			protected.PUT("/recurring/:id/occurrences/:slot", recurringHandler.EditOcc)
-			protected.POST("/recurring/:id/occurrences/:slot/confirm", recurringHandler.ConfirmOcc)
-			protected.POST("/recurring/:id/occurrences/:slot/skip", recurringHandler.SkipOcc)
-			protected.POST("/recurring/:id/occurrences/:slot/restore", recurringHandler.RestoreOcc)
-			protected.POST("/recurring/:id/occurrences/:slot/mark-paid", recurringHandler.MarkPaidOcc)
-			protected.POST("/recurring/:id/occurrences/:slot/unmark-paid", recurringHandler.UnmarkPaidOcc)
-			protected.POST("/recurring/:id/occurrences/:slot/link", recurringHandler.LinkOcc)
-			protected.POST("/recurring/:id/occurrences/:slot/unlink", recurringHandler.UnlinkOcc)
+			protected.GET("/recurring/:id", recurringHandler.GetRecurring)
+			protected.PUT("/recurring/:id", recurringHandler.UpdateRecurring)
+			protected.DELETE("/recurring/:id", recurringHandler.DeleteRecurring)
+			protected.GET("/recurring/:id/items", recurringHandler.ItemRounds)
+			protected.POST("/recurring/:id/pause", recurringHandler.PauseRecurring)
+			protected.POST("/recurring/:id/resume", recurringHandler.ResumeRecurring)
+			protected.POST("/recurring/:id/archive", recurringHandler.ArchiveRecurring)
+			protected.POST("/recurring/:id/restore", recurringHandler.RestoreRecurring)
+			protected.POST("/recurring/:id/duplicate", recurringHandler.DuplicateRecurring)
+			protected.POST("/recurring/:id/lines", recurringHandler.AddLine)
+			protected.PUT("/recurring/:id/lines/:line_id", recurringHandler.UpdateLine)
+			protected.DELETE("/recurring/:id/lines/:line_id", recurringHandler.DeleteLine)
+			protected.POST("/recurring/:id/lines/:line_id/pause", recurringHandler.PauseLine)
+			protected.POST("/recurring/:id/lines/:line_id/resume", recurringHandler.ResumeLine)
+			protected.POST("/recurring/:id/lines/:line_id/archive", recurringHandler.ArchiveLine)
+			protected.POST("/recurring/:id/lines/:line_id/restore", recurringHandler.RestoreLine)
+			protected.POST("/recurring/:id/lines/:line_id/extend", recurringHandler.ExtendLine)
+			protected.GET("/recurring/:id/occurrences", recurringHandler.ItemOccurrences)
+			protected.POST("/recurring/:id/occurrences/confirm-ready", recurringHandler.ConfirmReadyItem)
+			protected.POST("/recurring/:id/occurrences/mark-paid-ready", recurringHandler.MarkPaidReadyItem)
+			protected.POST("/recurring/:id/occurrences/skip-ready", recurringHandler.SkipReadyItem)
+			protected.PUT("/recurring/:id/lines/:line_id/occurrences/:slot", recurringHandler.EditOcc)
+			protected.POST("/recurring/:id/lines/:line_id/occurrences/:slot/confirm", recurringHandler.ConfirmOcc)
+			protected.POST("/recurring/:id/lines/:line_id/occurrences/:slot/skip", recurringHandler.SkipOcc)
+			protected.POST("/recurring/:id/lines/:line_id/occurrences/:slot/restore", recurringHandler.RestoreOcc)
+			protected.POST("/recurring/:id/lines/:line_id/occurrences/:slot/mark-paid", recurringHandler.MarkPaidOcc)
+			protected.POST("/recurring/:id/lines/:line_id/occurrences/:slot/unmark-paid", recurringHandler.UnmarkPaidOcc)
+			protected.POST("/recurring/:id/lines/:line_id/occurrences/:slot/link", recurringHandler.LinkOcc)
+			protected.POST("/recurring/:id/lines/:line_id/occurrences/:slot/unlink", recurringHandler.UnlinkOcc)
+			protected.GET("/recurring/:id/installments", recurringHandler.Installments)
+			protected.PUT("/recurring/:id/installments/:seq", recurringHandler.EditInstallment)
+			protected.POST("/recurring/:id/installments/:seq/mark", recurringHandler.MarkInstallment)
+			protected.POST("/recurring/:id/plan/close", recurringHandler.ClosePlan)
+			protected.DELETE("/recurring/:id/plan", recurringHandler.DeletePlan)
 			protected.GET("/recurring-items", recurringHandler.Items)
 			protected.POST("/recurring-items", recurringHandler.CreateItem)
 			protected.GET("/recurring-items/:id", recurringHandler.GetItem)
@@ -617,6 +635,13 @@ func main() {
 			protected.POST("/pending-transactions/parse-text", importsHandler.ParseText)
 			protected.POST("/slip-imports/check", importsHandler.CheckSlips)
 			protected.GET("/payment-providers", providersHandler.List)
+			protected.GET("/institutions", institutionsHandler.List)
+			protected.POST("/institutions", institutionsHandler.Create)
+			protected.GET("/institutions/:id", institutionsHandler.Get)
+			protected.PUT("/institutions/:id", institutionsHandler.Update)
+			protected.DELETE("/institutions/:id", institutionsHandler.Delete)
+			protected.POST("/institutions/:id/archive", institutionsHandler.Archive)
+			protected.POST("/institutions/:id/restore", institutionsHandler.Restore)
 			protected.DELETE("/slip-imports", importsHandler.ResetSlips)
 			protected.POST("/pending-transactions/:id/submit", pendingHandler.SubmitOne)
 			protected.PUT("/pending-transactions/:id", pendingHandler.Update)
@@ -645,6 +670,8 @@ func main() {
 	if telegramWebhook != nil {
 		telegramWebhook.Start() // getMe + setWebhook in the background; failures are logged only
 	}
+	// 0.4.3: recurring reminders (recurring_due_soon), checked every 10 minutes
+	recurringService.StartReminderJob(shutdownCtx, 10*time.Minute, log)
 
 	<-shutdownCtx.Done()
 	log.Info("Shutting down")

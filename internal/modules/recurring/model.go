@@ -77,6 +77,14 @@ type Rule struct {
 	DebtKind      *string
 	DebtDirection *string
 	ZeroRounds    int
+	// 0.4.3: the item this line belongs to; a line paid by a person (คนจ่ายแทน: a contact, else the
+	// typed name, always kept) instead of a wallet. InstitutionID — read only: the item's
+	// institution counterparty (type debt), the line's PersonName then holds its name.
+	RecurringID      uuid.UUID
+	PaidByContactID  *uuid.UUID
+	PaidByPersonName *string
+	InstitutionID    *uuid.UUID
+	forceID          uuid.UUID // insertRuleTx: the id a new line takes
 }
 
 type (
@@ -229,7 +237,7 @@ type LinkedTx struct {
 // from the rule (id null, stored false), addressed by rule_id + slot.
 type Item struct {
 	ID            *uuid.UUID            `json:"id"`
-	RuleID        uuid.UUID             `json:"rule_id"`
+	RuleID        uuid.UUID             `json:"recurring_rule_id"`
 	Slot          string                `json:"slot"` // the occurrence's original date
 	Stored        bool                  `json:"stored"`
 	AutoCreated   bool                  `json:"auto_created"`
@@ -301,14 +309,14 @@ type ItemWriteResult struct {
 	Item            Item                   `json:"item"`
 	Transaction     any                    `json:"transaction"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
-	Setting         *Recurring             `json:"setting"`
+	Setting         *ItemPage              `json:"setting"`
 	Effects         shared.Effects         `json:"effects"`
 }
 
 type ItemsWriteResult struct {
 	Items           []Item                 `json:"items"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
-	Setting         *Recurring             `json:"setting"`
+	Setting         *ItemPage              `json:"setting"`
 	Effects         shared.Effects         `json:"effects"`
 }
 
@@ -316,7 +324,7 @@ type ItemDeleteResult struct {
 	ID              uuid.UUID              `json:"id"`
 	TransactionID   *uuid.UUID             `json:"transaction_id"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
-	Setting         *Recurring             `json:"setting"`
+	Setting         *ItemPage              `json:"setting"`
 	Effects         shared.Effects         `json:"effects"`
 }
 
@@ -324,7 +332,7 @@ type BatchResult struct {
 	Items           []Item                 `json:"items"`
 	DeletedIDs      []uuid.UUID            `json:"deleted_ids"`
 	AccountBalances []shared.WalletBalance `json:"account_balances"`
-	Setting         *Recurring             `json:"setting"`
+	Setting         *ItemPage              `json:"setting"`
 	Effects         shared.Effects         `json:"effects"`
 }
 

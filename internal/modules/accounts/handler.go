@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/auth"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/institutions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/notifications"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
@@ -242,6 +243,8 @@ func mapServiceError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusConflict, apierr.UserAlreadyMember, "User is already a member of this account", nil)
 	case errors.Is(err, ErrNotMember):
 		response.Fail(c, http.StatusForbidden, apierr.NotMember, "Caller is not an active member of this account", nil)
+	case errors.Is(err, institutions.ErrNotFound), errors.Is(err, institutions.ErrInvalidState):
+		response.BadRequest(c, apierr.InstitutionNotFound, "Institution not found", nil)
 	case errors.Is(err, ErrNotOwner):
 		response.Fail(c, http.StatusForbidden, apierr.NotOwner, "Only the account owner can perform this action", nil)
 	case errors.Is(err, ErrOwnerMustTransfer):

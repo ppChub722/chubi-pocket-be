@@ -145,6 +145,8 @@ type WriteResult struct {
 	PersonBalances []any `json:"person_balances,omitempty"`
 	// Effects (0.4.1-1 B2) — everything the write changed, linked sides included.
 	Effects shared.Effects `json:"effects"`
+	// RecurringID (0.4.3) — the installment item a create with `installment` made; null otherwise.
+	RecurringID *uuid.UUID `json:"recurring_id"`
 }
 
 type DeleteResult struct {
@@ -168,6 +170,8 @@ type CreateRequest struct {
 	TagIDs              []uuid.UUID `json:"tag_ids" binding:"omitempty"`
 	// AllowZero — system callers only (recurring auto-create, 0.4.1-1 R12): amount 0 is recorded.
 	AllowZero bool `json:"-"`
+	// Installment (0.4.3 quick create "ผ่อน") — an expense on a card bought in installments.
+	Installment *InstallmentRequest `json:"installment"`
 }
 
 type UpdateRequest struct {
