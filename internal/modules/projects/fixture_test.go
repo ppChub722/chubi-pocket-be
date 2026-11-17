@@ -40,7 +40,7 @@ type fx struct {
 
 func newFx(t *testing.T) *fx {
 	t.Helper()
-	pool := testdb.Pool(t)
+	pool := testdb.StatsPool(t) // counts a request's queries when a test asks (DoCounted)
 	f := &fx{t: t, pool: pool}
 	catSvc := categories.NewService(categories.NewStore(pool))
 	f.txs = transactions.NewService(transactions.NewStore(pool), catSvc)
@@ -52,6 +52,7 @@ func newFx(t *testing.T) *fx {
 	f.svc.WithNotificationService(notifs)
 	f.svc.WithTransactionsService(f.txs)
 	f.svc.WithDebts(f.debts)
+	f.txs.WithPaperReader(f.svc) // as main.go: GET /transactions/:id carries its bill
 	t.Cleanup(f.cleanup)
 
 	f.a, f.b, f.c = f.user("Alice"), f.user("Bee"), f.user("Chai")

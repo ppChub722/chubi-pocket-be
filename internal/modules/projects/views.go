@@ -497,7 +497,7 @@ func (s *Service) paperViews(ctx context.Context, q shared.Querier, userID uuid.
 		v.Me = p.PersonOfUser(userID)
 		v.MyBooks = MyPaperBooks{DebtIDs: []uuid.UUID{}, Missing: []string{}, InSync: true}
 		if tid, ok := myTx[id]; ok && s.txs != nil {
-			if d, err := s.txs.Get(ctx, userID, tid); err == nil {
+			if d, err := s.txs.GetBare(ctx, userID, tid); err == nil { // Get would read this paper again
 				v.MyBooks.Transaction = d
 				v.MyBooks.InSync = p.TxInSync(userID, d.Amount, d.MyShare, d.Date, d.Description)
 			}

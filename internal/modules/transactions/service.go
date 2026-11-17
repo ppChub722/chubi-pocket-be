@@ -114,6 +114,16 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*TransactionDe
 	return d, nil
 }
 
+// GetBare is Get without the paper: for a reader that is building the paper itself (projects'
+// paper views), where Get would ask for the same paper again and loop.
+func (s *Service) GetBare(ctx context.Context, userID, id uuid.UUID) (*TransactionDetail, error) {
+	t, err := s.store.GetByID(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	return detailOf(ctx, s.store.db, userID, t)
+}
+
 func (s *Service) List(ctx context.Context, userID uuid.UUID, f ListFilter) (*ListResponse, error) {
 	if f.Page <= 0 {
 		f.Page = 1
