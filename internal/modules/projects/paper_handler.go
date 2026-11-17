@@ -194,6 +194,20 @@ func (h *Handler) GetPaper(event bool) gin.HandlerFunc {
 	}
 }
 
+// GetBill — GET /bills/:id: one paper by its id alone, either kind (the app's one bill page).
+func (h *Handler) GetBill(c *gin.Context) {
+	userID, ok := h.user(c)
+	if !ok {
+		return
+	}
+	id, ok := pathID(c, "id", "bill id")
+	if !ok {
+		return
+	}
+	out, err := h.service.getPaper(c.Request.Context(), userID, id, nil)
+	reply(c, http.StatusOK, out, err)
+}
+
 func (h *Handler) UpdatePaper(event bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, id, kind, ok := h.paperRoute(c, event)

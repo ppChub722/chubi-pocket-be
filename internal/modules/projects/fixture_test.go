@@ -213,6 +213,7 @@ func (f *fx) engine(as uuid.UUID) http.Handler {
 		g.GET("/split-bills", h.ListSplitBills)
 		g.POST("/split-bills", h.CreateSplitBill)
 		g.GET("/split-bills/:id", h.GetPaper(false))
+		g.GET("/bills/:id", h.GetBill)
 		g.PUT("/split-bills/:id", h.UpdatePaper(false))
 		g.POST("/split-bills/:id/join", h.JoinSplitBill)
 		g.POST("/split-bills/:id/decline", h.DeclineSplitBill)

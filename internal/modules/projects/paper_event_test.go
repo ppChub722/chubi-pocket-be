@@ -148,6 +148,10 @@ func TestMovePaperMatchesMembers(t *testing.T) {
 		t.Errorf("Bee got no bill_moved")
 	}
 	A.fail("GET", "/split-bills/"+id, nil, 404, "BILL_NOT_FOUND")
+	// one id for both kinds: /bills/{id} still reads it, now in the event
+	if got := A.do("GET", "/bills/"+id, nil, "getBill", 200); got["project_id"] != ev {
+		t.Errorf("GET /bills/{id} after the move: project_id %v, want %s", got["project_id"], ev)
+	}
 	out := obj(A.do("POST", "/projects/"+ev+"/bills/"+id+"/move", map[string]any{"project_id": nil}, "moveEventBill", 200), "paper")
 	if out["project_id"] != nil || len(arr(out, "people")) != 3 {
 		t.Errorf("moved out: %v", out)

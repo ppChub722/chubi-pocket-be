@@ -530,6 +530,7 @@ func main() {
 			protected.GET("/split-bills", projectsHandler.ListSplitBills)
 			protected.POST("/split-bills", projectsHandler.CreateSplitBill)
 			protected.GET("/split-bills/:id", projectsHandler.GetPaper(false))
+			protected.GET("/bills/:id", projectsHandler.GetBill)
 			protected.PUT("/split-bills/:id", projectsHandler.UpdatePaper(false))
 			protected.POST("/split-bills/:id/join", projectsHandler.JoinSplitBill)
 			protected.POST("/split-bills/:id/decline", projectsHandler.DeclineSplitBill)

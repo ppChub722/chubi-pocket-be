@@ -5417,6 +5417,22 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: 'ACCOUNT_ARCHIVED.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /bills/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    get:
+      tags: [Split bills]
+      summary: One bill as I see it, either kind
+      operationId: getBill
+      description: 'A split bill or an event bill by its id alone (`project_id` says which; the paper keeps its id when it moves in or out of an event). Writes stay on /split-bills/{id} and /projects/{id}/bills/{bid}.'
+      responses:
+        '200':
+          description: The paper.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaperView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /split-bills/{id}:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
