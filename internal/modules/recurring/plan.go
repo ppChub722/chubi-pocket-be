@@ -314,6 +314,9 @@ func (s *Service) planView(ctx context.Context, q shared.Querier, userID uuid.UU
 		if x, ok := refs[*p.CardAccountID]; ok {
 			v.CardAccount = &x
 		}
+		if v.Purchase, err = loadPurchase(ctx, q, userID, it.ID); err != nil {
+			return nil, err
+		}
 	}
 	for i := range rows {
 		x := rows[i]
@@ -323,6 +326,7 @@ func (s *Service) planView(ctx context.Context, q shared.Querier, userID uuid.UU
 		case "paid":
 			v.Done++
 			v.PaidPrincipal += x.Principal
+			v.PaidTotal += x.Amount
 		case "skipped":
 		default:
 			v.LeftCount++
@@ -341,7 +345,7 @@ func (s *Service) planView(ctx context.Context, q shared.Querier, userID uuid.UU
 		v.Next = &n
 	}
 	v.PaidPrincipal, v.LeftPrincipal, v.LeftInterest = round2(v.PaidPrincipal), round2(v.LeftPrincipal), round2(v.LeftInterest)
-	v.LeftTotal = round2(v.LeftPrincipal + v.LeftInterest)
+	v.LeftTotal, v.PaidTotal = round2(v.LeftPrincipal+v.LeftInterest), round2(v.PaidTotal)
 	return v, nil
 }
 
@@ -595,4 +599,38 @@ func marksOf(ctx context.Context) []int {
 		return v
 	}
 	return nil
+}
+
+// loadPurchase — a card plan's purchase (nil when it was not made by quick create, or was deleted).
+func loadPurchase(ctx context.Context, q shared.Querier, userID, itemID uuid.UUID) (*PlanPurchase, error) {
+	rows, err := q.Query(ctx, `SELECT t.id, t.amount::float8, t.date, t.description, t.category_id
+		FROM recurrings r JOIN transactions t ON t.id = r.purchase_transaction_id
+		WHERE r.id = $1 AND r.user_id = $2`, itemID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	var (
+		x    PlanPurchase
+		date time.Time
+		cat  *uuid.UUID
+	)
+	if err := rows.Scan(&x.ID, &x.Amount, &date, &x.Description, &cat); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	x.Date = date.Format(dateLayout)
+	if cat != nil {
+		refs, err := shared.LoadCategoryRefs(ctx, q, []uuid.UUID{*cat})
+		if err != nil {
+			return nil, err
+		}
+		if c, ok := refs[*cat]; ok {
+			x.Category = &c
+		}
+	}
+	return &x, nil
 }

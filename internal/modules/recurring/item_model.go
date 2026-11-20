@@ -199,10 +199,12 @@ type PlanView struct {
 	InstallmentAmount *float64            `json:"installment_amount"`
 	CardAccountID     *uuid.UUID          `json:"card_account_id"`
 	CardAccount       *shared.AccountRef  `json:"card_account"`
+	Purchase          *PlanPurchase       `json:"purchase"` // a card plan: its full-price expense on the card
 	Closed            bool                `json:"closed"`
 	Done              int                 `json:"done"` // installments ticked paid
 	LeftCount         int                 `json:"left_count"`
 	PaidPrincipal     float64             `json:"paid_principal"`
+	PaidTotal         float64             `json:"paid_total"` // principal + interest of the ticked installments
 	LeftPrincipal     float64             `json:"left_principal"`
 	LeftInterest      float64             `json:"left_interest"`
 	LeftTotal         float64             `json:"left_total"`
@@ -210,6 +212,15 @@ type PlanView struct {
 	Next              *Installment        `json:"next"`
 	Due               []Installment       `json:"due"` // past their date, not ticked
 	Chain             []InstallmentStatus `json:"chain"`
+}
+
+// PlanPurchase — the expense a card installment was made from (quick create ผ่อน).
+type PlanPurchase struct {
+	ID          uuid.UUID           `json:"id"`
+	Amount      float64             `json:"amount"`
+	Date        string              `json:"date"`
+	Description *string             `json:"description"`
+	Category    *shared.CategoryRef `json:"category"`
 }
 
 type InstallmentStatus struct {

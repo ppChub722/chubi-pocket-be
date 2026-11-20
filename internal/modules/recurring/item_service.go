@@ -545,7 +545,7 @@ func (s *Service) itemPages(ctx context.Context, userID uuid.UUID, today time.Ti
 		}
 		p.Actions = ItemActions{
 			Pause: it.Status == "active", Resume: it.Status == "paused", Archive: it.Status != "archived",
-			Restore: it.Status == "archived", Delete: true, AddLine: it.Status != "archived",
+			Restore: it.Status == "archived", Delete: true, AddLine: it.Status != "archived" && !onCard(it),
 		}
 		if full {
 			if err := s.fillItemFull(ctx, userID, today, it, lines, byItem[it.ID], &p); err != nil {
@@ -1103,6 +1103,9 @@ func (s *Service) AddLine(ctx context.Context, userID, id uuid.UUID, in LineInpu
 	return s.lineWrite(ctx, userID, id, nil, in, tz)
 }
 
+// onCard — a card installment: paid with the card's statement, so it takes no line.
+func onCard(it *itemRecord) bool { return it.Plan != nil && it.Plan.CardAccountID != nil }
+
 func (s *Service) UpdateLine(ctx context.Context, userID, id, lineID uuid.UUID, in LineInput, tz string) (*ItemPage, error) {
 	return s.lineWrite(ctx, userID, id, &lineID, in, tz)
 }
@@ -1121,7 +1124,7 @@ func (s *Service) lineWrite(ctx context.Context, userID, id uuid.UUID, lineID *u
 	if err != nil {
 		return nil, err
 	}
-	if it.Status == "archived" {
+	if it.Status == "archived" || (lineID == nil && onCard(it)) {
 		return nil, ErrInvalidTransition
 	}
 	if err := resolveCounterpartyTx(ctx, tx, userID, it); err != nil {

@@ -79,6 +79,9 @@ func (s *Service) CardInstallmentTx(ctx context.Context, tx pgx.Tx, userID uuid.
 		}
 		return uuid.Nil, err
 	}
+	if _, err := tx.Exec(ctx, `UPDATE recurrings SET purchase_transaction_id = $1 WHERE id = $2`, purchase.ID, it.ID); err != nil {
+		return uuid.Nil, err
+	}
 	return it.ID, nil
 }
 

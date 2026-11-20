@@ -12160,7 +12160,7 @@ components:
     RecurringPlan:
       type: object
       description: 'A debt item''s plan: information and ticks; the balance counts debt rows only.'
-      required: [principal, count, start_date, interest_method, interest_rate, installment_amount, card_account_id, card_account, closed, done, left_count, paid_principal, left_principal, left_interest, left_total, last_date, next, due, chain]
+      required: [principal, count, start_date, interest_method, interest_rate, installment_amount, card_account_id, card_account, purchase, closed, done, left_count, paid_principal, paid_total, left_principal, left_interest, left_total, last_date, next, due, chain]
       properties:
         principal: { $ref: '#/components/schemas/Money' }
         count: { type: integer }
@@ -12170,10 +12170,23 @@ components:
         installment_amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
         card_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         card_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
+        purchase:
+          description: 'A card plan: the full-price expense on the card it was made from (quick create ผ่อน); null otherwise or when that row was deleted.'
+          oneOf:
+            - type: object
+              required: [id, amount, date, description, category]
+              properties:
+                id: { $ref: '#/components/schemas/Uuid' }
+                amount: { $ref: '#/components/schemas/Money' }
+                date: { $ref: '#/components/schemas/Date' }
+                description: { type: [string, 'null'] }
+                category: { oneOf: [{ $ref: '#/components/schemas/CategoryRef' }, { type: 'null' }] }
+            - { type: 'null' }
         closed: { type: boolean, description: 'Closed early (ปิดแผนก่อนกำหนด).' }
         done: { type: integer, description: 'Installments ticked paid (n of n/N).' }
         left_count: { type: integer }
         paid_principal: { $ref: '#/components/schemas/Money' }
+        paid_total: { $ref: '#/components/schemas/Money', description: 'Principal + interest of the ticked installments (a card plan: billed so far).' }
         left_principal: { $ref: '#/components/schemas/Money' }
         left_interest: { $ref: '#/components/schemas/Money' }
         left_total: { $ref: '#/components/schemas/Money' }
