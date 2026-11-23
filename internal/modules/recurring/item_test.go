@@ -10,6 +10,7 @@ import (
 
 	"github.com/ppChub722/chubi-pocket-be/internal/apidoc/apitest"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
+	"github.com/ppChub722/chubi-pocket-be/internal/platform/testdb"
 )
 
 // do — a 0.4.3 call as is (no 0.4.2 shim).
@@ -61,7 +62,7 @@ func (f *recFix) monthly(day int, start string, end map[string]any) map[string]a
 func TestRecurringItemLines(t *testing.T) {
 	f := newRecFix(t)
 	other := f.wallet
-	body := map[string]any{"name": "ค่าเช่า", "type": "expense", "category_id": f.food, "lines": []any{
+	body := map[string]any{"name": "ค่าเช่า", "type": "expense", "category_id": f.food, "reminders": []any{
 		map[string]any{"amount": 6000, "source": map[string]any{"account_id": f.wallet}, "schedule": f.monthly(1, f.day(-40), nil)},
 		map[string]any{"amount": 500, "source": map[string]any{"account_id": other}, "schedule": map[string]any{"freq": "weekly", "interval": 1,
 			"weekdays": []int{6}, "start_date": f.day(-10)}},
@@ -76,7 +77,7 @@ func TestRecurringItemLines(t *testing.T) {
 	}
 	second := p.Lines[1].ID
 	var lineCat *uuid.UUID
-	_ = f.pool.QueryRow(f.ctx, `SELECT category_id FROM recurring_rules WHERE id = $1`, second).Scan(&lineCat)
+	_ = f.pool.QueryRow(f.ctx, `SELECT category_id FROM recurring_reminders WHERE id = $1`, second).Scan(&lineCat)
 	if lineCat == nil || *lineCat != f.food {
 		t.Errorf("the item's category did not reach its second line")
 	}
@@ -88,18 +89,21 @@ func TestRecurringItemLines(t *testing.T) {
 		t.Fatalf("list = %+v", list.Data)
 	}
 
-	// rename: every line follows; pause one line: the item stays active
-	f.do("PUT", "/recurring/"+p.ID.String(), "updateRecurring", map[string]any{"name": "ค่าบ้าน", "type": "bill", "category_id": f.food}, 200, &p)
+	// the type is fixed: another type is refused
+	f.do("PUT", "/recurring/"+p.ID.String(), "updateRecurring", map[string]any{"name": "ค่าบ้าน", "type": "income", "category_id": f.food}, http.StatusBadRequest, nil)
+
+	// rename: every reminder follows; pause one reminder: the item stays active
+	f.do("PUT", "/recurring/"+p.ID.String(), "updateRecurring", map[string]any{"name": "ค่าบ้าน", "type": "expense", "category_id": f.food}, 200, &p)
 	var n int
-	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM recurring_rules WHERE recurring_id = $1 AND name = 'ค่าบ้าน' AND kind = 'reminder'`, p.ID).Scan(&n)
-	if n != 2 || p.Type != TypeBill {
-		t.Errorf("rename reached %d lines, type %s", n, p.Type)
+	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM recurring_reminders WHERE recurring_id = $1 AND name = 'ค่าบ้าน'`, p.ID).Scan(&n)
+	if n != 2 || p.Type != TypeExpense {
+		t.Errorf("rename reached %d reminders, type %s", n, p.Type)
 	}
-	f.do("POST", "/recurring/"+p.ID.String()+"/lines/"+second.String()+"/pause", "pauseRecurringLine", nil, 200, &p)
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders/"+second.String()+"/pause", "pauseRecurringReminder", nil, 200, &p)
 	if p.Status != "active" || p.Lines[1].Status != "paused" {
 		t.Errorf("after line pause: item %s line %s", p.Status, p.Lines[1].Status)
 	}
-	f.do("POST", "/recurring/"+p.ID.String()+"/lines/"+p.ID.String()+"/pause", "pauseRecurringLine", nil, 200, &p)
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders/"+p.ID.String()+"/pause", "pauseRecurringReminder", nil, 200, &p)
 	if p.Status != "paused" {
 		t.Errorf("both lines paused: item %s", p.Status)
 	}
@@ -109,26 +113,26 @@ func TestRecurringItemLines(t *testing.T) {
 	}
 
 	// add a line, edit it, delete it; the last line can't go
-	f.do("POST", "/recurring/"+p.ID.String()+"/lines", "addRecurringLine",
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders", "addRecurringReminder",
 		map[string]any{"amount": 99, "source": map[string]any{"account_id": f.wallet}, "schedule": f.monthly(15, f.day(0), nil)}, 200, &p)
 	if len(p.Lines) != 3 {
 		t.Fatalf("lines after add = %d", len(p.Lines))
 	}
 	third := p.Lines[2].ID
-	f.do("PUT", "/recurring/"+p.ID.String()+"/lines/"+third.String(), "updateRecurringLine",
+	f.do("PUT", "/recurring/"+p.ID.String()+"/reminders/"+third.String(), "updateRecurringReminder",
 		map[string]any{"amount": 120, "source": map[string]any{"account_id": f.wallet}}, 200, &p)
 	if *p.Lines[2].Amount != 120 || p.Lines[2].Schedule.Freq != "monthly" {
 		t.Errorf("line edit = %+v", p.Lines[2])
 	}
-	f.do("PUT", "/recurring/"+p.ID.String()+"/lines/"+third.String(), "updateRecurringLine",
+	f.do("PUT", "/recurring/"+p.ID.String()+"/reminders/"+third.String(), "updateRecurringReminder",
 		map[string]any{"amount": 1, "source": map[string]any{"account_id": f.wallet, "paid_by": map[string]any{"person_name": "x"}}}, 400, nil)
-	f.do("DELETE", "/recurring/"+p.ID.String()+"/lines/"+third.String(), "deleteRecurringLine", nil, 200, &p)
-	f.do("DELETE", "/recurring/"+p.ID.String()+"/lines/"+second.String(), "deleteRecurringLine", nil, 200, &p)
-	raw := f.do("DELETE", "/recurring/"+p.ID.String()+"/lines/"+p.ID.String(), "deleteRecurringLine", nil, 409, nil)
-	if !contains(raw, "RECURRING_LAST_LINE") {
+	f.do("DELETE", "/recurring/"+p.ID.String()+"/reminders/"+third.String(), "deleteRecurringReminder", nil, 200, &p)
+	f.do("DELETE", "/recurring/"+p.ID.String()+"/reminders/"+second.String(), "deleteRecurringReminder", nil, 200, &p)
+	raw := f.do("DELETE", "/recurring/"+p.ID.String()+"/reminders/"+p.ID.String(), "deleteRecurringReminder", nil, 409, nil)
+	if !contains(raw, "RECURRING_LAST_REMINDER") {
 		t.Errorf("last line: %s", raw)
 	}
-	f.do("POST", "/recurring/"+p.ID.String()+"/lines/"+uuid.NewString()+"/occurrences/"+f.day(0)+"/skip", "skipRecurringOccurrence", nil, 404, nil)
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders/"+uuid.NewString()+"/occurrences/"+f.day(0)+"/skip", "skipRecurringOccurrence", nil, 404, nil)
 
 	// rounds of every line in one list
 	var rounds ItemList
@@ -149,9 +153,8 @@ func TestRecurringItemLines(t *testing.T) {
 func TestRecurringPaidByLine(t *testing.T) {
 	f := newRecFix(t)
 	before := f.balance()
-	body := map[string]any{"name": "ค่าเช่า", "type": "debt", "category_id": f.food, "debt_direction": "received",
-		"counterparty": map[string]any{"person_name": "แฟน"},
-		"lines": []any{map[string]any{"amount": 6000, "source": map[string]any{"paid_by": map[string]any{"person_name": "แฟน"}},
+	body := map[string]any{"name": "ค่าเช่า", "type": "expense", "category_id": f.food,
+		"reminders": []any{map[string]any{"amount": 6000, "source": map[string]any{"paid_by": map[string]any{"person_name": "แฟน"}},
 			"schedule": f.monthly(f.today.Day(), f.day(0), nil)}}}
 	var p ItemPage
 	f.do("POST", "/recurring", "createRecurring", body, http.StatusCreated, &p)
@@ -159,7 +162,7 @@ func TestRecurringPaidByLine(t *testing.T) {
 		t.Fatalf("line = %+v", p.Lines[0])
 	}
 	var res ItemWriteResult
-	f.do("POST", "/recurring/"+p.ID.String()+"/lines/"+p.ID.String()+"/occurrences/"+f.day(0)+"/confirm", "confirmRecurringOccurrence",
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders/"+p.ID.String()+"/occurrences/"+f.day(0)+"/confirm", "confirmRecurringOccurrence",
 		map[string]any{}, 200, &res)
 	if res.Item.Status != StatusDone || res.Item.Transaction == nil {
 		t.Fatalf("round = %+v", res.Item)
@@ -186,13 +189,9 @@ func TestRecurringPaidByLine(t *testing.T) {
 	if amount != 6000 || dir != "received" || rec == nil || *rec != p.ID {
 		t.Errorf("debt = %v %s item %v", amount, dir, rec)
 	}
-	f.do("GET", "/recurring/"+p.ID.String(), "getRecurring", nil, 200, &p)
-	if p.Counterparty == nil || p.Counterparty.Net != -6000 || p.Counterparty.Key != "n:แฟน" {
-		t.Errorf("counterparty = %+v", p.Counterparty)
-	}
 
 	// a person can't pay an income for me
-	bad := map[string]any{"name": "x", "type": "income", "lines": []any{map[string]any{"amount": 1,
+	bad := map[string]any{"name": "x", "type": "income", "reminders": []any{map[string]any{"amount": 1,
 		"source": map[string]any{"paid_by": map[string]any{"person_name": "a"}}, "schedule": f.monthly(1, f.day(0), nil)}}}
 	if raw := f.do("POST", "/recurring", "createRecurring", bad, 400, nil); !contains(raw, "RECURRING_SOURCE_INVALID") {
 		t.Errorf("paid_by income: %s", raw)
@@ -206,18 +205,18 @@ func TestRecurringPaidByLine(t *testing.T) {
 	}
 }
 
-// A debt item with a plan: the opening row counts at once; installments are ticks; a payment round
-// ticks the oldest open one; edit / mark / close / drop the plan.
-func TestRecurringDebtPlan(t *testing.T) {
+// A debt plan (a cash loan to a person): the opening row counts at once; a debt item pays it by
+// reminder (each round = the oldest open installment); edit / mark / pay with interest / close.
+func TestDebtPlan(t *testing.T) {
 	f := newRecFix(t)
 	var prev InstallmentList
-	f.do("POST", "/recurring/plan-preview", "previewRecurringPlan", map[string]any{"principal": 10000, "count": 3,
+	f.do("POST", "/debt-plans/preview", "previewDebtPlan", map[string]any{"principal": 10000, "count": 3,
 		"start_date": f.day(0), "interest_method": "none"}, 200, &prev)
 	if len(prev.Data) != 3 || prev.Data[0].Principal != 3333.33 || prev.Data[2].Principal != 3333.34 {
 		t.Fatalf("preview = %+v", prev.Data)
 	}
 	var red InstallmentList
-	f.do("POST", "/recurring/plan-preview", "previewRecurringPlan", map[string]any{"principal": 12000, "count": 12,
+	f.do("POST", "/debt-plans/preview", "previewDebtPlan", map[string]any{"principal": 12000, "count": 12,
 		"start_date": f.day(0), "interest_method": "reducing", "interest_rate": 12}, 200, &red)
 	sum := 0.0
 	for _, x := range red.Data {
@@ -226,102 +225,244 @@ func TestRecurringDebtPlan(t *testing.T) {
 	if len(red.Data) != 12 || red.Data[0].Interest != 120 || round2(sum) != 12000 || red.Data[11].Interest >= red.Data[0].Interest {
 		t.Errorf("reducing = %+v (principal %v)", red.Data, sum)
 	}
-	if raw := f.do("POST", "/recurring/plan-preview", "previewRecurringPlan", map[string]any{"principal": 1, "count": 0,
+	if raw := f.do("POST", "/debt-plans/preview", "previewDebtPlan", map[string]any{"principal": 1, "count": 0,
 		"start_date": f.day(0), "interest_method": "none"}, 400, nil); !contains(raw, "PLAN_INVALID") {
 		t.Errorf("bad plan: %s", raw)
 	}
 
 	f.seedCategories()
 	before := f.balance()
-	body := map[string]any{"name": "ให้ยืม", "type": "debt", "debt_direction": "paid", "counterparty": map[string]any{"person_name": "บอย"},
-		"plan": map[string]any{"principal": 10000, "count": 5, "start_date": f.day(-40), "interest_method": "none", "opening_account_id": f.wallet},
-		"lines": []any{map[string]any{"amount": 2000, "debt_kind": "repayment", "source": map[string]any{"account_id": f.wallet},
+	var pl PlanView
+	f.do("POST", "/debt-plans", "createDebtPlan", map[string]any{"name": "ให้ยืม", "direction": "paid", "origin": "cash",
+		"creditor": map[string]any{"person_name": "บอย"},
+		"plan":     map[string]any{"principal": 10000, "count": 5, "start_date": f.day(-40), "interest_method": "none", "opening_account_id": f.wallet}},
+		http.StatusCreated, &pl)
+	if pl.Count != 5 || pl.Done != 0 || len(pl.Due) != 2 || pl.LeftTotal != 10000 || pl.Creditor.Kind != "person" || pl.Origin != "cash" {
+		t.Fatalf("plan = %+v", pl)
+	}
+	if f.balance() != before-10000 {
+		t.Errorf("the opening row's wallet tx: balance %v → %v", before, f.balance())
+	}
+	// the item that pays it: a reminder; a round pays (here: collects) the oldest open installment
+	body := map[string]any{"name": "ให้ยืม", "type": "debt", "debt_plan_id": pl.ID,
+		"reminders": []any{map[string]any{"source": map[string]any{"account_id": f.wallet},
 			"schedule": f.monthly(f.today.Day(), f.day(0), map[string]any{"kind": "count", "count": 5})}}}
 	var p ItemPage
 	f.do("POST", "/recurring", "createRecurring", body, http.StatusCreated, &p)
-	if p.Plan == nil || p.Plan.Count != 5 || p.Plan.Done != 0 || len(p.Plan.Due) != 2 || p.Plan.LeftTotal != 10000 ||
-		p.Counterparty == nil || p.Counterparty.Net != 10000 {
+	if p.Plan == nil || p.Plan.ID != pl.ID || p.Counterparty == nil || p.Counterparty.Net != 10000 || p.Lines[0].Action != ActionCollect {
 		t.Fatalf("plan item = %+v plan %+v cp %+v", p, p.Plan, p.Counterparty)
 	}
-	if f.balance() != before-10000 || len(p.AccountBalances) != 1 {
-		t.Errorf("the opening row's wallet tx: balance %v → %v, %d balances", before, f.balance(), len(p.AccountBalances))
-	}
-	// a payment round: a repayment row of the item, the oldest open installment ticked
 	var res ItemWriteResult
-	f.do("POST", "/recurring/"+p.ID.String()+"/lines/"+p.ID.String()+"/occurrences/"+f.day(0)+"/confirm", "confirmRecurringOccurrence",
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders/"+p.ID.String()+"/occurrences/"+f.day(0)+"/confirm", "confirmRecurringOccurrence",
 		map[string]any{}, 200, &res)
 	f.do("GET", "/recurring/"+p.ID.String(), "getRecurring", nil, 200, &p)
 	if p.Plan.Done != 1 || p.Plan.Chain[0].Status != "paid" || p.Counterparty.Net != 8000 {
 		t.Errorf("after a payment: plan %+v net %v", p.Plan.Chain, p.Counterparty.Net)
 	}
-	// mark / unmark by hand, edit one, close early
-	f.do("POST", "/recurring/"+p.ID.String()+"/installments/2/mark", "markRecurringInstallment", map[string]any{"paid": true}, 200, &p)
-	f.do("POST", "/recurring/"+p.ID.String()+"/installments/2/mark", "markRecurringInstallment", map[string]any{"paid": false}, 200, &p)
-	f.do("PUT", "/recurring/"+p.ID.String()+"/installments/3", "updateRecurringInstallment", map[string]any{"amount": 2500, "interest": 500}, 200, &p)
+	// mark / unmark by hand, edit one
+	id := pl.ID.String()
+	f.do("POST", "/debt-plans/"+id+"/installments/2/mark", "markDebtPlanInstallment", map[string]any{"paid": true}, 200, &pl)
+	f.do("POST", "/debt-plans/"+id+"/installments/2/mark", "markDebtPlanInstallment", map[string]any{"paid": false}, 200, &pl)
+	f.do("PUT", "/debt-plans/"+id+"/installments/3", "updateDebtPlanInstallment", map[string]any{"amount": 2500, "interest": 500}, 200, &pl)
 	var inst InstallmentList
-	f.do("GET", "/recurring/"+p.ID.String()+"/installments", "listRecurringInstallments", nil, 200, &inst)
+	f.do("GET", "/debt-plans/"+id+"/installments", "listDebtPlanInstallments", nil, 200, &inst)
 	if inst.Data[1].Status == "paid" || inst.Data[2].Principal != 2000 || inst.Data[2].Interest != 500 || !inst.Data[2].Edited {
 		t.Errorf("installments = %+v", inst.Data)
 	}
-	f.do("POST", "/recurring/"+p.ID.String()+"/installments/9/mark", "markRecurringInstallment", map[string]any{"paid": true}, 404, nil)
-	f.do("POST", "/recurring/"+p.ID.String()+"/plan/close", "closeRecurringPlan", nil, 200, &p)
-	if !p.Plan.Closed || p.Plan.LeftCount != 0 || p.Plan.Done != 1 {
-		t.Errorf("closed plan = %+v", p.Plan)
+	f.do("POST", "/debt-plans/"+id+"/installments/9/mark", "markDebtPlanInstallment", map[string]any{"paid": true}, 404, nil)
+	// pay installment 3 from the debts page: principal 2000 back + interest 500 as ดอกเบี้ยรับ
+	before = f.balance()
+	f.do("POST", "/debt-plans/"+id+"/pay", "payDebtPlanInstallment", map[string]any{"seq": 3, "account_id": f.wallet}, 200, &pl)
+	var interest float64
+	_ = f.pool.QueryRow(f.ctx, `SELECT COALESCE(SUM(t.amount), 0)::float8 FROM transactions t JOIN categories c ON c.id = t.category_id
+		WHERE t.user_id = $1 AND c.system_kind = 'INTEREST_RECEIVED'`, f.me).Scan(&interest)
+	if pl.Done != 2 || pl.Chain[2].Status != "paid" || f.balance() != before+2500 || interest != 500 {
+		t.Errorf("after pay: done %d chain %+v balance %v → %v interest %v", pl.Done, pl.Chain, before, f.balance(), interest)
 	}
-	f.do("POST", "/recurring/"+p.ID.String()+"/plan/close", "closeRecurringPlan", nil, 409, nil)
-	f.do("DELETE", "/recurring/"+p.ID.String()+"/plan", "deleteRecurringPlan", nil, 200, &p)
-	if p.Plan != nil || p.Counterparty.Net != 8000 {
-		t.Errorf("after dropping the plan: %+v net %v", p.Plan, p.Counterparty.Net)
+	f.do("POST", "/debt-plans/"+id+"/close", "closeDebtPlan", nil, 200, &pl)
+	if !pl.Closed || pl.LeftCount != 0 || pl.Done != 2 {
+		t.Errorf("closed plan = %+v", pl)
 	}
+	f.do("POST", "/debt-plans/"+id+"/close", "closeDebtPlan", nil, 409, nil)
+	var list PlanList
+	f.do("GET", "/debt-plans", "listDebtPlans", nil, 200, &list)
+	if len(list.Data) != 1 || list.Data[0].RecurringID == nil {
+		t.Errorf("list = %+v", list.Data)
+	}
+	f.do("DELETE", "/debt-plans/"+id, "deleteDebtPlan", nil, http.StatusNoContent, nil)
+	f.do("GET", "/recurring/"+p.ID.String(), "getRecurring", nil, 404, nil) // its item went with it
 }
 
-// A card installment: no line, no debt row (the card holds it); an institution counterparty.
-func TestRecurringCardPlan(t *testing.T) {
+// A purchase on credit from an institution, with interest: the full price is my expense today, a
+// ledger-only debt row; paying an installment books the principal back + ดอกเบี้ย as my expense.
+func TestDebtPlanPurchase(t *testing.T) {
 	f := newRecFix(t)
-	card := f.wallet
-	f.exec(`UPDATE accounts SET type = 'credit_card', credit_limit = 50000 WHERE id = $1`, card)
+	f.seedCategories()
 	inst := uuid.New()
-	f.exec(`INSERT INTO institutions (id, user_id, name, kind) VALUES ($1, $2, 'KTC', 'card')`, inst, f.me)
-	body := map[string]any{"name": "ผ่อนทีวี", "type": "debt", "debt_direction": "received",
-		"counterparty": map[string]any{"institution_id": inst},
-		"plan":         map[string]any{"principal": 9000, "count": 3, "start_date": f.day(10), "interest_method": "none", "card_account_id": card},
-		"lines":        []any{}}
-	var p ItemPage
-	f.do("POST", "/recurring", "createRecurring", body, http.StatusCreated, &p)
-	if len(p.Lines) != 0 || p.Plan == nil || p.Plan.CardAccount == nil || p.Counterparty == nil || p.Counterparty.Kind != "institution" ||
-		p.Counterparty.Key != "i:"+inst.String() || p.Counterparty.Net != 0 {
-		t.Fatalf("card plan = %+v plan %+v cp %+v", p, p.Plan, p.Counterparty)
+	f.exec(`INSERT INTO institutions (id, user_id, name, kind) VALUES ($1, $2, 'Toyota Leasing', 'finance')`, inst, f.me)
+	before := f.balance()
+	var pl PlanView
+	f.do("POST", "/debt-plans", "createDebtPlan", map[string]any{"name": "ผ่อนรถ", "category_id": f.food,
+		"creditor": map[string]any{"institution_id": inst},
+		"plan":     map[string]any{"principal": 12000, "count": 12, "start_date": f.day(0), "interest_method": "flat", "interest_rate": 10}},
+		http.StatusCreated, &pl)
+	if pl.Direction != "received" || pl.Origin != "purchase" || pl.Purchase == nil || pl.Purchase.Amount != 12000 || pl.Creditor.Kind != "institution" {
+		t.Fatalf("plan = %+v", pl)
+	}
+	if f.balance() != before {
+		t.Errorf("a purchase on credit moved my wallet: %v → %v", before, f.balance())
+	}
+	f.do("POST", "/debt-plans/"+pl.ID.String()+"/pay", "payDebtPlanInstallment", map[string]any{"account_id": f.wallet}, 200, &pl)
+	var interest float64
+	_ = f.pool.QueryRow(f.ctx, `SELECT COALESCE(SUM(t.amount), 0)::float8 FROM transactions t JOIN categories c ON c.id = t.category_id
+		WHERE t.user_id = $1 AND c.system_kind = 'INTEREST_PAID'`, f.me).Scan(&interest)
+	if pl.Done != 1 || interest != 100 || f.balance() != before-1100 {
+		t.Errorf("after pay: done %d interest %v balance %v → %v", pl.Done, interest, before, f.balance())
+	}
+	// a purchase is mine to owe; a card plan takes no reminder
+	f.do("POST", "/debt-plans", "createDebtPlan", map[string]any{"name": "x", "direction": "paid",
+		"creditor": map[string]any{"person_name": "บอย"},
+		"plan":     map[string]any{"principal": 100, "count": 1, "start_date": f.day(0), "interest_method": "none"}}, 400, nil)
+}
+
+// A card plan: the card is the creditor, no debt row, no reminder (its bill pays it); a card bill
+// item: a transfer into the card each round.
+func TestCardPlanAndBill(t *testing.T) {
+	f := newRecFix(t)
+	f.seedCategories()
+	card := testdb.Account(t, f.pool, f.me)
+	f.exec(`UPDATE accounts SET type = 'credit_card', credit_limit = 50000, balance = 0 WHERE id = $1`, card)
+	var pl PlanView
+	f.do("POST", "/debt-plans", "createDebtPlan", map[string]any{"name": "ผ่อนคอม", "creditor": map[string]any{"account_id": card},
+		"plan": map[string]any{"principal": 42000, "count": 12, "start_date": f.day(10), "interest_method": "none"}},
+		http.StatusCreated, &pl)
+	if pl.Creditor.Kind != "card" || pl.Creditor.Account == nil || pl.Purchase != nil {
+		t.Fatalf("card plan = %+v", pl)
 	}
 	var n int
 	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1`, f.me).Scan(&n)
 	if n != 0 {
 		t.Errorf("a card plan wrote %d debt rows", n)
 	}
-	// without a plan an item needs a line
-	delete(body, "plan")
-	f.do("POST", "/recurring", "createRecurring", body, 400, nil)
+	f.do("POST", "/debt-plans/"+pl.ID.String()+"/pay", "payDebtPlanInstallment", map[string]any{"account_id": f.wallet}, 409, nil)
+	line := map[string]any{"source": map[string]any{"account_id": f.wallet}, "schedule": f.monthly(f.today.Day(), f.day(0), nil)}
+	f.do("POST", "/recurring", "createRecurring", map[string]any{"name": "x", "type": "debt", "debt_plan_id": pl.ID,
+		"reminders": []any{line}}, 400, nil)
+	// the card's bill: asks its amount, a transfer into the card
+	var p ItemPage
+	f.do("POST", "/recurring", "createRecurring", map[string]any{"name": "บิล KTC", "type": "debt",
+		"counterparty": map[string]any{"account_id": card}, "reminders": []any{line}}, http.StatusCreated, &p)
+	if p.Counterparty == nil || p.Counterparty.Kind != "card" || p.Lines[0].Action != ActionTransfer || p.Lines[0].AmountMode != AmountAsk ||
+		p.Lines[0].ToAccountID == nil || *p.Lines[0].ToAccountID != card {
+		t.Fatalf("card bill = %+v cp %+v lines %+v", p, p.Counterparty, p.Lines)
+	}
+	before := f.balance()
+	var res ItemWriteResult
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders/"+p.Lines[0].ID.String()+"/occurrences/"+f.day(0)+"/confirm", "confirmRecurringOccurrence",
+		map[string]any{"amount": 5595}, 200, &res)
+	var cardBal float64
+	_ = f.pool.QueryRow(f.ctx, `SELECT balance::float8 FROM accounts WHERE id = $1`, card).Scan(&cardBal)
+	if f.balance() != before-5595 || cardBal != 5595 {
+		t.Errorf("bill paid: wallet %v → %v, card %v", before, f.balance(), cardBal)
+	}
 }
 
-// Reminders: a due-anchored reminder sends one recurring_due_soon notice per round, once.
-func TestRecurringReminders(t *testing.T) {
+// The card summary: last cycle's spending (a plan purchase left out) + the plan installments due in
+// it; a bill reminder round starts with what is left.
+func TestCardSummaryAndPrefill(t *testing.T) {
+	f := newRecFix(t)
+	f.seedCategories()
+	card := testdb.Account(t, f.pool, f.me)
+	day := f.today.AddDate(0, 0, -1).Day() // the statement closed yesterday
+	if day > 28 {
+		t.Skip("month-end statement days clamp: covered by cardCycle")
+	}
+	f.exec(`UPDATE accounts SET type = 'credit_card', credit_limit = 50000, statement_date = $2 WHERE id = $1`, card, day)
+	spend := map[string]any{"type": "expense", "account_id": card, "amount": 2095, "category_id": f.food, "date": f.day(-3)}
+	f.do("POST", "/transactions", "createTransaction", spend, http.StatusCreated, nil)
+	var pl PlanView
+	f.do("POST", "/debt-plans", "createDebtPlan", map[string]any{"name": "ผ่อนคอม", "creditor": map[string]any{"account_id": card},
+		"plan": map[string]any{"principal": 42000, "count": 12, "start_date": f.day(-2), "interest_method": "none"}}, http.StatusCreated, &pl)
+	var sm CardSummary
+	f.do("GET", "/card-summaries/"+card.String(), "getCardSummary", nil, 200, &sm)
+	if sm.Bill.Spending != 2095 || sm.Bill.Installments != 3500 || sm.Bill.Left != 5595 || len(sm.Plans) != 1 || sm.Unbilled != 38500 {
+		t.Fatalf("summary = %+v bill %+v", sm, sm.Bill)
+	}
+	var list CardSummaryList
+	f.do("GET", "/card-summaries", "listCardSummaries", nil, 200, &list)
+	if len(list.Data) != 1 {
+		t.Errorf("cards = %+v", list.Data)
+	}
+	var p ItemPage
+	f.do("POST", "/recurring", "createRecurring", map[string]any{"name": "บิล KTC", "type": "debt", "counterparty": map[string]any{"account_id": card},
+		"reminders": []any{map[string]any{"source": map[string]any{"account_id": f.wallet}, "schedule": f.monthly(f.today.Day(), f.day(0), nil)}}},
+		http.StatusCreated, &p)
+	var res ItemWriteResult
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders/"+p.Lines[0].ID.String()+"/occurrences/"+f.day(0)+"/confirm", "confirmRecurringOccurrence",
+		map[string]any{}, 200, &res)
+	f.do("GET", "/card-summaries/"+card.String(), "getCardSummary", nil, 200, &sm)
+	if sm.Bill.Paid != 5595 || sm.Bill.Left != 0 || sm.RecurringID == nil {
+		t.Errorf("after paying the bill: %+v", sm.Bill)
+	}
+}
+
+// ค่าไฟ: the partner pays the bill (paid_by: my expense + my debt) and I pay them back on the 1st
+// (repay_paid_by: a debt repayment of that round's amount, not an expense).
+func TestRepayPaidBy(t *testing.T) {
+	f := newRecFix(t)
+	f.seedCategories()
+	var p ItemPage
+	f.do("POST", "/recurring", "createRecurring", map[string]any{"name": "ค่าไฟ", "type": "expense", "category_id": f.food,
+		"reminders": []any{map[string]any{"amount_mode": "ask", "source": map[string]any{"paid_by": map[string]any{"person_name": "แฟน"}},
+			"schedule": f.monthly(f.today.Day(), f.day(0), nil)}}}, http.StatusCreated, &p)
+	partner := p.Lines[0].ID
+	if p.Lines[0].Action != ActionPaidBy {
+		t.Fatalf("paid_by line = %+v", p.Lines[0])
+	}
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders", "addRecurringReminder", map[string]any{"repays_reminder_id": partner,
+		"source": map[string]any{"account_id": f.wallet}, "schedule": f.monthly(f.today.Day(), f.day(0), nil)}, 200, &p)
+	if len(p.Lines) != 2 || p.Lines[1].Action != ActionRepayPaidBy || p.Lines[1].RepaysReminderID == nil {
+		t.Fatalf("payback line = %+v", p.Lines)
+	}
+	payback := p.Lines[1].ID
+	var res ItemWriteResult
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders/"+partner.String()+"/occurrences/"+f.day(0)+"/confirm", "confirmRecurringOccurrence",
+		map[string]any{"amount": 1150}, 200, &res)
+	before := f.balance()
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders/"+payback.String()+"/occurrences/"+f.day(0)+"/confirm", "confirmRecurringOccurrence",
+		map[string]any{}, 200, &res)
+	var expenses float64
+	_ = f.pool.QueryRow(f.ctx, `SELECT COALESCE(SUM(t.amount), 0)::float8 FROM transactions t JOIN categories c ON c.id = t.category_id
+		WHERE t.user_id = $1 AND t.type = 'expense' AND NOT c.is_system`, f.me).Scan(&expenses)
+	if f.balance() != before-1150 || expenses != 1150 {
+		t.Errorf("payback: wallet %v → %v, expenses %v (want 1150 once)", before, f.balance(), expenses)
+	}
+	// a payback needs a person-paid reminder of the same item
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders", "addRecurringReminder", map[string]any{"repays_reminder_id": payback,
+		"source": map[string]any{"account_id": f.wallet}, "schedule": f.monthly(f.today.Day(), f.day(0), nil)}, 400, nil)
+}
+
+// Alerts: a due-anchored alert on a reminder sends one recurring_due_soon notice per round, once.
+func TestRecurringAlerts(t *testing.T) {
 	f := newRecFix(t)
 	f.exec(`INSERT INTO user_preferences (user_id, preferences) VALUES ($1, '{"timezone":"Asia/Bangkok"}')
 		ON CONFLICT (user_id) DO UPDATE SET preferences = EXCLUDED.preferences`, f.me)
-	body := map[string]any{"name": "ค่าไฟ", "type": "bill", "category_id": f.food,
-		"reminders": []any{map[string]any{"anchor": "due", "days_before": 2, "time": "00:00"}},
-		"lines": []any{map[string]any{"amount": 800, "source": map[string]any{"account_id": f.wallet},
+	alerts := []any{map[string]any{"anchor": "due", "days_before": 2, "time": "00:00"}}
+	body := map[string]any{"name": "ค่าไฟ", "type": "expense", "category_id": f.food,
+		"reminders": []any{map[string]any{"amount": 800, "source": map[string]any{"account_id": f.wallet}, "alerts": alerts,
 			"schedule": map[string]any{"freq": "daily", "interval": 1, "start_date": f.day(0)}}}}
 	var p ItemPage
 	f.do("POST", "/recurring", "createRecurring", body, http.StatusCreated, &p)
-	if len(p.Reminders) != 1 || p.Reminders[0].DaysBefore != 2 {
-		t.Fatalf("reminders = %+v", p.Reminders)
+	if len(p.Lines) != 1 || len(p.Lines[0].Alerts) != 1 || p.Lines[0].Alerts[0].DaysBefore != 2 {
+		t.Fatalf("alerts = %+v", p.Lines)
 	}
+	line := p.Lines[0].ID.String()
 	now := time.Now()
-	n1, err := f.svc.sendUserReminders(f.ctx, f.me, now)
+	n1, err := f.svc.sendUserAlerts(f.ctx, f.me, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n2, _ := f.svc.sendUserReminders(f.ctx, f.me, now)
+	n2, _ := f.svc.sendUserAlerts(f.ctx, f.me, now)
 	rows, _ := f.notices("recurring_due_soon")
 	if n1 != 1 || n2 != 0 || rows != 1 {
 		t.Errorf("sent %d then %d, %d notices", n1, n2, rows)
@@ -333,49 +474,46 @@ func TestRecurringReminders(t *testing.T) {
 	if payload["date"] != f.day(2) || payload["amount"] != 800.0 || payload["recurring_id"] != p.ID.String() {
 		t.Errorf("payload = %v", payload)
 	}
-	// same reminders again (the lines kept): nothing re-sent; removed: gone
-	delete(body, "lines")
-	body["reminders"] = []any{map[string]any{"anchor": "due", "days_before": 2, "time": "00:00"}}
-	f.do("PUT", "/recurring/"+p.ID.String(), "updateRecurring", body, 200, &p)
-	if n, _ := f.svc.sendUserReminders(f.ctx, f.me, now); n != 0 {
-		t.Errorf("an unchanged reminder re-sent")
+	// same alerts again: nothing re-sent; a reminder update without alerts keeps them; [] clears
+	upd := map[string]any{"amount": 800, "source": map[string]any{"account_id": f.wallet}, "alerts": alerts}
+	f.do("PUT", "/recurring/"+p.ID.String()+"/reminders/"+line, "updateRecurringReminder", upd, 200, &p)
+	if n, _ := f.svc.sendUserAlerts(f.ctx, f.me, now); n != 0 {
+		t.Errorf("an unchanged alert re-sent")
 	}
-	body["reminders"] = []any{}
-	f.do("PUT", "/recurring/"+p.ID.String(), "updateRecurring", body, 200, &p)
-	if len(p.Reminders) != 0 {
-		t.Errorf("reminders after clearing = %+v", p.Reminders)
+	delete(upd, "alerts")
+	f.do("PUT", "/recurring/"+p.ID.String()+"/reminders/"+line, "updateRecurringReminder", upd, 200, &p)
+	if len(p.Lines[0].Alerts) != 1 {
+		t.Errorf("alerts dropped by an update without them: %+v", p.Lines[0].Alerts)
+	}
+	upd["alerts"] = []any{}
+	f.do("PUT", "/recurring/"+p.ID.String()+"/reminders/"+line, "updateRecurringReminder", upd, 200, &p)
+	if len(p.Lines[0].Alerts) != 0 {
+		t.Errorf("alerts after clearing = %+v", p.Lines[0].Alerts)
 	}
 }
 
-// Quick create "ผ่อน": an expense on a card + its installment item (the card's institution, a plan
-// on the card, no line, no debt row) in one write.
+// Quick create "ผ่อน": an expense on a card + its card plan (the card is the creditor, no reminder,
+// no debt row) in one write.
 func TestQuickCreateInstallment(t *testing.T) {
 	f := newRecFix(t)
 	card := f.wallet
 	f.exec(`UPDATE accounts SET type = 'credit_card', credit_limit = 50000, statement_date = 25 WHERE id = $1`, card)
 	body := map[string]any{"type": "expense", "account_id": card, "amount": 9000, "category_id": f.food, "date": f.day(0),
 		"description": "ทีวี", "installment": map[string]any{"count": 3}}
-	if raw := f.do("POST", "/transactions", "createTransaction", body, 400, nil); !contains(raw, "INSTALLMENT_NEEDS_INSTITUTION") {
-		t.Errorf("no institution: %s", raw)
-	}
-	inst := uuid.New()
-	f.exec(`INSERT INTO institutions (id, user_id, name, kind) VALUES ($1, $2, 'KTC', 'card')`, inst, f.me)
-	f.exec(`UPDATE accounts SET institution_id = $2 WHERE id = $1`, card, inst)
 	var res struct {
-		RecurringID *uuid.UUID `json:"recurring_id"`
+		DebtPlanID *uuid.UUID `json:"debt_plan_id"`
 		Rows        []struct {
 			Amount float64 `json:"amount"`
 		} `json:"rows"`
 	}
 	f.do("POST", "/transactions", "createTransaction", body, http.StatusCreated, &res)
-	if res.RecurringID == nil || len(res.Rows) != 1 || res.Rows[0].Amount != 9000 {
+	if res.DebtPlanID == nil || len(res.Rows) != 1 || res.Rows[0].Amount != 9000 {
 		t.Fatalf("create = %+v", res)
 	}
-	var p ItemPage
-	f.do("GET", "/recurring/"+res.RecurringID.String(), "getRecurring", nil, 200, &p)
-	if p.Name != "ทีวี" || p.Type != TypeDebt || len(p.Lines) != 0 || p.Plan == nil || p.Plan.Count != 3 || p.Plan.CardAccountID == nil ||
-		p.Counterparty == nil || p.Counterparty.Key != "i:"+inst.String() || p.Plan.StartDate[8:] != "25" {
-		t.Fatalf("item = %+v plan %+v", p, p.Plan)
+	var pl PlanView
+	f.do("GET", "/debt-plans/"+res.DebtPlanID.String(), "getDebtPlan", nil, 200, &pl)
+	if pl.Name != "ทีวี" || pl.Count != 3 || pl.Creditor.Kind != "card" || pl.Purchase == nil || pl.StartDate[8:] != "25" {
+		t.Fatalf("plan = %+v", pl)
 	}
 	var n int
 	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM personal_debts WHERE user_id = $1`, f.me).Scan(&n)
@@ -386,6 +524,4 @@ func TestQuickCreateInstallment(t *testing.T) {
 	if raw := f.do("POST", "/transactions", "createTransaction", body, 400, nil); !contains(raw, "PLAN_INVALID") {
 		t.Errorf("bad count: %s", raw)
 	}
-	body["installment"], body["account_id"] = map[string]any{"count": 3}, nil
-	f.do("POST", "/transactions", "createTransaction", body, 400, nil)
 }

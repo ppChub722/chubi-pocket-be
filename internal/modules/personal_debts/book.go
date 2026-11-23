@@ -51,6 +51,7 @@ type EntryInput struct {
 	// item the row belongs to.
 	InstitutionID *uuid.UUID
 	RecurringID   *uuid.UUID
+	DebtPlanID    *uuid.UUID
 }
 
 // CreateEntryTx writes the row (and its transaction) inside the caller's DB transaction and answers
@@ -98,7 +99,7 @@ func (s *Service) insertRowTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, 
 	entry := &Entry{
 		UserID: userID, Kind: in.Kind, Direction: in.Direction, ContactID: in.ContactID, PersonName: in.PersonName,
 		Amount: in.Amount, Date: in.Date, Description: in.Description, Note: in.Note, DueDate: in.DueDate,
-		ProjectID: in.ProjectID, InstitutionID: in.InstitutionID, RecurringID: in.RecurringID,
+		ProjectID: in.ProjectID, InstitutionID: in.InstitutionID, RecurringID: in.RecurringID, DebtPlanID: in.DebtPlanID,
 	}
 	if entry.InstitutionID != nil {
 		entry.ContactID = nil
@@ -312,26 +313,60 @@ func checkRecurringTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, id *uuid
 		return err
 	}
 	var key *string
-	err = tx.QueryRow(ctx, `SELECT CASE WHEN counterparty_institution_id IS NOT NULL THEN 'i:' || counterparty_institution_id::text
-			WHEN counterparty_contact_id IS NOT NULL THEN 'c:' || counterparty_contact_id::text
-			ELSE 'n:' || LOWER(TRIM(counterparty_person_name)) END
-		FROM recurrings WHERE id = $1 AND user_id = $2 AND type = 'debt'`, *id, userID).Scan(&key)
+	err = tx.QueryRow(ctx, `SELECT CASE WHEN COALESCE(g.counterparty_institution_id, p.institution_id) IS NOT NULL
+				THEN 'i:' || COALESCE(g.counterparty_institution_id, p.institution_id)::text
+			WHEN COALESCE(g.counterparty_contact_id, p.contact_id) IS NOT NULL
+				THEN 'c:' || COALESCE(g.counterparty_contact_id, p.contact_id)::text
+			WHEN COALESCE(g.counterparty_person_name, p.person_name) IS NOT NULL
+				THEN 'n:' || LOWER(TRIM(COALESCE(g.counterparty_person_name, p.person_name))) END
+		FROM recurrings g LEFT JOIN debt_plans p ON p.id = g.debt_plan_id
+		WHERE g.id = $1 AND g.user_id = $2 AND g.type = 'debt'`, *id, userID).Scan(&key)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (key == nil || *key != k.Key())) {
 		return invalid("recurring_id is not a debt item of this counterparty")
 	}
 	return err
 }
 
-// tickInstallmentsTx — the installments a repayment of a plan item ticks: seqs, or (nil) the
-// oldest unticked one; nothing when the item has no plan.
-func tickInstallmentsTx(ctx context.Context, tx pgx.Tx, userID, itemID uuid.UUID, seqs *[]int, debtID uuid.UUID) error {
+// checkPlanTx — a row's debt plan: one of mine whose creditor is the page's key (never a card plan).
+func checkPlanTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, id *uuid.UUID, rawKey string) error {
+	if id == nil {
+		return nil
+	}
+	k, err := shared.ParseDebtKey(rawKey)
+	if err != nil {
+		return err
+	}
+	var key *string
+	err = tx.QueryRow(ctx, `SELECT CASE WHEN institution_id IS NOT NULL THEN 'i:' || institution_id::text
+			WHEN contact_id IS NOT NULL THEN 'c:' || contact_id::text
+			WHEN person_name IS NOT NULL THEN 'n:' || LOWER(TRIM(person_name)) END
+		FROM debt_plans WHERE id = $1 AND user_id = $2`, *id, userID).Scan(&key)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (key == nil || *key != k.Key())) {
+		return invalid("debt_plan_id is not a plan of this counterparty")
+	}
+	return err
+}
+
+// planOfItem — the plan a debt item pays (nil = none).
+func planOfItem(ctx context.Context, tx pgx.Tx, itemID uuid.UUID) (*uuid.UUID, error) {
+	var id *uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT debt_plan_id FROM recurrings WHERE id = $1`, itemID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return id, err
+}
+
+// tickInstallmentsTx — the installments a repayment of a plan ticks: seqs, or (nil) the oldest
+// unticked one.
+func tickInstallmentsTx(ctx context.Context, tx pgx.Tx, userID, planID uuid.UUID, seqs *[]int, debtID uuid.UUID) error {
 	var list []int
 	if seqs != nil {
 		list = *seqs
 	} else {
 		var seq int
-		err := tx.QueryRow(ctx, `SELECT seq FROM debt_installments WHERE recurring_id = $1 AND user_id = $2
-			AND paid_at IS NULL AND NOT skipped ORDER BY seq LIMIT 1`, itemID, userID).Scan(&seq)
+		err := tx.QueryRow(ctx, `SELECT seq FROM debt_installments WHERE debt_plan_id = $1 AND user_id = $2
+			AND paid_at IS NULL AND NOT skipped ORDER BY seq LIMIT 1`, planID, userID).Scan(&seq)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -342,12 +377,12 @@ func tickInstallmentsTx(ctx context.Context, tx pgx.Tx, userID, itemID uuid.UUID
 	}
 	for _, seq := range list {
 		tag, err := tx.Exec(ctx, `UPDATE debt_installments SET paid_at = COALESCE(paid_at, NOW()), skipped = FALSE,
-			personal_debt_id = $4 WHERE recurring_id = $1 AND user_id = $2 AND seq = $3`, itemID, userID, seq, debtID)
+			personal_debt_id = $4 WHERE debt_plan_id = $1 AND user_id = $2 AND seq = $3`, planID, userID, seq, debtID)
 		if err != nil {
 			return err
 		}
 		if tag.RowsAffected() == 0 {
-			return invalid(fmt.Sprintf("installment %d is not on this item", seq))
+			return invalid(fmt.Sprintf("installment %d is not on this plan", seq))
 		}
 	}
 	return nil

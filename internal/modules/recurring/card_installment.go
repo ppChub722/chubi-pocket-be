@@ -3,6 +3,7 @@ package recurring
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,24 +14,17 @@ import (
 )
 
 // CardInstallmentTx — quick create "ผ่อน" (0.4.3): the purchase is on the card at full price; this
-// makes its debt item: the card's institution, a plan of `count` installments on the card
-// (card_account_id: no opening row, no line, it is paid with the card's statement). Wired into
-// transactions.WithInstallments.
+// makes its debt plan: the card is the creditor (the debt is its balance: no debt row, no reminder;
+// the card's bill pays the rounds), count installments from the card's next statement. Wired into
+// transactions.WithInstallments; answers the plan's id.
 func (s *Service) CardInstallmentTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, purchase transactions.TransactionDetail,
 	in transactions.InstallmentRequest) (uuid.UUID, error) {
 	if purchase.AccountID == nil {
-		return uuid.Nil, transactions.ErrInstallmentNeedsInstitution
+		return uuid.Nil, transactions.ErrInstallmentInvalid
 	}
-	var (
-		inst      *uuid.UUID
-		statement *int32
-	)
-	if err := tx.QueryRow(ctx, `SELECT institution_id, statement_date FROM accounts WHERE id = $1`, *purchase.AccountID).
-		Scan(&inst, &statement); err != nil {
+	var statement *int32
+	if err := tx.QueryRow(ctx, `SELECT statement_date FROM accounts WHERE id = $1`, *purchase.AccountID).Scan(&statement); err != nil {
 		return uuid.Nil, err
-	}
-	if inst == nil {
-		return uuid.Nil, transactions.ErrInstallmentNeedsInstitution
 	}
 	bought, err := parseDate(purchase.Date)
 	if err != nil {
@@ -59,30 +53,21 @@ func (s *Service) CardInstallmentTx(ctx context.Context, tx pgx.Tx, userID uuid.
 	if r := []rune(name); len(r) > 100 {
 		name = string(r[:100])
 	}
-	it := &itemRecord{UserID: userID, Name: name, Type: TypeDebt, Status: "active", InstitutionID: inst,
-		DebtDirection: ptr("received"), CategoryID: purchase.CategoryID, TagIDs: []uuid.UUID{}}
-	if err := resolveCounterpartyTx(ctx, tx, userID, it); err != nil {
-		return uuid.Nil, err
-	}
-	if err := saveItemRecordTx(ctx, tx, it); err != nil {
-		return uuid.Nil, err
-	}
-	plan := &PlanInput{Principal: purchase.Amount, Count: in.Count, StartDate: first.Format(dateLayout), InterestMethod: method,
-		InterestRate: in.InterestRate, InstallmentAmount: in.InstallmentAmount, CardAccountID: purchase.AccountID}
-	if _, err := s.setPlanTx(ctx, tx, it, plan); err != nil {
+	pin := &DebtPlanInput{Name: &name, CategoryID: purchase.CategoryID, Creditor: CreditorInput{AccountID: purchase.AccountID},
+		Plan: PlanInput{Principal: purchase.Amount, Count: in.Count, StartDate: first.Format(dateLayout), InterestMethod: method,
+			InterestRate: in.InterestRate, InstallmentAmount: in.InstallmentAmount}}
+	p, _, err := s.createPlanTx(ctx, tx, userID, pin, &purchase.ID)
+	if err != nil {
 		if errors.Is(err, ErrPlanInvalid) {
 			fields := apierr.FieldsOf(err)
 			for i := range fields {
-				fields[i].Field = "installment." + fields[i].Field[len("plan."):]
+				fields[i].Field = "installment." + strings.TrimPrefix(fields[i].Field, "plan.")
 			}
 			return uuid.Nil, apierr.Wrap(transactions.ErrInstallmentInvalid, "invalid installment", fields...)
 		}
 		return uuid.Nil, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE recurrings SET purchase_transaction_id = $1 WHERE id = $2`, purchase.ID, it.ID); err != nil {
-		return uuid.Nil, err
-	}
-	return it.ID, nil
+	return p.ID, nil
 }
 
 // nextDay — the first date after d on day-of-month day (31 = the month's last day).

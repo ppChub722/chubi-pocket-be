@@ -764,6 +764,15 @@ func (s *Service) createRepaymentTx(ctx context.Context, tx pgx.Tx, userID uuid.
 	if err := checkRecurringTx(ctx, tx, userID, req.RecurringID, rawKey); err != nil {
 		return nil, nil, err
 	}
+	if err := checkPlanTx(ctx, tx, userID, req.DebtPlanID, rawKey); err != nil {
+		return nil, nil, err
+	}
+	plan := req.DebtPlanID
+	if plan == nil && req.RecurringID != nil {
+		if plan, err = planOfItem(ctx, tx, *req.RecurringID); err != nil {
+			return nil, nil, err
+		}
+	}
 	date := ""
 	if req.Date != nil {
 		date = *req.Date
@@ -774,13 +783,13 @@ func (s *Service) createRepaymentTx(ctx context.Context, tx pgx.Tx, userID uuid.
 		Kind: KindRepayment, Direction: repayDirection(req.Kind), ContactID: cp.ContactID, PersonName: strings.TrimSpace(cp.Name),
 		InstitutionID: cp.InstitutionID, Amount: req.Amount, Date: date, Description: req.Description, Note: req.Note,
 		CreateTransaction: wantsTx(req.CreateTransaction, req.AccountID), AccountID: req.AccountID, TagIDs: req.TagIDs,
-		LinkTransactionID: req.LinkTransactionID, RecurringID: req.RecurringID,
+		LinkTransactionID: req.LinkTransactionID, RecurringID: req.RecurringID, DebtPlanID: plan,
 	})
 	if err != nil {
 		return nil, nil, err
 	}
-	if req.RecurringID != nil { // 0.4.3: a payment of a plan item ticks its installments
-		if err := tickInstallmentsTx(ctx, tx, userID, *req.RecurringID, req.MarkInstallments, e.ID); err != nil {
+	if plan != nil { // 0.4.3: a payment of a plan ticks its installments
+		if err := tickInstallmentsTx(ctx, tx, userID, *plan, req.MarkInstallments, e.ID); err != nil {
 			return nil, nil, err
 		}
 	}

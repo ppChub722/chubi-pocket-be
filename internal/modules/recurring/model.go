@@ -84,7 +84,30 @@ type Rule struct {
 	PaidByContactID  *uuid.UUID
 	PaidByPersonName *string
 	InstitutionID    *uuid.UUID
-	forceID          uuid.UUID // insertRuleTx: the id a new line takes
+	// AmountMode — fixed: the reminder's amount; ask: typed on each round (a round waits for it).
+	AmountMode string
+	// RepaysReminderID — repay_paid_by: the paid_by reminder of the same item this one pays back
+	// (its person; each round the amount of that reminder's latest recorded round).
+	RepaysReminderID *uuid.UUID
+	forceID    uuid.UUID // insertRuleTx: the id a new reminder takes
+}
+
+const (
+	AmountFixed = "fixed"
+	AmountAsk   = "ask"
+)
+
+// isCardBillAsk — a transfer into a wallet asking its amount: a card bill when the wallet is a
+// card / PayLater one (cardBillPrefill answers nil otherwise).
+func (r *Rule) isCardBillAsk() bool {
+	return r.Type == "transfer" && r.ToAccountID != nil && r.amountMode() == AmountAsk
+}
+
+func (r *Rule) amountMode() string {
+	if r.AmountMode == AmountAsk {
+		return AmountAsk
+	}
+	return AmountFixed
 }
 
 type (
@@ -237,7 +260,7 @@ type LinkedTx struct {
 // from the rule (id null, stored false), addressed by rule_id + slot.
 type Item struct {
 	ID            *uuid.UUID            `json:"id"`
-	RuleID        uuid.UUID             `json:"recurring_rule_id"`
+	RuleID        uuid.UUID             `json:"recurring_reminder_id"`
 	Slot          string                `json:"slot"` // the occurrence's original date
 	Stored        bool                  `json:"stored"`
 	AutoCreated   bool                  `json:"auto_created"`

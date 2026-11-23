@@ -57,7 +57,7 @@ type upcomingJSON struct {
 			Type    string     `json:"type"`
 			Amount  float64    `json:"amount"`
 			DueDate string     `json:"due_date"`
-			RuleID  *uuid.UUID `json:"recurring_rule_id"`
+			RuleID  *uuid.UUID `json:"recurring_reminder_id"`
 			Slot    *string    `json:"slot"`
 		} `json:"items"`
 		TotalExpense float64 `json:"total_expense"`
@@ -124,12 +124,12 @@ func TestDashboardUpcomingWithoutExpecterKeepsStoredItems(t *testing.T) {
 	e := newDashEnv(t)
 	t.Cleanup(func() {
 		_, _ = e.pool.Exec(context.Background(), `DELETE FROM recurring_items WHERE user_id = $1`, e.uid)
-		_, _ = e.pool.Exec(context.Background(), `DELETE FROM recurring_rules WHERE user_id = $1`, e.uid)
+		_, _ = e.pool.Exec(context.Background(), `DELETE FROM recurring_reminders WHERE user_id = $1`, e.uid)
 	})
 	e.exec(t, `WITH g AS (INSERT INTO recurrings (id, user_id, name, type) VALUES (gen_random_uuid(), $1, 'Stored', 'expense') RETURNING id),
-		r AS (INSERT INTO recurring_rules (id, recurring_id, user_id, name, type, amount, account_id, freq, start_date, status)
+		r AS (INSERT INTO recurring_reminders (id, recurring_id, user_id, name, type, amount, account_id, freq, start_date, status)
 			SELECT id, id, $1, 'Stored', 'expense', 10, $2, 'monthly', CURRENT_DATE + 3, 'active' FROM g RETURNING id)
-		INSERT INTO recurring_items (id, user_id, recurring_rule_id, seq, slot, date, draft)
+		INSERT INTO recurring_items (id, user_id, recurring_reminder_id, seq, slot, date, draft)
 		SELECT gen_random_uuid(), $1, id, 1, CURRENT_DATE + 3, CURRENT_DATE + 3, '{"type":"expense","amount":10}' FROM r`, e.uid, e.acct)
 
 	r := e.router(t, nil)

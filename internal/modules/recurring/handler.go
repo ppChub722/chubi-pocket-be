@@ -118,8 +118,12 @@ func mapError(c *gin.Context, err error) {
 		response.Fail(c, http.StatusConflict, apierr.RecurringLastLine, err.Error(), nil)
 	case errors.Is(err, ErrSourceInvalid):
 		response.BadRequest(c, apierr.RecurringSourceInvalid, err.Error(), nil)
+	case errors.Is(err, ErrTypeFixed):
+		response.BadRequest(c, apierr.RecurringTypeFixed, err.Error(), nil)
 	case errors.Is(err, ErrPlanInvalid):
 		response.Fail(c, http.StatusBadRequest, apierr.PlanInvalid, "Invalid plan", apierr.FieldsOf(err))
+	case errors.Is(err, ErrPlanNotFound):
+		response.NotFound(c, apierr.NotFound, err.Error())
 	case errors.Is(err, ErrInstallmentNotFound):
 		response.NotFound(c, apierr.InstallmentNotFound, err.Error())
 	case errors.Is(err, institutions.ErrNotFound), errors.Is(err, institutions.ErrInvalidState):
@@ -204,7 +208,7 @@ func (h *Handler) Items(c *gin.Context) {
 		response.Validation(c, "Invalid kind", apierr.Field("kind", apierr.FieldInvalid))
 		return
 	}
-	ruleID, ok := optionalID(c, "recurring_rule_id") // one line
+	ruleID, ok := optionalID(c, "recurring_reminder_id") // one line
 	if !ok {
 		return
 	}
@@ -309,7 +313,7 @@ func optionalID(c *gin.Context, name string) (*uuid.UUID, bool) {
 	return &id, true
 }
 
-// ruleAndSlot reads /recurring/:id/lines/:line_id/occurrences/:slot (0.4.3) and answers the LINE id,
+// ruleAndSlot reads /recurring/:id/reminders/:reminder_id/occurrences/:slot (0.4.3) and answers the LINE id,
 // checked to be a line of the item.
 func (h *Handler) ruleAndSlot(c *gin.Context) (uuid.UUID, uuid.UUID, time.Time, bool) {
 	uid, id, line, ok := itemAndLine(c)

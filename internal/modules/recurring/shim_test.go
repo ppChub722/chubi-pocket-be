@@ -20,9 +20,7 @@ func str(v any) string {
 // legacyItemType — the 0.4.3 item type of a 0.4.2 setting body.
 func legacyItemType(kind, typ string, end map[string]any) string {
 	switch kind {
-	case KindSubscription:
-		return TypeSubscription
-	case KindInstallment:
+	case KindSubscription, KindInstallment:
 		return TypeExpense
 	case KindIncome:
 		return TypeIncome
@@ -30,18 +28,13 @@ func legacyItemType(kind, typ string, end map[string]any) string {
 		if typ == "transfer" {
 			return TypeTransfer
 		}
-		return TypeBill
+		return TypeExpense // asks its amount (legacyLine)
 	case KindSaving:
 		return TypeSaving
 	case KindDebt:
 		return TypeDebt
 	}
 	switch typ {
-	case "expense":
-		if end != nil && str(end["kind"]) == "count" {
-			return TypeExpense
-		}
-		return TypeSubscription
 	case "":
 		return ""
 	}
@@ -96,6 +89,9 @@ func legacyCreate(body map[string]any) map[string]any {
 			line[k] = v
 		}
 	}
+	if str(body["kind"]) == KindReminder && str(body["type"]) != "transfer" {
+		line["amount_mode"] = AmountAsk // a 0.4.2 bill reminder: its amount is typed each round
+	}
 	if rule, ok := body["rule"].(map[string]any); ok {
 		sc := map[string]any{}
 		for k, v := range rule {
@@ -107,7 +103,7 @@ func legacyCreate(body map[string]any) map[string]any {
 		}
 		line["schedule"] = sc
 	}
-	in["lines"] = []any{line}
+	in["reminders"] = []any{line}
 	return in
 }
 
@@ -141,7 +137,7 @@ func (f *recFix) legacyUpdate(id uuid.UUID, body map[string]any) map[string]any 
 		}
 	}
 	if k, ok := body["kind"]; ok {
-		in["type"] = legacyItemType(str(k), lineType(p.Type), nil)
+		in["type"] = legacyItemType(str(k), p.Type, nil)
 	}
 	if v, ok := body["direction"]; ok {
 		kind := any(ln.DebtKind)
@@ -187,7 +183,7 @@ func (f *recFix) legacyUpdate(id uuid.UUID, body map[string]any) map[string]any 
 		}
 		line["schedule"] = sc
 	}
-	in["lines"] = []any{line}
+	in["reminders"] = []any{line}
 	return in
 }
 
@@ -200,17 +196,17 @@ var (
 // shim — a 0.4.2 call as its 0.4.3 route, operation and body; the setting (line) it is about.
 func (f *recFix) shim(method, path, op string, body any) (string, string, any) {
 	if m := reOcc.FindStringSubmatch(path); m != nil {
-		path = "/recurring/" + m[1] + "/lines/" + m[1] + "/occurrences/" + m[2] + m[3]
+		path = "/recurring/" + m[1] + "/reminders/" + m[1] + "/occurrences/" + m[2] + m[3]
 	}
 	if m := reExtend.FindStringSubmatch(path); m != nil {
-		path, op = "/recurring/"+m[1]+"/lines/"+m[1]+"/extend", strings.Replace(op, "extendRecurring", "extendRecurringLine", 1)
+		path, op = "/recurring/"+m[1]+"/reminders/"+m[1]+"/extend", strings.Replace(op, "extendRecurring", "extendRecurringReminder", 1)
 	}
-	path = strings.Replace(path, "rule_id=", "recurring_rule_id=", 1)
+	path = strings.Replace(path, "rule_id=", "recurring_reminder_id=", 1)
 	if b, ok := body.(map[string]any); ok {
 		switch {
 		case method == "POST" && path == "/recurring":
 			body = legacyCreate(b)
-		case method == "PUT" && reItem.MatchString(path) && !strings.Contains(path, "/lines/"):
+		case method == "PUT" && reItem.MatchString(path) && !strings.Contains(path, "/reminders/"):
 			id, _ := uuid.Parse(reItem.FindStringSubmatch(path)[1])
 			body = f.legacyUpdate(id, b)
 		}

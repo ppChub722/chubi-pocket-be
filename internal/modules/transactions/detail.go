@@ -139,7 +139,7 @@ func buildDetails(
 		if f.recItemID != nil && f.recItemUser != nil && *f.recItemUser == callerID {
 			link := &shared.RecurringItemLink{ItemID: *f.recItemID, Seq: f.recItemSeq, Total: f.recTotal}
 			if f.recID != nil && f.recItem != nil {
-				link.Recurring = &shared.RecurringRef{ID: *f.recItem, RecurringRuleID: *f.recID, IconCode: shared.IconFromJSON(f.recIcon)}
+				link.Recurring = &shared.RecurringRef{ID: *f.recItem, RecurringReminderID: *f.recID, IconCode: shared.IconFromJSON(f.recIcon)}
 				if f.recName != nil {
 					link.Recurring.Name = *f.recName
 				}
@@ -223,7 +223,7 @@ func loadRowFacts(ctx context.Context, q shared.Querier, callerID uuid.UUID, ids
 		       ri.id, ri.user_id, ri.seq, rr.id, rr.name, rr.icon_code, rr.total_count, rr.recurring_id
 		FROM transactions t
 		LEFT JOIN recurring_items ri ON ri.transaction_id = t.id
-		LEFT JOIN recurring_rules rr ON rr.id = ri.recurring_rule_id
+		LEFT JOIN recurring_reminders rr ON rr.id = ri.recurring_reminder_id
 		LEFT JOIN personal_debts de ON de.id = t.source_personal_debt_id
 		JOIN users u ON u.id = t.user_id
 		LEFT JOIN accounts a ON a.id = t.account_id

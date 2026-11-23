@@ -13,7 +13,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
-// Routes of the recurring ITEMS (0.4.3): /recurring/{id} = the item, /recurring/{id}/lines/{line_id}
+// Routes of the recurring ITEMS (0.4.3): /recurring/{id} = the item, /recurring/{id}/reminders/{reminder_id}
 // = one of its lines, rounds addressed by line + slot.
 
 func bindItem(c *gin.Context) (RecurringInput, bool) {
@@ -193,9 +193,9 @@ func itemAndLine(c *gin.Context) (uuid.UUID, uuid.UUID, uuid.UUID, bool) {
 	if !ok {
 		return uuid.Nil, uuid.Nil, uuid.Nil, false
 	}
-	line, err := uuid.Parse(c.Param("line_id"))
+	line, err := uuid.Parse(c.Param("reminder_id"))
 	if err != nil {
-		response.Validation(c, "Invalid line_id", apierr.Field("line_id", apierr.FieldInvalid))
+		response.Validation(c, "Invalid reminder_id", apierr.Field("reminder_id", apierr.FieldInvalid))
 		return uuid.Nil, uuid.Nil, uuid.Nil, false
 	}
 	return uid, id, line, true
@@ -396,13 +396,110 @@ func (h *Handler) MarkInstallment(c *gin.Context) {
 }
 
 func (h *Handler) ClosePlan(c *gin.Context) {
-	h.itemOp(c, func(u, id uuid.UUID) (*ItemPage, error) {
-		return h.service.ClosePlan(c.Request.Context(), u, id, tz(c))
-	})
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.ClosePlan(c.Request.Context(), uid, id, tz(c))
+	reply(c, http.StatusOK, out, err)
 }
 
-func (h *Handler) DeletePlan(c *gin.Context) {
-	h.itemOp(c, func(u, id uuid.UUID) (*ItemPage, error) {
-		return h.service.DeletePlan(c.Request.Context(), u, id, tz(c))
-	})
+// ---- debt plans (0.4.3: /debt-plans) ----
+
+func (h *Handler) CreateDebtPlan(c *gin.Context) {
+	uid, ok := user(c)
+	if !ok {
+		return
+	}
+	var in DebtPlanInput
+	if _, ok := bind(c, &in); !ok {
+		return
+	}
+	out, err := h.service.CreateDebtPlan(c.Request.Context(), uid, in, tz(c))
+	reply(c, http.StatusCreated, out, err)
+}
+
+func (h *Handler) ListDebtPlans(c *gin.Context) {
+	uid, ok := user(c)
+	if !ok {
+		return
+	}
+	var acc *uuid.UUID
+	if v := strings.TrimSpace(c.Query("account_id")); v != "" {
+		id, err := uuid.Parse(v)
+		if err != nil {
+			response.Validation(c, "Invalid account_id", apierr.Field("account_id", apierr.FieldInvalid))
+			return
+		}
+		acc = &id
+	}
+	out, err := h.service.ListDebtPlans(c.Request.Context(), uid, acc, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) GetDebtPlan(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.GetDebtPlan(c.Request.Context(), uid, id, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) UpdateDebtPlan(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	var in DebtPlanUpdate
+	if _, ok := bind(c, &in); !ok {
+		return
+	}
+	out, err := h.service.UpdateDebtPlan(c.Request.Context(), uid, id, in, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) DeleteDebtPlan(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	if err := h.service.DeleteDebtPlan(c.Request.Context(), uid, id); err != nil {
+		mapError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) PayInstallment(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	var in PayInstallmentRequest
+	if _, ok := bind(c, &in); !ok {
+		return
+	}
+	out, err := h.service.PayInstallment(c.Request.Context(), uid, id, in, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+// ---- card summaries (0.4.3) ----
+
+func (h *Handler) CardSummaries(c *gin.Context) {
+	uid, ok := user(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.CardSummaries(c.Request.Context(), uid, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
+func (h *Handler) CardSummary(c *gin.Context) {
+	uid, id, ok := userAndID(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.CardSummaryOf(c.Request.Context(), uid, id, tz(c))
+	reply(c, http.StatusOK, out, err)
 }

@@ -86,8 +86,8 @@ func (s *Store) fillPreviews(ctx context.Context, q shared.Querier, userID uuid.
 // owed on it now minus the principal of its card installments not due yet (the plans show those).
 func (s *Store) cardDebts(ctx context.Context, q shared.Querier, userID, institutionID uuid.UUID) ([]CardDebt, error) {
 	rows, err := q.Query(ctx, `SELECT a.id, -(`+shared.EffectiveBalanceSQL("a.balance", "a.id", "$1")+`)::float8,
-			COALESCE((SELECT SUM(di.principal) FROM debt_installments di JOIN recurrings g ON g.id = di.recurring_id
-			          WHERE g.card_account_id = a.id AND g.user_id = $1 AND di.paid_at IS NULL AND NOT di.skipped
+			COALESCE((SELECT SUM(di.principal) FROM debt_installments di JOIN debt_plans g ON g.id = di.debt_plan_id
+			          WHERE g.account_id = a.id AND g.user_id = $1 AND di.paid_at IS NULL AND NOT di.skipped
 			            AND di.due_date > `+todayInUserTZ+`), 0)::float8
 		FROM accounts a
 		WHERE a.institution_id = $2 AND a.type IN ('credit_card', 'pay_later') AND `+shared.ActiveMembershipPredicate("a.id", "$1")+`

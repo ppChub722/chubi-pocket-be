@@ -26,6 +26,9 @@ const (
 	// A transfer with one side only: money out of a wallet to nowhere / into one from nowhere.
 	SystemWithdraw SystemKind = "WITHDRAW" // expense
 	SystemDeposit  SystemKind = "DEPOSIT"  // income
+	// 0.4.3: the interest of a plan's installment (counted in reports).
+	SystemInterestPaid     SystemKind = "INTEREST_PAID"     // expense
+	SystemInterestReceived SystemKind = "INTEREST_RECEIVED" // income
 )
 
 type Category struct {

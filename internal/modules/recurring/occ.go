@@ -144,7 +144,7 @@ func (s *Service) storedRows(ctx context.Context, q shared.Querier, userID uuid.
 	if len(ruleIDs) == 0 {
 		return nil, nil
 	}
-	sql := `SELECT ` + itemColumns + ` FROM recurring_items WHERE user_id = $1 AND recurring_rule_id = ANY($2)`
+	sql := `SELECT ` + itemColumns + ` FROM recurring_items WHERE user_id = $1 AND recurring_reminder_id = ANY($2)`
 	args := []any{userID, ruleIDs}
 	if from != nil && to != nil {
 		sql += ` AND ((date BETWEEN $3 AND $4) OR (slot BETWEEN $3 AND $4))`
@@ -173,7 +173,7 @@ func (s *Service) rulesByID(ctx context.Context, q shared.Querier, userID uuid.U
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := q.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1 AND id = ANY($2)`, userID, ids)
+	rows, err := q.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_reminders WHERE user_id = $1 AND id = ANY($2)`, userID, ids)
 	if err != nil {
 		return nil, fmt.Errorf("rules: %w", err)
 	}
@@ -344,7 +344,7 @@ func (s *Service) occsInRange(ctx context.Context, q shared.Querier, userID uuid
 // activeRules loads the user's rules that can have something to pay: the active ones and the
 // paused ones (their stored due occurrences stay due, 0.4.1-1 R7).
 func (s *Service) activeRules(ctx context.Context, q shared.Querier, userID uuid.UUID) ([]*Rule, error) {
-	rows, err := q.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1 AND status IN ('active', 'paused') ORDER BY created_at, id`, userID)
+	rows, err := q.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_reminders WHERE user_id = $1 AND status IN ('active', 'paused') ORDER BY created_at, id`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("active rules: %w", err)
 	}
@@ -468,7 +468,7 @@ func (s *Service) store(ctx context.Context, tx pgx.Tx, o *occ) (*itemRow, error
 	}
 	if id == uuid.Nil { // someone stored it in the meantime
 		var existing uuid.UUID
-		if err := tx.QueryRow(ctx, `SELECT id FROM recurring_items WHERE recurring_rule_id = $1 AND slot = $2`, o.rule.ID, slot).Scan(&existing); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT id FROM recurring_items WHERE recurring_reminder_id = $1 AND slot = $2`, o.rule.ID, slot).Scan(&existing); err != nil {
 			return nil, err
 		}
 		return getItem(ctx, tx, o.rule.UserID, existing, true)
@@ -618,7 +618,7 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 		}
 		it := Item{
 			RuleID: o.rule.ID, Slot: o.slot.Format(dateLayout), Stored: o.row != nil, Status: o.status,
-			Recurring: &shared.RecurringRef{ID: o.rule.RecurringID, RecurringRuleID: o.rule.ID, Name: o.rule.Name, IconCode: o.rule.IconCode,
+			Recurring: &shared.RecurringRef{ID: o.rule.RecurringID, RecurringReminderID: o.rule.ID, Name: o.rule.Name, IconCode: o.rule.IconCode,
 				Kind: o.rule.Kind, PauseReason: o.rule.pauseReason()},
 			Seq: o.seq, Date: date.Format(dateLayout), DaysUntil: int(date.Sub(today).Hours() / 24),
 			Account: r.Account, ToAccount: r.TransferToAccount, Category: r.Category,
@@ -665,6 +665,17 @@ func (s *Service) viewOccs(ctx context.Context, q shared.Querier, userID uuid.UU
 	}
 	if err := debtItemViews(ctx, q, userID, occs, out); err != nil {
 		return nil, err
+	}
+	for i, o := range occs { // a card bill asking its amount starts with what is left of the bill
+		if out[i].NeedsAmount && o.rule.isCardBillAsk() && (o.row == nil || !o.row.Edited) {
+			v, err := cardBillPrefill(ctx, q, userID, *o.rule.ToAccountID, o.date)
+			if err != nil {
+				return nil, err
+			}
+			if v != nil {
+				out[i].Amount, out[i].NeedsAmount = v, false
+			}
+		}
 	}
 	return out, nil
 }

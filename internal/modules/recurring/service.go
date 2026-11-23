@@ -72,7 +72,7 @@ func (s *Service) DueCheckDaily(ctx context.Context, userID uuid.UUID, headerTZ 
 	var skip bool
 	if err := s.db.QueryRow(ctx, `SELECT
 		EXISTS (SELECT 1 FROM recurring_due_checks c WHERE c.user_id = $1 AND c.checked_on >= $2)
-		AND NOT EXISTS (SELECT 1 FROM recurring_rules r WHERE r.user_id = $1 AND r.status = 'paused'
+		AND NOT EXISTS (SELECT 1 FROM recurring_reminders r WHERE r.user_id = $1 AND r.status = 'paused'
 			AND r.pause_reason = '`+PauseNoBalance+`' AND `+owedAgainSQL()+`)`,
 		userID, today).Scan(&skip); err != nil {
 		return fmt.Errorf("due check guard: %w", err)
@@ -104,7 +104,7 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 	if err := s.resumeNoBalanceTx(ctx, tx, userID, today); err != nil { // K5: a new debt runs them again
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1 AND status = 'active'
+	rows, err := tx.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_reminders WHERE user_id = $1 AND status = 'active'
 		ORDER BY created_at, id FOR UPDATE SKIP LOCKED`, userID)
 	if err != nil {
 		return fmt.Errorf("due rules: %w", err)
@@ -169,7 +169,7 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 		}
 	}
 	for _, e := range ends {
-		if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET ending_notified = TRUE WHERE id = $1`, e.id); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE recurring_reminders SET ending_notified = TRUE WHERE id = $1`, e.id); err != nil {
 			return err
 		}
 	}
@@ -214,7 +214,7 @@ func (s *Service) newlyDue(ctx context.Context, tx pgx.Tx, r *Rule, today time.T
 		}
 	}
 	// only when it moves: a write bumps updated_at, which the sync fingerprint reads
-	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET due_notified_until = $2 WHERE id = $1
+	if _, err := tx.Exec(ctx, `UPDATE recurring_reminders SET due_notified_until = $2 WHERE id = $1
 		AND due_notified_until IS DISTINCT FROM $2`, r.ID, today); err != nil {
 		return 0, err
 	}
@@ -405,10 +405,10 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 		byRule[it.RuleID] = append(byRule[it.RuleID], it)
 	}
 	avg := map[uuid.UUID]float64{}
-	arows, err := s.db.Query(ctx, `SELECT i.recurring_rule_id, AVG(COALESCE(t.amount, e.amount))::float8 FROM recurring_items i
+	arows, err := s.db.Query(ctx, `SELECT i.recurring_reminder_id, AVG(COALESCE(t.amount, e.amount))::float8 FROM recurring_items i
 		LEFT JOIN transactions t ON t.id = i.transaction_id
 		LEFT JOIN saving_entries e ON e.id = i.saving_entry_id
-		WHERE i.user_id = $1 AND i.recurring_rule_id = ANY($2) AND (t.id IS NOT NULL OR e.id IS NOT NULL) GROUP BY i.recurring_rule_id`, userID, ids)
+		WHERE i.user_id = $1 AND i.recurring_reminder_id = ANY($2) AND (t.id IS NOT NULL OR e.id IS NOT NULL) GROUP BY i.recurring_reminder_id`, userID, ids)
 	if err != nil {
 		return nil, fmt.Errorf("avg amounts: %w", err)
 	}
@@ -560,7 +560,7 @@ func (s *Service) stats(ctx context.Context, userID uuid.UUID, r *Rule, stored [
 	rows, err := s.db.Query(ctx, `SELECT COALESCE(i.slot, i.date), i.date, COALESCE(t.amount, e.amount)::float8 FROM recurring_items i
 		LEFT JOIN transactions t ON t.id = i.transaction_id
 		LEFT JOIN saving_entries e ON e.id = i.saving_entry_id
-		WHERE i.user_id = $1 AND i.recurring_rule_id = $2 AND (t.id IS NOT NULL OR e.id IS NOT NULL)
+		WHERE i.user_id = $1 AND i.recurring_reminder_id = $2 AND (t.id IS NOT NULL OR e.id IS NOT NULL)
 		ORDER BY COALESCE(i.slot, i.date)`, userID, r.ID)
 	if err != nil {
 		return st, fmt.Errorf("stats: %w", err)
@@ -740,7 +740,7 @@ func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, mon
 	case StatusArchived:
 		status = StatusSkipped
 	}
-	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1
+	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_reminders WHERE user_id = $1
 		AND ($2::uuid IS NULL OR id = $2) AND ($3::uuid IS NULL OR recurring_id = $3)`, userID, ruleID, itemID)
 	if err != nil {
 		return nil, err
@@ -956,7 +956,7 @@ type OccurrencesResult struct {
 	Data          []Item  `json:"data"`
 	SuggestedSlot *string `json:"suggested_slot"`
 	// SuggestedRuleID — the line of the suggested round (0.4.3: an item's rounds of every line).
-	SuggestedRuleID *uuid.UUID `json:"suggested_recurring_rule_id"`
+	SuggestedRuleID *uuid.UUID `json:"suggested_recurring_reminder_id"`
 }
 
 type PickerHint struct {

@@ -29,7 +29,7 @@ type OccBulkRequest struct {
 }
 
 type OccBulkItem struct {
-	RuleID uuid.UUID `json:"recurring_rule_id"`
+	RuleID uuid.UUID `json:"recurring_reminder_id"`
 	Slot   string    `json:"slot"`
 	// Amount — confirm and mark_paid (0.4.1-1 R5): the amount typed for an occurrence that has
 	// none (or overrides it).
@@ -37,7 +37,7 @@ type OccBulkItem struct {
 }
 
 type OccLeftOut struct {
-	RuleID uuid.UUID `json:"recurring_rule_id"`
+	RuleID uuid.UUID `json:"recurring_reminder_id"`
 	Slot   string    `json:"slot"`
 	Reason string    `json:"reason"` // needs_amount | refused | not_found | already_recorded
 }
@@ -62,7 +62,7 @@ func validateBulk(req *OccBulkRequest) ([]time.Time, error) {
 	slots := make([]time.Time, len(req.Items))
 	for i, it := range req.Items {
 		if it.RuleID == uuid.Nil {
-			return nil, apierr.Wrap(ErrValidation, fmt.Sprintf("items[%d].recurring_rule_id is required", i), apierr.Field(fmt.Sprintf("items[%d].recurring_rule_id", i), apierr.FieldRequired))
+			return nil, apierr.Wrap(ErrValidation, fmt.Sprintf("items[%d].recurring_reminder_id is required", i), apierr.Field(fmt.Sprintf("items[%d].recurring_reminder_id", i), apierr.FieldRequired))
 		}
 		d, err := time.Parse(dateLayout, it.Slot)
 		if err != nil {

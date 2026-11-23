@@ -52,11 +52,11 @@ func TestRecurringReadsNeverWrite(t *testing.T) {
 	d := f.createWeekly(6)
 	id := d.Recurring.ID
 	f.track(id)
-	f.exec(`UPDATE recurring_rules SET due_notified_until = $2 WHERE id = $1`, id, f.today.AddDate(0, 0, -30))
+	f.exec(`UPDATE recurring_reminders SET due_notified_until = $2 WHERE id = $1`, id, f.today.AddDate(0, 0, -30))
 	f.exec(`DELETE FROM recurring_due_checks WHERE user_id = $1`, f.me)
 	f.exec(`DELETE FROM notifications WHERE recipient_user_id = $1`, f.me)
 	var before string
-	_ = f.pool.QueryRow(f.ctx, `SELECT updated_at::text FROM recurring_rules WHERE id = $1`, id).Scan(&before)
+	_ = f.pool.QueryRow(f.ctx, `SELECT updated_at::text FROM recurring_reminders WHERE id = $1`, id).Scan(&before)
 
 	for _, p := range []string{
 		"/recurring", "/recurring/" + id.String(), "/recurring/" + id.String() + "/items?tab=produced",
@@ -68,7 +68,7 @@ func TestRecurringReadsNeverWrite(t *testing.T) {
 	var after string
 	var due *string
 	var checks int
-	_ = f.pool.QueryRow(f.ctx, `SELECT updated_at::text, due_notified_until::text FROM recurring_rules WHERE id = $1`, id).Scan(&after, &due)
+	_ = f.pool.QueryRow(f.ctx, `SELECT updated_at::text, due_notified_until::text FROM recurring_reminders WHERE id = $1`, id).Scan(&after, &due)
 	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM recurring_due_checks WHERE user_id = $1`, f.me).Scan(&checks)
 	if after != before || checks != 0 {
 		t.Errorf("a GET wrote: updated_at %s -> %s, due_checks rows %d", before, after, checks)
@@ -97,7 +97,7 @@ func TestDueCheckDailyRunsOncePerLocalDay(t *testing.T) {
 		t.Fatal(err)
 	}
 	var status string
-	_ = f.pool.QueryRow(f.ctx, `SELECT status FROM recurring_rules WHERE id = $1`, id).Scan(&status)
+	_ = f.pool.QueryRow(f.ctx, `SELECT status FROM recurring_reminders WHERE id = $1`, id).Scan(&status)
 	if status != "active" {
 		t.Errorf("a setting on an archived wallet is %q after the check, want active", status)
 	}

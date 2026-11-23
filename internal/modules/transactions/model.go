@@ -146,7 +146,7 @@ type WriteResult struct {
 	// Effects (0.4.1-1 B2) — everything the write changed, linked sides included.
 	Effects shared.Effects `json:"effects"`
 	// RecurringID (0.4.3) — the installment item a create with `installment` made; null otherwise.
-	RecurringID *uuid.UUID `json:"recurring_id"`
+	DebtPlanID *uuid.UUID `json:"debt_plan_id"`
 }
 
 type DeleteResult struct {

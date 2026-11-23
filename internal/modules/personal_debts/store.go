@@ -68,7 +68,7 @@ const entryColumns = `id, user_id, kind, direction,
 	counterparty_contact_id, counterparty_person_name, project_id,
 	amount, currency, to_char(date, 'YYYY-MM-DD'), paid, source_kind, description, note,
 	created_at, updated_at, counterpart_debt_id, to_char(due_date, 'YYYY-MM-DD'),
-	disconnected_at, counterparty_institution_id, recurring_id`
+	disconnected_at, counterparty_institution_id, recurring_id, debt_plan_id`
 
 func scanEntry(row pgx.Row) (*Entry, error) {
 	var e Entry
@@ -77,7 +77,7 @@ func scanEntry(row pgx.Row) (*Entry, error) {
 		&e.ContactID, &e.PersonName, &e.ProjectID,
 		&e.Amount, &e.Currency, &e.Date, &e.Paid, &e.SourceKind, &e.Description, &e.Note,
 		&e.CreatedAt, &e.UpdatedAt, &e.CounterpartDebtID, &e.DueDate,
-		&e.DisconnectedAt, &e.InstitutionID, &e.RecurringID,
+		&e.DisconnectedAt, &e.InstitutionID, &e.RecurringID, &e.DebtPlanID,
 	)
 	return &e, err
 }
@@ -122,12 +122,12 @@ func insertEntryTx(ctx context.Context, tx pgx.Tx, e *Entry) (*Entry, error) {
 	row, err := scanEntry(tx.QueryRow(ctx, `INSERT INTO personal_debts
 		(id, user_id, direction, counterparty_contact_id, counterparty_person_name, project_id,
 		 amount, currency, date, paid, source_kind, description, note,
-		 created_by_user_id, updated_by_user_id, due_date, kind, counterparty_institution_id, recurring_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13, $2, $2, $14::date, $15, $16, $17)
+		 created_by_user_id, updated_by_user_id, due_date, kind, counterparty_institution_id, recurring_id, debt_plan_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13, $2, $2, $14::date, $15, $16, $17, $18)
 		RETURNING `+entryColumns,
 		id, e.UserID, e.Direction, e.ContactID, strings.TrimSpace(e.PersonName), e.ProjectID,
 		e.Amount, strings.ToUpper(e.Currency), e.Date, e.Paid, e.SourceKind,
-		shared.CleanText(e.Description), shared.CleanText(e.Note), e.DueDate, e.Kind, e.InstitutionID, e.RecurringID))
+		shared.CleanText(e.Description), shared.CleanText(e.Note), e.DueDate, e.Kind, e.InstitutionID, e.RecurringID, e.DebtPlanID))
 	if err != nil {
 		return nil, fmt.Errorf("insert entry: %w", err)
 	}
@@ -384,7 +384,7 @@ const entryViewSQL = `SELECT pd.id, pd.kind, pd.direction, pd.counterparty_conta
 		-- 0.4.3: an institution counterparty; the recurring item the row belongs to (+ its installment)
 		pd.counterparty_institution_id, pd.recurring_id, rg.name, rg.icon_code,
 		(SELECT di.seq FROM debt_installments di WHERE di.personal_debt_id = pd.id ORDER BY di.seq LIMIT 1),
-		rg.plan_count
+		(SELECT dp.count FROM debt_plans dp WHERE dp.id = pd.debt_plan_id)
 	FROM personal_debts pd
 	LEFT JOIN recurrings rg ON rg.id = pd.recurring_id
 	LEFT JOIN transactions t ON t.source_personal_debt_id = pd.id
@@ -779,7 +779,7 @@ func (s *Store) AbsorbForContact(ctx context.Context, userID, contactID uuid.UUI
 		return 0, fmt.Errorf("absorb: %w", err)
 	}
 	// 0.4.1-2 K7 (Q-K1): the typed names' "หนี้" recurring settings merge into the contact too.
-	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET contact_id = $1, person_name = $2
+	if _, err := tx.Exec(ctx, `UPDATE recurring_reminders SET contact_id = $1, person_name = $2
 		WHERE user_id = $3 AND type = 'debt' AND contact_id IS NULL
 		  AND LOWER(TRIM(person_name)) = ANY($4::text[])`, contactID, displayName, userID, lowered); err != nil {
 		return 0, fmt.Errorf("absorb rules: %w", err)
@@ -814,7 +814,7 @@ func (s *Store) RestoreOnContactDeleteTx(ctx context.Context, tx pgx.Tx, userID,
 		return 0, fmt.Errorf("restore on delete: %w", err)
 	}
 	// 0.4.1-2 K7: a "หนี้" recurring setting keeps the name (the FK then drops the contact).
-	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET person_name = $1
+	if _, err := tx.Exec(ctx, `UPDATE recurring_reminders SET person_name = $1
 		WHERE user_id = $2 AND contact_id = $3`, displayName, userID, contactID); err != nil {
 		return 0, fmt.Errorf("restore rules on delete: %w", err)
 	}

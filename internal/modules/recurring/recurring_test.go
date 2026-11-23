@@ -77,7 +77,6 @@ func newRecFix(t *testing.T) *recFix {
 	f.r = apitest.CountedEngine(f.me, func(g *gin.RouterGroup) {
 		g.GET("/recurring", h.ListRecurring)
 		g.POST("/recurring", h.CreateRecurring)
-		g.POST("/recurring/plan-preview", h.PlanPreview)
 		g.POST("/recurring/occurrences/bulk", h.SettleOccurrences)
 		g.GET("/recurring/:id", h.GetRecurring)
 		g.PUT("/recurring/:id", h.UpdateRecurring)
@@ -88,31 +87,39 @@ func newRecFix(t *testing.T) *recFix {
 		g.POST("/recurring/:id/archive", h.ArchiveRecurring)
 		g.POST("/recurring/:id/restore", h.RestoreRecurring)
 		g.POST("/recurring/:id/duplicate", h.DuplicateRecurring)
-		g.POST("/recurring/:id/lines", h.AddLine)
-		g.PUT("/recurring/:id/lines/:line_id", h.UpdateLine)
-		g.DELETE("/recurring/:id/lines/:line_id", h.DeleteLine)
-		g.POST("/recurring/:id/lines/:line_id/pause", h.PauseLine)
-		g.POST("/recurring/:id/lines/:line_id/resume", h.ResumeLine)
-		g.POST("/recurring/:id/lines/:line_id/archive", h.ArchiveLine)
-		g.POST("/recurring/:id/lines/:line_id/restore", h.RestoreLine)
-		g.POST("/recurring/:id/lines/:line_id/extend", h.ExtendLine)
+		g.POST("/recurring/:id/reminders", h.AddLine)
+		g.PUT("/recurring/:id/reminders/:reminder_id", h.UpdateLine)
+		g.DELETE("/recurring/:id/reminders/:reminder_id", h.DeleteLine)
+		g.POST("/recurring/:id/reminders/:reminder_id/pause", h.PauseLine)
+		g.POST("/recurring/:id/reminders/:reminder_id/resume", h.ResumeLine)
+		g.POST("/recurring/:id/reminders/:reminder_id/archive", h.ArchiveLine)
+		g.POST("/recurring/:id/reminders/:reminder_id/restore", h.RestoreLine)
+		g.POST("/recurring/:id/reminders/:reminder_id/extend", h.ExtendLine)
 		g.GET("/recurring/:id/occurrences", h.ItemOccurrences)
 		g.POST("/recurring/:id/occurrences/confirm-ready", h.ConfirmReadyItem)
 		g.POST("/recurring/:id/occurrences/mark-paid-ready", h.MarkPaidReadyItem)
 		g.POST("/recurring/:id/occurrences/skip-ready", h.SkipReadyItem)
-		g.PUT("/recurring/:id/lines/:line_id/occurrences/:slot", h.EditOcc)
-		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/confirm", h.ConfirmOcc)
-		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/skip", h.SkipOcc)
-		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/restore", h.RestoreOcc)
-		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/mark-paid", h.MarkPaidOcc)
-		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/unmark-paid", h.UnmarkPaidOcc)
-		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/link", h.LinkOcc)
-		g.POST("/recurring/:id/lines/:line_id/occurrences/:slot/unlink", h.UnlinkOcc)
-		g.GET("/recurring/:id/installments", h.Installments)
-		g.PUT("/recurring/:id/installments/:seq", h.EditInstallment)
-		g.POST("/recurring/:id/installments/:seq/mark", h.MarkInstallment)
-		g.POST("/recurring/:id/plan/close", h.ClosePlan)
-		g.DELETE("/recurring/:id/plan", h.DeletePlan)
+		g.PUT("/recurring/:id/reminders/:reminder_id/occurrences/:slot", h.EditOcc)
+		g.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/confirm", h.ConfirmOcc)
+		g.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/skip", h.SkipOcc)
+		g.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/restore", h.RestoreOcc)
+		g.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/mark-paid", h.MarkPaidOcc)
+		g.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/unmark-paid", h.UnmarkPaidOcc)
+		g.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/link", h.LinkOcc)
+		g.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/unlink", h.UnlinkOcc)
+		g.GET("/debt-plans", h.ListDebtPlans)
+		g.POST("/debt-plans", h.CreateDebtPlan)
+		g.POST("/debt-plans/preview", h.PlanPreview)
+		g.GET("/debt-plans/:id", h.GetDebtPlan)
+		g.PUT("/debt-plans/:id", h.UpdateDebtPlan)
+		g.DELETE("/debt-plans/:id", h.DeleteDebtPlan)
+		g.POST("/debt-plans/:id/close", h.ClosePlan)
+		g.POST("/debt-plans/:id/pay", h.PayInstallment)
+		g.GET("/card-summaries", h.CardSummaries)
+		g.GET("/card-summaries/:id", h.CardSummary)
+		g.GET("/debt-plans/:id/installments", h.Installments)
+		g.PUT("/debt-plans/:id/installments/:seq", h.EditInstallment)
+		g.POST("/debt-plans/:id/installments/:seq/mark", h.MarkInstallment)
 		g.GET("/recurring-items", h.Items)
 		g.POST("/recurring-items", h.CreateItem)
 		g.GET("/recurring-items/:id", h.GetItem)
@@ -213,7 +220,7 @@ func (f *recFix) createWeekly(count int) Detail {
 // tracked_from back to the start.
 func (f *recFix) track(id uuid.UUID) {
 	f.t.Helper()
-	f.exec(`UPDATE recurring_rules SET tracked_from = start_date WHERE id = $1`, id)
+	f.exec(`UPDATE recurring_reminders SET tracked_from = start_date WHERE id = $1`, id)
 }
 
 func (f *recFix) occ(id uuid.UUID, slot string) string {
@@ -233,7 +240,7 @@ func (f *recFix) newTx(amount float64, day int) uuid.UUID {
 func (f *recFix) storedRows(id uuid.UUID) int {
 	f.t.Helper()
 	var n int
-	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM recurring_items WHERE recurring_rule_id = $1`, id).Scan(&n); err != nil {
+	if err := f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM recurring_items WHERE recurring_reminder_id = $1`, id).Scan(&n); err != nil {
 		f.t.Fatal(err)
 	}
 	return n
@@ -510,7 +517,7 @@ func TestSettleOccurrences(t *testing.T) {
 		return out
 	}
 	item := func(rule uuid.UUID, slot string, amount ...float64) map[string]any {
-		m := map[string]any{"recurring_rule_id": rule, "slot": slot}
+		m := map[string]any{"recurring_reminder_id": rule, "slot": slot}
 		if len(amount) > 0 {
 			m["amount"] = amount[0]
 		}
@@ -615,7 +622,7 @@ func TestAutoCreate(t *testing.T) {
 	f.call("POST", "/recurring", "createRecurring", map[string]any{"name": "G", "type": "expense", "amount": 7, "account_id": gone,
 		"category_id": f.food, "auto_create": true, "rule": map[string]any{"freq": "daily", "interval": 1}, "start_date": f.day(1)}, 201, &ga)
 	f.exec(`UPDATE accounts SET status = 'archived' WHERE id = $1`, gone)
-	f.exec(`UPDATE recurring_rules SET start_date = $2, tracked_from = $2, auto_created_until = $3 WHERE id = $1`,
+	f.exec(`UPDATE recurring_reminders SET start_date = $2, tracked_from = $2, auto_created_until = $3 WHERE id = $1`,
 		ga.Recurring.ID, f.today, f.today.AddDate(0, 0, -1))
 	if err := f.svc.DueCheck(f.ctx, f.me, ""); err != nil {
 		t.Fatal(err)
@@ -643,7 +650,7 @@ func TestDueNoticeResumeAndEdit(t *testing.T) {
 	d := f.createWeekly(6)
 	id := d.Recurring.ID
 	f.track(id)
-	f.exec(`UPDATE recurring_rules SET due_notified_until = $2 WHERE id = $1`, id, f.today.AddDate(0, 0, -30))
+	f.exec(`UPDATE recurring_reminders SET due_notified_until = $2 WHERE id = $1`, id, f.today.AddDate(0, 0, -30))
 	f.exec(`DELETE FROM notifications WHERE recipient_user_id = $1`, f.me)
 	f.call("GET", "/recurring/"+id.String(), "getRecurring", nil, 200, nil)
 	if rows, _ := f.notices("recurring_due"); rows != 0 {
@@ -689,11 +696,11 @@ func TestDueNoticeResumeAndEdit(t *testing.T) {
 	}
 	// clear them, pause "since" 8 days ago, resume: the next one is today's (its period holds
 	// today); -7 is in the gap and never made (R8)
-	f.exec(`DELETE FROM recurring_items WHERE recurring_rule_id = $1`, id)
-	f.exec(`UPDATE recurring_rules SET paused_from = $2 WHERE id = $1`, id, f.today.AddDate(0, 0, -8))
+	f.exec(`DELETE FROM recurring_items WHERE recurring_reminder_id = $1`, id)
+	f.exec(`UPDATE recurring_reminders SET paused_from = $2 WHERE id = $1`, id, f.today.AddDate(0, 0, -8))
 	f.call("POST", "/recurring/"+id.String()+"/resume", "resumeRecurring", nil, 200, &d)
 	var tf string
-	_ = f.pool.QueryRow(f.ctx, `SELECT to_char(tracked_from, 'YYYY-MM-DD') FROM recurring_rules WHERE id = $1`, id).Scan(&tf)
+	_ = f.pool.QueryRow(f.ctx, `SELECT to_char(tracked_from, 'YYYY-MM-DD') FROM recurring_reminders WHERE id = $1`, id).Scan(&tf)
 	if tf != f.day(-14) {
 		t.Errorf("resume moved tracked_from to %s", tf)
 	}
@@ -748,7 +755,7 @@ func TestFilledOccurrenceReadsItsTx(t *testing.T) {
 		t.Fatalf("filled occurrence = %+v", it)
 	}
 	var draft []byte
-	_ = f.pool.QueryRow(f.ctx, `SELECT draft FROM recurring_items WHERE recurring_rule_id = $1 AND slot = $2`, id, f.day(-14)).Scan(&draft)
+	_ = f.pool.QueryRow(f.ctx, `SELECT draft FROM recurring_items WHERE recurring_reminder_id = $1 AND slot = $2`, id, f.day(-14)).Scan(&draft)
 	if contains(draft, "mine") || contains(draft, "130") {
 		t.Errorf("the tx values were copied into the draft: %s", draft)
 	}
@@ -1115,7 +1122,7 @@ func TestRecurringSaving(t *testing.T) {
 		t.Fatal(err)
 	}
 	var status string
-	_ = f.pool.QueryRow(f.ctx, `SELECT status FROM recurring_rules WHERE id = $1`, id).Scan(&status)
+	_ = f.pool.QueryRow(f.ctx, `SELECT status FROM recurring_reminders WHERE id = $1`, id).Scan(&status)
 	if status != "paused" {
 		t.Errorf("setting of an archived goal = %s", status)
 	}

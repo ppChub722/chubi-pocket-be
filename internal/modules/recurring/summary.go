@@ -71,7 +71,7 @@ func (s *Service) summary(ctx context.Context, userID uuid.UUID, today time.Time
 	if err := s.dueWindow(ctx, userID, today, &out); err != nil {
 		return out, err
 	}
-	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules r
+	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_reminders r
 		WHERE user_id = $1 AND status = 'active'`, userID)
 	if err != nil {
 		return out, fmt.Errorf("summary rules: %w", err)

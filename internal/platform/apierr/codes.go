@@ -169,9 +169,10 @@ const (
 	// debts + recurring 0.4.3: institutions, lines, plans
 	InstitutionNotFound         Code = "INSTITUTION_NOT_FOUND"
 	InstitutionInUse            Code = "INSTITUTION_IN_USE"
-	RecurringLineNotFound       Code = "RECURRING_LINE_NOT_FOUND"
-	RecurringLastLine           Code = "RECURRING_LAST_LINE"
+	RecurringLineNotFound       Code = "RECURRING_REMINDER_NOT_FOUND"
+	RecurringLastLine           Code = "RECURRING_LAST_REMINDER"
 	RecurringSourceInvalid      Code = "RECURRING_SOURCE_INVALID"
+	RecurringTypeFixed          Code = "RECURRING_TYPE_FIXED"
 	PlanInvalid                 Code = "PLAN_INVALID"
 	InstallmentNotFound         Code = "INSTALLMENT_NOT_FOUND"
 	InstallmentNeedsInstitution Code = "INSTALLMENT_NEEDS_INSTITUTION"
@@ -345,7 +346,8 @@ var registry = []Def{
 	{InstitutionInUse, []int{409}, InEnvelope, "Debts, recurring items or wallets still point at this institution; archive it instead."},
 	{RecurringLineNotFound, []int{404}, InEnvelope, "No such line on this recurring item."},
 	{RecurringLastLine, []int{409}, InEnvelope, "A recurring item keeps at least one line; delete the item instead."},
-	{RecurringSourceInvalid, []int{400}, InEnvelope, "A line pays from exactly one source: a wallet, or a person paying for me (expense / bill / debt only)."},
+	{RecurringSourceInvalid, []int{400}, InEnvelope, "A reminder pays from exactly one source: a wallet, or a person paying for me (expense / debt only)."},
+	{RecurringTypeFixed, []int{400}, InEnvelope, "A recurring item keeps its type: delete it and create a new one."},
 	{PlanInvalid, []int{400}, InEnvelope, "The plan is invalid (details = FieldError[])."},
 	{InstallmentNotFound, []int{404}, InEnvelope, "No such installment on this recurring item."},
 	{InstallmentNeedsInstitution, []int{400}, InEnvelope, "An installment on a card needs the wallet linked to an institution first."},

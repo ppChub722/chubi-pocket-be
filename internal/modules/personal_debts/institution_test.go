@@ -25,13 +25,14 @@ func TestInstitutionCounterparty(t *testing.T) {
 	f.code("GET", "/api/v1/personal-debts/people/"+url.PathEscape("i:"+uuid.NewString()), nil, http.StatusNotFound, "NOT_FOUND")
 
 	// a recurring item with a plan of this institution
-	item := uuid.New()
-	f.exec(`INSERT INTO recurrings (id, user_id, name, type, counterparty_institution_id, debt_direction,
-		plan_principal, plan_count, plan_start, plan_interest_method) VALUES ($1, $2, 'ผ่อนรถ', 'debt', $3, 'received', 30000, 3, CURRENT_DATE, 'none')`,
-		item, f.me, inst)
+	item, plan := uuid.New(), uuid.New()
+	f.exec(`INSERT INTO debt_plans (id, user_id, name, direction, institution_id, principal, count, start_date, interest_method)
+		VALUES ($1, $2, 'ผ่อนรถ', 'received', $3, 30000, 3, CURRENT_DATE, 'none')`, plan, f.me, inst)
+	f.exec(`INSERT INTO recurrings (id, user_id, name, type, debt_direction, debt_plan_id)
+		VALUES ($1, $2, 'ผ่อนรถ', 'debt', 'received', $3)`, item, f.me, plan)
 	for i := 1; i <= 3; i++ {
-		f.exec(`INSERT INTO debt_installments (user_id, recurring_id, seq, due_date, amount, principal, interest)
-			VALUES ($1, $2, $3, CURRENT_DATE + ($3 - 1) * 30, 10000, 10000, 0)`, f.me, item, i)
+		f.exec(`INSERT INTO debt_installments (user_id, debt_plan_id, seq, due_date, amount, principal, interest)
+			VALUES ($1, $2, $3, CURRENT_DATE + ($3 - 1) * 30, 10000, 10000, 0)`, f.me, plan, i)
 	}
 	debt := f.call("POST", page+"/entries", map[string]any{"direction": "received", "amount": 30000, "recurring_id": item,
 		"due_date": f.today()}, "createDebtEntry", http.StatusCreated)
@@ -75,11 +76,10 @@ func TestInstitutionCounterparty(t *testing.T) {
 	// a card of the institution: what is owed minus the installments not billed yet
 	f.exec(`UPDATE accounts SET type = 'credit_card', credit_limit = 50000, balance = -12000, institution_id = $2 WHERE id = $1`, f.wallet, inst)
 	card := uuid.New()
-	f.exec(`INSERT INTO recurrings (id, user_id, name, type, counterparty_institution_id, debt_direction,
-		plan_principal, plan_count, plan_start, plan_interest_method, card_account_id)
-		VALUES ($1, $2, 'ผ่อนทีวี', 'debt', $3, 'received', 9000, 3, CURRENT_DATE, 'none', $4)`, card, f.me, inst, f.wallet)
+	f.exec(`INSERT INTO debt_plans (id, user_id, name, direction, account_id, principal, count, start_date, interest_method)
+		VALUES ($1, $2, 'ผ่อนทีวี', 'received', $3, 9000, 3, CURRENT_DATE, 'none')`, card, f.me, f.wallet)
 	for i := 1; i <= 3; i++ {
-		f.exec(`INSERT INTO debt_installments (user_id, recurring_id, seq, due_date, amount, principal, interest)
+		f.exec(`INSERT INTO debt_installments (user_id, debt_plan_id, seq, due_date, amount, principal, interest)
 			VALUES ($1, $2, $3, CURRENT_DATE + ($3 - 1) * 30, 3000, 3000, 0)`, f.me, card, i)
 	}
 	p = f.call("GET", page, nil, "getDebtPerson", http.StatusOK)

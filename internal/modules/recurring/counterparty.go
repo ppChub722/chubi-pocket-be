@@ -14,7 +14,7 @@ import (
 type CounterpartyItem struct {
 	RecurringSummary
 	Plan  *PlanView `json:"plan"`
-	Lines []Line    `json:"lines"`
+	Lines []Line    `json:"reminders"`
 }
 
 // CounterpartyItems — the debt items (not archived) of a counterparty key (c: / n: / i:), newest
@@ -39,6 +39,9 @@ func (s *Service) CounterpartyItems(ctx context.Context, userID uuid.UUID, key s
 	if err := rows.Err(); err != nil || len(items) == 0 {
 		return out, err
 	}
+	if err := attachPlans(ctx, s.db, userID, items...); err != nil {
+		return nil, err
+	}
 	today, err := s.today(ctx, userID, shared.HeaderTZ(ctx))
 	if err != nil {
 		return nil, err
@@ -57,10 +60,14 @@ func (s *Service) CounterpartyItems(ctx context.Context, userID uuid.UUID, key s
 	return out, nil
 }
 
-// itemKeySQL — a recurring item's counterparty key, as shared.DebtKey writes it.
-const itemKeySQL = `(CASE WHEN counterparty_institution_id IS NOT NULL THEN 'i:' || counterparty_institution_id::text
-	WHEN counterparty_contact_id IS NOT NULL THEN 'c:' || counterparty_contact_id::text
-	ELSE 'n:' || LOWER(TRIM(counterparty_person_name)) END)`
+// itemKeySQL — a recurring item's counterparty key (its own, else its plan's creditor), as
+// shared.DebtKey writes it; NULL for a card's bill.
+const itemKeySQL = `(SELECT CASE WHEN COALESCE(counterparty_institution_id, p.institution_id) IS NOT NULL
+		THEN 'i:' || COALESCE(counterparty_institution_id, p.institution_id)::text
+	WHEN COALESCE(counterparty_contact_id, p.contact_id) IS NOT NULL THEN 'c:' || COALESCE(counterparty_contact_id, p.contact_id)::text
+	WHEN COALESCE(counterparty_person_name, p.person_name) IS NOT NULL
+		THEN 'n:' || LOWER(TRIM(COALESCE(counterparty_person_name, p.person_name))) END
+	FROM (SELECT NULL) one LEFT JOIN debt_plans p ON p.id = debt_plan_id)`
 
 // DebtMonth — this month's rounds of the active debt lines still to book (not person-paid ones:
 // they move no money of mine): money out (the rows I pay: lend / pay back) and in.

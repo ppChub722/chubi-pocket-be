@@ -5,23 +5,31 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/institutions"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/personal_debts"
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/apierr"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// A plan on a debt item (0.4.3): count installments from a first due date, each with its principal
-// and interest, worked out at creation (none / flat / reducing / fixed) or typed (manual), editable
-// later. Information and hand-set ticks only: the balance counts debt rows, never installments.
+// Debt plans (0.4.3): ผ่อน / a loan repaid in installments, owned by the debts page. The creditor
+// is a card / PayLater wallet (the debt is the card's balance: no debt row, no payment here — the
+// card bill pays it), an institution or a person. count installments from a first due date, each
+// with its principal and interest, worked out at creation (none / flat / reducing / fixed) or typed
+// (manual), editable later. Paying one books a repayment (the principal) and the interest (an
+// expense in the system category ดอกเบี้ย). A recurring item of type debt may pay it by reminder.
 
 var (
 	ErrPlanInvalid         = errors.New("the plan is invalid")
-	ErrInstallmentNotFound = errors.New("no such installment on this recurring item")
+	ErrPlanNotFound        = errors.New("debt plan not found")
+	ErrInstallmentNotFound = errors.New("no such installment on this plan")
 )
 
 func planInvalid(field, code string) error {
@@ -160,7 +168,7 @@ func computeInstallments(in *PlanInput) ([]Installment, time.Time, error) {
 	return out, start, nil
 }
 
-// PlanPreview — POST /recurring/plan-preview: the installments of a plan, nothing saved.
+// PlanPreview — POST /debt-plans/preview: the installments of a plan, nothing saved.
 func (s *Service) PlanPreview(in PlanInput) (*InstallmentList, error) {
 	rows, _, err := computeInstallments(&in)
 	if err != nil {
@@ -173,90 +181,404 @@ type InstallmentList struct {
 	Data []Installment `json:"data"`
 }
 
-// setPlanTx — the item's plan from in: its installments (ticks kept by seq) and, when the item
-// gets a plan for the first time and it is not on a card, its opening debt row. Answers the
-// wallets it moved.
-func (s *Service) setPlanTx(ctx context.Context, tx pgx.Tx, it *itemRecord, in *PlanInput) ([]uuid.UUID, error) {
-	if it.Type != TypeDebt {
-		return nil, ErrValidation
-	}
-	rows, start, err := computeInstallments(in)
-	if err != nil {
+// ---- storage ----
+
+type planRecord struct {
+	ID                    uuid.UUID
+	UserID                uuid.UUID
+	Name                  string
+	Description           *string
+	Note                  *string
+	CategoryID            *uuid.UUID
+	Direction             string // paid (they owe me) | received (I owe them)
+	AccountID             *uuid.UUID
+	InstitutionID         *uuid.UUID
+	ContactID             *uuid.UUID
+	PersonName            *string
+	Origin                string // purchase | cash
+	Principal             float64
+	Count                 int
+	Start                 time.Time
+	InterestMethod        string
+	InterestRate          *float64
+	InstallmentAmount     *float64
+	PurchaseTransactionID *uuid.UUID
+	ClosedAt              *time.Time
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+	creditorName          string // resolved: the card / institution / contact name
+}
+
+// isCard — a card / PayLater plan: the card holds the debt and its bill pays the rounds.
+func (p *planRecord) isCard() bool { return p.AccountID != nil }
+
+const planColumns = `id, user_id, name, description, note, category_id, direction, account_id, institution_id,
+	contact_id, person_name, origin, principal::float8, count, start_date, interest_method, interest_rate::float8,
+	installment_amount::float8, purchase_transaction_id, closed_at, created_at, updated_at`
+
+func scanPlan(row pgx.Row) (*planRecord, error) {
+	var (
+		p     planRecord
+		count int32
+	)
+	if err := row.Scan(&p.ID, &p.UserID, &p.Name, &p.Description, &p.Note, &p.CategoryID, &p.Direction, &p.AccountID,
+		&p.InstitutionID, &p.ContactID, &p.PersonName, &p.Origin, &p.Principal, &count, &p.Start, &p.InterestMethod,
+		&p.InterestRate, &p.InstallmentAmount, &p.PurchaseTransactionID, &p.ClosedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
-	if in.CardAccountID != nil {
-		var typ string
-		err := tx.QueryRow(ctx, `SELECT a.type FROM accounts a WHERE a.id = $1 AND `+shared.ActiveMembershipPredicate("a.id", "$2"),
-			*in.CardAccountID, it.UserID).Scan(&typ)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrAccountNotFound
-		}
+	p.Count = int(count)
+	return &p, nil
+}
+
+func getPlan(ctx context.Context, q rowQuerier, userID, id uuid.UUID, lock bool) (*planRecord, error) {
+	sql := `SELECT ` + planColumns + ` FROM debt_plans WHERE id = $1 AND user_id = $2`
+	if lock {
+		sql += ` FOR UPDATE`
+	}
+	p, err := scanPlan(q.QueryRow(ctx, sql, id, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrPlanNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("debt plan: %w", err)
+	}
+	return p, nil
+}
+
+// plansByID — the plans of ids (any user's rows are filtered by userID).
+func plansByID(ctx context.Context, q shared.Querier, userID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]*planRecord, error) {
+	out := map[uuid.UUID]*planRecord{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.Query(ctx, `SELECT `+planColumns+` FROM debt_plans WHERE user_id = $1 AND id = ANY($2)`, userID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("debt plans: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		p, err := scanPlan(rows)
 		if err != nil {
 			return nil, err
 		}
-		if typ != "credit_card" && typ != "pay_later" {
-			return nil, planInvalid("card_account_id", apierr.FieldInvalid)
-		}
+		out[p.ID] = p
 	}
-	first := it.Plan == nil
-	it.Plan = &planRecord{Principal: round2(in.Principal), Count: in.Count, Start: start, InterestMethod: in.InterestMethod,
-		InterestRate: in.InterestRate, InstallmentAmount: in.InstallmentAmount, CardAccountID: in.CardAccountID}
-	if err := saveItemRecordTx(ctx, tx, it); err != nil {
-		return nil, err
+	return out, rows.Err()
+}
+
+func savePlanTx(ctx context.Context, tx pgx.Tx, p *planRecord) error {
+	args := []any{p.ID, p.UserID, p.Name, shared.CleanText(p.Description), shared.CleanText(p.Note), p.CategoryID, p.Direction,
+		p.AccountID, p.InstitutionID, p.ContactID, p.PersonName, p.Origin, p.Principal, p.Count, p.Start, p.InterestMethod,
+		p.InterestRate, p.InstallmentAmount, p.PurchaseTransactionID, p.ClosedAt}
+	var err error
+	if p.ID == uuid.Nil {
+		p.ID, _ = uuid.NewV7()
+		args[0] = p.ID
+		_, err = tx.Exec(ctx, `INSERT INTO debt_plans (id, user_id, name, description, note, category_id, direction, account_id,
+			institution_id, contact_id, person_name, origin, principal, count, start_date, interest_method, interest_rate,
+			installment_amount, purchase_transaction_id, closed_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`, args...)
+	} else {
+		_, err = tx.Exec(ctx, `UPDATE debt_plans SET name = $3, description = $4, note = $5, category_id = $6, direction = $7,
+			account_id = $8, institution_id = $9, contact_id = $10, person_name = $11, origin = $12, principal = $13, count = $14,
+			start_date = $15, interest_method = $16, interest_rate = $17, installment_amount = $18,
+			purchase_transaction_id = $19, closed_at = $20
+			WHERE id = $1 AND user_id = $2`, args...)
 	}
+	if err != nil {
+		return fmt.Errorf("save debt plan: %w", err)
+	}
+	return nil
+}
+
+// writeInstallmentsTx — the plan's installments become rows (ticks kept by seq).
+func writeInstallmentsTx(ctx context.Context, tx pgx.Tx, p *planRecord, rows []Installment) error {
 	for _, x := range rows {
-		if _, err := tx.Exec(ctx, `INSERT INTO debt_installments (user_id, recurring_id, seq, due_date, amount, principal, interest)
+		if _, err := tx.Exec(ctx, `INSERT INTO debt_installments (user_id, debt_plan_id, seq, due_date, amount, principal, interest)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (recurring_id, seq) DO UPDATE SET due_date = EXCLUDED.due_date, amount = EXCLUDED.amount,
+			ON CONFLICT (debt_plan_id, seq) DO UPDATE SET due_date = EXCLUDED.due_date, amount = EXCLUDED.amount,
 				principal = EXCLUDED.principal, interest = EXCLUDED.interest, edited = FALSE`,
-			it.UserID, it.ID, x.Seq, x.DueDate, x.Amount, x.Principal, x.Interest); err != nil {
-			return nil, fmt.Errorf("installments: %w", err)
+			p.UserID, p.ID, x.Seq, x.DueDate, x.Amount, x.Principal, x.Interest); err != nil {
+			return fmt.Errorf("installments: %w", err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM debt_installments WHERE recurring_id = $1 AND seq > $2`, it.ID, in.Count); err != nil {
-		return nil, err
+	_, err := tx.Exec(ctx, `DELETE FROM debt_installments WHERE debt_plan_id = $1 AND seq > $2`, p.ID, len(rows))
+	return err
+}
+
+// ---- input ----
+
+// CreditorInput — who a plan is owed to (or by): exactly one of a card / PayLater wallet, an
+// institution, a contact or a typed name.
+type CreditorInput struct {
+	AccountID     *uuid.UUID `json:"account_id"`
+	InstitutionID *uuid.UUID `json:"institution_id"`
+	ContactID     *uuid.UUID `json:"contact_id"`
+	PersonName    *string    `json:"person_name"`
+}
+
+// DebtPlanInput — POST /debt-plans.
+type DebtPlanInput struct {
+	Name        *string       `json:"name"`
+	Description *string       `json:"description"`
+	Note        *string       `json:"note"`
+	CategoryID  *uuid.UUID    `json:"category_id"`
+	Direction   *string       `json:"direction"` // received (I owe; default) | paid (they owe me)
+	Origin      *string       `json:"origin"`    // purchase (default) | cash
+	Creditor    CreditorInput `json:"creditor"`
+	Plan        PlanInput     `json:"plan"`
+}
+
+// DebtPlanUpdate — PUT /debt-plans/{id}: its own fields; plan = the installments worked out again
+// (ticks kept by seq). The creditor, direction and origin stay.
+type DebtPlanUpdate struct {
+	Name        *string    `json:"name"`
+	Description *string    `json:"description"`
+	Note        *string    `json:"note"`
+	CategoryID  *uuid.UUID `json:"category_id"`
+	Plan        *PlanInput `json:"plan"`
+}
+
+func cleanName(v *string) (string, bool) {
+	if v == nil {
+		return "", false
 	}
-	if !first || in.CardAccountID != nil || s.debts == nil {
-		return nil, nil
+	n := strings.TrimSpace(*v)
+	return n, n != "" && len([]rune(n)) <= 100
+}
+
+// resolveCreditorTx — the creditor of in onto p, checked to be mine (a card / PayLater wallet I am a
+// member of, my active institution, my contact) with its name.
+func resolveCreditorTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, p *planRecord, in CreditorInput) error {
+	n := 0
+	for _, set := range []bool{in.AccountID != nil, in.InstitutionID != nil, in.ContactID != nil || in.PersonName != nil} {
+		if set {
+			n++
+		}
 	}
-	// the opening row: the whole principal counts at once (a card plan: the card holds it)
-	name := it.counterpartName
-	if name == "" {
-		name = derefStr(it.PersonName)
+	if n != 1 {
+		return planInvalid("creditor", apierr.FieldInvalid)
 	}
-	entry := personal_debts.EntryInput{Kind: personal_debts.KindDebt, Direction: *it.DebtDirection, ContactID: it.ContactID,
-		PersonName: name, Amount: it.Plan.Principal, Description: &it.Name,
-		InstitutionID: it.InstitutionID, RecurringID: &it.ID}
-	today, err := shared.UserToday(ctx, tx, it.UserID, shared.HeaderTZ(ctx))
+	p.AccountID, p.InstitutionID, p.ContactID, p.PersonName = nil, nil, nil, nil
+	switch {
+	case in.AccountID != nil:
+		var typ, name string
+		err := tx.QueryRow(ctx, `SELECT a.type, a.name FROM accounts a WHERE a.id = $1 AND `+shared.ActiveMembershipPredicate("a.id", "$2"),
+			*in.AccountID, userID).Scan(&typ, &name)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrAccountNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if typ != "credit_card" && typ != "pay_later" {
+			return planInvalid("creditor.account_id", apierr.FieldInvalid)
+		}
+		p.AccountID, p.creditorName = in.AccountID, name
+	case in.InstitutionID != nil:
+		if err := institutions.CheckOwned(ctx, tx, userID, *in.InstitutionID, true); err != nil {
+			return err
+		}
+		p.InstitutionID = in.InstitutionID
+		return tx.QueryRow(ctx, `SELECT name FROM institutions WHERE id = $1`, *in.InstitutionID).Scan(&p.creditorName)
+	case in.ContactID != nil:
+		r := &Rule{ContactID: in.ContactID}
+		if err := checkDebtPersonTx(ctx, tx, userID, r); err != nil {
+			return err
+		}
+		p.ContactID, p.PersonName, p.creditorName = in.ContactID, r.PersonName, *r.PersonName
+	default:
+		name, ok := cleanName(in.PersonName)
+		if !ok {
+			return planInvalid("creditor.person_name", apierr.FieldInvalid)
+		}
+		p.PersonName, p.creditorName = &name, name
+	}
+	return nil
+}
+
+// ---- create ----
+
+// createPlanTx — a new plan and its installments, and (not on a card) its opening:
+//   - cash: the debt row of the money lent / borrowed (with its wallet transaction when
+//     plan.opening_account_id is sent);
+//   - purchase (I owe only): the full price as my expense on the day (no wallet: the lender paid)
+//     and the debt row, ledger-only.
+//
+// purchaseTx — a card plan's purchase on the card (quick create ผ่อน). Answers the wallets it moved.
+func (s *Service) createPlanTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, in *DebtPlanInput, purchaseTx *uuid.UUID) (*planRecord, []uuid.UUID, error) {
+	name, ok := cleanName(in.Name)
+	if !ok {
+		return nil, nil, planInvalid("name", apierr.FieldInvalid)
+	}
+	if in.Description != nil && len([]rune(*in.Description)) > 200 || in.Note != nil && len([]rune(*in.Note)) > 500 {
+		return nil, nil, ErrValidation
+	}
+	p := &planRecord{UserID: userID, Name: name, Description: in.Description, Note: in.Note, CategoryID: in.CategoryID,
+		Direction: "received", Origin: "purchase", PurchaseTransactionID: purchaseTx}
+	if in.Direction != nil {
+		if *in.Direction != "paid" && *in.Direction != "received" {
+			return nil, nil, planInvalid("direction", apierr.FieldInvalid)
+		}
+		p.Direction = *in.Direction
+	}
+	if in.Origin != nil {
+		if *in.Origin != "purchase" && *in.Origin != "cash" {
+			return nil, nil, planInvalid("origin", apierr.FieldInvalid)
+		}
+		p.Origin = *in.Origin
+	}
+	if p.Origin == "purchase" && p.Direction == "paid" {
+		return nil, nil, planInvalid("origin", apierr.FieldInvalid) // a purchase on credit is mine to owe
+	}
+	if err := resolveCreditorTx(ctx, tx, userID, p, in.Creditor); err != nil {
+		return nil, nil, err
+	}
+	if p.isCard() && (p.Direction != "received" || p.Origin != "purchase") {
+		return nil, nil, planInvalid("origin", apierr.FieldInvalid)
+	}
+	if p.CategoryID != nil {
+		if err := checkRefsTx(ctx, tx, userID, "expense", nil, nil, p.CategoryID, nil); err != nil {
+			return nil, nil, err
+		}
+	}
+	rows, start, err := computeInstallments(&in.Plan)
+	if err != nil {
+		return nil, nil, err
+	}
+	p.Principal, p.Count, p.Start, p.InterestMethod = round2(in.Plan.Principal), in.Plan.Count, start, in.Plan.InterestMethod
+	p.InterestRate, p.InstallmentAmount = in.Plan.InterestRate, in.Plan.InstallmentAmount
+	if err := savePlanTx(ctx, tx, p); err != nil {
+		return nil, nil, err
+	}
+	if err := writeInstallmentsTx(ctx, tx, p, rows); err != nil {
+		return nil, nil, err
+	}
+	if p.isCard() || s.debts == nil {
+		return p, nil, nil
+	}
+	// the opening
+	today, err := shared.UserToday(ctx, tx, userID, shared.HeaderTZ(ctx))
+	if err != nil {
+		return nil, nil, err
+	}
+	date := today.Format(dateLayout)
+	if in.Plan.OpeningDate != nil {
+		if _, err := parseDate(*in.Plan.OpeningDate); err != nil {
+			return nil, nil, planInvalid("opening_date", apierr.FieldInvalid)
+		}
+		date = *in.Plan.OpeningDate
+	}
+	entry := personal_debts.EntryInput{Kind: personal_debts.KindDebt, Direction: p.Direction, ContactID: p.ContactID,
+		PersonName: p.creditorName, InstitutionID: p.InstitutionID, Amount: p.Principal, Date: date,
+		Description: &p.Name, DebtPlanID: &p.ID}
+	var touched []uuid.UUID
+	switch p.Origin {
+	case "cash":
+		if in.Plan.OpeningAccountID != nil {
+			entry.CreateTransaction, entry.AccountID = true, in.Plan.OpeningAccountID
+			touched = append(touched, *in.Plan.OpeningAccountID)
+		}
+	case "purchase":
+		if in.Plan.OpeningAccountID != nil {
+			return nil, nil, planInvalid("opening_account_id", apierr.FieldInvalid) // the lender paid: no wallet of mine moves
+		}
+		res, err := s.txs.CreateInTx(ctx, tx, userID, transactions.CreateRequest{Type: transactions.TypeExpense,
+			Amount: p.Principal, CategoryID: p.CategoryID, Date: date, Description: &p.Name})
+		if err != nil {
+			return nil, nil, err
+		}
+		if d, ok := res.(*transactions.TransactionDetail); ok {
+			p.PurchaseTransactionID = &d.ID
+			if err := savePlanTx(ctx, tx, p); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+	if _, _, err := s.debts.CreateEntryTx(ctx, tx, userID, entry); err != nil {
+		return nil, nil, err
+	}
+	return p, touched, nil
+}
+
+// CreateDebtPlan — POST /debt-plans.
+func (s *Service) CreateDebtPlan(ctx context.Context, userID uuid.UUID, in DebtPlanInput, tz string) (*PlanView, error) {
+	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
 	}
-	entry.Date = today.Format(dateLayout)
-	var touched []uuid.UUID
-	if in.OpeningAccountID != nil {
-		entry.CreateTransaction, entry.AccountID = true, in.OpeningAccountID
-		touched = append(touched, *in.OpeningAccountID)
-	}
-	if in.OpeningDate != nil {
-		if _, err := parseDate(*in.OpeningDate); err != nil {
-			return nil, planInvalid("opening_date", apierr.FieldInvalid)
-		}
-		entry.Date = *in.OpeningDate
-	}
-	if _, _, err := s.debts.CreateEntryTx(ctx, tx, it.UserID, entry); err != nil {
+	defer tx.Rollback(ctx)
+	p, _, err := s.createPlanTx(ctx, tx, userID, &in, nil)
+	if err != nil {
 		return nil, err
 	}
-	return touched, nil
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return s.GetDebtPlan(ctx, userID, p.ID, tz)
 }
 
-// dropPlanTx — the plan and its installments go; the item and its debt rows stay.
-func dropPlanTx(ctx context.Context, tx pgx.Tx, it *itemRecord) error {
-	if _, err := tx.Exec(ctx, `DELETE FROM debt_installments WHERE recurring_id = $1`, it.ID); err != nil {
+// UpdateDebtPlan — PUT /debt-plans/{id}.
+func (s *Service) UpdateDebtPlan(ctx context.Context, userID, id uuid.UUID, in DebtPlanUpdate, tz string) (*PlanView, error) {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	p, err := getPlan(ctx, tx, userID, id, true)
+	if err != nil {
+		return nil, err
+	}
+	if in.Name != nil {
+		name, ok := cleanName(in.Name)
+		if !ok {
+			return nil, planInvalid("name", apierr.FieldInvalid)
+		}
+		p.Name = name
+	}
+	if in.Description != nil && len([]rune(*in.Description)) > 200 || in.Note != nil && len([]rune(*in.Note)) > 500 {
+		return nil, ErrValidation
+	}
+	p.Description, p.Note, p.CategoryID = in.Description, in.Note, in.CategoryID
+	if p.CategoryID != nil {
+		if err := checkRefsTx(ctx, tx, userID, "expense", nil, nil, p.CategoryID, nil); err != nil {
+			return nil, err
+		}
+	}
+	if in.Plan != nil {
+		rows, start, err := computeInstallments(in.Plan)
+		if err != nil {
+			return nil, err
+		}
+		p.Principal, p.Count, p.Start, p.InterestMethod = round2(in.Plan.Principal), in.Plan.Count, start, in.Plan.InterestMethod
+		p.InterestRate, p.InstallmentAmount = in.Plan.InterestRate, in.Plan.InstallmentAmount
+		if err := writeInstallmentsTx(ctx, tx, p, rows); err != nil {
+			return nil, err
+		}
+	}
+	if err := savePlanTx(ctx, tx, p); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return s.GetDebtPlan(ctx, userID, id, tz)
+}
+
+// DeleteDebtPlan — the plan, its installments and its recurring item go; its debt rows stay as
+// general debts of the creditor.
+func (s *Service) DeleteDebtPlan(ctx context.Context, userID, id uuid.UUID) error {
+	tag, err := s.db.Exec(ctx, `DELETE FROM debt_plans WHERE id = $1 AND user_id = $2`, id, userID)
+	if err != nil {
 		return err
 	}
-	it.Plan = nil
+	if tag.RowsAffected() == 0 {
+		return ErrPlanNotFound
+	}
 	return nil
 }
+
+// ---- read ----
 
 func installmentStatus(paidAt *time.Time, skipped bool, due, today time.Time) string {
 	switch {
@@ -270,10 +592,10 @@ func installmentStatus(paidAt *time.Time, skipped bool, due, today time.Time) st
 	return "upcoming"
 }
 
-func (s *Service) loadInstallments(ctx context.Context, q shared.Querier, userID, itemID uuid.UUID, today time.Time) ([]Installment, error) {
+func loadInstallments(ctx context.Context, q shared.Querier, userID, planID uuid.UUID, today time.Time) ([]Installment, error) {
 	rows, err := q.Query(ctx, `SELECT seq, due_date, amount::float8, principal::float8, interest::float8, paid_at, skipped,
 			personal_debt_id, edited
-		FROM debt_installments WHERE recurring_id = $1 AND user_id = $2 ORDER BY seq`, itemID, userID)
+		FROM debt_installments WHERE debt_plan_id = $1 AND user_id = $2 ORDER BY seq`, planID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("installments: %w", err)
 	}
@@ -294,30 +616,86 @@ func (s *Service) loadInstallments(ctx context.Context, q shared.Querier, userID
 	return out, rows.Err()
 }
 
-func (s *Service) planView(ctx context.Context, q shared.Querier, userID uuid.UUID, it *itemRecord, today time.Time) (*PlanView, error) {
-	p := it.Plan
-	if p == nil {
-		return nil, nil
+// creditorOf — the plan's creditor, page-ready.
+func creditorOf(ctx context.Context, q shared.Querier, userID uuid.UUID, p *planRecord) (Counterparty, error) {
+	c := Counterparty{}
+	switch {
+	case p.AccountID != nil:
+		c.Kind = "card"
+		refs, err := shared.LoadAccountRefs(ctx, q, []uuid.UUID{*p.AccountID})
+		if err != nil {
+			return c, err
+		}
+		if a, ok := refs[*p.AccountID]; ok {
+			c.Account, c.Name = &a, a.Name
+		}
+	case p.InstitutionID != nil:
+		c.Kind, c.Key = "institution", shared.InstitutionKey(*p.InstitutionID)
+		refs, err := shared.LoadInstitutionRefs(ctx, q, []uuid.UUID{*p.InstitutionID})
+		if err != nil {
+			return c, err
+		}
+		if x, ok := refs[*p.InstitutionID]; ok {
+			c.Institution, c.Name = &x, x.Name
+		}
+	default:
+		name := derefStr(p.PersonName)
+		c.Kind, c.Key = "person", shared.DebtKey(p.ContactID, name)
+		pr := shared.NamePerson(name)
+		if p.ContactID != nil {
+			persons, err := shared.LoadPersons(ctx, q, userID, []uuid.UUID{*p.ContactID})
+			if err != nil {
+				return c, err
+			}
+			pr = shared.ResolvePerson(persons, shared.PersonKey{ContactID: p.ContactID, Snapshot: name})
+		}
+		c.Person, c.Name = &pr, pr.Name
 	}
-	rows, err := s.loadInstallments(ctx, q, userID, it.ID, today)
+	return c, nil
+}
+
+// planView — a plan, page-ready: its numbers over the installments, its creditor, its purchase,
+// the recurring item that pays it, and every installment.
+func (s *Service) planView(ctx context.Context, q shared.Querier, userID uuid.UUID, p *planRecord, today time.Time) (*PlanView, error) {
+	rows, err := loadInstallments(ctx, q, userID, p.ID, today)
 	if err != nil {
 		return nil, err
 	}
-	v := &PlanView{Principal: p.Principal, Count: p.Count, StartDate: p.Start.Format(dateLayout), InterestMethod: p.InterestMethod,
-		InterestRate: p.InterestRate, InstallmentAmount: p.InstallmentAmount, CardAccountID: p.CardAccountID, Closed: p.ClosedAt != nil,
-		Due: []Installment{}, Chain: []InstallmentStatus{}}
-	if p.CardAccountID != nil {
-		refs, err := shared.LoadAccountRefs(ctx, q, []uuid.UUID{*p.CardAccountID})
+	v := &PlanView{ID: p.ID, Name: p.Name, Description: p.Description, Note: p.Note, CategoryID: p.CategoryID,
+		Direction: p.Direction, Origin: p.Origin, Principal: p.Principal, Count: p.Count, StartDate: p.Start.Format(dateLayout),
+		InterestMethod: p.InterestMethod, InterestRate: p.InterestRate, InstallmentAmount: p.InstallmentAmount,
+		Closed: p.ClosedAt != nil, Due: []Installment{}, Chain: []InstallmentStatus{}, Installments: rows, CreatedAt: p.CreatedAt}
+	if v.Creditor, err = creditorOf(ctx, q, userID, p); err != nil {
+		return nil, err
+	}
+	if p.CategoryID != nil {
+		refs, err := shared.LoadCategoryRefs(ctx, q, []uuid.UUID{*p.CategoryID})
 		if err != nil {
 			return nil, err
 		}
-		if x, ok := refs[*p.CardAccountID]; ok {
-			v.CardAccount = &x
+		if c, ok := refs[*p.CategoryID]; ok {
+			v.Category = &c
 		}
-		if v.Purchase, err = loadPurchase(ctx, q, userID, it.ID); err != nil {
+	}
+	if p.PurchaseTransactionID != nil {
+		if v.Purchase, err = loadPurchase(ctx, q, userID, *p.PurchaseTransactionID); err != nil {
 			return nil, err
 		}
 	}
+	items, err := q.Query(ctx, `SELECT id FROM recurrings WHERE debt_plan_id = $1 AND user_id = $2 ORDER BY created_at LIMIT 1`,
+		p.ID, userID)
+	if err != nil {
+		return nil, err
+	}
+	for items.Next() {
+		var id uuid.UUID
+		if err := items.Scan(&id); err != nil {
+			items.Close()
+			return nil, err
+		}
+		v.RecurringID = &id
+	}
+	items.Close()
 	for i := range rows {
 		x := rows[i]
 		v.Chain = append(v.Chain, InstallmentStatus{Seq: x.Seq, Status: x.Status})
@@ -340,7 +718,7 @@ func (s *Service) planView(ctx context.Context, q shared.Querier, userID uuid.UU
 			}
 		}
 	}
-	if v.Next == nil && len(v.Due) > 0 {
+	if len(v.Due) > 0 {
 		n := v.Due[0]
 		v.Next = &n
 	}
@@ -349,16 +727,57 @@ func (s *Service) planView(ctx context.Context, q shared.Querier, userID uuid.UU
 	return v, nil
 }
 
-// planItem — the item, which must have a plan.
-func (s *Service) planItem(ctx context.Context, q rowQuerier, userID, id uuid.UUID, lock bool) (*itemRecord, error) {
-	it, err := getItemRecord(ctx, q, userID, id, lock)
+// GetDebtPlan — GET /debt-plans/{id}.
+func (s *Service) GetDebtPlan(ctx context.Context, userID, id uuid.UUID, tz string) (*PlanView, error) {
+	today, err := s.today(ctx, userID, tz)
 	if err != nil {
 		return nil, err
 	}
-	if it.Plan == nil {
-		return nil, ErrInstallmentNotFound
+	p, err := getPlan(ctx, s.db, userID, id, false)
+	if err != nil {
+		return nil, err
 	}
-	return it, nil
+	return s.planView(ctx, s.db, userID, p, today)
+}
+
+type PlanList struct {
+	Data []PlanView `json:"data"`
+}
+
+// ListDebtPlans — GET /debt-plans: my plans, open first then newest; ?account_id= only the plans on
+// that card.
+func (s *Service) ListDebtPlans(ctx context.Context, userID uuid.UUID, accountID *uuid.UUID, tz string) (*PlanList, error) {
+	today, err := s.today(ctx, userID, tz)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx, `SELECT `+planColumns+` FROM debt_plans WHERE user_id = $1 AND ($2::uuid IS NULL OR account_id = $2)
+		ORDER BY closed_at IS NOT NULL, created_at DESC, id`, userID, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("debt plans: %w", err)
+	}
+	var plans []*planRecord
+	for rows.Next() {
+		p, err := scanPlan(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		plans = append(plans, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := &PlanList{Data: []PlanView{}}
+	for _, p := range plans {
+		v, err := s.planView(ctx, s.db, userID, p, today)
+		if err != nil {
+			return nil, err
+		}
+		out.Data = append(out.Data, *v)
+	}
+	return out, nil
 }
 
 func (s *Service) Installments(ctx context.Context, userID, id uuid.UUID, tz string) (*InstallmentList, error) {
@@ -366,15 +785,17 @@ func (s *Service) Installments(ctx context.Context, userID, id uuid.UUID, tz str
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.planItem(ctx, s.db, userID, id, false); err != nil {
+	if _, err := getPlan(ctx, s.db, userID, id, false); err != nil {
 		return nil, err
 	}
-	rows, err := s.loadInstallments(ctx, s.db, userID, id, today)
+	rows, err := loadInstallments(ctx, s.db, userID, id, today)
 	if err != nil {
 		return nil, err
 	}
 	return &InstallmentList{Data: rows}, nil
 }
+
+// ---- installments ----
 
 type InstallmentEdit struct {
 	DueDate   *string  `json:"due_date"`
@@ -385,13 +806,13 @@ type InstallmentEdit struct {
 
 // EditInstallment — "แก้เฉพาะงวดนี้": its date and / or its money (amount alone = all principal
 // unless interest is sent; principal + interest = the amount).
-func (s *Service) EditInstallment(ctx context.Context, userID, id uuid.UUID, seq int, in InstallmentEdit, tz string) (*ItemPage, error) {
+func (s *Service) EditInstallment(ctx context.Context, userID, id uuid.UUID, seq int, in InstallmentEdit, tz string) (*PlanView, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := s.planItem(ctx, tx, userID, id, true); err != nil {
+	if _, err := getPlan(ctx, tx, userID, id, true); err != nil {
 		return nil, err
 	}
 	var (
@@ -399,7 +820,7 @@ func (s *Service) EditInstallment(ctx context.Context, userID, id uuid.UUID, seq
 		amt, prin, inter float64
 	)
 	err = tx.QueryRow(ctx, `SELECT due_date, amount::float8, principal::float8, interest::float8 FROM debt_installments
-		WHERE recurring_id = $1 AND seq = $2 FOR UPDATE`, id, seq).Scan(&due, &amt, &prin, &inter)
+		WHERE debt_plan_id = $1 AND seq = $2 FOR UPDATE`, id, seq).Scan(&due, &amt, &prin, &inter)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrInstallmentNotFound
 	}
@@ -438,13 +859,13 @@ func (s *Service) EditInstallment(ctx context.Context, userID, id uuid.UUID, seq
 	}
 	prin, inter = round2(prin), round2(inter)
 	if _, err := tx.Exec(ctx, `UPDATE debt_installments SET due_date = $3, principal = $4, interest = $5, amount = $4::numeric + $5::numeric, edited = TRUE
-		WHERE recurring_id = $1 AND seq = $2`, id, seq, due, prin, inter); err != nil {
+		WHERE debt_plan_id = $1 AND seq = $2`, id, seq, due, prin, inter); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.GetRecurring(ctx, userID, id, tz)
+	return s.GetDebtPlan(ctx, userID, id, tz)
 }
 
 type MarkInstallmentRequest struct {
@@ -453,13 +874,13 @@ type MarkInstallmentRequest struct {
 }
 
 // MarkInstallment — the "จ่ายงวดแล้ว" tick (no money moves); paid false clears it.
-func (s *Service) MarkInstallment(ctx context.Context, userID, id uuid.UUID, seq int, req MarkInstallmentRequest, tz string) (*ItemPage, error) {
+func (s *Service) MarkInstallment(ctx context.Context, userID, id uuid.UUID, seq int, req MarkInstallmentRequest, tz string) (*PlanView, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := s.planItem(ctx, tx, userID, id, true); err != nil {
+	if _, err := getPlan(ctx, tx, userID, id, true); err != nil {
 		return nil, err
 	}
 	if req.PersonalDebtID != nil {
@@ -478,20 +899,20 @@ func (s *Service) MarkInstallment(ctx context.Context, userID, id uuid.UUID, seq
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.GetRecurring(ctx, userID, id, tz)
+	return s.GetDebtPlan(ctx, userID, id, tz)
 }
 
-func markInstallmentsTx(ctx context.Context, tx pgx.Tx, userID, itemID uuid.UUID, seqs []int, paid bool, debtID *uuid.UUID) error {
+func markInstallmentsTx(ctx context.Context, tx pgx.Tx, userID, planID uuid.UUID, seqs []int, paid bool, debtID *uuid.UUID) error {
 	for _, seq := range seqs {
 		var tag interface{ RowsAffected() int64 }
 		var err error
 		if paid {
 			tag, err = tx.Exec(ctx, `UPDATE debt_installments SET paid_at = COALESCE(paid_at, NOW()), skipped = FALSE,
-				personal_debt_id = COALESCE($4, personal_debt_id) WHERE recurring_id = $1 AND user_id = $2 AND seq = $3`,
-				itemID, userID, seq, debtID)
+				personal_debt_id = COALESCE($4, personal_debt_id) WHERE debt_plan_id = $1 AND user_id = $2 AND seq = $3`,
+				planID, userID, seq, debtID)
 		} else {
 			tag, err = tx.Exec(ctx, `UPDATE debt_installments SET paid_at = NULL, personal_debt_id = NULL
-				WHERE recurring_id = $1 AND user_id = $2 AND seq = $3`, itemID, userID, seq)
+				WHERE debt_plan_id = $1 AND user_id = $2 AND seq = $3`, planID, userID, seq)
 		}
 		if err != nil {
 			return err
@@ -503,82 +924,164 @@ func markInstallmentsTx(ctx context.Context, tx pgx.Tx, userID, itemID uuid.UUID
 	return nil
 }
 
-// MarkInstallmentsTx — the ticks a repayment asks for (seqs; nil = the oldest unticked one) on the
-// item's plan; nothing when the item has no plan. The debt page's repayment calls it.
-func MarkInstallmentsTx(ctx context.Context, tx pgx.Tx, userID, itemID uuid.UUID, seqs []int, debtID *uuid.UUID) error {
-	if seqs == nil {
-		var seq int
-		err := tx.QueryRow(ctx, `SELECT seq FROM debt_installments WHERE recurring_id = $1 AND user_id = $2
-			AND paid_at IS NULL AND NOT skipped ORDER BY seq LIMIT 1`, itemID, userID).Scan(&seq)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		seqs = []int{seq}
-	}
-	return markInstallmentsTx(ctx, tx, userID, itemID, seqs, true, debtID)
-}
-
 // ClosePlan — "ปิดแผนก่อนกำหนด": the unticked installments are skipped; the ticked ones stay as
 // history.
-func (s *Service) ClosePlan(ctx context.Context, userID, id uuid.UUID, tz string) (*ItemPage, error) {
+func (s *Service) ClosePlan(ctx context.Context, userID, id uuid.UUID, tz string) (*PlanView, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	it, err := s.planItem(ctx, tx, userID, id, true)
+	p, err := getPlan(ctx, tx, userID, id, true)
 	if err != nil {
 		return nil, err
 	}
-	if it.Plan.ClosedAt != nil {
+	if p.ClosedAt != nil {
 		return nil, ErrInvalidTransition
 	}
-	if _, err := tx.Exec(ctx, `UPDATE debt_installments SET skipped = TRUE WHERE recurring_id = $1 AND paid_at IS NULL`, id); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE debt_installments SET skipped = TRUE WHERE debt_plan_id = $1 AND paid_at IS NULL`, id); err != nil {
 		return nil, err
 	}
 	now := time.Now()
-	it.Plan.ClosedAt = &now
-	if err := saveItemRecordTx(ctx, tx, it); err != nil {
+	p.ClosedAt = &now
+	if err := savePlanTx(ctx, tx, p); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE recurring_reminders SET status = 'archived', paused_from = NULL, pause_reason = NULL
+		WHERE recurring_id IN (SELECT id FROM recurrings WHERE debt_plan_id = $1) AND status <> 'archived'`, id); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE recurrings SET status = 'archived' WHERE debt_plan_id = $1`, id); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.GetRecurring(ctx, userID, id, tz)
+	return s.GetDebtPlan(ctx, userID, id, tz)
 }
 
-// DeletePlan — the plan goes, the item and its debt rows stay.
-func (s *Service) DeletePlan(ctx context.Context, userID, id uuid.UUID, tz string) (*ItemPage, error) {
+// ---- paying ----
+
+type PayInstallmentRequest struct {
+	Seq       *int       `json:"seq"`        // absent = the oldest open one
+	AccountID *uuid.UUID `json:"account_id"` // the wallet it is paid from (absent = ledger only, no interest row)
+	Date      *string    `json:"date"`       // default today
+}
+
+// PayInstallment — POST /debt-plans/{id}/pay: one installment paid now (a card plan is paid by its
+// card's bill instead).
+func (s *Service) PayInstallment(ctx context.Context, userID, id uuid.UUID, req PayInstallmentRequest, tz string) (*PlanView, error) {
+	today, err := s.today(ctx, userID, tz)
+	if err != nil {
+		return nil, err
+	}
+	when := today
+	if req.Date != nil {
+		if when, err = parseDate(*req.Date); err != nil {
+			return nil, ErrValidation
+		}
+	}
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	it, err := s.planItem(ctx, tx, userID, id, true)
+	p, err := getPlan(ctx, tx, userID, id, true)
 	if err != nil {
 		return nil, err
 	}
-	var lines int
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM recurring_rules WHERE recurring_id = $1`, id).Scan(&lines); err != nil {
-		return nil, err
+	seq := 0
+	if req.Seq != nil {
+		seq = *req.Seq
 	}
-	if lines == 0 {
-		return nil, ErrLastLine // a card plan's item has nothing left without its plan: delete the item
-	}
-	if err := dropPlanTx(ctx, tx, it); err != nil {
-		return nil, err
-	}
-	if err := saveItemRecordTx(ctx, tx, it); err != nil {
+	if _, err := s.payPlanRoundTx(ctx, tx, p, seq, req.AccountID, when, nil, nil); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.GetRecurring(ctx, userID, id, tz)
+	return s.GetDebtPlan(ctx, userID, id, tz)
 }
+
+// planPayment — what paying one installment booked.
+type planPayment struct {
+	Seq      int
+	EntryID  *uuid.UUID // the repayment row (nil when the installment had no principal)
+	Amount   float64    // principal + interest
+	Interest float64
+	Touched  []uuid.UUID
+}
+
+// payPlanRoundTx — installment seq (0 = the oldest open one) of p paid: a repayment row of the
+// principal (with its wallet transaction when accountID is set) and, with a wallet, the interest as
+// a ดอกเบี้ย transaction (an expense when I owe, an income when they owe me); then the tick.
+// recurringID — the item whose reminder paid it.
+func (s *Service) payPlanRoundTx(ctx context.Context, tx pgx.Tx, p *planRecord, seq int, accountID *uuid.UUID, when time.Time,
+	desc *string, recurringID *uuid.UUID) (*planPayment, error) {
+	if p.isCard() || p.ClosedAt != nil || s.debts == nil {
+		return nil, ErrInvalidTransition
+	}
+	q := `SELECT seq, principal::float8, interest::float8 FROM debt_installments
+		WHERE debt_plan_id = $1 AND paid_at IS NULL AND NOT skipped AND ($2 = 0 OR seq = $2) ORDER BY seq LIMIT 1 FOR UPDATE`
+	var pay planPayment
+	err := tx.QueryRow(ctx, q, p.ID, seq).Scan(&pay.Seq, &pay.Amount, &pay.Interest)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if seq != 0 {
+			return nil, ErrInstallmentNotFound
+		}
+		return nil, ErrNothingOwed
+	}
+	if err != nil {
+		return nil, err
+	}
+	principal := pay.Amount
+	pay.Amount = round2(principal + pay.Interest)
+	if desc == nil {
+		desc = ptr(fmt.Sprintf("%s %d/%d", p.Name, pay.Seq, p.Count))
+	}
+	name := derefStr(p.PersonName)
+	if p.InstitutionID != nil {
+		if err := tx.QueryRow(ctx, `SELECT name FROM institutions WHERE id = $1`, *p.InstitutionID).Scan(&name); err != nil {
+			return nil, err
+		}
+	}
+	back := "paid" // a repayment books the way back: I pay them back = paid
+	if p.Direction == "paid" {
+		back = "received"
+	}
+	if principal > 0 {
+		in := personal_debts.EntryInput{Kind: personal_debts.KindRepayment, Direction: back, ContactID: p.ContactID,
+			PersonName: name, InstitutionID: p.InstitutionID, Amount: principal, Date: when.Format(dateLayout),
+			Description: truncRunes(desc, 200), RecurringID: recurringID, DebtPlanID: &p.ID}
+		if accountID != nil {
+			in.CreateTransaction, in.AccountID = true, accountID
+		}
+		e, _, err := s.debts.CreateEntryTx(ctx, tx, p.UserID, in)
+		if err != nil {
+			return nil, err
+		}
+		pay.EntryID = &e.ID
+	}
+	if accountID != nil {
+		pay.Touched = append(pay.Touched, *accountID)
+		if pay.Interest > 0 {
+			kind := categories.SystemInterestPaid
+			if p.Direction == "paid" {
+				kind = categories.SystemInterestReceived
+			}
+			if _, _, err := s.txs.CreateSystemInTx(ctx, tx, p.UserID, *accountID, kind, pay.Interest, when.Format(dateLayout),
+				truncRunes(desc, 200), nil); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := markInstallmentsTx(ctx, tx, p.UserID, p.ID, []int{pay.Seq}, true, pay.EntryID); err != nil {
+		return nil, err
+	}
+	return &pay, nil
+}
+
+// ---- engine hooks ----
 
 type marksKey struct{}
 
@@ -601,11 +1104,21 @@ func marksOf(ctx context.Context) []int {
 	return nil
 }
 
-// loadPurchase — a card plan's purchase (nil when it was not made by quick create, or was deleted).
-func loadPurchase(ctx context.Context, q shared.Querier, userID, itemID uuid.UUID) (*PlanPurchase, error) {
+// nextInstallmentAmount — the amount of the plan's oldest open installment (0 = none left).
+func nextInstallmentAmount(ctx context.Context, q rowQuerier, planID uuid.UUID) (float64, error) {
+	var v float64
+	err := q.QueryRow(ctx, `SELECT amount::float8 FROM debt_installments WHERE debt_plan_id = $1 AND paid_at IS NULL
+		AND NOT skipped ORDER BY seq LIMIT 1`, planID).Scan(&v)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	return v, err
+}
+
+// loadPurchase — a plan's purchase transaction (nil when it was deleted).
+func loadPurchase(ctx context.Context, q shared.Querier, userID, txID uuid.UUID) (*PlanPurchase, error) {
 	rows, err := q.Query(ctx, `SELECT t.id, t.amount::float8, t.date, t.description, t.category_id
-		FROM recurrings r JOIN transactions t ON t.id = r.purchase_transaction_id
-		WHERE r.id = $1 AND r.user_id = $2`, itemID, userID)
+		FROM transactions t WHERE t.id = $1 AND t.user_id = $2`, txID, userID)
 	if err != nil {
 		return nil, err
 	}

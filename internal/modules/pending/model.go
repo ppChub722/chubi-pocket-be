@@ -39,7 +39,7 @@ type Draft struct {
 	SavingAction string     `json:"saving_action,omitempty"`
 	FromGoalID   *uuid.UUID `json:"from_goal_id,omitempty"`
 	// RecurringID — the transaction is the record of this recurring rule's next slot (the chatbot picks the slot).
-	RecurringID *uuid.UUID `json:"recurring_rule_id,omitempty"` // 0.4.3: the LINE (recurring_rules.id)
+	RecurringID *uuid.UUID `json:"recurring_reminder_id,omitempty"` // 0.4.3: the LINE (recurring_reminders.id)
 	// Debt — a person-book entry (with a transaction when WithMoney), or a repayment.
 	Debt *DraftDebt `json:"debt,omitempty"`
 }

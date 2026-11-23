@@ -116,7 +116,7 @@ var archivedTotalSQL = `(
 	+ (SELECT COUNT(*) FROM projects p JOIN project_members m ON m.project_id = p.id AND m.user_id = $1 AND m.status = 'active'
 	   WHERE p.status = 'archived')
 	+ (SELECT COUNT(*) FROM contacts WHERE user_id = $1 AND status = 'archived')
-	+ (SELECT COUNT(*) FROM recurring_rules WHERE user_id = $1 AND status = 'archived'))`
+	+ (SELECT COUNT(*) FROM recurring_reminders WHERE user_id = $1 AND status = 'archived'))`
 
 var countsSQL = `SELECT
 	(SELECT COUNT(*) FROM categories WHERE user_id = $1 AND is_system = FALSE),
@@ -131,7 +131,7 @@ var countsSQL = `SELECT
 	(SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1 AND read_at IS NULL),
 	(SELECT COUNT(*) FROM pending_transactions WHERE user_id = $1),
 	` + archivedTotalSQL + `,
-	(SELECT COUNT(*) FROM recurring_rules WHERE user_id = $1 AND status = 'active')`
+	(SELECT COUNT(*) FROM recurring_reminders WHERE user_id = $1 AND status = 'active')`
 
 func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string) (*MeCounts, error) {
 	ctx = shared.WithExpectedMemo(ctx) // a read: the recurring counts and the budgets share one read of the occurrences
@@ -172,7 +172,7 @@ func (s *Service) Counts(ctx context.Context, userID uuid.UUID, headerTZ string)
 		todayStr := today.Format("2006-01-02")
 		until := today.AddDate(0, 0, upcomingDays).Format("2006-01-02")
 		if err := s.db.QueryRow(ctx, `SELECT
-		(SELECT COUNT(*) FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.recurring_rule_id
+		(SELECT COUNT(*) FROM recurring_items i LEFT JOIN recurring_reminders r ON r.id = i.recurring_reminder_id
 		 WHERE i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
 		   AND NOT i.archived AND i.date > $2::date AND i.date <= $3::date
 		   AND r.status = 'active')`, userID, todayStr, until).Scan(

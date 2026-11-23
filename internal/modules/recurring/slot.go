@@ -39,7 +39,7 @@ type LinkSlotRequest struct {
 }
 
 type LeftOut struct {
-	RuleID uuid.UUID `json:"recurring_rule_id"`
+	RuleID uuid.UUID `json:"recurring_reminder_id"`
 	Slot   string    `json:"slot"`
 	Reason string    `json:"reason"` // needs_amount
 }
@@ -146,7 +146,16 @@ func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, ro
 			return nil, nil, err
 		}
 	} else if d.Amount == nil || *d.Amount <= 0 {
-		return nil, nil, ErrAmountRequired
+		if r.isCardBillAsk() { // a card bill: what is left of the bill, when none was typed
+			if v, err := cardBillPrefill(ctx, tx, r.UserID, *r.ToAccountID, row.Date); err != nil {
+				return nil, nil, err
+			} else if v != nil {
+				d.Amount = v
+			}
+		}
+		if d.Amount == nil || *d.Amount <= 0 {
+			return nil, nil, ErrAmountRequired
+		}
 	}
 	slot := row.Date
 	if row.Slot != nil {
@@ -250,7 +259,7 @@ func (s *Service) autoCreate(ctx context.Context, tx pgx.Tx, r *Rule, today time
 			made++
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET auto_created_until = $2 WHERE id = $1
+	if _, err := tx.Exec(ctx, `UPDATE recurring_reminders SET auto_created_until = $2 WHERE id = $1
 		AND auto_created_until IS DISTINCT FROM $2`, r.ID, today); err != nil {
 		return 0, err
 	}

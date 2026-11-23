@@ -111,7 +111,7 @@ func (s *Service) Archived(ctx context.Context, userID uuid.UUID) (*ArchivedHub,
 		WHERE user_id = $1 AND status = 'archived' ORDER BY updated_at DESC, id`, userID); err != nil {
 		return nil, err
 	}
-	if out.Recurring, err = s.archivedGroup(ctx, `SELECT id, name, icon_code, updated_at, TRUE, 'amount', amount::float8 FROM recurring_rules
+	if out.Recurring, err = s.archivedGroup(ctx, `SELECT id, name, icon_code, updated_at, TRUE, 'amount', amount::float8 FROM recurring_reminders
 		WHERE user_id = $1 AND status = 'archived' ORDER BY updated_at DESC, id`, userID); err != nil {
 		return nil, err
 	}

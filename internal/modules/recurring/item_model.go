@@ -16,11 +16,13 @@ type PersonInput struct {
 	PersonName *string    `json:"person_name"`
 }
 
-// CounterpartyInput — a debt item's counterparty: exactly one of contact / typed name / institution.
+// CounterpartyInput — the debt a debt item pays (without debt_plan_id): exactly one of a contact /
+// typed name / institution, or a card / PayLater wallet (its bill: a transfer into the card).
 type CounterpartyInput struct {
 	ContactID     *uuid.UUID `json:"contact_id"`
 	PersonName    *string    `json:"person_name"`
 	InstitutionID *uuid.UUID `json:"institution_id"`
+	AccountID     *uuid.UUID `json:"account_id"`
 }
 
 // SourceInput — where a line's money comes from: a wallet, or a person paying for me.
@@ -38,28 +40,33 @@ type Schedule struct {
 }
 
 type LineInput struct {
-	ID          *uuid.UUID  `json:"id"`
-	Amount      *float64    `json:"amount"`
-	Source      SourceInput `json:"source"`
-	ToAccountID *uuid.UUID  `json:"to_account_id"`
-	DebtKind    *string     `json:"debt_kind"`
-	Schedule    *Schedule   `json:"schedule"`
-	AutoCreate  *bool       `json:"auto_create"`
+	ID         *uuid.UUID `json:"id"`
+	Amount     *float64   `json:"amount"`
+	AmountMode *string    `json:"amount_mode"` // fixed | ask (default: ask when no amount is sent)
+	// RepaysReminderID — type expense: this reminder pays back the person of that person-paid reminder
+	// of the item (repay_paid_by).
+	RepaysReminderID *uuid.UUID  `json:"repays_reminder_id"`
+	Source           SourceInput `json:"source"`
+	ToAccountID      *uuid.UUID  `json:"to_account_id"`
+	DebtKind         *string     `json:"debt_kind"`
+	Schedule         *Schedule   `json:"schedule"`
+	AutoCreate       *bool       `json:"auto_create"`
+	// Alerts — the reminder's notices; absent = kept, [] = none.
+	Alerts *[]AlertInput `json:"alerts"`
 }
 
 type PlanInput struct {
-	Principal         float64    `json:"principal"`
-	Count             int        `json:"count"`
-	StartDate         string     `json:"start_date"`
-	InterestMethod    string     `json:"interest_method"`
-	InterestRate      *float64   `json:"interest_rate"`
-	InstallmentAmount *float64   `json:"installment_amount"`
-	CardAccountID     *uuid.UUID `json:"card_account_id"`
+	Principal         float64  `json:"principal"`
+	Count             int      `json:"count"`
+	StartDate         string   `json:"start_date"`
+	InterestMethod    string   `json:"interest_method"`
+	InterestRate      *float64 `json:"interest_rate"`
+	InstallmentAmount *float64 `json:"installment_amount"`
 	// Installments — interest_method manual: every installment as typed (count rows).
 	Installments []InstallmentInput `json:"installments"`
-	// OpeningAccountID / OpeningDate — the opening debt row (written once, when the item gets its
-	// plan, not on a card): its wallet transaction (the money lent / borrowed) and date (default
-	// today). Absent = a ledger-only row.
+	// OpeningAccountID / OpeningDate — a cash loan's opening debt row: its wallet transaction (the
+	// money lent / borrowed; absent = ledger only) and date (default today; a purchase's expense
+	// takes it too).
 	OpeningAccountID *uuid.UUID `json:"opening_account_id"`
 	OpeningDate      *string    `json:"opening_date"`
 }
@@ -71,7 +78,7 @@ type InstallmentInput struct {
 	Interest  *float64 `json:"interest"`
 }
 
-type ReminderInput struct {
+type AlertInput struct {
 	Anchor     string `json:"anchor"`
 	DaysBefore int    `json:"days_before"`
 	Time       string `json:"time"`
@@ -88,9 +95,9 @@ type RecurringInput struct {
 	GoalID        *uuid.UUID         `json:"goal_id"`
 	Counterparty  *CounterpartyInput `json:"counterparty"`
 	DebtDirection *string            `json:"debt_direction"`
-	Plan          *PlanInput         `json:"plan"`
-	Reminders     []ReminderInput    `json:"reminders"`
-	Lines         []LineInput        `json:"lines"`
+	// DebtPlanID — type debt: the plan it pays (its creditor and direction are the plan's).
+	DebtPlanID *uuid.UUID  `json:"debt_plan_id"`
+	Lines      []LineInput `json:"reminders"`
 
 	present map[string]bool
 }
@@ -101,11 +108,12 @@ func (in *RecurringInput) has(k string) bool { return in.present[k] }
 
 // Counterparty — a debt item's counterparty, page-ready.
 type Counterparty struct {
-	Key         string                 `json:"key"` // c: / n: / i:, the debt page key
-	Kind        string                 `json:"kind"`
+	Key         string                 `json:"key"`  // c: / n: / i:, the debt page key
+	Kind        string                 `json:"kind"` // person | institution | card
 	Name        string                 `json:"name"`
 	Person      *shared.PersonRef      `json:"person"`
 	Institution *shared.InstitutionRef `json:"institution"`
+	Account     *shared.AccountRef     `json:"account"`
 	// Net — the counterparty's balance now (> 0 = they owe me).
 	Net float64 `json:"net"`
 }
@@ -128,6 +136,9 @@ type LineActions struct {
 type Line struct {
 	ID                uuid.UUID          `json:"id"`
 	Amount            *float64           `json:"amount"`
+	AmountMode        string             `json:"amount_mode"` // fixed | ask
+	Action            string             `json:"action"`      // expense | income | transfer | saving | paid_by | repay_paid_by | repay | collect
+	RepaysReminderID  *uuid.UUID         `json:"repays_reminder_id"`
 	Source            LineSource         `json:"source"`
 	Account           *shared.AccountRef `json:"account"`
 	PaidBy            *shared.PersonRef  `json:"paid_by"`
@@ -149,16 +160,17 @@ type Line struct {
 	EndingSoon        bool               `json:"ending_soon"`
 	Counts            StatusCounts       `json:"counts"`
 	CurrentOccurrence *Occurrence        `json:"current_occurrence"`
+	Alerts            []Alert            `json:"alerts"`
 	Actions           LineActions        `json:"actions"`
 	CreatedAt         time.Time          `json:"created_at"`
 	UpdatedAt         time.Time          `json:"updated_at"`
 }
 
 type NextRound struct {
-	RecurringRuleID uuid.UUID `json:"recurring_rule_id"`
-	Date            string    `json:"date"`
-	Amount          *float64  `json:"amount"`
-	DaysUntil       int       `json:"days_until"`
+	RecurringReminderID uuid.UUID `json:"recurring_reminder_id"`
+	Date                string    `json:"date"`
+	Amount              *float64  `json:"amount"`
+	DaysUntil           int       `json:"days_until"`
 }
 
 // ItemStats — the item page's numbers over every line's recorded rounds.
@@ -173,7 +185,7 @@ type ItemStats struct {
 	Series     []Point  `json:"series"`
 }
 
-type Reminder struct {
+type Alert struct {
 	ID         uuid.UUID `json:"id"`
 	Anchor     string    `json:"anchor"`
 	DaysBefore int       `json:"days_before"`
@@ -186,20 +198,28 @@ type ItemActions struct {
 	Archive bool `json:"archive"`
 	Restore bool `json:"restore"`
 	Delete  bool `json:"delete"`
-	AddLine bool `json:"add_line"`
+	AddLine bool `json:"add_reminder"`
 }
 
-// PlanView — a debt item's plan (information; the balance counts debt rows only).
+// PlanView — a debt plan, page-ready (GET /debt-plans/{id}; a debt item's plan).
 type PlanView struct {
+	ID                uuid.UUID           `json:"id"`
+	Name              string              `json:"name"`
+	Description       *string             `json:"description"`
+	Note              *string             `json:"note"`
+	CategoryID        *uuid.UUID          `json:"category_id"`
+	Category          *shared.CategoryRef `json:"category"`
+	Direction         string              `json:"direction"` // received = I owe | paid = they owe me
+	Origin            string              `json:"origin"`    // purchase | cash
+	Creditor          Counterparty        `json:"creditor"`
+	RecurringID       *uuid.UUID          `json:"recurring_id"` // the item whose reminder pays it
 	Principal         float64             `json:"principal"`
 	Count             int                 `json:"count"`
 	StartDate         string              `json:"start_date"`
 	InterestMethod    string              `json:"interest_method"`
 	InterestRate      *float64            `json:"interest_rate"`
 	InstallmentAmount *float64            `json:"installment_amount"`
-	CardAccountID     *uuid.UUID          `json:"card_account_id"`
-	CardAccount       *shared.AccountRef  `json:"card_account"`
-	Purchase          *PlanPurchase       `json:"purchase"` // a card plan: its full-price expense on the card
+	Purchase          *PlanPurchase       `json:"purchase"` // the purchase: on the card, or the expense of a purchase on credit
 	Closed            bool                `json:"closed"`
 	Done              int                 `json:"done"` // installments ticked paid
 	LeftCount         int                 `json:"left_count"`
@@ -212,6 +232,8 @@ type PlanView struct {
 	Next              *Installment        `json:"next"`
 	Due               []Installment       `json:"due"` // past their date, not ticked
 	Chain             []InstallmentStatus `json:"chain"`
+	Installments      []Installment       `json:"installments"`
+	CreatedAt         time.Time           `json:"created_at"`
 }
 
 // PlanPurchase — the expense a card installment was made from (quick create ผ่อน).
@@ -258,8 +280,7 @@ type ItemPage struct {
 	DebtDirection   *string                `json:"debt_direction"`
 	Status          string                 `json:"status"` // active | paused | archived | done
 	Plan            *PlanView              `json:"plan"`
-	Reminders       []Reminder             `json:"reminders"`
-	Lines           []Line                 `json:"lines"`
+	Lines           []Line                 `json:"reminders"`
 	Stats           ItemStats              `json:"stats"`
 	DueCount        int                    `json:"due_count"`
 	Next            *NextRound             `json:"next"`
@@ -285,7 +306,7 @@ type RecurringSummary struct {
 	Status      string              `json:"status"`
 	PauseReason *string             `json:"pause_reason"`
 	Category    *shared.CategoryRef `json:"category"`
-	LinesCount  int                 `json:"lines_count"`
+	LinesCount  int                 `json:"reminders_count"`
 	// Amount / Account / Chain — the single line's (null / empty with 2+ lines).
 	Amount     *float64           `json:"amount"`
 	Account    *shared.AccountRef `json:"account"`
@@ -295,7 +316,7 @@ type RecurringSummary struct {
 	MonthTotal float64            `json:"month_total"`
 	Next       *NextRound         `json:"next"`
 	// CurrentOccurrence — the round a transaction links to now: the oldest due one over the lines,
-	// else the nearest upcoming one (its line in recurring_rule_id); null when none is near.
+	// else the nearest upcoming one (its line in recurring_reminder_id); null when none is near.
 	CurrentOccurrence *Occurrence   `json:"current_occurrence"`
 	DueCount          int           `json:"due_count"`
 	EndingSoon        bool          `json:"ending_soon"`

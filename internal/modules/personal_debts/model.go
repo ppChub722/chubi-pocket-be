@@ -48,6 +48,8 @@ type Entry struct {
 	// the row belongs to (null = a general debt).
 	InstitutionID *uuid.UUID
 	RecurringID   *uuid.UUID
+	// DebtPlanID — the debt plan the row belongs to (its opening row, a paid installment).
+	DebtPlanID *uuid.UUID
 }
 
 func (e *Entry) Key() string {
@@ -317,6 +319,9 @@ type RepaymentRequest struct {
 	// installments it ticks ([] = none; absent = the oldest open one).
 	RecurringID      *uuid.UUID `json:"recurring_id"`
 	MarkInstallments *[]int     `json:"mark_installments"`
+	// DebtPlanID — a payment of this plan of the counterparty: it ticks MarkInstallments (absent =
+	// the oldest open one). The plan's own pay (POST /debt-plans/{id}/pay) also books the interest.
+	DebtPlanID *uuid.UUID `json:"debt_plan_id"`
 }
 
 // DebtPreview — POST …/entries or …/repayments with ?preview=true (the debt quick create's result

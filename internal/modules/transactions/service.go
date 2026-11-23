@@ -227,7 +227,7 @@ func (s *Service) CreateWrite(ctx context.Context, userID uuid.UUID, req CreateR
 	if out.Effects, err = s.rowEffects(ctx, userID, rows, nil, nil, nil, out.AccountBalances); err != nil {
 		return nil, err
 	}
-	out.RecurringID = item
+	out.DebtPlanID = item
 	return out, nil
 }
 

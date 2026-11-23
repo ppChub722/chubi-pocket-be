@@ -238,7 +238,7 @@ func (s *Service) Submit(ctx context.Context, userID uuid.UUID, req SubmitReques
 		if p.Draft.RecurringID != nil && txID != nil && s.recurringLink != nil {
 			if lerr := s.recurringLink(ctx, userID, *p.Draft.RecurringID, *txID); lerr != nil {
 				unlinked = true // the transaction is booked; only the link to the slot failed
-				slog.Warn("pending: recurring link failed", "recurring_rule_id", *p.Draft.RecurringID, "error", lerr)
+				slog.Warn("pending: recurring link failed", "recurring_reminder_id", *p.Draft.RecurringID, "error", lerr)
 			}
 		}
 		out.Submitted = append(out.Submitted, Submitted{ID: id, Rows: rows, TransactionID: txID, Unlinked: unlinked})

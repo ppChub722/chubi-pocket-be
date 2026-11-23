@@ -103,11 +103,11 @@ type RecurringEnd struct {
 }
 
 // RecurringDueSoonPayload — a reminder of a recurring item (0.4.3): "{name} จะตัด {amount} {when}"
-// (the app words it from date / days_before). anchor due = a round of the line recurring_rule_id;
+// (the app words it from date / days_before). anchor due = a round of the line recurring_reminder_id;
 // start / end = the item's start / end (no line, amount null).
 type RecurringDueSoonPayload struct {
 	RecurringID     uuid.UUID  `json:"recurring_id"`
-	RecurringRuleID *uuid.UUID `json:"recurring_rule_id"`
+	RecurringReminderID *uuid.UUID `json:"recurring_reminder_id"`
 	Name            string     `json:"name"`
 	Date            string     `json:"date"`
 	Amount          *float64   `json:"amount"`

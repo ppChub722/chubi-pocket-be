@@ -94,7 +94,7 @@ func (r *Rule) finishKind(kind *string) error {
 		}
 	case KindDebt:
 		// 0.4.3: a debt item may carry a category / tags: its person-paid rounds are my expense
-		if r.Type != typeDebt || r.Amount <= 0 || (r.PersonName == nil && r.ContactID == nil) || r.DebtKind == nil || r.DebtDirection == nil ||
+		if r.Type != typeDebt || (r.Amount <= 0 && r.RepaysReminderID == nil) || (r.PersonName == nil && r.ContactID == nil) || r.DebtKind == nil || r.DebtDirection == nil ||
 			r.GoalID != nil || r.ToAccountID != nil {
 			return ErrValidation
 		}
