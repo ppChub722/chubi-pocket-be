@@ -382,6 +382,15 @@ func (h *Handler) EditInstallment(c *gin.Context) {
 	reply(c, http.StatusOK, out, err)
 }
 
+func (h *Handler) SkipInstallment(c *gin.Context) {
+	uid, id, seq, ok := installmentSeq(c)
+	if !ok {
+		return
+	}
+	out, err := h.service.SkipInstallment(c.Request.Context(), uid, id, seq, tz(c))
+	reply(c, http.StatusOK, out, err)
+}
+
 func (h *Handler) MarkInstallment(c *gin.Context) {
 	uid, id, seq, ok := installmentSeq(c)
 	if !ok {

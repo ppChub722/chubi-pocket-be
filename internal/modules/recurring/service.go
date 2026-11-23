@@ -126,6 +126,9 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 	newlyDue, autoMade := 0, 0
 	var ends []ending
 	for _, r := range rules {
+		if err := s.notifyRoundsTx(ctx, tx, r, today); err != nil { // แค่แจ้งเตือน: due rounds close by themselves
+			return err
+		}
 		if err := s.repaymentRoundsTx(ctx, tx, r, today); err != nil { // K5, before the overdue limit
 			return err
 		}

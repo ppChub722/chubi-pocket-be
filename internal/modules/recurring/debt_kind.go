@@ -200,6 +200,33 @@ const noBalanceOwedSQL = `((SELECT COALESCE(SUM(l.signed), 0) FROM (` + "%s" + `
 
 func owedAgainSQL() string { return fmt.Sprintf(noBalanceOwedSQL, shared.DebtLedgerSQL("$1")) }
 
+// notifyRoundsTx — แค่แจ้งเตือน at the due check: every due round is closed (the paid mark, no
+// transaction), so a notice never waits in ต้องทำ nor counts toward the overdue limit.
+func (s *Service) notifyRoundsTx(ctx context.Context, tx pgx.Tx, r *Rule, today time.Time) error {
+	if !r.NotifyOnly || r.Status != "active" {
+		return nil
+	}
+	due, err := s.dueOccs(ctx, tx, r, today)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	for _, o := range due {
+		row, err := s.store(ctx, tx, o)
+		if err != nil {
+			return err
+		}
+		if row.filled() {
+			continue
+		}
+		row.Archived, row.ClearedAt, row.AutoCreatedAt = false, &now, nil
+		if err := saveItemTx(ctx, tx, row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // repaymentRoundsTx — K5 at the due check, for an active จ่ายหนี้ setting: nothing owed → each due
 // occurrence (not edited by hand) is skipped and counts a zero round; the 3rd pauses it
 // (no_balance). Something owed → the count restarts and one occurrence waits at a time (older

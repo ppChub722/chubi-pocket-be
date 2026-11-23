@@ -61,7 +61,7 @@ const ruleColumns = `id, user_id, name, description, note, icon_code, type, amou
 	contact_id, person_name, debt_kind, debt_direction, zero_rounds,
 	recurring_id, paid_by_contact_id, paid_by_person_name,
 	(SELECT COALESCE(ri.counterparty_institution_id, dp.institution_id) FROM recurrings ri
-		LEFT JOIN debt_plans dp ON dp.id = ri.debt_plan_id WHERE ri.id = recurring_id), amount_mode, repays_reminder_id`
+		LEFT JOIN debt_plans dp ON dp.id = ri.debt_plan_id WHERE ri.id = recurring_id), amount_mode, repays_reminder_id, notify_only`
 
 func scanRule(row pgx.Row) (*Rule, error) {
 	var (
@@ -79,7 +79,7 @@ func scanRule(row pgx.Row) (*Rule, error) {
 		&r.CreatedAt, &r.UpdatedAt, &r.GoalID, &r.Kind, &r.TrialUntil,
 		&r.TrackedFrom, &r.DueNotifiedUntil, &r.AutoCreate, &r.AutoCreatedUntil, &r.PausedFrom, &r.PauseReason, &r.Gaps,
 		&r.ContactID, &r.PersonName, &r.DebtKind, &r.DebtDirection, &r.ZeroRounds,
-		&r.RecurringID, &r.PaidByContactID, &r.PaidByPersonName, &r.InstitutionID, &r.AmountMode, &r.RepaysReminderID); err != nil {
+		&r.RecurringID, &r.PaidByContactID, &r.PaidByPersonName, &r.InstitutionID, &r.AmountMode, &r.RepaysReminderID, &r.NotifyOnly); err != nil {
 		return nil, err
 	}
 	r.IconCode = shared.IconFromJSON(icon)
@@ -151,7 +151,7 @@ func saveRuleTx(ctx context.Context, tx pgx.Tx, r *Rule) error {
 		r.EndDate, r.EndCount, r.TotalCount, r.GeneratedUntil, r.Status, r.EndingNotified, r.GoalID, r.Kind, r.TrialUntil,
 		r.TrackedFrom, r.DueNotifiedUntil, r.AutoCreate, r.AutoCreatedUntil, r.PausedFrom, r.PauseReason, gapsJSON(r.Gaps),
 		r.ContactID, r.PersonName, r.DebtKind, r.DebtDirection, r.ZeroRounds,
-		r.RecurringID, r.PaidByContactID, shared.CleanText(r.PaidByPersonName), r.amountMode(), r.RepaysReminderID}
+		r.RecurringID, r.PaidByContactID, shared.CleanText(r.PaidByPersonName), r.amountMode(), r.RepaysReminderID, r.NotifyOnly}
 	if r.ID == uuid.Nil {
 		r.ID, _ = uuid.NewV7()
 		if r.forceID != uuid.Nil {
@@ -167,10 +167,10 @@ func saveRuleTx(ctx context.Context, tx pgx.Tx, r *Rule) error {
 			end_date, end_count, total_count, generated_until, status, ending_notified, goal_id, kind, trial_until,
 			tracked_from, due_notified_until, auto_create, auto_created_until, paused_from, pause_reason, gaps,
 			contact_id, person_name, debt_kind, debt_direction, zero_rounds,
-			recurring_id, paid_by_contact_id, paid_by_person_name, amount_mode, repays_reminder_id)
+			recurring_id, paid_by_contact_id, paid_by_person_name, amount_mode, repays_reminder_id, notify_only)
 			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15,
 			        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
-			        $32, $33, $34, $35, $36, $37, $38::jsonb, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48)`, args...)
+			        $32, $33, $34, $35, $36, $37, $38::jsonb, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49)`, args...)
 	} else {
 		_, err = tx.Exec(ctx, `UPDATE recurring_reminders SET name = $3, description = $4, note = $5, icon_code = $6::jsonb,
 			type = $7, amount = $8, account_id = $9, to_account_id = $10, category_id = $11, tag_ids = $12,
@@ -179,7 +179,7 @@ func saveRuleTx(ctx context.Context, tx pgx.Tx, r *Rule) error {
 			total_count = $25, generated_until = $26, status = $27, ending_notified = $28, goal_id = $29, kind = $30, trial_until = $31,
 			tracked_from = $32, due_notified_until = $33, auto_create = $34, auto_created_until = $35, paused_from = $36, pause_reason = $37, gaps = $38::jsonb,
 			contact_id = $39, person_name = $40, debt_kind = $41, debt_direction = $42, zero_rounds = $43,
-			recurring_id = $44, paid_by_contact_id = $45, paid_by_person_name = $46, amount_mode = $47, repays_reminder_id = $48
+			recurring_id = $44, paid_by_contact_id = $45, paid_by_person_name = $46, amount_mode = $47, repays_reminder_id = $48, notify_only = $49
 			WHERE id = $1 AND user_id = $2`, args...)
 	}
 	if err != nil {

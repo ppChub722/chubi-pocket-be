@@ -924,6 +924,61 @@ func markInstallmentsTx(ctx context.Context, tx pgx.Tx, userID, planID uuid.UUID
 	return nil
 }
 
+// SkipInstallment — "ข้าม" (owner 2026-11-23): installment seq is not paid now; it moves to the end
+// of the plan (a new last installment, a month after the last one, with its money), so the plan
+// still adds up to its principal. The one skipped stays as skipped.
+func (s *Service) SkipInstallment(ctx context.Context, userID, id uuid.UUID, seq int, tz string) (*PlanView, error) {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	p, err := getPlan(ctx, tx, userID, id, true)
+	if err != nil {
+		return nil, err
+	}
+	if p.ClosedAt != nil {
+		return nil, ErrInvalidTransition
+	}
+	var (
+		amt, prin, inter float64
+		paid             *time.Time
+		skipped          bool
+	)
+	err = tx.QueryRow(ctx, `SELECT amount::float8, principal::float8, interest::float8, paid_at, skipped FROM debt_installments
+		WHERE debt_plan_id = $1 AND seq = $2 FOR UPDATE`, id, seq).Scan(&amt, &prin, &inter, &paid, &skipped)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrInstallmentNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if paid != nil || skipped {
+		return nil, ErrInvalidTransition
+	}
+	var last int
+	var lastDue time.Time
+	if err := tx.QueryRow(ctx, `SELECT seq, due_date FROM debt_installments WHERE debt_plan_id = $1 ORDER BY seq DESC LIMIT 1`,
+		id).Scan(&last, &lastDue); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE debt_installments SET skipped = TRUE WHERE debt_plan_id = $1 AND seq = $2`, id, seq); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO debt_installments (user_id, debt_plan_id, seq, due_date, amount, principal, interest, edited)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)`, userID, id, last+1, addMonths(lastDue, 1), amt, prin, inter); err != nil {
+		return nil, err
+	}
+	p.Count++
+	if err := savePlanTx(ctx, tx, p); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return s.GetDebtPlan(ctx, userID, id, tz)
+}
+
 // ClosePlan — "ปิดแผนก่อนกำหนด": the unticked installments are skipped; the ticked ones stay as
 // history.
 func (s *Service) ClosePlan(ctx context.Context, userID, id uuid.UUID, tz string) (*PlanView, error) {

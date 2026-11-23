@@ -120,6 +120,7 @@ func newRecFix(t *testing.T) *recFix {
 		g.GET("/debt-plans/:id/installments", h.Installments)
 		g.PUT("/debt-plans/:id/installments/:seq", h.EditInstallment)
 		g.POST("/debt-plans/:id/installments/:seq/mark", h.MarkInstallment)
+		g.POST("/debt-plans/:id/installments/:seq/skip", h.SkipInstallment)
 		g.GET("/recurring-items", h.Items)
 		g.POST("/recurring-items", h.CreateItem)
 		g.GET("/recurring-items/:id", h.GetItem)

@@ -89,6 +89,9 @@ type Rule struct {
 	// RepaysReminderID — repay_paid_by: the paid_by reminder of the same item this one pays back
 	// (its person; each round the amount of that reminder's latest recorded round).
 	RepaysReminderID *uuid.UUID
+	// NotifyOnly — แค่แจ้งเตือน: its rounds book nothing (no money, no totals); a due round is closed
+	// by itself; only its alerts go out.
+	NotifyOnly bool
 	forceID    uuid.UUID // insertRuleTx: the id a new reminder takes
 }
 

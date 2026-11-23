@@ -122,6 +122,9 @@ func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, ro
 	if row.filled() {
 		return nil, nil, ErrAlreadyRecorded
 	}
+	if r.NotifyOnly {
+		return nil, nil, ErrInvalidTransition // แค่แจ้งเตือน: nothing to record
+	}
 	if row.PendingID != nil { // a legacy draft of this occurrence: the transaction replaces it
 		if err := s.pending.Store().DeleteTx(ctx, tx, r.UserID, *row.PendingID); err != nil {
 			return nil, nil, err

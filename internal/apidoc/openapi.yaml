@@ -4519,6 +4519,19 @@ paths:
         '200': { description: 'The plan.', content: { application/json: { schema: { $ref: '#/components/schemas/RecurringPlan' } } } }
         '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /debt-plans/{id}/installments/{seq}/skip:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+      - { $ref: '#/components/parameters/SeqPath' }
+    post:
+      tags: [Debts]
+      summary: Skip an installment ("ข้าม")
+      operationId: skipDebtPlanInstallment
+      description: 'Not paid now: it moves to the end of the plan (a new last installment a month after the last one, with its money; count + 1). The one skipped stays as skipped. 409 INVALID_TRANSITION when it is paid / skipped or the plan is closed.'
+      responses:
+        '200': { description: 'The plan.', content: { application/json: { schema: { $ref: '#/components/schemas/RecurringPlan' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: '409 INVALID_TRANSITION.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   /debt-plans/{id}/installments/{seq}/mark:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
@@ -12068,6 +12081,7 @@ components:
       properties:
         id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'PUT /recurring/{id}: an existing line to update; absent = a new line.' }
         amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
+        notify_only: { type: [boolean, 'null'], description: 'แค่แจ้งเตือน: the rounds book nothing and count in no total; a due round closes by itself (paid, no transaction); only the alerts go out. No paid_by / repays_reminder_id; auto_create off.' }
         repays_reminder_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Type expense: pay back the person of that person-paid reminder of the item (repay_paid_by); each round = its latest recorded round, capped at what is owed.' }
         amount_mode: { type: [string, 'null'], enum: [fixed, ask, null], description: 'fixed = the amount every round; ask = typed on each round (expense / transfer only). Absent = ask when no amount is sent.' }
         source:
@@ -12238,7 +12252,7 @@ components:
         id: { $ref: '#/components/schemas/Uuid' }
         amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'null = waits for its amount (amount_mode ask).' }
         amount_mode: { type: string, enum: [fixed, ask] }
-        action: { type: string, enum: [expense, income, transfer, saving, paid_by, repay_paid_by, repay, collect], description: 'What a round does (from the item type and the reminder). A card bill: transfer.' }
+        action: { type: string, enum: [expense, income, transfer, saving, paid_by, repay_paid_by, repay, collect, notify], description: 'What a round does (from the item type and the reminder). A card bill: transfer.' }
         repays_reminder_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         source:
           type: object

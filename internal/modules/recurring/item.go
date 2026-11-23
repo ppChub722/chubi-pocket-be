@@ -90,11 +90,14 @@ const (
 	ActionRepayPaidBy = "repay_paid_by" // I pay back the one who paid another reminder of the item
 	ActionRepay       = "repay"         // I pay a debt (a card bill: a transfer into the card)
 	ActionCollect     = "collect"       // they pay me back
+	ActionNotify      = "notify"        // แค่แจ้งเตือน: nothing is booked
 )
 
 // action — what a round of r does.
 func (r *Rule) action() string {
 	switch {
+	case r.NotifyOnly:
+		return ActionNotify
 	case r.PaidByPersonName != nil:
 		return ActionPaidBy
 	case r.RepaysReminderID != nil:

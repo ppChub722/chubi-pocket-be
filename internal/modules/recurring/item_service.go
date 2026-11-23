@@ -160,6 +160,12 @@ func checkItemRefsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, it *itemR
 // required on a new line; absent on an update = kept.
 func (s *Service) applyLineInputTx(ctx context.Context, tx pgx.Tx, it *itemRecord, r *Rule, in LineInput, today time.Time) error {
 	isNew := r.ID == uuid.Nil
+	if in.NotifyOnly != nil {
+		r.NotifyOnly = *in.NotifyOnly
+	}
+	if r.NotifyOnly && (in.Source.PaidBy != nil || in.RepaysReminderID != nil) {
+		return ErrSourceInvalid // a notice moves no money: no one pays, nothing is paid back
+	}
 	// repay_paid_by: pays back the person of a person-paid reminder of the same (expense) item
 	r.RepaysReminderID = nil
 	if in.RepaysReminderID != nil {
@@ -216,6 +222,10 @@ func (s *Service) applyLineInputTx(ctx context.Context, tx pgx.Tx, it *itemRecor
 		mode = AmountAsk
 	}
 	switch {
+	case r.NotifyOnly:
+		if in.AmountMode == nil {
+			mode = AmountFixed // a notice may show an amount; never asked
+		}
 	case r.RepaysReminderID != nil || it.DebtPlanID != nil:
 		if in.AmountMode == nil {
 			mode = AmountFixed // its amount comes from what it pays back / the plan's installment
@@ -230,7 +240,7 @@ func (s *Service) applyLineInputTx(ctx context.Context, tx pgx.Tx, it *itemRecor
 		return ErrValidation
 	case in.Amount != nil:
 		r.Amount = math.Round(*in.Amount*100) / 100 // ask: a hint the round starts with
-	case mode == AmountAsk || r.RepaysReminderID != nil:
+	case mode == AmountAsk || r.RepaysReminderID != nil || r.NotifyOnly:
 		r.Amount = 0
 	case it.DebtPlanID != nil:
 		v, err := nextInstallmentAmount(ctx, tx, *it.DebtPlanID)
@@ -254,6 +264,10 @@ func (s *Service) applyLineInputTx(ctx context.Context, tx pgx.Tx, it *itemRecor
 		}
 		r.DebtKind = ptr(DebtKindRepayment)
 		r.DebtDirection = lineDirection(it.DebtDirection, r.DebtKind)
+	}
+	if r.NotifyOnly {
+		f := false
+		in.AutoCreate = &f // nothing to create
 	}
 	if in.AutoCreate != nil && *in.AutoCreate != r.AutoCreate {
 		r.AutoCreate = *in.AutoCreate

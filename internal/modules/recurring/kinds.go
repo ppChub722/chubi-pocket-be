@@ -72,6 +72,10 @@ func (r *Rule) finishKind(kind *string) error {
 	case r.Kind == "":
 		r.Kind = deriveKind(r.Type, r.EndKind)
 	}
+	if r.NotifyOnly { // แค่แจ้งเตือน: no money, so no amount to check
+		r.TrialUntil = nil
+		return nil
+	}
 	switch r.Kind {
 	case KindSubscription, KindInstallment:
 		if r.Type != "expense" || r.Amount <= 0 {

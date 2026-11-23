@@ -45,12 +45,14 @@ type LineInput struct {
 	AmountMode *string    `json:"amount_mode"` // fixed | ask (default: ask when no amount is sent)
 	// RepaysReminderID — type expense: this reminder pays back the person of that person-paid reminder
 	// of the item (repay_paid_by).
-	RepaysReminderID *uuid.UUID  `json:"repays_reminder_id"`
-	Source           SourceInput `json:"source"`
-	ToAccountID      *uuid.UUID  `json:"to_account_id"`
-	DebtKind         *string     `json:"debt_kind"`
-	Schedule         *Schedule   `json:"schedule"`
-	AutoCreate       *bool       `json:"auto_create"`
+	RepaysReminderID *uuid.UUID `json:"repays_reminder_id"`
+	// NotifyOnly — แค่แจ้งเตือน: the rounds book nothing; only the alerts go out.
+	NotifyOnly  *bool       `json:"notify_only"`
+	Source      SourceInput `json:"source"`
+	ToAccountID *uuid.UUID  `json:"to_account_id"`
+	DebtKind    *string     `json:"debt_kind"`
+	Schedule    *Schedule   `json:"schedule"`
+	AutoCreate  *bool       `json:"auto_create"`
 	// Alerts — the reminder's notices; absent = kept, [] = none.
 	Alerts *[]AlertInput `json:"alerts"`
 }

@@ -622,6 +622,7 @@ func main() {
 			protected.GET("/debt-plans/:id/installments", recurringHandler.Installments)
 			protected.PUT("/debt-plans/:id/installments/:seq", recurringHandler.EditInstallment)
 			protected.POST("/debt-plans/:id/installments/:seq/mark", recurringHandler.MarkInstallment)
+			protected.POST("/debt-plans/:id/installments/:seq/skip", recurringHandler.SkipInstallment)
 			protected.GET("/recurring-items", recurringHandler.Items)
 			protected.POST("/recurring-items", recurringHandler.CreateItem)
 			protected.GET("/recurring-items/:id", recurringHandler.GetItem)

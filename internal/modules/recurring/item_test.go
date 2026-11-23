@@ -270,6 +270,12 @@ func TestDebtPlan(t *testing.T) {
 		t.Errorf("installments = %+v", inst.Data)
 	}
 	f.do("POST", "/debt-plans/"+id+"/installments/9/mark", "markDebtPlanInstallment", map[string]any{"paid": true}, 404, nil)
+	// ข้าม: installment 4 moves to the end (6th), the plan still adds up
+	f.do("POST", "/debt-plans/"+id+"/installments/4/skip", "skipDebtPlanInstallment", nil, 200, &pl)
+	if pl.Count != 6 || pl.Chain[3].Status != "skipped" || len(pl.Installments) != 6 || pl.Installments[5].Principal != 2000 {
+		t.Errorf("after skip: count %d chain %+v", pl.Count, pl.Chain)
+	}
+	f.do("POST", "/debt-plans/"+id+"/installments/4/skip", "skipDebtPlanInstallment", nil, 409, nil)
 	// pay installment 3 from the debts page: principal 2000 back + interest 500 as ดอกเบี้ยรับ
 	before = f.balance()
 	f.do("POST", "/debt-plans/"+id+"/pay", "payDebtPlanInstallment", map[string]any{"seq": 3, "account_id": f.wallet}, 200, &pl)
@@ -404,6 +410,27 @@ func TestCardSummaryAndPrefill(t *testing.T) {
 	if sm.Bill.Paid != 5595 || sm.Bill.Left != 0 || sm.RecurringID == nil {
 		t.Errorf("after paying the bill: %+v", sm.Bill)
 	}
+}
+
+// แค่แจ้งเตือน: a notice reminder books nothing; its due round closes by itself; confirm is refused.
+func TestNotifyOnlyReminder(t *testing.T) {
+	f := newRecFix(t)
+	f.seedCategories()
+	before := f.balance()
+	var p ItemPage
+	f.do("POST", "/recurring", "createRecurring", map[string]any{"name": "ต่อภาษีรถ", "type": "expense",
+		"reminders": []any{map[string]any{"notify_only": true, "source": map[string]any{"account_id": nil},
+			"schedule": f.monthly(f.today.Day(), f.day(-31), nil)}}}, http.StatusCreated, &p)
+	if p.Lines[0].Action != ActionNotify || p.DueCount != 0 {
+		t.Fatalf("notice = %+v due %d", p.Lines[0], p.DueCount)
+	}
+	var n int
+	_ = f.pool.QueryRow(f.ctx, `SELECT COUNT(*) FROM recurring_items WHERE recurring_reminder_id = $1 AND cleared_at IS NOT NULL`, p.Lines[0].ID).Scan(&n)
+	if n < 1 || f.balance() != before {
+		t.Errorf("closed rounds %d, balance %v → %v", n, before, f.balance())
+	}
+	f.do("POST", "/recurring/"+p.ID.String()+"/reminders/"+p.Lines[0].ID.String()+"/occurrences/"+f.today.AddDate(0, 1, 0).Format(dateLayout)+"/confirm",
+		"confirmRecurringOccurrence", map[string]any{}, 409, nil)
 }
 
 // ค่าไฟ: the partner pays the bill (paid_by: my expense + my debt) and I pay them back on the 1st
