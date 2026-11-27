@@ -75,12 +75,12 @@ ALTER TABLE recurring_rules ADD CONSTRAINT recurring_rules_months_check
     CHECK (months <@ ARRAY[1,2,3,4,5,6,7,8,9,10,11,12]);
 
 -- a recurring always has a rule: one left with none (its goal / plan / wallet deleted its rules) goes
-CREATE FUNCTION recurring_drop_empty() RETURNS trigger LANGUAGE plpgsql AS $
+CREATE FUNCTION recurring_drop_empty() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     DELETE FROM recurrings g WHERE g.id = OLD.recurring_id
         AND NOT EXISTS (SELECT 1 FROM recurring_rules r WHERE r.recurring_id = OLD.recurring_id);
     RETURN OLD;
-END $;
+END $$;
 CREATE TRIGGER recurring_rules_drop_empty AFTER DELETE ON recurring_rules
     FOR EACH ROW EXECUTE FUNCTION recurring_drop_empty();
 
