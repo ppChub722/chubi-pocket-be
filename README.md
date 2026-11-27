@@ -12,7 +12,7 @@ Part of a multi-repo project:
 
 - **chubi-pocket-be** — this repo, the Go REST API
 - [chubi-pocket-app](https://github.com/ppChub722/chubi-pocket-app) — Flutter client
-- [chubi-pocket-web](https://github.com/ppChub722/chubi-pocket-web) — web client (in progress)
+- chubi-pocket-web — web client (in progress, private)
 - [chubi-pocket-docs](https://github.com/ppChub722/chubi-pocket-docs) — specs and design docs
 
 ## Tech stack
