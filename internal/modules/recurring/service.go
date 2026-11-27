@@ -72,7 +72,7 @@ func (s *Service) DueCheckDaily(ctx context.Context, userID uuid.UUID, headerTZ 
 	var skip bool
 	if err := s.db.QueryRow(ctx, `SELECT
 		EXISTS (SELECT 1 FROM recurring_due_checks c WHERE c.user_id = $1 AND c.checked_on >= $2)
-		AND NOT EXISTS (SELECT 1 FROM recurring_reminders r WHERE r.user_id = $1 AND r.status = 'paused'
+		AND NOT EXISTS (SELECT 1 FROM recurring_rules r WHERE r.user_id = $1 AND r.status = 'paused'
 			AND r.pause_reason = '`+PauseNoBalance+`' AND `+owedAgainSQL()+`)`,
 		userID, today).Scan(&skip); err != nil {
 		return fmt.Errorf("due check guard: %w", err)
@@ -104,7 +104,7 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 	if err := s.resumeNoBalanceTx(ctx, tx, userID, today); err != nil { // K5: a new debt runs them again
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_reminders WHERE user_id = $1 AND status = 'active'
+	rows, err := tx.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1 AND status = 'active'
 		ORDER BY created_at, id FOR UPDATE SKIP LOCKED`, userID)
 	if err != nil {
 		return fmt.Errorf("due rules: %w", err)
@@ -123,12 +123,15 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 		return err
 	}
 	lang := s.lang(ctx, userID)
-	newlyDue, autoMade := 0, 0
-	var ends []ending
+	defNotify, defAuto, err := userDefaults(ctx, tx, userID)
+	if err != nil {
+		return err
+	}
+	// one notice when rounds come due (an auto-accepted round counts too), only for the rules whose
+	// notify switch is on (the rule's, else the user's default)
+	notice := 0
 	for _, r := range rules {
-		if err := s.notifyRoundsTx(ctx, tx, r, today); err != nil { // แค่แจ้งเตือน: due rounds close by themselves
-			return err
-		}
+		r.autoEff = r.autoAcceptOn(defAuto)
 		if err := s.repaymentRoundsTx(ctx, tx, r, today); err != nil { // K5, before the overdue limit
 			return err
 		}
@@ -139,40 +142,16 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 		if err != nil {
 			return err
 		}
-		autoMade += made
 		n, err := s.newlyDue(ctx, tx, r, today, lang)
 		if err != nil {
 			return err
 		}
-		newlyDue += n
-		if e, ok, err := s.endingOf(ctx, tx, r, today, lang); err != nil {
-			return err
-		} else if ok {
-			ends = append(ends, e)
+		if r.notifyOn(defNotify) {
+			notice += n + made
 		}
 	}
-	if s.notifs != nil {
-		if newlyDue > 0 {
-			if err := s.notifs.RecurringDueTx(ctx, tx, userID, newlyDue); err != nil {
-				return err
-			}
-		}
-		if autoMade > 0 {
-			if err := s.notifs.RecurringAutoCreatedTx(ctx, tx, userID, autoMade, today.Format(dateLayout)); err != nil {
-				return err
-			}
-		}
-		for _, e := range ends {
-			if err := s.notifs.RecurringEndingTx(ctx, tx, userID, notifications.RecurringEndingPayload{
-				RecurringID: e.id, Name: e.name, Left: e.left, StartDate: e.start,
-				End: notifications.RecurringEnd{Kind: e.endKind, Date: e.endDate, Count: e.endCount},
-			}); err != nil {
-				return err
-			}
-		}
-	}
-	for _, e := range ends {
-		if _, err := tx.Exec(ctx, `UPDATE recurring_reminders SET ending_notified = TRUE WHERE id = $1`, e.id); err != nil {
+	if s.notifs != nil && notice > 0 {
+		if err := s.notifs.RecurringDueTx(ctx, tx, userID, notice); err != nil {
 			return err
 		}
 	}
@@ -181,16 +160,6 @@ func (s *Service) DueCheck(ctx context.Context, userID uuid.UUID, headerTZ strin
 		return err
 	}
 	return tx.Commit(ctx)
-}
-
-type ending struct {
-	id       uuid.UUID
-	name     string
-	left     int
-	start    string
-	endKind  string
-	endDate  *string
-	endCount *int
 }
 
 // newlyDue counts the occurrences of r that came due since the due notice last
@@ -217,39 +186,12 @@ func (s *Service) newlyDue(ctx context.Context, tx pgx.Tx, r *Rule, today time.T
 		}
 	}
 	// only when it moves: a write bumps updated_at, which the sync fingerprint reads
-	if _, err := tx.Exec(ctx, `UPDATE recurring_reminders SET due_notified_until = $2 WHERE id = $1
+	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET due_notified_until = $2 WHERE id = $1
 		AND due_notified_until IS DISTINCT FROM $2`, r.ID, today); err != nil {
 		return 0, err
 	}
 	r.DueNotifiedUntil = &today
 	return n, nil
-}
-
-// endingOf — a setting WITH an end that has 2 or fewer occurrences left gets
-// one "about to end" notice.
-func (s *Service) endingOf(ctx context.Context, tx pgx.Tx, r *Rule, today time.Time, lang string) (ending, bool, error) {
-	if r.EndingNotified || r.TotalCount == nil || r.GeneratedUntil == nil {
-		return ending{}, false, nil
-	}
-	from := today.AddDate(0, 0, 1)
-	if from.After(*r.GeneratedUntil) {
-		return ending{}, false, nil
-	}
-	rows, err := s.storedRows(ctx, tx, r.UserID, []uuid.UUID{r.ID}, &from, r.GeneratedUntil)
-	if err != nil {
-		return ending{}, false, err
-	}
-	left := 0
-	for _, o := range occsOf(r, rows, from, *r.GeneratedUntil, today, lang) {
-		if o.status == StatusUpcoming {
-			left++
-		}
-	}
-	if left > 2 {
-		return ending{}, false, nil
-	}
-	return ending{id: r.ID, name: r.Name, left: left, start: r.StartDate.Format(dateLayout), endKind: r.EndKind,
-		endDate: dstr(r.EndDate), endCount: r.EndCount}, true, nil
 }
 
 func (s *Service) itemView(ctx context.Context, userID, itemID uuid.UUID) (*Item, error) {
@@ -408,10 +350,10 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 		byRule[it.RuleID] = append(byRule[it.RuleID], it)
 	}
 	avg := map[uuid.UUID]float64{}
-	arows, err := s.db.Query(ctx, `SELECT i.recurring_reminder_id, AVG(COALESCE(t.amount, e.amount))::float8 FROM recurring_items i
+	arows, err := s.db.Query(ctx, `SELECT i.recurring_rule_id, AVG(COALESCE(t.amount, e.amount))::float8 FROM recurring_items i
 		LEFT JOIN transactions t ON t.id = i.transaction_id
 		LEFT JOIN saving_entries e ON e.id = i.saving_entry_id
-		WHERE i.user_id = $1 AND i.recurring_reminder_id = ANY($2) AND (t.id IS NOT NULL OR e.id IS NOT NULL) GROUP BY i.recurring_reminder_id`, userID, ids)
+		WHERE i.user_id = $1 AND i.recurring_rule_id = ANY($2) AND (t.id IS NOT NULL OR e.id IS NOT NULL) GROUP BY i.recurring_rule_id`, userID, ids)
 	if err != nil {
 		return nil, fmt.Errorf("avg amounts: %w", err)
 	}
@@ -458,7 +400,7 @@ func (s *Service) recurringViews(ctx context.Context, userID uuid.UUID, today ti
 			StartDate: r.StartDate.Format(dateLayout), End: r.apiEnd(), Status: r.Status,
 			Progress: Progress{Done: a.done, Total: r.TotalCount}, Counts: a.counts, EditedAny: a.edited,
 			CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
-			DueCount: a.counts.Due, Chain: a.chain, AutoCreate: r.AutoCreate, RecordedTxCount: a.txCount, PauseReason: r.pauseReason(),
+			DueCount: a.counts.Due, Chain: a.chain, AutoAccept: r.AutoAccept, RecordedTxCount: a.txCount, PauseReason: r.pauseReason(),
 		}
 		if a.chain == nil {
 			v.Chain = []ChainStep{}
@@ -563,7 +505,7 @@ func (s *Service) stats(ctx context.Context, userID uuid.UUID, r *Rule, stored [
 	rows, err := s.db.Query(ctx, `SELECT COALESCE(i.slot, i.date), i.date, COALESCE(t.amount, e.amount)::float8 FROM recurring_items i
 		LEFT JOIN transactions t ON t.id = i.transaction_id
 		LEFT JOIN saving_entries e ON e.id = i.saving_entry_id
-		WHERE i.user_id = $1 AND i.recurring_reminder_id = $2 AND (t.id IS NOT NULL OR e.id IS NOT NULL)
+		WHERE i.user_id = $1 AND i.recurring_rule_id = $2 AND (t.id IS NOT NULL OR e.id IS NOT NULL)
 		ORDER BY COALESCE(i.slot, i.date)`, userID, r.ID)
 	if err != nil {
 		return st, fmt.Errorf("stats: %w", err)
@@ -743,7 +685,7 @@ func (s *Service) Items(ctx context.Context, userID uuid.UUID, status, kind, mon
 	case StatusArchived:
 		status = StatusSkipped
 	}
-	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_reminders WHERE user_id = $1
+	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules WHERE user_id = $1
 		AND ($2::uuid IS NULL OR id = $2) AND ($3::uuid IS NULL OR recurring_id = $3)`, userID, ruleID, itemID)
 	if err != nil {
 		return nil, err
@@ -959,7 +901,7 @@ type OccurrencesResult struct {
 	Data          []Item  `json:"data"`
 	SuggestedSlot *string `json:"suggested_slot"`
 	// SuggestedRuleID — the line of the suggested round (0.4.3: an item's rounds of every line).
-	SuggestedRuleID *uuid.UUID `json:"suggested_recurring_reminder_id"`
+	SuggestedRuleID *uuid.UUID `json:"suggested_recurring_rule_id"`
 }
 
 type PickerHint struct {

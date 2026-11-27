@@ -281,7 +281,9 @@ func (s *Store) Delete(ctx context.Context, userID, id uuid.UUID) error {
 const settingsColumns = `user_id, muted_types, default_account_id,
 	auto_sync_events, auto_sync_debts, auto_accept_events, auto_accept_debts,
 	auto_accept_event_invites, auto_accept_contact_links, auto_accept_wallet_invites,
-	on_split_removed, auto_accept_repayments, created_at, updated_at`
+	on_split_removed, auto_accept_repayments,
+	(SELECT u.recurring_notify_default FROM users u WHERE u.id = user_id),
+	(SELECT u.recurring_auto_accept_default FROM users u WHERE u.id = user_id), created_at, updated_at`
 
 func scanSettings(row pgx.Row) (*Settings, error) {
 	var s Settings
@@ -289,7 +291,8 @@ func scanSettings(row pgx.Row) (*Settings, error) {
 		&s.UserID, &s.MutedTypes, &s.DefaultAccountID,
 		&s.AutoSyncEvents, &s.AutoSyncDebts, &s.AutoAcceptEvents, &s.AutoAcceptDebts,
 		&s.AutoAcceptEventInvites, &s.AutoAcceptContactLinks, &s.AutoAcceptWalletInvites,
-		&s.OnSplitRemoved, &s.AutoAcceptRepayments, &s.CreatedAt, &s.UpdatedAt,
+		&s.OnSplitRemoved, &s.AutoAcceptRepayments, &s.RecurringNotifyDefault, &s.RecurringAutoAcceptDefault,
+		&s.CreatedAt, &s.UpdatedAt,
 	)
 	return &s, err
 }
@@ -304,6 +307,8 @@ func DefaultSettings(userID uuid.UUID) *Settings {
 		AutoSyncDebts:    true,
 		AutoAcceptEvents: true,
 		OnSplitRemoved:   OnRemovedAsk,
+		// as the users columns' defaults
+		RecurringNotifyDefault: true,
 	}
 }
 
@@ -342,6 +347,14 @@ func (s *Store) UpdateSettings(ctx context.Context, userID uuid.UUID, req Update
 	if _, err := s.db.Exec(ctx, `INSERT INTO user_notification_settings (user_id, created_by_user_id, updated_by_user_id)
 		VALUES ($1, $1, $1) ON CONFLICT (user_id) DO NOTHING`, userID); err != nil {
 		return nil, fmt.Errorf("settings row: %w", err)
+	}
+	if req.RecurringNotifyDefault != nil || req.RecurringAutoAcceptDefault != nil {
+		if _, err := s.db.Exec(ctx, `UPDATE users SET
+			recurring_notify_default = COALESCE($2, recurring_notify_default),
+			recurring_auto_accept_default = COALESCE($3, recurring_auto_accept_default) WHERE id = $1`,
+			userID, req.RecurringNotifyDefault, req.RecurringAutoAcceptDefault); err != nil {
+			return nil, fmt.Errorf("recurring defaults: %w", err)
+		}
 	}
 	q := `UPDATE user_notification_settings SET updated_by_user_id = $1`
 	args := []any{userID}

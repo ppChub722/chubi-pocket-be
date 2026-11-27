@@ -341,7 +341,7 @@ func (r *Rule) resume(today time.Time) error {
 		autoFrom = *cur
 	}
 	until := autoFrom.AddDate(0, 0, -1)
-	r.AutoCreatedUntil = &until
+	r.AutoAcceptedUntil = &until
 	return nil
 }
 
@@ -400,11 +400,7 @@ func (s *Service) Extend(ctx context.Context, userID, id uuid.UUID, req ExtendRe
 		if err := r.limits(today); err != nil {
 			return err
 		}
-		r.EndingNotified = false
-		_, err := tx.Exec(ctx, `UPDATE notifications SET actioned_at = NOW(), read_at = COALESCE(read_at, NOW())
-			WHERE recipient_user_id = $1 AND type = 'recurring_ending' AND actioned_at IS NULL AND dismissed_at IS NULL
-			  AND payload->>'recurring_id' = $2`, userID, r.ID.String())
-		return err
+		return nil
 	})
 }
 

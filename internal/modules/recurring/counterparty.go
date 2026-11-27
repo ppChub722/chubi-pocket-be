@@ -9,20 +9,21 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// CounterpartyItem — a recurring item on its counterparty's debt page (0.4.3): the list row, its
-// whole plan and its lines (↻ when, wallet or คนจ่ายแทน, amount).
+// CounterpartyItem — a recurring on a counterparty's debt page: the list row, the plan of its rules
+// and only the rules that touch this counterparty (spec §3: pages pull rules by their columns).
 type CounterpartyItem struct {
 	RecurringSummary
 	Plan  *PlanView `json:"plan"`
-	Lines []Line    `json:"reminders"`
+	Lines []Line    `json:"rules"`
 }
 
-// CounterpartyItems — the debt items (not archived) of a counterparty key (c: / n: / i:), newest
-// first. The debts page reads it through personal_debts' hook.
+// CounterpartyItems — the recurrings (not archived) with a debt rule of a counterparty key (c: / n:
+// / i:), newest first. The debts page reads it through personal_debts' hook.
 func (s *Service) CounterpartyItems(ctx context.Context, userID uuid.UUID, key string) (any, error) {
 	out := []CounterpartyItem{}
-	rows, err := s.db.Query(ctx, `SELECT `+itemRecordColumns+` FROM recurrings WHERE user_id = $1 AND type = 'debt'
-		AND status <> 'archived' AND `+itemKeySQL+` = $2 ORDER BY created_at DESC, id`, userID, key)
+	rows, err := s.db.Query(ctx, `SELECT `+itemRecordColumns+` FROM recurrings g WHERE user_id = $1
+		AND status <> 'archived' AND EXISTS (SELECT 1 FROM recurring_rules r WHERE r.recurring_id = g.id AND r.type = 'debt'
+			AND `+ruleKeySQL+` = $2) ORDER BY created_at DESC, id`, userID, key)
 	if err != nil {
 		return nil, fmt.Errorf("counterparty items: %w", err)
 	}
@@ -39,9 +40,6 @@ func (s *Service) CounterpartyItems(ctx context.Context, userID uuid.UUID, key s
 	if err := rows.Err(); err != nil || len(items) == 0 {
 		return out, err
 	}
-	if err := attachPlans(ctx, s.db, userID, items...); err != nil {
-		return nil, err
-	}
 	today, err := s.today(ctx, userID, shared.HeaderTZ(ctx))
 	if err != nil {
 		return nil, err
@@ -55,19 +53,21 @@ func (s *Service) CounterpartyItems(ctx context.Context, userID uuid.UUID, key s
 		return nil, err
 	}
 	for i := range pages {
-		out = append(out, CounterpartyItem{RecurringSummary: sums[i], Plan: pages[i].Plan, Lines: pages[i].Lines})
+		lines := []Line{}
+		for _, ln := range pages[i].Lines {
+			if ln.Counterparty != nil && ln.Counterparty.Key == key {
+				lines = append(lines, ln)
+			}
+		}
+		out = append(out, CounterpartyItem{RecurringSummary: sums[i], Plan: pages[i].Plan, Lines: lines})
 	}
 	return out, nil
 }
 
-// itemKeySQL — a recurring item's counterparty key (its own, else its plan's creditor), as
-// shared.DebtKey writes it; NULL for a card's bill.
-const itemKeySQL = `(SELECT CASE WHEN COALESCE(counterparty_institution_id, p.institution_id) IS NOT NULL
-		THEN 'i:' || COALESCE(counterparty_institution_id, p.institution_id)::text
-	WHEN COALESCE(counterparty_contact_id, p.contact_id) IS NOT NULL THEN 'c:' || COALESCE(counterparty_contact_id, p.contact_id)::text
-	WHEN COALESCE(counterparty_person_name, p.person_name) IS NOT NULL
-		THEN 'n:' || LOWER(TRIM(COALESCE(counterparty_person_name, p.person_name))) END
-	FROM (SELECT NULL) one LEFT JOIN debt_plans p ON p.id = debt_plan_id)`
+// ruleKeySQL — a debt rule's counterparty key (alias r), as shared.DebtKey writes it.
+const ruleKeySQL = `(CASE WHEN r.institution_id IS NOT NULL THEN 'i:' || r.institution_id::text
+	WHEN r.contact_id IS NOT NULL THEN 'c:' || r.contact_id::text
+	ELSE 'n:' || LOWER(TRIM(r.person_name)) END)`
 
 // DebtMonth — this month's rounds of the active debt lines still to book (not person-paid ones:
 // they move no money of mine): money out (the rows I pay: lend / pay back) and in.

@@ -42,11 +42,11 @@ type window struct {
 // used until an Expecter is set.
 const storedItemsSQL = `
 	SELECT 'recurring_item', i.id, 'upcoming', 'expected', i.date, (i.draft->>'amount')::float8,
-		COALESCE(i.draft->>'description', r.name), (i.draft->>'category_id')::uuid, (i.draft->>'account_id')::uuid,
+		COALESCE(i.draft->>'description', (SELECT g.name FROM recurrings g WHERE g.id = r.recurring_id)), (i.draft->>'category_id')::uuid, (i.draft->>'account_id')::uuid,
 		ARRAY(SELECT g.name FROM tags g WHERE g.user_id = $1 AND g.id::text IN
 			(SELECT jsonb_array_elements_text(COALESCE(i.draft->'tag_ids', '[]'::jsonb))) ORDER BY g.name)::text[],
 		NULL::uuid, i.id, NULL::uuid, NULL::date
-	FROM recurring_items i LEFT JOIN recurring_reminders r ON r.id = i.recurring_reminder_id
+	FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.recurring_rule_id
 	WHERE $4 AND i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
 	  AND NOT i.archived AND r.status = 'active'
 	  AND i.draft->>'type' = 'expense' AND i.draft ? 'amount' AND i.date BETWEEN $5 AND $6`
@@ -202,7 +202,7 @@ func (s *Service) expectedOccurrences(ctx context.Context, userID uuid.UUID, fro
 		})
 		links[id] = &ItemRecurring{
 			ItemID: o.ItemID, Seq: o.Seq, Total: o.Total,
-			Recurring: &shared.RecurringRef{ID: o.RecurringID, RecurringReminderID: o.RuleID, Name: o.RuleName, IconCode: o.RuleIcon},
+			Recurring: &shared.RecurringRef{ID: o.RecurringID, RecurringRuleID: o.RuleID, Name: o.RuleName, IconCode: o.RuleIcon},
 		}
 	}
 	js, err := json.Marshal(rows)

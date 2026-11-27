@@ -13,7 +13,7 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/platform/response"
 )
 
-// Routes of the recurring ITEMS (0.4.3): /recurring/{id} = the item, /recurring/{id}/reminders/{reminder_id}
+// Routes of the recurring ITEMS (0.4.3): /recurring/{id} = the item, /recurring/{id}/rules/{rule_id}
 // = one of its lines, rounds addressed by line + slot.
 
 func bindItem(c *gin.Context) (RecurringInput, bool) {
@@ -39,9 +39,9 @@ func (h *Handler) ListRecurring(c *gin.Context) {
 		response.Validation(c, "Invalid status", apierr.Field("status", apierr.FieldInvalid))
 		return
 	}
-	typ := c.Query("type")
-	if typ != "" && !validItemType(typ) {
-		response.Validation(c, "Invalid type", apierr.Field("type", apierr.FieldInvalid))
+	typ := c.Query("tracking_type")
+	if typ != "" && !trackingTypes[typ] {
+		response.Validation(c, "Invalid tracking_type", apierr.Field("tracking_type", apierr.FieldInvalid))
 		return
 	}
 	forType := c.Query("for_type")
@@ -193,9 +193,9 @@ func itemAndLine(c *gin.Context) (uuid.UUID, uuid.UUID, uuid.UUID, bool) {
 	if !ok {
 		return uuid.Nil, uuid.Nil, uuid.Nil, false
 	}
-	line, err := uuid.Parse(c.Param("reminder_id"))
+	line, err := uuid.Parse(c.Param("rule_id"))
 	if err != nil {
-		response.Validation(c, "Invalid reminder_id", apierr.Field("reminder_id", apierr.FieldInvalid))
+		response.Validation(c, "Invalid rule_id", apierr.Field("rule_id", apierr.FieldInvalid))
 		return uuid.Nil, uuid.Nil, uuid.Nil, false
 	}
 	return uid, id, line, true

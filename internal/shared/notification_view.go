@@ -46,7 +46,7 @@ func AwaitsAnswer(typ string, actionedAt, dismissedAt *time.Time, payload json.R
 		return ok && v != nil && v != false && v != ""
 	}
 	switch typ {
-	case "contact_link_request", "account_invite", "project_invite", "recurring_ending":
+	case "contact_link_request", "account_invite", "project_invite":
 		return true
 	case "bill_invite":
 		return true

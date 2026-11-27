@@ -307,6 +307,21 @@ func TestNotificationSettings(t *testing.T) {
 		}
 	}
 
+	// the รายการประจำ row: the rules' defaults, stored on users; recurring_due's on shows notify
+	if out["recurring_notify_default"] != true || out["recurring_auto_accept_default"] != false {
+		t.Errorf("recurring defaults = %v / %v", out["recurring_notify_default"], out["recurring_auto_accept_default"])
+	}
+	out = f.do(t, "PUT", "/api/v1/notifications/settings", map[string]any{"recurring_notify_default": false,
+		"recurring_auto_accept_default": true}, "updateNotificationSettings", http.StatusOK)
+	if out["recurring_notify_default"] != false || out["recurring_auto_accept_default"] != true {
+		t.Errorf("recurring defaults after set = %v", out)
+	}
+	for _, r := range out["types"].([]any) {
+		if row := r.(map[string]any); row["type"] == TypeRecurringDue && row["on"] != false {
+			t.Errorf("recurring_due row = %v", row)
+		}
+	}
+
 	out = f.do(t, "PUT", "/api/v1/notifications/settings", map[string]any{"muted_types": []string{}}, "updateNotificationSettings", http.StatusOK)
 	if out["default_account"] == nil {
 		t.Error("partial update must keep default_account")
@@ -346,7 +361,7 @@ func (f *nfix) status(t *testing.T, method, path string, body any, want int, cod
 func TestInboxSummaryAndAwaitsAnswer(t *testing.T) {
 	f := newFix(t)
 	f.add(t, TypeProjectInvite, nil, `{}`, time.Hour)
-	f.add(t, TypeRecurringEnding, nil, `{"left":2}`, 2*time.Hour)
+	f.add(t, TypeContactLinkRequest, nil, `{}`, 2*time.Hour)
 	info := f.add(t, TypeEventCompleted, nil, `{}`, 3*time.Hour)
 	hidden := f.add(t, TypeEventCompleted, nil, `{}`, 4*time.Hour)
 	f.do(t, "POST", "/api/v1/notifications/"+hidden.String()+"/dismiss", nil, "dismissNotification", http.StatusOK)
@@ -362,7 +377,7 @@ func TestInboxSummaryAndAwaitsAnswer(t *testing.T) {
 	}
 	for _, d := range f.do(t, "GET", "/api/v1/notifications?read=all", nil, "listNotifications", http.StatusOK)["data"].([]any) {
 		n := d.(map[string]any)
-		want := n["type"] == TypeProjectInvite || n["type"] == TypeRecurringEnding
+		want := n["type"] == TypeProjectInvite || n["type"] == TypeContactLinkRequest
 		if n["awaits_answer"] != want {
 			t.Errorf("%v awaits_answer = %v, want %v", n["type"], n["awaits_answer"], want)
 		}
@@ -415,54 +430,6 @@ func (f *nfix) recurringNotices(t *testing.T, typ string) []recurringNotice {
 }
 
 // One auto-create notice per day: the day's row (read or not) adds up the
-// counts; another day gets its own row; muted = none.
-func TestRecurringAutoCreatedGroupsPerDay(t *testing.T) {
-	f := newFix(t)
-	svc := NewService(NewStore(f.pool))
-	add := func(count int, date string) {
-		t.Helper()
-		f.inTx(t, func(ctx context.Context, tx pgx.Tx) error {
-			return svc.RecurringAutoCreatedTx(ctx, tx, f.uid, count, date)
-		})
-	}
-	add(2, "2026-10-20")
-	add(3, "2026-10-20")
-	add(0, "2026-10-20") // nothing recorded: no change
-	got := f.recurringNotices(t, TypeRecurringAutoCreated)
-	if len(got) != 1 || got[0].count != 5 || got[0].date != "2026-10-20" || got[0].link != "/recurring" {
-		t.Fatalf("same day = %+v, want one row, count 5, link /recurring", got)
-	}
-
-	// Read, then more the same day: still the one row, read stays.
-	if _, err := f.pool.Exec(context.Background(), `UPDATE notifications SET read_at = NOW()
-		WHERE recipient_user_id = $1 AND type = $2`, f.uid, TypeRecurringAutoCreated); err != nil {
-		t.Fatal(err)
-	}
-	add(1, "2026-10-20")
-	add(4, "2026-10-21")
-	got = f.recurringNotices(t, TypeRecurringAutoCreated)
-	if len(got) != 2 || got[0].count != 6 || !got[0].read || got[1].date != "2026-10-21" || got[1].count != 4 || got[1].read {
-		t.Fatalf("next day = %+v, want [2026-10-20 ×6 read, 2026-10-21 ×4 unread]", got)
-	}
-
-	// The inbox lists it in the spec's shape.
-	out := f.do(t, "GET", "/api/v1/notifications?type=recurring_auto_created&read=all", nil, "listNotifications", http.StatusOK)
-	if n := len(out["data"].([]any)); n != 2 {
-		t.Errorf("listed %d, want 2", n)
-	}
-
-	// Muted: nothing is written.
-	if _, err := f.pool.Exec(context.Background(), `UPDATE user_notification_settings SET muted_types = ARRAY[$2]
-		WHERE user_id = $1`, f.uid, TypeRecurringAutoCreated); err != nil {
-		t.Fatal(err)
-	}
-	add(7, "2026-10-22")
-	if got := f.recurringNotices(t, TypeRecurringAutoCreated); len(got) != 2 {
-		t.Errorf("muted wrote a row: %+v", got)
-	}
-}
-
-// The due notice opens ต้องจัดการ: a new one and a bumped one both point at
 // /recurring?focus=due (an old unread one still on /pending moves over).
 func TestRecurringDueDeepLink(t *testing.T) {
 	f := newFix(t)

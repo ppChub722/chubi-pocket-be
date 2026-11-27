@@ -204,8 +204,8 @@ func (s *Service) Get(ctx context.Context, userID, id uuid.UUID) (*Detail, error
 		WHERE l.key = $2`, userID, key).Scan(&out.Debt.Net, &out.Debt.EntryCount); err != nil {
 		return nil, err
 	}
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM recurrings g LEFT JOIN debt_plans p ON p.id = g.debt_plan_id
-		WHERE g.user_id = $1 AND COALESCE(g.counterparty_institution_id, p.institution_id) = $2`,
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(DISTINCT recurring_id) FROM recurring_rules
+		WHERE user_id = $1 AND institution_id = $2 AND status <> 'archived'`,
 		userID, id).Scan(&out.Debt.RecurringCount); err != nil {
 		return nil, err
 	}
@@ -374,7 +374,7 @@ func (s *Service) Delete(ctx context.Context, userID, id uuid.UUID) (*DeleteResu
 	var used bool
 	if err := s.db.QueryRow(ctx, `SELECT
 		EXISTS (SELECT 1 FROM personal_debts WHERE counterparty_institution_id = $1)
-		OR EXISTS (SELECT 1 FROM recurrings WHERE counterparty_institution_id = $1)
+		OR EXISTS (SELECT 1 FROM recurring_rules WHERE institution_id = $1)
 		OR EXISTS (SELECT 1 FROM debt_plans WHERE institution_id = $1)
 		OR EXISTS (SELECT 1 FROM accounts WHERE institution_id = $1)`, id).Scan(&used); err != nil {
 		return nil, err

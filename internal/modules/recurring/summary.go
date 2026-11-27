@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
 type NextUp struct {
@@ -28,6 +30,105 @@ type ListSummary struct {
 	DueCount int      `json:"due_count"`
 	DueTotal float64  `json:"due_total"`
 	ByKind   KindsSum `json:"by_kind"`
+	// Month — the list hero (spec §3): this calendar month's rounds.
+	Month MonthHero `json:"month"`
+}
+
+// MonthHero — this month's rounds by what they book. Expense leaves out saving and installments; a
+// round with no amount yet counts its rule's average (ExpenseApprox = some are estimates, shown
+// "~"). Installment = the debt rules' rounds + card plans' installments billed this month.
+type MonthHero struct {
+	Expense       float64 `json:"expense"`
+	ExpenseApprox bool    `json:"expense_approx"`
+	ExpensePaid   float64 `json:"expense_paid"`
+	Income        float64 `json:"income"`
+	Saving        float64 `json:"saving"`
+	Installment   float64 `json:"installment"`
+}
+
+// monthHero — the hero figures over the active rules' rounds of today's month.
+func (s *Service) monthHero(ctx context.Context, userID uuid.UUID, rules []*Rule, today time.Time) (MonthHero, error) {
+	var out MonthHero
+	first, last := shared.MonthBounds(today)
+	occs, err := s.occsInRange(ctx, s.db, userID, rules, first, last, today, true)
+	if err != nil {
+		return out, err
+	}
+	var ids []uuid.UUID
+	for _, r := range rules {
+		ids = append(ids, r.ID)
+	}
+	// each rule's average recorded amount (the estimate of an unknown one) and, in the same read, the card
+	// plans' installments billed this month (the null row)
+	avg := map[uuid.UUID]float64{}
+	var cards float64
+	rows, err := s.db.Query(ctx, `SELECT recurring_rule_id, AVG((draft->>'amount')::numeric)::float8 FROM recurring_items
+		WHERE user_id = $1 AND recurring_rule_id = ANY($2) AND (draft->>'amount') IS NOT NULL
+		  AND (transaction_id IS NOT NULL OR debt_entry_id IS NOT NULL OR saving_entry_id IS NOT NULL OR cleared_at IS NOT NULL)
+		GROUP BY recurring_rule_id
+		UNION ALL
+		SELECT NULL, COALESCE(SUM(i.amount), 0)::float8 FROM debt_installments i JOIN debt_plans p ON p.id = i.debt_plan_id
+		WHERE p.user_id = $1 AND p.account_id IS NOT NULL AND NOT i.skipped AND i.due_date BETWEEN $3 AND $4`, userID, ids, first, last)
+	if err != nil {
+		return out, fmt.Errorf("rule averages: %w", err)
+	}
+	for rows.Next() {
+		var (
+			id *uuid.UUID
+			v  float64
+		)
+		if err := rows.Scan(&id, &v); err != nil {
+			rows.Close()
+			return out, err
+		}
+		if id == nil {
+			cards = v
+		} else {
+			avg[*id] = v
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	for _, o := range occs {
+		if o.status == StatusSkipped {
+			continue
+		}
+		r := o.rule
+		amt, known := 0.0, o.draft.Amount != nil && *o.draft.Amount > 0
+		if known {
+			amt = *o.draft.Amount
+		} else if v, ok := avg[r.ID]; ok {
+			amt = v
+		} else {
+			amt = r.Amount
+		}
+		done := o.status == StatusDone || o.status == StatusPaid
+		switch {
+		case r.Type == TypeSaving:
+			out.Saving += amt
+		case r.Type == typeDebt:
+			if r.moneyWay() == "expense" {
+				out.Installment += amt
+			}
+		case r.Type == TypeIncome:
+			out.Income += amt
+		case r.Type == TypeExpense:
+			out.Expense += amt
+			if !known {
+				out.ExpenseApprox = true
+			}
+			if done {
+				out.ExpensePaid += amt
+			}
+		}
+	}
+	out.Installment += cards
+	for _, v := range []*float64{&out.Expense, &out.ExpensePaid, &out.Income, &out.Saving, &out.Installment} {
+		*v = math.Round(*v*100) / 100
+	}
+	return out, nil
 }
 
 const (
@@ -71,7 +172,7 @@ func (s *Service) summary(ctx context.Context, userID uuid.UUID, today time.Time
 	if err := s.dueWindow(ctx, userID, today, &out); err != nil {
 		return out, err
 	}
-	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_reminders r
+	rows, err := s.db.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules r
 		WHERE user_id = $1 AND status = 'active'`, userID)
 	if err != nil {
 		return out, fmt.Errorf("summary rules: %w", err)
@@ -89,14 +190,12 @@ func (s *Service) summary(ctx context.Context, userID uuid.UUID, today time.Time
 	if err := rows.Err(); err != nil {
 		return out, err
 	}
+	if out.Month, err = s.monthHero(ctx, userID, rules, today); err != nil {
+		return out, err
+	}
 	if len(rules) == 0 {
 		return out, nil
 	}
-	ids := make([]uuid.UUID, len(rules))
-	for i, r := range rules {
-		ids[i] = r.ID
-	}
-	_ = ids
 	next := map[uuid.UUID]time.Time{}
 	ahead, err := s.occsInRange(ctx, s.db, userID, rules, today, today.AddDate(0, 0, horizonDays), today, true)
 	if err != nil {

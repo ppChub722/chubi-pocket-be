@@ -779,7 +779,7 @@ func (s *Store) AbsorbForContact(ctx context.Context, userID, contactID uuid.UUI
 		return 0, fmt.Errorf("absorb: %w", err)
 	}
 	// 0.4.1-2 K7 (Q-K1): the typed names' "หนี้" recurring settings merge into the contact too.
-	if _, err := tx.Exec(ctx, `UPDATE recurring_reminders SET contact_id = $1, person_name = $2
+	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET contact_id = $1, person_name = $2
 		WHERE user_id = $3 AND type = 'debt' AND contact_id IS NULL
 		  AND LOWER(TRIM(person_name)) = ANY($4::text[])`, contactID, displayName, userID, lowered); err != nil {
 		return 0, fmt.Errorf("absorb rules: %w", err)
@@ -814,7 +814,7 @@ func (s *Store) RestoreOnContactDeleteTx(ctx context.Context, tx pgx.Tx, userID,
 		return 0, fmt.Errorf("restore on delete: %w", err)
 	}
 	// 0.4.1-2 K7: a "หนี้" recurring setting keeps the name (the FK then drops the contact).
-	if _, err := tx.Exec(ctx, `UPDATE recurring_reminders SET person_name = $1
+	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET person_name = $1
 		WHERE user_id = $2 AND contact_id = $3`, displayName, userID, contactID); err != nil {
 		return 0, fmt.Errorf("restore rules on delete: %w", err)
 	}

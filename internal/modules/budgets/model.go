@@ -243,7 +243,7 @@ type Item struct {
 	Recurring   *ItemRecurring      `json:"recurring"`
 	// RuleID / Slot name a recurring occurrence (the id of its setting and its
 	// original date); set for the รอจ่าย rows read from computed occurrences.
-	RuleID *uuid.UUID `json:"recurring_reminder_id"`
+	RuleID *uuid.UUID `json:"recurring_rule_id"`
 	Slot   *string    `json:"slot"`
 	Reason string     `json:"reason"`
 }

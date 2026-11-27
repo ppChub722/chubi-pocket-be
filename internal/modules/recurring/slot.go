@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ppChub722/chubi-pocket-be/internal/modules/categories"
 	"github.com/ppChub722/chubi-pocket-be/internal/modules/transactions"
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
@@ -21,6 +22,20 @@ type ConfirmRequest struct {
 	// MarkInstallments — a payment round of an item with a plan: the installments it ticks
 	// ([] = none); absent = the oldest open one (0.4.3).
 	MarkInstallments *[]int `json:"mark_installments"`
+	// BillDiff — a card bill round (a transfer into a card): the actual bill differed from what
+	// was recorded and the user said book it (spec §2.3 bill confirm sheet; never automatic).
+	BillDiff *BillDiff `json:"bill_diff"`
+}
+
+// BillDiff — the difference booked as an expense on the card, dated the round (the statement
+// day): category "other" = the starter อื่นๆ, "interest" = ดอกเบี้ย (INTEREST_PAID).
+type BillDiff struct {
+	Amount   float64 `json:"amount"`
+	Category string  `json:"category"`
+}
+
+func (d *BillDiff) valid() bool {
+	return d.Amount > 0 && (d.Category == "other" || d.Category == "interest")
 }
 
 // MarkPaidRequest — paid without a transaction keeps an amount (0.4.1-1 R5): the
@@ -39,7 +54,7 @@ type LinkSlotRequest struct {
 }
 
 type LeftOut struct {
-	RuleID uuid.UUID `json:"recurring_reminder_id"`
+	RuleID uuid.UUID `json:"recurring_rule_id"`
 	Slot   string    `json:"slot"`
 	Reason string    `json:"reason"` // needs_amount
 }
@@ -121,9 +136,6 @@ func truncRunes(s *string, n int) *string {
 func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, row *itemRow, date *time.Time, auto bool, lang string) ([]uuid.UUID, any, error) {
 	if row.filled() {
 		return nil, nil, ErrAlreadyRecorded
-	}
-	if r.NotifyOnly {
-		return nil, nil, ErrInvalidTransition // แค่แจ้งเตือน: nothing to record
 	}
 	if row.PendingID != nil { // a legacy draft of this occurrence: the transaction replaces it
 		if err := s.pending.Store().DeleteTx(ctx, tx, r.UserID, *row.PendingID); err != nil {
@@ -220,16 +232,22 @@ func (s *Service) recordOccurrenceTx(ctx context.Context, tx pgx.Tx, r *Rule, ro
 }
 
 // autoCreate records, for a setting with auto-create on, the occurrences that
-// came due since it last looked (auto_created_until, today]: not the ones that
+// came due since it last looked (auto_accepted_until, today]: not the ones that
 // were due before it was switched on (they stay due), not skipped / paid /
 // recorded ones; an edited one uses its edited values. A failing one stays due.
 func (s *Service) autoCreate(ctx context.Context, tx pgx.Tx, r *Rule, today time.Time, lang string) (int, error) {
-	if !r.AutoCreate || (r.AutoCreatedUntil != nil && !r.AutoCreatedUntil.Before(today)) {
-		return 0, nil // off, or already handled today
+	if r.AutoAcceptedUntil != nil && !r.AutoAcceptedUntil.Before(today) {
+		return 0, nil // already handled today
+	}
+	if !r.autoEff { // off: the marker still moves, so switching on later never back-books
+		_, err := tx.Exec(ctx, `UPDATE recurring_rules SET auto_accepted_until = $2 WHERE id = $1
+			AND auto_accepted_until IS DISTINCT FROM $2`, r.ID, today)
+		r.AutoAcceptedUntil = &today
+		return 0, err
 	}
 	from := r.TrackedFrom
-	if r.AutoCreatedUntil != nil && r.AutoCreatedUntil.AddDate(0, 0, 1).After(from) {
-		from = r.AutoCreatedUntil.AddDate(0, 0, 1)
+	if r.AutoAcceptedUntil != nil && r.AutoAcceptedUntil.AddDate(0, 0, 1).After(from) {
+		from = r.AutoAcceptedUntil.AddDate(0, 0, 1)
 	}
 	made := 0
 	if !from.After(today) {
@@ -262,11 +280,11 @@ func (s *Service) autoCreate(ctx context.Context, tx pgx.Tx, r *Rule, today time
 			made++
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE recurring_reminders SET auto_created_until = $2 WHERE id = $1
-		AND auto_created_until IS DISTINCT FROM $2`, r.ID, today); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE recurring_rules SET auto_accepted_until = $2 WHERE id = $1
+		AND auto_accepted_until IS DISTINCT FROM $2`, r.ID, today); err != nil {
 		return 0, err
 	}
-	r.AutoCreatedUntil = &today
+	r.AutoAcceptedUntil = &today
 	return made, nil
 }
 
@@ -303,12 +321,18 @@ func (s *Service) Confirm(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 	if err := validateFields(&req.Fields); err != nil {
 		return nil, err
 	}
+	if req.BillDiff != nil && !req.BillDiff.valid() {
+		return nil, ErrValidation
+	}
 	_, r, o, err := s.occCtx(ctx, s.db, userID, ruleID, slot, tz)
 	if err != nil {
 		return nil, err
 	}
 	if o.status == StatusDone {
 		return nil, ErrAlreadyRecorded
+	}
+	if req.BillDiff != nil && (r.Type != "transfer" || r.ToAccountID == nil) {
+		return nil, ErrValidation
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -339,10 +363,33 @@ func (s *Service) Confirm(ctx context.Context, userID, ruleID uuid.UUID, slot ti
 	if err != nil {
 		return nil, err
 	}
+	if d := req.BillDiff; d != nil { // after the transfer: its prefill must not count the difference
+		if err := s.bookBillDiffTx(ctx, tx, r, d, slot); err != nil {
+			return nil, err
+		}
+		touched = append(touched, *r.ToAccountID)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return s.slotResult(ctx, userID, ruleID, slot, txRow, touched)
+}
+
+// bookBillDiffTx books a bill's difference as an expense on the card, dated the round.
+func (s *Service) bookBillDiffTx(ctx context.Context, tx pgx.Tx, r *Rule, d *BillDiff, slot time.Time) error {
+	card, date := *r.ToAccountID, slot.Format(dateLayout)
+	if d.Category == "interest" {
+		_, _, err := s.txs.CreateSystemInTx(ctx, tx, r.UserID, card, categories.SystemInterestPaid, round2(d.Amount), date, nil, nil)
+		return err
+	}
+	var cat *uuid.UUID // the starter อื่นๆ; none when the user deleted it
+	err := tx.QueryRow(ctx, `SELECT id FROM categories WHERE user_id = $1 AND seed_key = 'other'`, r.UserID).Scan(&cat)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	_, err = s.txs.CreateInTx(ctx, tx, r.UserID, transactions.CreateRequest{Type: transactions.TypeExpense,
+		AccountID: &card, Amount: round2(d.Amount), CategoryID: cat, Date: date})
+	return err
 }
 
 // SkipOcc skips an open (or paid) occurrence. A filled one is refused: its

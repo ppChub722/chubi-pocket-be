@@ -453,8 +453,8 @@ func (s *Service) entryViews(ctx context.Context, rows []*entryRow) ([]Entry, er
 		return nil, err
 	}
 	links := map[uuid.UUID]shared.RecurringItemLink{}
-	q, err := s.store.db.Query(ctx, `SELECT ri.saving_entry_id, ri.id, ri.seq, r.id, r.name, r.icon_code, r.total_count, r.recurring_id
-		FROM recurring_items ri LEFT JOIN recurring_reminders r ON r.id = ri.recurring_reminder_id WHERE ri.saving_entry_id = ANY($1)`, ids)
+	q, err := s.store.db.Query(ctx, `SELECT ri.saving_entry_id, ri.id, ri.seq, r.id, (SELECT g.name FROM recurrings g WHERE g.id = r.recurring_id), (SELECT g.icon_code FROM recurrings g WHERE g.id = r.recurring_id), r.total_count, r.recurring_id
+		FROM recurring_items ri LEFT JOIN recurring_rules r ON r.id = ri.recurring_rule_id WHERE ri.saving_entry_id = ANY($1)`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("entry links: %w", err)
 	}
@@ -481,7 +481,7 @@ func (s *Service) entryViews(ctx context.Context, rows []*entryRow) ([]Entry, er
 		}
 		l.ItemID, l.Seq, l.Total = iid, intOrNil(seq), intOrNil(tot)
 		if rid != nil && name != nil && itemID != nil {
-			l.Recurring = &shared.RecurringRef{ID: *itemID, RecurringReminderID: *rid, Name: *name, IconCode: shared.IconFromJSON(icon)}
+			l.Recurring = &shared.RecurringRef{ID: *itemID, RecurringRuleID: *rid, Name: *name, IconCode: shared.IconFromJSON(icon)}
 		}
 		links[eid] = l
 	}

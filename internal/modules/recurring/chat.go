@@ -15,7 +15,7 @@ var ErrNoSlot = errors.New("recurring: no slot to record")
 type ChatRule struct {
 	ID          uuid.UUID
 	Name        string
-	Type        string // expense | income | transfer
+	Type        string  // expense | income | transfer
 	Amount      float64 // 0 = the rule has no amount
 	AccountID   *uuid.UUID
 	CategoryID  *uuid.UUID

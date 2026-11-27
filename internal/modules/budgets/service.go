@@ -311,8 +311,8 @@ func (s *Service) loadRefs(ctx context.Context, userID uuid.UUID, bs []*Budget, 
 		return nil, err
 	}
 	if len(itemIDs) > 0 {
-		q, err := s.store.db.Query(ctx, `SELECT ri.id, ri.seq, r.id, r.name, r.icon_code, r.total_count, r.recurring_id
-			FROM recurring_items ri LEFT JOIN recurring_reminders r ON r.id = ri.recurring_reminder_id WHERE ri.id = ANY($1)`, itemIDs)
+		q, err := s.store.db.Query(ctx, `SELECT ri.id, ri.seq, r.id, (SELECT g.name FROM recurrings g WHERE g.id = r.recurring_id), (SELECT g.icon_code FROM recurrings g WHERE g.id = r.recurring_id), r.total_count, r.recurring_id
+			FROM recurring_items ri LEFT JOIN recurring_rules r ON r.id = ri.recurring_rule_id WHERE ri.id = ANY($1)`, itemIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -340,7 +340,7 @@ func (s *Service) loadRefs(ctx context.Context, userID uuid.UUID, bs []*Budget, 
 			}
 			l.ItemID, l.Seq, l.Total = id, toIntPt(seq), toIntPt(total)
 			if ruleID != nil && name != nil && itemID != nil {
-				l.Recurring = &shared.RecurringRef{ID: *itemID, RecurringReminderID: *ruleID, Name: *name, IconCode: shared.IconFromJSON(icon)}
+				l.Recurring = &shared.RecurringRef{ID: *itemID, RecurringRuleID: *ruleID, Name: *name, IconCode: shared.IconFromJSON(icon)}
 			}
 			out.recItem[id] = l
 		}

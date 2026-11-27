@@ -50,20 +50,21 @@ type Rule struct {
 	GoalID      *uuid.UUID // type saving: the goal (nil = spare)
 	TagIDs      []uuid.UUID
 	recurrence.Spec
-	Kind           string     // subscription | installment | income | reminder | saving
-	TrialUntil     *time.Time // subscription: the free trial runs until
-	Status         string
-	EndingNotified bool
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	Kind       string     // subscription | installment | income | reminder | saving
+	TrialUntil *time.Time // subscription: the free trial runs until
+	Status     string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 	// TrackedFrom — occurrences before it are history (paid implicitly), never overdue.
 	TrackedFrom time.Time
 	// DueNotifiedUntil — the due notice has counted the occurrences up to this day.
 	DueNotifiedUntil *time.Time
-	// AutoCreate — record the transaction by itself when an occurrence comes due;
-	// AutoCreatedUntil is the last day it has handled.
-	AutoCreate       bool
-	AutoCreatedUntil *time.Time
+	// Notify / AutoAccept — the round-due notice and confirming a round by itself; nil = the user's
+	// default (users.recurring_notify_default / recurring_auto_accept_default). AutoAcceptedUntil is
+	// the last day auto-accept has handled. Auto-accept never runs on an asked amount.
+	Notify            *bool
+	AutoAccept        *bool
+	AutoAcceptedUntil *time.Time
 	// PausedFrom — the day it was paused (or archived while active); resuming skips the
 	// occurrences of the gap.
 	PausedFrom *time.Time
@@ -77,22 +78,22 @@ type Rule struct {
 	DebtKind      *string
 	DebtDirection *string
 	ZeroRounds    int
-	// 0.4.3: the item this line belongs to; a line paid by a person (คนจ่ายแทน: a contact, else the
-	// typed name, always kept) instead of a wallet. InstitutionID — read only: the item's
-	// institution counterparty (type debt), the line's PersonName then holds its name.
+	// RecurringID — the recurring this rule sits under; a rule paid by a person (คนจ่ายแทน: a contact,
+	// else the typed name, always kept) instead of a wallet. InstitutionID — a debt rule with an
+	// institution (PersonName then holds its name); DebtPlanID — the plan whose rounds it pays.
 	RecurringID      uuid.UUID
 	PaidByContactID  *uuid.UUID
 	PaidByPersonName *string
 	InstitutionID    *uuid.UUID
+	DebtPlanID       *uuid.UUID
 	// AmountMode — fixed: the reminder's amount; ask: typed on each round (a round waits for it).
 	AmountMode string
-	// RepaysReminderID — repay_paid_by: the paid_by reminder of the same item this one pays back
-	// (its person; each round the amount of that reminder's latest recorded round).
-	RepaysReminderID *uuid.UUID
-	// NotifyOnly — แค่แจ้งเตือน: its rounds book nothing (no money, no totals); a due round is closed
-	// by itself; only its alerts go out.
-	NotifyOnly bool
-	forceID    uuid.UUID // insertRuleTx: the id a new reminder takes
+	// RepaysRuleID — repay_paid_by: the paid_by rule of the same recurring this one pays back (its
+	// person; each round the amount of that rule's latest recorded round).
+	RepaysRuleID *uuid.UUID
+	forceID      uuid.UUID // insertRuleTx: the id a new rule takes
+	// autoEff — auto-accept in effect (the rule's switch, else the user's default), set by DueCheck.
+	autoEff bool
 }
 
 const (
@@ -223,8 +224,8 @@ type Recurring struct {
 	AvgAmount *float64 `json:"avg_amount"`
 	// Chain — an installment (a setting with an end, up to 60 occurrences): the status of every occurrence.
 	Chain []ChainStep `json:"chain"`
-	// AutoCreate — the transaction is recorded by itself when an occurrence comes due.
-	AutoCreate bool `json:"auto_create"`
+	// AutoAccept — the rule's switch as stored (null = the user's default).
+	AutoAccept *bool `json:"auto_accept"`
 	// RecordedTxCount — recorded occurrences that have a transaction.
 	RecordedTxCount int `json:"recorded_tx_count"`
 	// PauseReason — manual | overdue_limit | goal_inactive | no_balance; null unless paused (0.4.1-1 R7).
@@ -263,7 +264,7 @@ type LinkedTx struct {
 // from the rule (id null, stored false), addressed by rule_id + slot.
 type Item struct {
 	ID            *uuid.UUID            `json:"id"`
-	RuleID        uuid.UUID             `json:"recurring_reminder_id"`
+	RuleID        uuid.UUID             `json:"recurring_rule_id"`
 	Slot          string                `json:"slot"` // the occurrence's original date
 	Stored        bool                  `json:"stored"`
 	AutoCreated   bool                  `json:"auto_created"`
@@ -392,32 +393,6 @@ func (f *Fields) values() bool {
 		}
 	}
 	return false
-}
-
-type CreateRequest struct {
-	Fields
-	Name       string           `json:"name"`
-	Kind       *string          `json:"kind"`
-	TrialUntil *string          `json:"trial_until"`
-	IconCode   *shared.IconCode `json:"icon_code"`
-	Rule       *RecurrenceRule  `json:"rule"`
-	StartDate  string           `json:"start_date"`
-	End        *RecurrenceEnd   `json:"end"`
-	// AutoCreate — record the transaction by itself when an occurrence comes due.
-	AutoCreate *bool `json:"auto_create"`
-}
-
-type UpdateRequest struct {
-	Fields
-	Name       *string          `json:"name"`
-	Kind       *string          `json:"kind"`
-	TrialUntil *string          `json:"trial_until"`
-	IconCode   *shared.IconCode `json:"icon_code"`
-	Rule       *RecurrenceRule  `json:"rule"`
-	StartDate  *string          `json:"start_date"`
-	End        *RecurrenceEnd   `json:"end"`
-	// AutoCreate — switch auto-create on / off (never back-creates).
-	AutoCreate *bool `json:"auto_create"`
 }
 
 type ExtendRequest struct {

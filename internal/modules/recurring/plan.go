@@ -567,6 +567,8 @@ func (s *Service) UpdateDebtPlan(ctx context.Context, userID, id uuid.UUID, in D
 
 // DeleteDebtPlan — the plan, its installments and its recurring item go; its debt rows stay as
 // general debts of the creditor.
+// DeleteDebtPlan — the plan and the rules that pay it (cascade; a recurring left with no rule goes
+// with them, migration 015's trigger).
 func (s *Service) DeleteDebtPlan(ctx context.Context, userID, id uuid.UUID) error {
 	tag, err := s.db.Exec(ctx, `DELETE FROM debt_plans WHERE id = $1 AND user_id = $2`, id, userID)
 	if err != nil {
@@ -682,7 +684,7 @@ func (s *Service) planView(ctx context.Context, q shared.Querier, userID uuid.UU
 			return nil, err
 		}
 	}
-	items, err := q.Query(ctx, `SELECT id FROM recurrings WHERE debt_plan_id = $1 AND user_id = $2 ORDER BY created_at LIMIT 1`,
+	items, err := q.Query(ctx, `SELECT recurring_id FROM recurring_rules WHERE debt_plan_id = $1 AND user_id = $2 ORDER BY created_at LIMIT 1`,
 		p.ID, userID)
 	if err != nil {
 		return nil, err
@@ -802,6 +804,9 @@ type InstallmentEdit struct {
 	Amount    *float64 `json:"amount"`
 	Principal *float64 `json:"principal"`
 	Interest  *float64 `json:"interest"`
+	// RecalcRest — the app asked "คำนวณงวดที่เหลือใหม่ไหม" and the user said yes: the open rounds after
+	// this one are rebuilt from the real remaining principal, overwriting them (hand-edited ones too).
+	RecalcRest bool `json:"recalc_rest"`
 }
 
 // EditInstallment — "แก้เฉพาะงวดนี้": its date and / or its money (amount alone = all principal
@@ -812,7 +817,8 @@ func (s *Service) EditInstallment(ctx context.Context, userID, id uuid.UUID, seq
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := getPlan(ctx, tx, userID, id, true); err != nil {
+	p, err := getPlan(ctx, tx, userID, id, true)
+	if err != nil {
 		return nil, err
 	}
 	var (
@@ -862,10 +868,84 @@ func (s *Service) EditInstallment(ctx context.Context, userID, id uuid.UUID, seq
 		WHERE debt_plan_id = $1 AND seq = $2`, id, seq, due, prin, inter); err != nil {
 		return nil, err
 	}
+	if in.RecalcRest {
+		if err := recalcRestTx(ctx, tx, p, seq); err != nil {
+			return nil, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return s.GetDebtPlan(ctx, userID, id, tz)
+}
+
+// recalcRestTx — the open rounds after seq rebuilt from the real remaining principal (the plan's
+// principal less every round up to seq, skipped ones aside), by the plan's method, keeping their
+// dates: reducing works the interest on the balance again; flat and manual keep each round's
+// interest (flat is on the original principal); fixed keeps the installment amount.
+func recalcRestTx(ctx context.Context, tx pgx.Tx, p *planRecord, seq int) error {
+	var done float64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(principal), 0)::float8 FROM debt_installments
+		WHERE debt_plan_id = $1 AND seq <= $2 AND NOT skipped`, p.ID, seq).Scan(&done); err != nil {
+		return err
+	}
+	type row struct {
+		seq      int
+		due      time.Time
+		interest float64
+	}
+	var rest []row
+	rows, err := tx.Query(ctx, `SELECT seq, due_date, interest::float8 FROM debt_installments
+		WHERE debt_plan_id = $1 AND seq > $2 AND paid_at IS NULL AND NOT skipped ORDER BY seq FOR UPDATE`, p.ID, seq)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.seq, &r.due, &r.interest); err != nil {
+			rows.Close()
+			return err
+		}
+		rest = append(rest, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil || len(rest) == 0 {
+		return err
+	}
+	left := round2(p.Principal - done)
+	set := func(r row, prin, inter float64) error {
+		_, err := tx.Exec(ctx, `UPDATE debt_installments SET principal = $3, interest = $4, amount = $3::numeric + $4::numeric,
+			edited = FALSE WHERE debt_plan_id = $1 AND seq = $2`, p.ID, r.seq, prin, inter)
+		return err
+	}
+	if left <= 0 { // already paid off: nothing left to pay
+		for _, r := range rest {
+			if err := set(r, 0, 0); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	method := p.InterestMethod
+	if method == "manual" || method == "flat" {
+		method = "none" // principal spread again, each round keeps its interest
+	}
+	in := &PlanInput{Principal: left, Count: len(rest), StartDate: rest[0].due.Format(dateLayout), InterestMethod: method,
+		InterestRate: p.InterestRate, InstallmentAmount: p.InstallmentAmount}
+	plan, _, err := computeInstallments(in)
+	if err != nil {
+		return err
+	}
+	for i, r := range rest {
+		inter := plan[i].Interest
+		if p.InterestMethod == "manual" || p.InterestMethod == "flat" {
+			inter = r.interest
+		}
+		if err := set(r, plan[i].Principal, inter); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type MarkInstallmentRequest struct {
@@ -1002,12 +1082,16 @@ func (s *Service) ClosePlan(ctx context.Context, userID, id uuid.UUID, tz string
 	if err := savePlanTx(ctx, tx, p); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE recurring_reminders SET status = 'archived', paused_from = NULL, pause_reason = NULL
-		WHERE recurring_id IN (SELECT id FROM recurrings WHERE debt_plan_id = $1) AND status <> 'archived'`, id); err != nil {
+	// closing a plan stops the rules that pay it (spec §2.2); their recurrings follow their rules
+	items, err := collectUUIDs(ctx, tx, `UPDATE recurring_rules SET status = 'archived', paused_from = NULL, pause_reason = NULL
+		WHERE debt_plan_id = $1 AND status <> 'archived' RETURNING recurring_id`, id)
+	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE recurrings SET status = 'archived' WHERE debt_plan_id = $1`, id); err != nil {
-		return nil, err
+	for _, it := range uniqueIDs(items) {
+		if err := refreshItemStatusTx(ctx, tx, userID, it); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err

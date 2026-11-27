@@ -28,8 +28,11 @@ func TestInstitutionCounterparty(t *testing.T) {
 	item, plan := uuid.New(), uuid.New()
 	f.exec(`INSERT INTO debt_plans (id, user_id, name, direction, institution_id, principal, count, start_date, interest_method)
 		VALUES ($1, $2, 'ผ่อนรถ', 'received', $3, 30000, 3, CURRENT_DATE, 'none')`, plan, f.me, inst)
-	f.exec(`INSERT INTO recurrings (id, user_id, name, type, debt_direction, debt_plan_id)
-		VALUES ($1, $2, 'ผ่อนรถ', 'debt', 'received', $3)`, item, f.me, plan)
+	f.exec(`INSERT INTO recurrings (id, user_id, name) VALUES ($1, $2, 'ผ่อนรถ')`, item, f.me)
+	f.exec(`INSERT INTO recurring_rules (id, recurring_id, user_id, type, kind, amount, freq, interval_n, start_date, status,
+		person_name, debt_kind, debt_direction, debt_plan_id, institution_id)
+		VALUES ($1, $1, $2, 'debt', 'debt', 10000, 'monthly', 1, CURRENT_DATE, 'active', 'ผ่อนรถ', 'repayment', 'paid', $3, $4)`,
+		item, f.me, plan, inst)
 	for i := 1; i <= 3; i++ {
 		f.exec(`INSERT INTO debt_installments (user_id, debt_plan_id, seq, due_date, amount, principal, interest)
 			VALUES ($1, $2, $3, CURRENT_DATE + ($3 - 1) * 30, 10000, 10000, 0)`, f.me, plan, i)

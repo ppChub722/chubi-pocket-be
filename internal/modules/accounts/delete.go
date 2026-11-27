@@ -8,11 +8,11 @@ import (
 )
 
 type DeletePreview struct {
-	Transactions int `json:"transactions"`
-	Transfers int `json:"transfers"`
-	SystemRowsDeleted int `json:"system_rows_deleted"`
-	Recurring int `json:"recurring"`
-	SavingEntries SavingEntriesPreview `json:"saving_entries"`
+	Transactions      int                  `json:"transactions"`
+	Transfers         int                  `json:"transfers"`
+	SystemRowsDeleted int                  `json:"system_rows_deleted"`
+	Recurring         int                  `json:"recurring"`
+	SavingEntries     SavingEntriesPreview `json:"saving_entries"`
 }
 
 type SavingEntriesPreview struct {
@@ -58,7 +58,7 @@ func (s *Service) previewOn(ctx context.Context, id uuid.UUID) (*DeletePreview, 
 		WHERE t.account_id = $1`, id).Scan(&p.Transactions, &p.Transfers, &p.SystemRowsDeleted); err != nil {
 		return nil, fmt.Errorf("delete preview: %w", err)
 	}
-	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM recurring_reminders WHERE account_id = $1 OR to_account_id = $1`, id).Scan(&p.Recurring); err != nil {
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM recurring_rules WHERE account_id = $1 OR to_account_id = $1`, id).Scan(&p.Recurring); err != nil {
 		return nil, fmt.Errorf("delete preview: %w", err)
 	}
 	if err := db.QueryRow(ctx, `SELECT COUNT(*), COALESCE(SUM(amount), 0)::float8 FROM saving_entries WHERE account_id = $1`, id).

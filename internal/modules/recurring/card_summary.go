@@ -169,8 +169,8 @@ func (s *Service) cardSummaries(ctx context.Context, userID uuid.UUID, only *uui
 			}
 		}
 		var item uuid.UUID
-		err = s.db.QueryRow(ctx, `SELECT id FROM recurrings WHERE user_id = $1 AND counterparty_account_id = $2
-			AND status <> 'archived' ORDER BY created_at LIMIT 1`, userID, c.id).Scan(&item)
+		err = s.db.QueryRow(ctx, `SELECT r.recurring_id FROM recurring_rules r WHERE r.user_id = $1 AND r.type = 'transfer'
+			AND r.to_account_id = $2 AND r.status <> 'archived' ORDER BY r.created_at LIMIT 1`, userID, c.id).Scan(&item)
 		switch {
 		case err == nil:
 			sm.RecurringID = &item

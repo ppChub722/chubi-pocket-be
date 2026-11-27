@@ -8,7 +8,7 @@ import (
 // next one coming (within the setting's window).
 type Occurrence struct {
 	ItemID    *uuid.UUID `json:"item_id"` // null while it is only computed
-	RuleID    uuid.UUID  `json:"recurring_reminder_id"`
+	RuleID    uuid.UUID  `json:"recurring_rule_id"`
 	Slot      string     `json:"slot"`
 	Date      string     `json:"date"`
 	DaysUntil int        `json:"days_until"`

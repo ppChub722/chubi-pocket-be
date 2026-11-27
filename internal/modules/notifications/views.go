@@ -36,19 +36,22 @@ type DeleteResult struct {
 }
 
 type SettingsView struct {
-	MutedTypes              []string           `json:"muted_types"`
-	Types                   []TypeSetting      `json:"types"`
-	AutoSyncEvents          bool               `json:"auto_sync_events"`
-	AutoSyncDebts           bool               `json:"auto_sync_debts"`
-	AutoAcceptEvents        bool               `json:"auto_accept_events"`
-	AutoAcceptDebts         bool               `json:"auto_accept_debts"`
-	AutoAcceptEventInvites  bool               `json:"auto_accept_event_invites"`
-	AutoAcceptContactLinks  bool               `json:"auto_accept_contact_links"`
-	AutoAcceptWalletInvites bool               `json:"auto_accept_wallet_invites"`
-	AutoAcceptRepayments    bool               `json:"auto_accept_repayments"`
-	OnSplitRemoved          string             `json:"on_split_removed"`
-	DefaultAccount          *shared.AccountRef `json:"default_account"`
-	UpdatedAt               time.Time          `json:"updated_at"`
+	MutedTypes              []string      `json:"muted_types"`
+	Types                   []TypeSetting `json:"types"`
+	AutoSyncEvents          bool          `json:"auto_sync_events"`
+	AutoSyncDebts           bool          `json:"auto_sync_debts"`
+	AutoAcceptEvents        bool          `json:"auto_accept_events"`
+	AutoAcceptDebts         bool          `json:"auto_accept_debts"`
+	AutoAcceptEventInvites  bool          `json:"auto_accept_event_invites"`
+	AutoAcceptContactLinks  bool          `json:"auto_accept_contact_links"`
+	AutoAcceptWalletInvites bool          `json:"auto_accept_wallet_invites"`
+	AutoAcceptRepayments    bool          `json:"auto_accept_repayments"`
+	// the รายการประจำ row: แจ้ง / อัตโนมัติ = a rule's defaults
+	RecurringNotifyDefault     bool               `json:"recurring_notify_default"`
+	RecurringAutoAcceptDefault bool               `json:"recurring_auto_accept_default"`
+	OnSplitRemoved             string             `json:"on_split_removed"`
+	DefaultAccount             *shared.AccountRef `json:"default_account"`
+	UpdatedAt                  time.Time          `json:"updated_at"`
 }
 
 // TypeSetting — one row of the notification settings page (0.4.1-2 P7).
@@ -134,18 +137,20 @@ func (s *Service) MarkDismissedResult(ctx context.Context, userID, id uuid.UUID)
 
 func (s *Service) settingsView(ctx context.Context, st *Settings) (*SettingsView, error) {
 	v := &SettingsView{
-		MutedTypes:              st.MutedTypes,
-		Types:                   make([]TypeSetting, 0, len(pageTypes)),
-		AutoSyncEvents:          st.AutoSyncEvents,
-		AutoSyncDebts:           st.AutoSyncDebts,
-		AutoAcceptEvents:        st.AutoAcceptEvents,
-		AutoAcceptDebts:         st.AutoAcceptDebts,
-		AutoAcceptEventInvites:  st.AutoAcceptEventInvites,
-		AutoAcceptContactLinks:  st.AutoAcceptContactLinks,
-		AutoAcceptWalletInvites: st.AutoAcceptWalletInvites,
-		AutoAcceptRepayments:    st.AutoAcceptRepayments,
-		OnSplitRemoved:          st.OnSplitRemoved,
-		UpdatedAt:               st.UpdatedAt,
+		MutedTypes:                 st.MutedTypes,
+		Types:                      make([]TypeSetting, 0, len(pageTypes)),
+		AutoSyncEvents:             st.AutoSyncEvents,
+		AutoSyncDebts:              st.AutoSyncDebts,
+		AutoAcceptEvents:           st.AutoAcceptEvents,
+		AutoAcceptDebts:            st.AutoAcceptDebts,
+		AutoAcceptEventInvites:     st.AutoAcceptEventInvites,
+		AutoAcceptContactLinks:     st.AutoAcceptContactLinks,
+		AutoAcceptWalletInvites:    st.AutoAcceptWalletInvites,
+		AutoAcceptRepayments:       st.AutoAcceptRepayments,
+		RecurringNotifyDefault:     st.RecurringNotifyDefault,
+		RecurringAutoAcceptDefault: st.RecurringAutoAcceptDefault,
+		OnSplitRemoved:             st.OnSplitRemoved,
+		UpdatedAt:                  st.UpdatedAt,
 	}
 	if v.MutedTypes == nil {
 		v.MutedTypes = []string{}
@@ -156,6 +161,9 @@ func (s *Service) settingsView(ctx context.Context, st *Settings) (*SettingsView
 			Type: t.Type, Group: t.Group, Mutable: mutableTypes[t.Type],
 			On: st.Deliver(t.Type),
 		})
+		if t.Type == TypeRecurringDue { // the row's แจ้ง is the rules' default, not a mute
+			v.Types[len(v.Types)-1].On = st.RecurringNotifyDefault
+		}
 	}
 	if st.DefaultAccountID != nil {
 		refs, err := shared.LoadAccountRefs(ctx, s.store.db, []uuid.UUID{*st.DefaultAccountID})

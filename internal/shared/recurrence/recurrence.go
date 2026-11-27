@@ -20,19 +20,28 @@ const (
 	maxOccurrences = 1000 // safety stop for any loop
 )
 
+// LastDay in MonthDays = the month's last day (สิ้นเดือน).
+const LastDay = -1
+
+// Monthly — a monthly rule's pattern: mode day (the days in MonthDays) or weekday (the nth
+// weekday; kept in the model, not offered on screen).
 type Monthly struct {
 	Mode    string `json:"mode"`
-	Day     *int   `json:"day"`
 	Nth     *int   `json:"nth"`
 	Weekday *int   `json:"weekday"`
 }
 
+// RecurrenceRule — the API shape. MonthDays: the days of a monthly (day mode) or yearly rule
+// (1–31, -1 = the last day; a day past the month's end falls on its last day). Months: a yearly
+// rule's months (1–12). Empty = the start date's day / month.
 type RecurrenceRule struct {
-	Freq     string   `json:"freq"`
-	Interval int      `json:"interval"`
-	Weekdays []int    `json:"weekdays"`
-	Monthly  *Monthly `json:"monthly"`
-	Dates    []string `json:"dates"`
+	Freq      string   `json:"freq"`
+	Interval  int      `json:"interval"`
+	Weekdays  []int    `json:"weekdays"`
+	Monthly   *Monthly `json:"monthly"`
+	MonthDays []int    `json:"month_days"`
+	Months    []int    `json:"months"`
+	Dates     []string `json:"dates"`
 }
 
 type RecurrenceEnd struct {
@@ -48,7 +57,8 @@ type Spec struct {
 	Interval       int
 	Weekdays       []int
 	MonthlyMode    *string
-	MonthDay       *int
+	MonthDays      []int
+	Months         []int
 	MonthNth       *int
 	MonthWeekday   *int
 	Dates          []time.Time
@@ -110,6 +120,62 @@ func IsoWeekday(t time.Time) int {
 	return wd
 }
 
+// daysIn — the dates of month (y, m) for the day list days (empty = the start's day), sorted, each
+// once: -1 and a day past the month's end fall on its last day.
+func (r *Spec) daysIn(y int, m time.Month) []time.Time {
+	days := r.MonthDays
+	if len(days) == 0 {
+		days = []int{r.StartDate.Day()}
+	}
+	ld := lastDay(y, m)
+	seen := map[int]bool{}
+	var nums []int
+	for _, d := range days {
+		if d == LastDay || d > ld {
+			d = ld
+		}
+		if d < 1 || seen[d] {
+			continue
+		}
+		seen[d] = true
+		nums = append(nums, d)
+	}
+	sort.Ints(nums)
+	out := make([]time.Time, 0, len(nums))
+	for _, d := range nums {
+		out = append(out, time.Date(y, m, d, 0, 0, 0, 0, time.UTC))
+	}
+	return out
+}
+
+// monthDates — the dates of a monthly rule in month (y, m) (none when its nth weekday is missing).
+func (r *Spec) monthDates(y int, m time.Month) []time.Time {
+	if r.MonthlyMode != nil && *r.MonthlyMode == "weekday" && r.MonthNth != nil && r.MonthWeekday != nil {
+		if d, ok := nthWeekday(y, m, *r.MonthNth, *r.MonthWeekday); ok {
+			return []time.Time{d}
+		}
+		return nil
+	}
+	return r.daysIn(y, m)
+}
+
+// yearDates — the dates of a yearly rule in year y (its months, else the start's month).
+func (r *Spec) yearDates(y int) []time.Time {
+	months := append([]int(nil), r.Months...)
+	if len(months) == 0 {
+		months = []int{int(r.StartDate.Month())}
+	}
+	sort.Ints(months)
+	var out []time.Time
+	for i, m := range months {
+		if i > 0 && m == months[i-1] {
+			continue
+		}
+		out = append(out, r.daysIn(y, time.Month(m))...)
+	}
+	return out
+}
+
 func nthWeekday(y int, m time.Month, nth, weekday int) (time.Time, bool) {
 	if nth == -1 {
 		d := time.Date(y, m, lastDay(y, m), 0, 0, 0, 0, time.UTC)
@@ -168,44 +234,29 @@ func (r *Spec) Occurrences(until time.Time, limit int) []time.Time {
 			}
 		}
 	case "monthly":
+	months:
 		for k := 0; len(out) < maxOccurrences; k += r.Interval {
 			first := time.Date(start.Year(), start.Month()+time.Month(k), 1, 0, 0, 0, 0, time.UTC)
 			if first.After(until) {
 				break
 			}
-			var d time.Time
-			if r.MonthlyMode != nil && *r.MonthlyMode == "weekday" && r.MonthNth != nil && r.MonthWeekday != nil {
-				var ok bool
-				if d, ok = nthWeekday(first.Year(), first.Month(), *r.MonthNth, *r.MonthWeekday); !ok {
-					continue
+			for _, d := range r.monthDates(first.Year(), first.Month()) {
+				if !add(d) {
+					break months
 				}
-			} else {
-				day := start.Day()
-				if r.MonthDay != nil {
-					day = *r.MonthDay
-				}
-				if ld := lastDay(first.Year(), first.Month()); day > ld {
-					day = ld
-				}
-				d = time.Date(first.Year(), first.Month(), day, 0, 0, 0, 0, time.UTC)
-			}
-			if !add(d) {
-				break
 			}
 		}
 	case "yearly":
+	years:
 		for k := 0; len(out) < maxOccurrences; k += r.Interval {
 			y := start.Year() + k
-			day := start.Day()
-			if ld := lastDay(y, start.Month()); day > ld {
-				day = ld
-			}
-			d := time.Date(y, start.Month(), day, 0, 0, 0, 0, time.UTC)
-			if d.After(until) {
+			if time.Date(y, 1, 1, 0, 0, 0, 0, time.UTC).After(until) {
 				break
 			}
-			if !add(d) {
-				break
+			for _, d := range r.yearDates(y) {
+				if !add(d) {
+					break years
+				}
 			}
 		}
 	case "dates":
@@ -320,15 +371,27 @@ func (r *Spec) ApplyRule(in RecurrenceRule) error {
 		}
 		r.Weekdays = append(r.Weekdays, wd)
 	}
-	r.MonthlyMode, r.MonthDay, r.MonthNth, r.MonthWeekday = nil, nil, nil, nil
+	r.MonthlyMode, r.MonthDays, r.Months, r.MonthNth, r.MonthWeekday = nil, nil, nil, nil, nil
+	if in.Freq == "monthly" || in.Freq == "yearly" {
+		for _, d := range in.MonthDays {
+			if d != LastDay && (d < 1 || d > 31) {
+				return ErrInvalidRule
+			}
+			r.MonthDays = append(r.MonthDays, d)
+		}
+	}
+	if in.Freq == "yearly" {
+		for _, m := range in.Months {
+			if m < 1 || m > 12 {
+				return ErrInvalidRule
+			}
+			r.Months = append(r.Months, m)
+		}
+	}
 	if in.Freq == "monthly" && in.Monthly != nil {
 		m := *in.Monthly
 		switch m.Mode {
 		case "day":
-			if m.Day == nil || *m.Day < 1 || *m.Day > 31 {
-				return ErrInvalidRule
-			}
-			r.MonthDay = m.Day
 		case "weekday":
 			if m.Nth == nil || m.Weekday == nil || *m.Weekday < 1 || *m.Weekday > 7 ||
 				(*m.Nth != -1 && (*m.Nth < 1 || *m.Nth > 5)) {
@@ -385,7 +448,8 @@ func (r *Spec) ApplyEnd(in *RecurrenceEnd) error {
 }
 
 func (r *Spec) APIRule() RecurrenceRule {
-	out := RecurrenceRule{Freq: r.Freq, Interval: r.Interval, Weekdays: []int{}, Dates: []string{}}
+	out := RecurrenceRule{Freq: r.Freq, Interval: r.Interval, Weekdays: []int{}, MonthDays: []int{}, Months: []int{},
+		Dates: []string{}}
 	out.Weekdays = append(out.Weekdays, r.Weekdays...)
 	if r.Freq == "weekly" && len(out.Weekdays) == 0 {
 		out.Weekdays = []int{IsoWeekday(r.StartDate)}
@@ -397,14 +461,20 @@ func (r *Spec) APIRule() RecurrenceRule {
 		}
 		if m.Mode == "weekday" {
 			m.Nth, m.Weekday = r.MonthNth, r.MonthWeekday
-		} else {
-			day := r.StartDate.Day()
-			if r.MonthDay != nil {
-				day = *r.MonthDay
-			}
-			m.Day = &day
 		}
 		out.Monthly = m
+	}
+	if (r.Freq == "monthly" && out.Monthly.Mode == "day") || r.Freq == "yearly" {
+		out.MonthDays = append(out.MonthDays, r.MonthDays...)
+		if len(out.MonthDays) == 0 {
+			out.MonthDays = []int{r.StartDate.Day()}
+		}
+	}
+	if r.Freq == "yearly" {
+		out.Months = append(out.Months, r.Months...)
+		if len(out.Months) == 0 {
+			out.Months = []int{int(r.StartDate.Month())}
+		}
 	}
 	for _, d := range r.Dates {
 		out.Dates = append(out.Dates, d.Format(DateLayout))
@@ -551,45 +621,31 @@ func (r *Spec) Between(from, to time.Time) []time.Time {
 			if first.After(hi) {
 				break
 			}
-			var d time.Time
-			if r.MonthlyMode != nil && *r.MonthlyMode == "weekday" && r.MonthNth != nil && r.MonthWeekday != nil {
-				var ok bool
-				if d, ok = nthWeekday(first.Year(), first.Month(), *r.MonthNth, *r.MonthWeekday); !ok {
+			for _, d := range r.monthDates(first.Year(), first.Month()) {
+				if d.Before(lo) {
 					continue
 				}
-			} else {
-				day := start.Day()
-				if r.MonthDay != nil {
-					day = *r.MonthDay
+				if d.After(hi) {
+					return r.dropGaps(out)
 				}
-				if ld := lastDay(first.Year(), first.Month()); day > ld {
-					day = ld
-				}
-				d = time.Date(first.Year(), first.Month(), day, 0, 0, 0, 0, time.UTC)
+				out = append(out, d)
 			}
-			if d.Before(lo) {
-				continue
-			}
-			if d.After(hi) {
-				break
-			}
-			out = append(out, d)
 		}
 	case "yearly":
 		for k := ceilDiv(lo.Year()-start.Year(), step) * step; ; k += step {
 			y := start.Year() + k
-			day := start.Day()
-			if ld := lastDay(y, start.Month()); day > ld {
-				day = ld
-			}
-			d := time.Date(y, start.Month(), day, 0, 0, 0, 0, time.UTC)
-			if d.After(hi) {
+			if time.Date(y, 1, 1, 0, 0, 0, 0, time.UTC).After(hi) {
 				break
 			}
-			if d.Before(lo) {
-				continue
+			for _, d := range r.yearDates(y) {
+				if d.Before(lo) {
+					continue
+				}
+				if d.After(hi) {
+					return r.dropGaps(out)
+				}
+				out = append(out, d)
 			}
-			out = append(out, d)
 		}
 	case "dates":
 		ds := append([]time.Time(nil), r.Dates...)

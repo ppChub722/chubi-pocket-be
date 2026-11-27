@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-
 )
 
 // 0.4.1-2 K: the "หนี้" kind books person-book entries.

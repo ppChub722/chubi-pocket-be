@@ -17,11 +17,10 @@ import (
 	"github.com/ppChub722/chubi-pocket-be/internal/shared"
 )
 
-// ---- validation of an item input ----
+// ---- validation of a recurring / rule input ----
 
-// applyItemInput — the item fields of in onto it (create: it is new; update: a full replace of the
-// item's own fields, lines handled apart). Checks what needs no DB.
-func applyItemInput(it *itemRecord, in *RecurringInput, creating bool) error {
+// applyItemInput — the recurring's own fields (a full replace). Checks what needs no DB.
+func applyItemInput(it *itemRecord, in *RecurringInput) error {
 	if in.Name == nil {
 		return ErrValidation
 	}
@@ -29,160 +28,92 @@ func applyItemInput(it *itemRecord, in *RecurringInput, creating bool) error {
 	if name == "" || len([]rune(name)) > 100 {
 		return ErrValidation
 	}
-	if in.Type == nil || !validItemType(*in.Type) {
-		return ErrValidation
-	}
-	if !creating && *in.Type != it.Type {
-		return ErrTypeFixed // the type is fixed: delete the item and create a new one
-	}
 	if in.Description != nil && len([]rune(*in.Description)) > 200 || in.Note != nil && len([]rune(*in.Note)) > 500 {
 		return ErrValidation
 	}
-	it.Name, it.Type, it.Description, it.Note, it.IconCode = name, *in.Type, in.Description, in.Note, in.IconCode
-	it.CategoryID, it.GoalID = nil, nil
-	it.TagIDs = uniqueIDs(append([]uuid.UUID{}, in.TagIDs...))
-	switch it.Type {
-	case TypeSaving:
-		it.GoalID, it.TagIDs = in.GoalID, []uuid.UUID{}
-	case TypeTransfer:
-	default:
-		it.CategoryID = in.CategoryID
-	}
-	it.ContactID, it.PersonName, it.InstitutionID, it.AccountID, it.DebtDirection = nil, nil, nil, nil, nil
-	it.DebtPlanID, it.Plan = nil, nil
-	if it.Type == TypeDebt {
-		c := in.Counterparty
-		switch {
-		case in.DebtPlanID != nil: // a plan: its creditor and direction (resolveCounterpartyTx)
-			if c != nil {
-				return ErrValidation
-			}
-			it.DebtPlanID = in.DebtPlanID
-			return nil
-		case c != nil && c.AccountID != nil: // a card / PayLater bill: I owe the card
-			if c.ContactID != nil || c.PersonName != nil || c.InstitutionID != nil {
-				return ErrValidation
-			}
-			it.AccountID, it.DebtDirection = c.AccountID, ptr("received")
-			return nil
-		}
-		if c == nil || in.DebtDirection == nil || (*in.DebtDirection != "paid" && *in.DebtDirection != "received") {
+	tt := "other"
+	if in.TrackingType != nil {
+		if !trackingTypes[*in.TrackingType] {
 			return ErrValidation
 		}
-		n := 0
-		if c.ContactID != nil {
-			n++
-		}
-		if c.InstitutionID != nil {
-			n++
-		}
-		if c.PersonName != nil && strings.TrimSpace(*c.PersonName) != "" && c.ContactID == nil {
-			n++
-		}
-		if n != 1 {
-			return ErrValidation
-		}
-		it.ContactID, it.InstitutionID, it.DebtDirection = c.ContactID, c.InstitutionID, in.DebtDirection
-		if c.ContactID == nil && c.InstitutionID == nil {
-			pn := strings.TrimSpace(*c.PersonName)
-			if len([]rune(pn)) > 100 {
-				return ErrValidation
-			}
-			it.PersonName = &pn
-		}
-	} else if in.Counterparty != nil || in.DebtPlanID != nil {
-		return ErrValidation
+		tt = *in.TrackingType
 	}
+	it.Name, it.Description, it.Note, it.IconCode, it.TrackingType = name, in.Description, in.Note, in.IconCode, tt
 	return nil
 }
 
-// sameFamily — the expense types switch freely; the others never change.
-// resolveCounterpartyTx — the counterparty's name (a contact's live name, an institution's name),
-// checked to be mine and active.
-func resolveCounterpartyTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, it *itemRecord) error {
-	it.counterpartName = ""
-	if it.DebtPlanID != nil {
-		p, err := getPlan(ctx, tx, userID, *it.DebtPlanID, false)
+// resolveTargetTx — a debt rule's counterparty name (a contact's live name, an institution's name)
+// and plan, checked to be mine and active.
+func resolveTargetTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, t *ruleTarget) error {
+	t.counterpartName = ""
+	if t.DebtPlanID != nil {
+		p, err := getPlan(ctx, tx, userID, *t.DebtPlanID, false)
 		if err != nil {
 			return err
 		}
 		if p.isCard() { // a card plan is paid by its card's bill
-			return apierr.Wrap(ErrValidation, "a card plan takes no reminder: pay the card bill",
+			return apierr.Wrap(ErrValidation, "a card plan takes no rule: pay the card bill",
 				apierr.Field("debt_plan_id", apierr.FieldInvalid))
 		}
-		it.setPlan(p)
+		if p.ClosedAt != nil {
+			return ErrInvalidTransition
+		}
+		t.setPlan(p)
 	}
 	switch {
-	case it.AccountID != nil:
-		var typ string
-		err := tx.QueryRow(ctx, `SELECT a.type, a.name FROM accounts a WHERE a.id = $1 AND `+shared.ActiveMembershipPredicate("a.id", "$2"),
-			*it.AccountID, userID).Scan(&typ, &it.counterpartName)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrAccountNotFound
-		}
-		if err != nil {
+	case t.InstitutionID != nil:
+		if err := institutions.CheckOwned(ctx, tx, userID, *t.InstitutionID, true); err != nil {
 			return err
 		}
-		if typ != "credit_card" && typ != "pay_later" {
-			return apierr.Wrap(ErrValidation, "not a card / PayLater wallet", apierr.Field("counterparty.account_id", apierr.FieldInvalid))
-		}
-	case it.InstitutionID != nil:
-		if err := institutions.CheckOwned(ctx, tx, userID, *it.InstitutionID, true); err != nil {
-			return err
-		}
-		return tx.QueryRow(ctx, `SELECT name FROM institutions WHERE id = $1`, *it.InstitutionID).Scan(&it.counterpartName)
-	case it.ContactID != nil:
-		r := &Rule{ContactID: it.ContactID}
+		return tx.QueryRow(ctx, `SELECT name FROM institutions WHERE id = $1`, *t.InstitutionID).Scan(&t.counterpartName)
+	case t.ContactID != nil:
+		r := &Rule{ContactID: t.ContactID}
 		if err := checkDebtPersonTx(ctx, tx, userID, r); err != nil {
 			return err
 		}
-		it.counterpartName = *r.PersonName
-		it.PersonName = r.PersonName // the name is kept with the contact (a deleted contact leaves it)
-	case it.PersonName != nil:
-		it.counterpartName = *it.PersonName
+		t.counterpartName = *r.PersonName
+		t.PersonName = r.PersonName // the name is kept with the contact (a deleted contact leaves it)
+	case t.PersonName != nil:
+		t.counterpartName = *t.PersonName
 	}
 	return nil
 }
 
-// checkItemRefsTx — category (my expense / income one), tags, goal.
-func checkItemRefsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, it *itemRecord) error {
-	catType := "expense"
-	if it.Type == TypeIncome {
-		catType = "income"
-	}
-	if err := checkRefsTx(ctx, tx, userID, catType, nil, nil, it.CategoryID, it.TagIDs); err != nil {
-		return err
-	}
-	return nil
-}
-
-// applyLineInput — a line input onto r (a new line, or the line it updates). The schedule is
-// required on a new line; absent on an update = kept.
+// applyLineInputTx — a rule input onto r (a new rule, or the rule it updates; a full replace). The
+// schedule is required on a new rule; absent on an update = kept.
 func (s *Service) applyLineInputTx(ctx context.Context, tx pgx.Tx, it *itemRecord, r *Rule, in LineInput, today time.Time) error {
 	isNew := r.ID == uuid.Nil
-	if in.NotifyOnly != nil {
-		r.NotifyOnly = *in.NotifyOnly
+	var t ruleTarget
+	if err := applyTargetInput(&t, &in); err != nil {
+		return err
 	}
-	if r.NotifyOnly && (in.Source.PaidBy != nil || in.RepaysReminderID != nil) {
-		return ErrSourceInvalid // a notice moves no money: no one pays, nothing is paid back
+	if err := resolveTargetTx(ctx, tx, it.UserID, &t); err != nil {
+		return err
 	}
-	// repay_paid_by: pays back the person of a person-paid reminder of the same (expense) item
-	r.RepaysReminderID = nil
-	if in.RepaysReminderID != nil {
-		if it.Type != TypeExpense || in.Source.PaidBy != nil || (r.ID != uuid.Nil && *in.RepaysReminderID == r.ID) {
+	// repay_paid_by: pays back the person of a person-paid rule of the same recurring
+	r.RepaysRuleID = nil
+	if in.RepaysRuleID != nil {
+		if t.Type != TypeExpense || in.Source.PaidBy != nil || (r.ID != uuid.Nil && *in.RepaysRuleID == r.ID) {
 			return ErrSourceInvalid
 		}
-		t, err := getRule(ctx, tx, it.UserID, *in.RepaysReminderID, false)
-		if errors.Is(err, ErrNotFound) || (err == nil && (t.RecurringID != it.ID || t.PaidByPersonName == nil)) {
-			return apierr.Wrap(ErrValidation, "repays_reminder_id is not a person-paid reminder of this item",
-				apierr.Field("repays_reminder_id", apierr.FieldInvalid))
+		o, err := getRule(ctx, tx, it.UserID, *in.RepaysRuleID, false)
+		if errors.Is(err, ErrNotFound) || (err == nil && (o.RecurringID != it.ID || o.PaidByPersonName == nil)) {
+			return apierr.Wrap(ErrValidation, "repays_rule_id is not a person-paid rule of this recurring",
+				apierr.Field("repays_rule_id", apierr.FieldInvalid))
 		}
 		if err != nil {
 			return err
 		}
-		r.RepaysReminderID, r.ContactID, r.PersonName = &t.ID, t.PaidByContactID, t.PaidByPersonName
+		r.RepaysRuleID, r.ContactID, r.PersonName = &o.ID, o.PaidByContactID, o.PaidByPersonName
 	}
-	itemToLine(it, r)
+	r.DebtKind = nil
+	if t.Type == TypeDebt && t.DebtPlanID == nil && in.DebtKind != nil {
+		if *in.DebtKind != DebtKindDebt && *in.DebtKind != DebtKindRepayment {
+			return ErrValidation
+		}
+		r.DebtKind = in.DebtKind
+	}
+	itemToLine(it, &t, r)
 	// source
 	src := in.Source
 	if src.AccountID != nil && src.PaidBy != nil {
@@ -190,7 +121,7 @@ func (s *Service) applyLineInputTx(ctx context.Context, tx pgx.Tx, it *itemRecor
 	}
 	r.AccountID, r.PaidByContactID, r.PaidByPersonName = src.AccountID, nil, nil
 	if src.PaidBy != nil {
-		if !paidByAllowed(it.Type) {
+		if !paidByAllowed(t.Type) {
 			return ErrSourceInvalid
 		}
 		p := src.PaidBy
@@ -208,72 +139,59 @@ func (s *Service) applyLineInputTx(ctx context.Context, tx pgx.Tx, it *itemRecor
 			return ErrSourceInvalid
 		}
 	}
-	// neither: a line without a wallet (as a 0.4.2 setting: confirm asks for one, auto-create
-	// leaves it out; a debt line books ledger-only rows; saving answers SAVING_NEEDS_WALLET)
-	// amount: fixed, or asked on each round (expense / transfer only; no amount sent = ask; an amount
-	// sent with ask is the hint each round starts with)
+	// neither: a rule without a wallet (confirm asks for one, auto-accept leaves it out; a debt rule
+	// books ledger-only rows; saving answers SAVING_NEEDS_WALLET)
+	// amount: fixed, or asked on each round (expense / transfer / a person repayment; no amount sent =
+	// ask; an amount sent with ask is the hint each round starts with). A plan's amount follows its
+	// installments, a payback the latest round of the rule it repays.
 	mode := AmountFixed
 	switch {
 	case in.AmountMode != nil && *in.AmountMode != AmountFixed && *in.AmountMode != AmountAsk:
 		return ErrValidation
+	case r.RepaysRuleID != nil || t.DebtPlanID != nil:
 	case in.AmountMode != nil:
 		mode = *in.AmountMode
 	case in.Amount == nil:
 		mode = AmountAsk
 	}
-	switch {
-	case r.NotifyOnly:
-		if in.AmountMode == nil {
-			mode = AmountFixed // a notice may show an amount; never asked
+	if mode == AmountAsk {
+		personRepay := t.Type == TypeDebt && r.DebtKind != nil && *r.DebtKind == DebtKindRepayment && t.InstitutionID == nil
+		if t.Type != TypeExpense && t.Type != TypeTransfer && !personRepay {
+			return ErrValidation
 		}
-	case r.RepaysReminderID != nil || it.DebtPlanID != nil:
-		if in.AmountMode == nil {
-			mode = AmountFixed // its amount comes from what it pays back / the plan's installment
-		}
-	}
-	if mode == AmountAsk && lineType(it) != TypeExpense && lineType(it) != TypeTransfer || mode == AmountAsk && r.RepaysReminderID != nil {
-		return ErrValidation
 	}
 	r.AmountMode = mode
 	switch {
 	case in.Amount != nil && *in.Amount < 0:
 		return ErrValidation
-	case in.Amount != nil:
-		r.Amount = math.Round(*in.Amount*100) / 100 // ask: a hint the round starts with
-	case mode == AmountAsk || r.RepaysReminderID != nil || r.NotifyOnly:
-		r.Amount = 0
-	case it.DebtPlanID != nil:
-		v, err := nextInstallmentAmount(ctx, tx, *it.DebtPlanID)
+	case t.DebtPlanID != nil:
+		v, err := nextInstallmentAmount(ctx, tx, *t.DebtPlanID)
 		if err != nil {
 			return err
 		}
 		r.Amount = v
+	case in.Amount != nil:
+		r.Amount = math.Round(*in.Amount*100) / 100 // ask: a hint the round starts with
+	case mode == AmountAsk || r.RepaysRuleID != nil:
+		r.Amount = 0
 	default:
 		return ErrValidation
 	}
 	r.ToAccountID = nil
-	switch {
-	case it.isCardBill():
-		r.ToAccountID = it.AccountID
-	case it.Type == TypeTransfer:
+	if t.Type == TypeTransfer {
 		r.ToAccountID = in.ToAccountID
 	}
-	if it.Type == TypeDebt && !it.isCardBill() {
-		if in.DebtKind != nil && *in.DebtKind != DebtKindRepayment {
-			return ErrValidation // a debt item pays its debt back (repay / collect)
-		}
-		r.DebtKind = ptr(DebtKindRepayment)
-		r.DebtDirection = lineDirection(it.DebtDirection, r.DebtKind)
+	// switches: null = the user's default; auto-accept never runs on an asked amount
+	r.Notify = in.Notify
+	auto := in.AutoAccept
+	if mode == AmountAsk {
+		auto = nil
 	}
-	if r.NotifyOnly {
-		f := false
-		in.AutoCreate = &f // nothing to create
-	}
-	if in.AutoCreate != nil && *in.AutoCreate != r.AutoCreate {
-		r.AutoCreate = *in.AutoCreate
+	if isNew || !sameBool(auto, r.AutoAccept) {
 		yesterday := today.AddDate(0, 0, -1)
-		r.AutoCreatedUntil = &yesterday // switching on / off never back-creates
+		r.AutoAcceptedUntil = &yesterday // switching on / off never back-books
 	}
+	r.AutoAccept = auto
 	if isNew {
 		if in.Schedule == nil {
 			return ErrValidation
@@ -295,10 +213,10 @@ func (s *Service) applyLineInputTx(ctx context.Context, tx pgx.Tx, it *itemRecor
 		if err := r.applyEnd(sc.End); err != nil {
 			return err
 		}
-		r.GeneratedUntil, r.EndingNotified, r.TotalCount = nil, false, nil
+		r.GeneratedUntil, r.TotalCount = nil, nil
 	}
-	r.Kind = lineKind(it, r.EndKind, r.AmountMode)
-	if r.RepaysReminderID != nil {
+	r.Kind = lineKind(&t, r.EndKind, r.AmountMode)
+	if r.RepaysRuleID != nil {
 		r.Kind = KindDebt
 	}
 	if err := r.finishKind(&r.Kind); err != nil {
@@ -308,7 +226,7 @@ func (s *Service) applyLineInputTx(ctx context.Context, tx pgx.Tx, it *itemRecor
 		return err
 	}
 	if r.PaidByPersonName != nil {
-		// a person-paid round moves no wallet money: the line carries no wallet
+		// a person-paid round moves no wallet money: the rule carries no wallet
 		if err := checkRefsTx(ctx, tx, it.UserID, "expense", nil, nil, r.CategoryID, r.TagIDs); err != nil {
 			return err
 		}
@@ -320,21 +238,27 @@ func (s *Service) applyLineInputTx(ctx context.Context, tx pgx.Tx, it *itemRecor
 	return checkRuleRefsTx(ctx, tx, it.UserID, r)
 }
 
+func sameBool(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 // ---- create / update ----
 
+// CreateRecurring — a recurring with its rules, in one call (the create page saves its draft rules
+// together).
 func (s *Service) CreateRecurring(ctx context.Context, userID uuid.UUID, in RecurringInput, tz string) (*ItemPage, error) {
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
 		return nil, err
 	}
 	it := &itemRecord{UserID: userID, Status: "active"}
-	if err := applyItemInput(it, &in, true); err != nil {
+	if err := applyItemInput(it, &in); err != nil {
 		return nil, err
 	}
-	if len(in.Lines) == 0 {
-		return nil, ErrValidation
-	}
-	if len(in.Lines) > 20 {
+	if len(in.Lines) == 0 || len(in.Lines) > 20 {
 		return nil, ErrValidation
 	}
 	tx, err := s.begin(ctx)
@@ -342,12 +266,6 @@ func (s *Service) CreateRecurring(ctx context.Context, userID uuid.UUID, in Recu
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	if err := resolveCounterpartyTx(ctx, tx, userID, it); err != nil {
-		return nil, err
-	}
-	if err := checkItemRefsTx(ctx, tx, userID, it); err != nil {
-		return nil, err
-	}
 	if err := saveItemRecordTx(ctx, tx, it); err != nil {
 		return nil, err
 	}
@@ -357,14 +275,11 @@ func (s *Service) CreateRecurring(ctx context.Context, userID uuid.UUID, in Recu
 			return nil, err
 		}
 		if i == 0 {
-			r.ID = it.ID // the first reminder shares the item's id (as every migrated rule does)
+			r.ID = it.ID // the first rule shares the recurring's id (old links open the right one)
 			if err := insertRuleTx(ctx, tx, r); err != nil {
 				return nil, err
 			}
 		} else if err := saveRuleTx(ctx, tx, r); err != nil {
-			return nil, err
-		}
-		if err := saveAlertsTx(ctx, tx, r, li.Alerts); err != nil {
 			return nil, err
 		}
 	}
@@ -377,8 +292,8 @@ func (s *Service) CreateRecurring(ctx context.Context, userID uuid.UUID, in Recu
 	return s.afterItemWrite(ctx, userID, it.ID, tz, nil)
 }
 
-// UpdateRecurring — the item's own fields (full replace), its lines (with id = update, without =
-// new, missing = deleted), plan and reminders when sent. The item's fields reach every line.
+// UpdateRecurring — the recurring's own fields (full replace) and, when sent, its rules (with id =
+// update, without = new, missing = deleted).
 func (s *Service) UpdateRecurring(ctx context.Context, userID, id uuid.UUID, in RecurringInput, tz string) (*ItemPage, error) {
 	today, err := s.today(ctx, userID, tz)
 	if err != nil {
@@ -393,26 +308,23 @@ func (s *Service) UpdateRecurring(ctx context.Context, userID, id uuid.UUID, in 
 	if err != nil {
 		return nil, err
 	}
-	if err := applyItemInput(it, &in, false); err != nil {
+	if err := applyItemInput(it, &in); err != nil {
 		return nil, err
 	}
-	if err := resolveCounterpartyTx(ctx, tx, userID, it); err != nil {
+	if err := saveItemRecordTx(ctx, tx, it); err != nil {
 		return nil, err
 	}
-	if err := checkItemRefsTx(ctx, tx, userID, it); err != nil {
-		return nil, err
-	}
-	lines, err := linesOf(ctx, tx, userID, []uuid.UUID{id}, true)
-	if err != nil {
-		return nil, err
-	}
-	byID := map[uuid.UUID]*Rule{}
-	for _, r := range lines {
-		byID[r.ID] = r
-	}
-	if in.has("reminders") {
+	if in.has("rules") {
 		if len(in.Lines) == 0 || len(in.Lines) > 20 {
 			return nil, ErrValidation
+		}
+		lines, err := linesOf(ctx, tx, userID, []uuid.UUID{id}, true)
+		if err != nil {
+			return nil, err
+		}
+		byID := map[uuid.UUID]*Rule{}
+		for _, r := range lines {
+			byID[r.ID] = r
 		}
 		keep := map[uuid.UUID]bool{}
 		for _, li := range in.Lines {
@@ -431,24 +343,14 @@ func (s *Service) UpdateRecurring(ctx context.Context, userID, id uuid.UUID, in 
 			if err := saveRuleTx(ctx, tx, r); err != nil {
 				return nil, err
 			}
-			if err := saveAlertsTx(ctx, tx, r, li.Alerts); err != nil {
-				return nil, err
-			}
 		}
 		for _, r := range lines {
 			if !keep[r.ID] {
-				if _, err := tx.Exec(ctx, `DELETE FROM recurring_reminders WHERE id = $1 AND user_id = $2`, r.ID, userID); err != nil {
+				if _, err := tx.Exec(ctx, `DELETE FROM recurring_rules WHERE id = $1 AND user_id = $2`, r.ID, userID); err != nil {
 					return nil, err
 				}
 			}
 		}
-	} else {
-		if err := syncLinesTx(ctx, tx, it, lines); err != nil {
-			return nil, err
-		}
-	}
-	if err := saveItemRecordTx(ctx, tx, it); err != nil {
-		return nil, err
 	}
 	if err := refreshItemStatusTx(ctx, tx, userID, id); err != nil {
 		return nil, err
@@ -457,17 +359,6 @@ func (s *Service) UpdateRecurring(ctx context.Context, userID, id uuid.UUID, in 
 		return nil, err
 	}
 	return s.afterItemWrite(ctx, userID, id, tz, nil)
-}
-
-// syncLinesTx — the item's own fields onto every line (no line input).
-func syncLinesTx(ctx context.Context, tx pgx.Tx, it *itemRecord, lines []*Rule) error {
-	for _, r := range lines {
-		itemToLine(it, r)
-		if err := saveRuleTx(ctx, tx, r); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *Service) afterItemWrite(ctx context.Context, userID, id uuid.UUID, tz string, touched []uuid.UUID) (*ItemPage, error) {
@@ -504,7 +395,239 @@ func (s *Service) GetRecurring(ctx context.Context, userID, id uuid.UUID, tz str
 	return &pages[0], nil
 }
 
-// itemPages — the page of each item (full = stats, plan, reminders: the item page; else the list
+// userDefaults — the user's rule switch defaults (notify, auto-accept).
+func userDefaults(ctx context.Context, q rowQuerier, userID uuid.UUID) (bool, bool, error) {
+	var n, a bool
+	err := q.QueryRow(ctx, `SELECT recurring_notify_default, recurring_auto_accept_default FROM users WHERE id = $1`, userID).Scan(&n, &a)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, false, nil
+	}
+	return n, a, err
+}
+
+// notifyOn / autoAcceptOn — a rule's switches in effect (auto-accept never on an asked amount).
+func (r *Rule) notifyOn(def bool) bool {
+	if r.Notify != nil {
+		return *r.Notify
+	}
+	return def
+}
+
+func (r *Rule) autoAcceptOn(def bool) bool {
+	if r.amountMode() == AmountAsk {
+		return false
+	}
+	if r.AutoAccept != nil {
+		return *r.AutoAccept
+	}
+	return def
+}
+
+// ruleViews — the page-ready views of rules (any recurrings), in rules' order, each with its Rule n.
+type ruleViews struct {
+	lines []Line
+	plans map[uuid.UUID]*planRecord
+}
+
+// complete — rules holds every rule of its recurrings, oldest first (Rule n is worked out here, no read).
+func (s *Service) ruleViewsOf(ctx context.Context, userID uuid.UUID, today time.Time, rules []*Rule, complete bool) (*ruleViews, []Recurring, error) {
+	out := &ruleViews{lines: make([]Line, 0, len(rules)), plans: map[uuid.UUID]*planRecord{}}
+	if len(rules) == 0 {
+		return out, nil, nil
+	}
+	views, err := s.recurringViews(ctx, userID, today, rules)
+	if err != nil {
+		return nil, nil, err
+	}
+	var catIDs, tagIDs, goalIDs, planIDs []uuid.UUID
+	for _, r := range rules {
+		if r.CategoryID != nil {
+			catIDs = append(catIDs, *r.CategoryID)
+		}
+		if r.GoalID != nil {
+			goalIDs = append(goalIDs, *r.GoalID)
+		}
+		if r.DebtPlanID != nil {
+			planIDs = append(planIDs, *r.DebtPlanID)
+		}
+		tagIDs = append(tagIDs, r.TagIDs...)
+	}
+	cats, err := shared.LoadCategoryRefs(ctx, s.db, catIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	tags, err := shared.LoadTagRefs(ctx, s.db, userID, tagIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	goals, err := shared.LoadSavingGoalRefs(ctx, s.db, goalIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	if out.plans, err = plansByID(ctx, s.db, userID, planIDs); err != nil {
+		return nil, nil, err
+	}
+	cps, err := s.counterparties(ctx, userID, rules)
+	if err != nil {
+		return nil, nil, err
+	}
+	paidBy, err := s.paidByPersons(ctx, userID, rules)
+	if err != nil {
+		return nil, nil, err
+	}
+	defNotify, defAuto, err := userDefaults(ctx, s.db, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	seqs := map[uuid.UUID]int{}
+	if complete {
+		n := map[uuid.UUID]int{}
+		for _, r := range rules {
+			n[r.RecurringID]++
+			seqs[r.ID] = n[r.RecurringID]
+		}
+	} else if seqs, err = ruleSeqs(ctx, s.db, userID, rules); err != nil {
+		return nil, nil, err
+	}
+	// an asked person repayment fills the net only when it is that person's only rule (spec §2.1)
+	perPerson := map[string]int{}
+	if err := s.personRuleCounts(ctx, userID, rules, perPerson); err != nil {
+		return nil, nil, err
+	}
+	for i, r := range rules {
+		v := &views[i]
+		ln := lineOf(r, v, paidBy)
+		ln.Seq = seqs[r.ID]
+		ln.NotifyOn, ln.AutoAcceptOn = r.notifyOn(defNotify), r.autoAcceptOn(defAuto)
+		if r.CategoryID != nil {
+			if x, ok := cats[*r.CategoryID]; ok {
+				ln.Category = &x
+			}
+		}
+		for _, t := range r.TagIDs {
+			if x, ok := tags[t]; ok {
+				ln.Tags = append(ln.Tags, x)
+			}
+		}
+		if r.GoalID != nil {
+			if x, ok := goals[*r.GoalID]; ok {
+				ln.Goal = &x
+			}
+			ln.EndText = ptr("goal_reached")
+		}
+		if c, ok := cps[r.ID]; ok {
+			ln.Counterparty = &c
+			t := targetOf(r)
+			ln.DebtDirection = t.DebtDirection
+			if r.DebtKind != nil && *r.DebtKind == DebtKindRepayment && r.DebtPlanID == nil {
+				ln.EndText = ptr("debt_cleared")
+			}
+			if r.amountMode() == AmountAsk && perPerson[c.Key] > 1 {
+				net := math.Abs(c.Net)
+				ln.PrefillHint = &net
+			}
+		}
+		out.lines = append(out.lines, ln)
+	}
+	return out, views, nil
+}
+
+// ruleSeqs — each rule's place among its recurring's rules (1-based, oldest first).
+func ruleSeqs(ctx context.Context, q shared.Querier, userID uuid.UUID, rules []*Rule) (map[uuid.UUID]int, error) {
+	var items []uuid.UUID
+	for _, r := range rules {
+		items = append(items, r.RecurringID)
+	}
+	out := map[uuid.UUID]int{}
+	rows, err := q.Query(ctx, `SELECT id, ROW_NUMBER() OVER (PARTITION BY recurring_id ORDER BY created_at, id)
+		FROM recurring_rules WHERE user_id = $1 AND recurring_id = ANY($2)`, userID, uniqueIDs(items))
+	if err != nil {
+		return nil, fmt.Errorf("rule seqs: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id uuid.UUID
+			n  int64
+		)
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = int(n)
+	}
+	return out, rows.Err()
+}
+
+// personRuleCounts — the user's live debt rules per person key, for the keys these rules touch.
+func (s *Service) personRuleCounts(ctx context.Context, userID uuid.UUID, rules []*Rule, out map[string]int) error {
+	var keys []string
+	for _, r := range rules {
+		if r.Type == typeDebt && r.InstitutionID == nil && r.DebtPlanID == nil && r.amountMode() == AmountAsk {
+			keys = append(keys, shared.DebtKey(r.ContactID, derefStr(r.PersonName)))
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT k, COUNT(*) FROM (SELECT CASE WHEN contact_id IS NOT NULL THEN 'c:' || contact_id::text
+			ELSE 'n:' || LOWER(TRIM(person_name)) END AS k
+		FROM recurring_rules WHERE user_id = $1 AND type = 'debt' AND institution_id IS NULL AND debt_plan_id IS NULL
+			AND status <> 'archived') x WHERE k = ANY($2) GROUP BY k`, userID, keys)
+	if err != nil {
+		return fmt.Errorf("person rules: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			k string
+			n int
+		)
+		if err := rows.Scan(&k, &n); err != nil {
+			return err
+		}
+		out[k] = n
+	}
+	return rows.Err()
+}
+
+// touchesOf — what a recurring's rules touch on other pages (spec §3 "รายการประจำ has 2 sections").
+func touchesOf(lines []Line, plans map[uuid.UUID]*planRecord) []Touch {
+	out := []Touch{}
+	seen := map[string]bool{}
+	add := func(t Touch) {
+		k := t.Kind + t.ID.String() + t.Key
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, t)
+		}
+	}
+	for _, ln := range lines {
+		if ln.Goal != nil {
+			add(Touch{Kind: "goal", ID: ln.Goal.ID, Name: ln.Goal.Name})
+		}
+		if ln.DebtPlanID != nil {
+			name := ""
+			if p, ok := plans[*ln.DebtPlanID]; ok {
+				name = p.Name
+			}
+			add(Touch{Kind: "plan", ID: *ln.DebtPlanID, Name: name})
+		} else if c := ln.Counterparty; c != nil {
+			t := Touch{Kind: c.Kind, Key: c.Key, Name: c.Name}
+			if c.Institution != nil {
+				t.ID = c.Institution.ID
+			} else if c.Person != nil && c.Person.ContactID != nil {
+				t.ID = *c.Person.ContactID
+			}
+			add(t)
+		}
+		if ln.ToAccount != nil && (ln.ToAccount.Type == "credit_card" || ln.ToAccount.Type == "pay_later") {
+			add(Touch{Kind: "card", ID: ln.ToAccount.ID, Name: ln.ToAccount.Name})
+		}
+	}
+	return out
+}
+
+// itemPages — the page of each recurring (full = stats and plan: the detail page; else the list
 // row's needs).
 func (s *Service) itemPages(ctx context.Context, userID uuid.UUID, today time.Time, items []*itemRecord, full bool) ([]ItemPage, error) {
 	out := make([]ItemPage, 0, len(items))
@@ -512,22 +635,14 @@ func (s *Service) itemPages(ctx context.Context, userID uuid.UUID, today time.Ti
 		return out, nil
 	}
 	ids := make([]uuid.UUID, len(items))
-	var catIDs, tagIDs, goalIDs []uuid.UUID
 	for i, it := range items {
 		ids[i] = it.ID
-		if it.CategoryID != nil {
-			catIDs = append(catIDs, *it.CategoryID)
-		}
-		if it.GoalID != nil {
-			goalIDs = append(goalIDs, *it.GoalID)
-		}
-		tagIDs = append(tagIDs, it.TagIDs...)
 	}
 	lines, err := linesOf(ctx, s.db, userID, ids, false)
 	if err != nil {
 		return nil, err
 	}
-	views, err := s.recurringViews(ctx, userID, today, lines)
+	rv, views, err := s.ruleViewsOf(ctx, userID, today, lines, true)
 	if err != nil {
 		return nil, err
 	}
@@ -535,60 +650,23 @@ func (s *Service) itemPages(ctx context.Context, userID uuid.UUID, today time.Ti
 	for i, r := range lines {
 		byItem[r.RecurringID] = append(byItem[r.RecurringID], i)
 	}
-	cats, err := shared.LoadCategoryRefs(ctx, s.db, catIDs)
-	if err != nil {
-		return nil, err
-	}
-	tags, err := shared.LoadTagRefs(ctx, s.db, userID, tagIDs)
-	if err != nil {
-		return nil, err
-	}
-	goals, err := shared.LoadSavingGoalRefs(ctx, s.db, goalIDs)
-	if err != nil {
-		return nil, err
-	}
-	cps, err := s.counterparties(ctx, userID, items)
-	if err != nil {
-		return nil, err
-	}
-	paidBy, err := s.paidByPersons(ctx, userID, lines)
-	if err != nil {
-		return nil, err
-	}
 	for _, it := range items {
-		p := ItemPage{ID: it.ID, Name: it.Name, Description: it.Description, Note: it.Note, IconCode: it.IconCode, Type: it.Type,
-			CategoryID: it.CategoryID, TagIDs: it.TagIDs, Tags: []shared.TagRef{}, GoalID: it.GoalID, DebtDirection: it.DebtDirection,
-			Status: it.Status, Lines: []Line{}, CreatedAt: it.CreatedAt, UpdatedAt: it.UpdatedAt,
+		p := ItemPage{ID: it.ID, Name: it.Name, Description: it.Description, Note: it.Note, IconCode: it.IconCode,
+			TrackingType: it.TrackingType, Status: it.Status, Lines: []Line{}, CreatedAt: it.CreatedAt, UpdatedAt: it.UpdatedAt,
 			Stats: ItemStats{Series: []Point{}}, AccountBalances: []shared.WalletBalance{}, Effects: shared.NewEffects()}
-		if it.CategoryID != nil {
-			if x, ok := cats[*it.CategoryID]; ok {
-				p.Category = &x
-			}
-		}
-		for _, t := range it.TagIDs {
-			if x, ok := tags[t]; ok {
-				p.Tags = append(p.Tags, x)
-			}
-		}
-		if it.GoalID != nil {
-			if x, ok := goals[*it.GoalID]; ok {
-				p.Goal = &x
-			}
-		}
-		if c, ok := cps[it.ID]; ok {
-			p.Counterparty = &c
-		}
 		allDone := len(byItem[it.ID]) > 0
 		var own []*Rule
+		var plan *planRecord
 		for _, i := range byItem[it.ID] {
 			own = append(own, lines[i])
+			if r := lines[i]; plan == nil && r.DebtPlanID != nil {
+				plan = rv.plans[*r.DebtPlanID]
+			}
 		}
 		it.Status = effectiveStatus(it.Status, own)
 		p.Status = it.Status
-		var dueKeyMin string
 		for _, i := range byItem[it.ID] {
-			r, v := lines[i], views[i]
-			ln := lineOf(r, &v, paidBy)
+			r, v, ln := lines[i], views[i], rv.lines[i]
 			p.Lines = append(p.Lines, ln)
 			p.DueCount += v.DueCount
 			if v.MonthlyAmount != nil && r.Status == "active" {
@@ -600,13 +678,11 @@ func (s *Service) itemPages(ctx context.Context, userID uuid.UUID, today time.Ti
 			if v.NextDate != nil && r.Status == "active" {
 				d := *v.DaysUntil
 				if p.Next == nil || *v.NextDate < p.Next.Date {
-					p.Next = &NextRound{RecurringReminderID: r.ID, Date: *v.NextDate, Amount: v.NextAmount, DaysUntil: d}
+					p.Next = &NextRound{RecurringRuleID: r.ID, Date: *v.NextDate, Amount: v.NextAmount, DaysUntil: d}
 				}
 			}
-			if k := dueKey(&v); dueKeyMin == "" || k < dueKeyMin {
-				dueKeyMin = k
-			}
 		}
+		p.Touches = touchesOf(p.Lines, rv.plans)
 		p.MonthTotal = math.Round(p.MonthTotal*100) / 100
 		if allDone && it.Status != "archived" {
 			p.Status = "done"
@@ -616,21 +692,21 @@ func (s *Service) itemPages(ctx context.Context, userID uuid.UUID, today time.Ti
 			Restore: it.Status == "archived", Delete: true, AddLine: it.Status != "archived",
 		}
 		if full {
-			if err := s.fillItemFull(ctx, userID, today, it, lines, byItem[it.ID], &p); err != nil {
-				return nil, err
-			}
-		} else if it.Plan != nil {
-			if p.Plan, err = s.planView(ctx, s.db, userID, it.Plan, today); err != nil {
+			if err := s.fillItemFull(ctx, userID, today, lines, byItem[it.ID], &p); err != nil {
 				return nil, err
 			}
 		}
-		_ = dueKeyMin
+		if plan != nil {
+			if p.Plan, err = s.planView(ctx, s.db, userID, plan, today); err != nil {
+				return nil, err
+			}
+		}
 		out = append(out, p)
 	}
 	return out, nil
 }
 
-func (s *Service) fillItemFull(ctx context.Context, userID uuid.UUID, today time.Time, it *itemRecord, lines []*Rule, idx []int, p *ItemPage) error {
+func (s *Service) fillItemFull(ctx context.Context, userID uuid.UUID, today time.Time, lines []*Rule, idx []int, p *ItemPage) error {
 	var pts []Point
 	left, allEnd := 0.0, len(idx) > 0
 	for _, i := range idx {
@@ -673,27 +749,26 @@ func (s *Service) fillItemFull(ctx context.Context, userID uuid.UUID, today time
 		}
 		p.Stats.Series = pts
 	}
-	var err error
-	if it.Plan != nil {
-		if p.Plan, err = s.planView(ctx, s.db, userID, it.Plan, today); err != nil {
-			return err
-		}
-	}
-	for i := range p.Lines {
-		if p.Lines[i].Alerts, err = loadAlerts(ctx, s.db, p.Lines[i].ID); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
-// lineOf — a line's view from the engine's view of it.
+// lineOf — a rule's view from the engine's view of it.
 func lineOf(r *Rule, v *Recurring, paidBy map[uuid.UUID]shared.PersonRef) Line {
 	end := v.End
-	ln := Line{ID: r.ID, Amount: v.Amount, AmountMode: r.amountMode(), Action: r.action(), RepaysReminderID: r.RepaysReminderID, Alerts: []Alert{}, Account: v.Account, ToAccountID: r.ToAccountID, ToAccount: v.ToAccount,
+	mode := r.amountMode()
+	switch {
+	case r.DebtPlanID != nil:
+		mode = "schedule"
+	case r.RepaysRuleID != nil:
+		mode = "follow"
+	}
+	ln := Line{ID: r.ID, RecurringID: r.RecurringID, Type: r.Type, CategoryID: r.CategoryID, TagIDs: append([]uuid.UUID{}, r.TagIDs...),
+		Tags: []shared.TagRef{}, GoalID: r.GoalID, DebtPlanID: r.DebtPlanID,
+		Amount: v.Amount, AmountMode: mode, Action: r.action(), RepaysRuleID: r.RepaysRuleID, Account: v.Account,
+		ToAccountID: r.ToAccountID, ToAccount: v.ToAccount,
 		DebtKind: r.DebtKind, Schedule: Schedule{RecurrenceRule: v.Rule, StartDate: v.StartDate, End: &end},
-		AutoCreate: r.AutoCreate, Status: r.Status, PauseReason: v.PauseReason, NextDate: v.NextDate, NextAmount: v.NextAmount,
-		DaysUntil: v.DaysUntil, DueCount: v.DueCount, MonthlyAmount: v.MonthlyAmount, YearlyCost: v.YearlyCost,
+		Notify: r.Notify, AutoAccept: r.AutoAccept, Status: r.Status, PauseReason: v.PauseReason, NextDate: v.NextDate,
+		NextAmount: v.NextAmount, DaysUntil: v.DaysUntil, DueCount: v.DueCount, MonthlyAmount: v.MonthlyAmount, YearlyCost: v.YearlyCost,
 		Progress: v.Progress, Chain: v.Chain, EndingSoon: v.EndingSoon, Counts: v.Counts, CurrentOccurrence: v.CurrentOccurrence,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 		Source: LineSource{AccountID: r.AccountID},
@@ -726,33 +801,25 @@ func (s *Service) paidByPersons(ctx context.Context, userID uuid.UUID, lines []*
 	return shared.LoadPersons(ctx, s.db, userID, ids)
 }
 
-// counterparties — each debt item's counterparty, with its balance now.
-func (s *Service) counterparties(ctx context.Context, userID uuid.UUID, items []*itemRecord) (map[uuid.UUID]Counterparty, error) {
+// counterparties — each debt rule's counterparty (a plan's: its creditor), with its balance now.
+func (s *Service) counterparties(ctx context.Context, userID uuid.UUID, rules []*Rule) (map[uuid.UUID]Counterparty, error) {
 	out := map[uuid.UUID]Counterparty{}
-	var contacts, insts, cards []uuid.UUID
+	var contacts, insts []uuid.UUID
 	var keys []string
-	for _, it := range items {
-		if it.Type != TypeDebt {
+	for _, r := range rules {
+		if r.Type != typeDebt {
 			continue
 		}
-		if it.isCardBill() {
-			cards = append(cards, *it.AccountID)
-			continue
+		keys = append(keys, ruleKey(r))
+		if r.ContactID != nil {
+			contacts = append(contacts, *r.ContactID)
 		}
-		keys = append(keys, itemKey(it))
-		if it.ContactID != nil {
-			contacts = append(contacts, *it.ContactID)
-		}
-		if it.InstitutionID != nil {
-			insts = append(insts, *it.InstitutionID)
+		if r.InstitutionID != nil {
+			insts = append(insts, *r.InstitutionID)
 		}
 	}
-	if len(keys) == 0 && len(cards) == 0 {
+	if len(keys) == 0 {
 		return out, nil
-	}
-	arefs, err := shared.LoadAccountRefs(ctx, s.db, cards)
-	if err != nil {
-		return nil, err
 	}
 	persons, err := shared.LoadPersons(ctx, s.db, userID, contacts)
 	if err != nil {
@@ -780,60 +847,52 @@ func (s *Service) counterparties(ctx context.Context, userID uuid.UUID, items []
 		nets[k] = math.Round(v*100) / 100
 	}
 	rows.Close()
-	for _, it := range items {
-		if it.Type != TypeDebt {
+	for _, r := range rules {
+		if r.Type != typeDebt {
 			continue
 		}
-		key := itemKey(it)
+		key := ruleKey(r)
 		c := Counterparty{Key: key, Kind: "person", Net: nets[key]}
 		switch {
-		case it.isCardBill():
-			c.Kind = "card"
-			if a, ok := arefs[*it.AccountID]; ok {
-				c.Account, c.Name = &a, a.Name
-			}
-		case it.InstitutionID != nil:
+		case r.InstitutionID != nil:
 			c.Kind = "institution"
-			if x, ok := irefs[*it.InstitutionID]; ok {
+			if x, ok := irefs[*r.InstitutionID]; ok {
 				c.Institution, c.Name = &x, x.Name
 			}
-		case it.ContactID != nil:
-			pr := shared.ResolvePerson(persons, shared.PersonKey{ContactID: it.ContactID, Snapshot: derefStr(it.PersonName)})
+		case r.ContactID != nil:
+			pr := shared.ResolvePerson(persons, shared.PersonKey{ContactID: r.ContactID, Snapshot: derefStr(r.PersonName)})
 			c.Person, c.Name = &pr, pr.Name
 		default:
-			pr := shared.NamePerson(derefStr(it.PersonName))
+			pr := shared.NamePerson(derefStr(r.PersonName))
 			c.Person, c.Name = &pr, pr.Name
 		}
-		out[it.ID] = c
+		out[r.ID] = c
 	}
 	return out, rows.Err()
 }
 
-func itemKey(it *itemRecord) string {
-	if it.isCardBill() {
-		return "" // a card's bill: the card holds the debt, no debt rows
+func ruleKey(r *Rule) string {
+	if r.InstitutionID != nil {
+		return shared.InstitutionKey(*r.InstitutionID)
 	}
-	if it.InstitutionID != nil {
-		return shared.InstitutionKey(*it.InstitutionID)
-	}
-	return shared.DebtKey(it.ContactID, derefStr(it.PersonName))
+	return shared.DebtKey(r.ContactID, derefStr(r.PersonName))
 }
 
-// ListRecurring — the recurring list: items, not lines. status current (active + paused, default) |
-// archived | all; type = one of the 7; for_type = the quick-create picker (items with an active line
-// that can take a transaction of that money type, likely first).
-func (s *Service) ListRecurring(ctx context.Context, userID uuid.UUID, status, typ, q, forType string, hint PickerHint,
+// ListRecurring — the recurring list: recurrings, not rules. status current (active + paused,
+// default) | archived | all; tracking = one tracking type; for_type = the quick-create picker
+// (recurrings with an active rule that can take a transaction of that money type, likely first).
+func (s *Service) ListRecurring(ctx context.Context, userID uuid.UUID, status, tracking, q, forType string, hint PickerHint,
 	page, perPage int, tz string) (*SummaryList, error) {
 	page, perPage = clampPage(page, perPage)
-	return s.listRecurring(ctx, userID, status, typ, q, forType, hint, page, perPage, tz)
+	return s.listRecurring(ctx, userID, status, tracking, q, forType, hint, page, perPage, tz)
 }
 
-// ListAll — every item in one page (the sync dataset); no 100-row cap.
+// ListAll — every recurring in one page (the sync dataset); no 100-row cap.
 func (s *Service) ListAll(ctx context.Context, userID uuid.UUID, tz string) (*SummaryList, error) {
 	return s.listRecurring(ctx, userID, "all", "", "", "", PickerHint{}, 1, unlimitedPerPage, tz)
 }
 
-func (s *Service) listRecurring(ctx context.Context, userID uuid.UUID, status, typ, q, forType string, hint PickerHint,
+func (s *Service) listRecurring(ctx context.Context, userID uuid.UUID, status, tracking, q, forType string, hint PickerHint,
 	page, perPage int, tz string) (*SummaryList, error) {
 	ctx = shared.WithRefCache(ctx)
 	today, err := s.today(ctx, userID, tz)
@@ -848,13 +907,13 @@ func (s *Service) listRecurring(ctx context.Context, userID uuid.UUID, status, t
 		cond = `TRUE`
 	}
 	args := []any{userID}
-	if typ != "" {
-		args = append(args, typ)
-		cond += fmt.Sprintf(` AND type = $%d`, len(args))
+	if tracking != "" {
+		args = append(args, tracking)
+		cond += fmt.Sprintf(` AND tracking_type = $%d`, len(args))
 	}
 	if forType != "" {
 		args = append(args, forType)
-		cond = fmt.Sprintf(`status = 'active' AND EXISTS (SELECT 1 FROM recurring_reminders l WHERE l.recurring_id = recurrings.id
+		cond = fmt.Sprintf(`status = 'active' AND EXISTS (SELECT 1 FROM recurring_rules l WHERE l.recurring_id = recurrings.id
 			AND l.status = 'active' AND l.type = $%d)`, len(args))
 	}
 	if q = strings.TrimSpace(q); q != "" {
@@ -887,9 +946,6 @@ func (s *Service) listRecurring(ctx context.Context, userID uuid.UUID, status, t
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := attachPlans(ctx, s.db, userID, items...); err != nil {
-		return nil, err
-	}
 	sums, keys, err := s.summaries(ctx, userID, today, items)
 	if err != nil {
 		return nil, err
@@ -897,7 +953,11 @@ func (s *Service) listRecurring(ctx context.Context, userID uuid.UUID, status, t
 	likely := map[uuid.UUID]bool{}
 	if forType != "" {
 		for i, it := range items {
-			likely[it.ID] = hint.likely(it.CategoryID, sums[i].Amount)
+			var cat *uuid.UUID
+			if sums[i].Category != nil {
+				cat = &sums[i].Category.ID
+			}
+			likely[it.ID] = hint.likely(cat, sums[i].Amount)
 		}
 	}
 	idx := make([]int, len(items))
@@ -932,7 +992,7 @@ func occKey(c *Occurrence) string {
 	return "1" + c.Date
 }
 
-// summaries — the list rows of items (+ each one's order key: due first, then next date).
+// summaries — the list rows of recurrings (+ each one's order key: due first, then next date).
 func (s *Service) summaries(ctx context.Context, userID uuid.UUID, today time.Time, items []*itemRecord) ([]RecurringSummary, []string, error) {
 	pages, err := s.itemPages(ctx, userID, today, items, false)
 	if err != nil {
@@ -941,9 +1001,9 @@ func (s *Service) summaries(ctx context.Context, userID uuid.UUID, today time.Ti
 	out := make([]RecurringSummary, len(pages))
 	keys := make([]string, len(pages))
 	for i, p := range pages {
-		sm := RecurringSummary{ID: p.ID, Name: p.Name, Type: p.Type, IconCode: p.IconCode, Status: p.Status, Category: p.Category,
-			LinesCount: len(p.Lines), Chain: []ChainStep{}, MonthTotal: p.MonthTotal, Next: p.Next, DueCount: p.DueCount,
-			Counterparty: p.Counterparty, DebtDirection: p.DebtDirection, Goal: p.Goal, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+		sm := RecurringSummary{ID: p.ID, Name: p.Name, TrackingType: p.TrackingType, IconCode: p.IconCode, Status: p.Status,
+			LinesCount: len(p.Lines), Related: len(p.Touches) > 0, Touches: p.Touches, Chain: []ChainStep{}, MonthTotal: p.MonthTotal,
+			Next: p.Next, DueCount: p.DueCount, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
 		if p.Plan != nil {
 			sm.Plan = &PlanBrief{Done: p.Plan.Done, Count: p.Plan.Count}
 		}
@@ -956,10 +1016,7 @@ func (s *Service) summaries(ctx context.Context, userID uuid.UUID, today time.Ti
 				sm.EndingSoon = true
 			}
 			if c := ln.CurrentOccurrence; c != nil {
-				k := "1" + c.Date
-				if c.Status == StatusDue {
-					k = "0" + c.Date
-				}
+				k := occKey(c)
 				if k < keys[i] {
 					keys[i] = k
 				}
@@ -973,7 +1030,7 @@ func (s *Service) summaries(ctx context.Context, userID uuid.UUID, today time.Ti
 		if len(p.Lines) == 1 {
 			ln := p.Lines[0]
 			pr := ln.Progress
-			sm.Amount, sm.Account, sm.PaidBy, sm.Chain, sm.Progress = ln.Amount, ln.Account, ln.PaidBy, ln.Chain, &pr
+			sm.Amount, sm.Account, sm.PaidBy, sm.Chain, sm.Progress, sm.Category = ln.Amount, ln.Account, ln.PaidBy, ln.Chain, &pr, ln.Category
 		}
 		out[i] = sm
 	}
@@ -1144,20 +1201,17 @@ func (s *Service) DuplicateRecurring(ctx context.Context, userID, id uuid.UUID, 
 		return nil, err
 	}
 	cp := *src
-	cp.ID, cp.Status, cp.Plan, cp.Name = uuid.Nil, "active", nil, copyName(src.Name)
-	if err := resolveCounterpartyTx(ctx, tx, userID, &cp); err != nil {
-		return nil, err
-	}
+	cp.ID, cp.Status, cp.Name = uuid.Nil, "active", copyName(src.Name)
 	if err := saveItemRecordTx(ctx, tx, &cp); err != nil {
 		return nil, err
 	}
 	for _, r := range lines {
 		l := *r
 		l.ID, l.Status, l.PauseReason, l.PausedFrom, l.Gaps, l.ZeroRounds = uuid.Nil, "active", nil, nil, nil, 0
-		l.GeneratedUntil, l.EndingNotified, l.TotalCount = nil, false, nil
+		l.GeneratedUntil, l.TotalCount = nil, nil
 		l.StartDate, l.TrackedFrom, l.DueNotifiedUntil = today, today, &today
 		yesterday := today.AddDate(0, 0, -1)
-		l.AutoCreatedUntil = &yesterday
+		l.AutoAcceptedUntil = &yesterday
 		l.Weekdays = append([]int(nil), r.Weekdays...)
 		if l.Freq == "dates" {
 			l.Dates = nil
@@ -1170,7 +1224,8 @@ func (s *Service) DuplicateRecurring(ctx context.Context, userID, id uuid.UUID, 
 				continue // nothing left to copy of this line
 			}
 		}
-		itemToLine(&cp, &l)
+		t := targetOf(r)
+		itemToLine(&cp, &t, &l)
 		if err := l.limits(today); err != nil {
 			return nil, err
 		}
@@ -1215,9 +1270,6 @@ func (s *Service) lineWrite(ctx context.Context, userID, id uuid.UUID, lineID *u
 	if it.Status == "archived" {
 		return nil, ErrInvalidTransition
 	}
-	if err := resolveCounterpartyTx(ctx, tx, userID, it); err != nil {
-		return nil, err
-	}
 	r := &Rule{}
 	if lineID != nil {
 		if err := lineOfItem(ctx, tx, userID, id, *lineID); err != nil {
@@ -1233,9 +1285,6 @@ func (s *Service) lineWrite(ctx context.Context, userID, id uuid.UUID, lineID *u
 	if err := saveRuleTx(ctx, tx, r); err != nil {
 		return nil, err
 	}
-	if err := saveAlertsTx(ctx, tx, r, in.Alerts); err != nil {
-		return nil, err
-	}
 	if err := refreshItemStatusTx(ctx, tx, userID, id); err != nil {
 		return nil, err
 	}
@@ -1245,8 +1294,7 @@ func (s *Service) lineWrite(ctx context.Context, userID, id uuid.UUID, lineID *u
 	return s.afterItemWrite(ctx, userID, id, tz, nil)
 }
 
-// DeleteLine — the line and its rounds; what they wrote stays. The last line goes only from an
-// item whose card plan needs none.
+// DeleteLine — the rule and its rounds; what they wrote stays. A recurring keeps at least one rule.
 func (s *Service) DeleteLine(ctx context.Context, userID, id, lineID uuid.UUID, tz string) (*ItemPage, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -1260,13 +1308,13 @@ func (s *Service) DeleteLine(ctx context.Context, userID, id, lineID uuid.UUID, 
 		return nil, err
 	}
 	var n int
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM recurring_reminders WHERE recurring_id = $1`, id).Scan(&n); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM recurring_rules WHERE recurring_id = $1`, id).Scan(&n); err != nil {
 		return nil, err
 	}
 	if n <= 1 {
 		return nil, ErrLastLine
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM recurring_reminders WHERE id = $1 AND user_id = $2`, lineID, userID); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM recurring_rules WHERE id = $1 AND user_id = $2`, lineID, userID); err != nil {
 		return nil, err
 	}
 	if err := refreshItemStatusTx(ctx, tx, userID, id); err != nil {

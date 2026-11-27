@@ -72,10 +72,6 @@ func (r *Rule) finishKind(kind *string) error {
 	case r.Kind == "":
 		r.Kind = deriveKind(r.Type, r.EndKind)
 	}
-	if r.NotifyOnly { // แค่แจ้งเตือน: no money, so no amount to check
-		r.TrialUntil = nil
-		return nil
-	}
 	switch r.Kind {
 	case KindSubscription, KindInstallment:
 		if r.Type != "expense" || r.Amount <= 0 {
@@ -98,7 +94,7 @@ func (r *Rule) finishKind(kind *string) error {
 		}
 	case KindDebt:
 		// 0.4.3: a debt item may carry a category / tags: its person-paid rounds are my expense
-		if r.Type != typeDebt || (r.Amount <= 0 && r.RepaysReminderID == nil) || (r.PersonName == nil && r.ContactID == nil) || r.DebtKind == nil || r.DebtDirection == nil ||
+		if r.Type != typeDebt || (r.Amount <= 0 && r.RepaysRuleID == nil && r.amountMode() != AmountAsk) || (r.PersonName == nil && r.ContactID == nil) || r.DebtKind == nil || r.DebtDirection == nil ||
 			r.GoalID != nil || r.ToAccountID != nil {
 			return ErrValidation
 		}

@@ -112,9 +112,9 @@ type DebtLink struct {
 }
 
 type RecurringRef struct {
-	// ID — the recurring ITEM (0.4.3: /recurring/{id}); RecurringReminderID — its line.
+	// ID — the recurring ITEM (0.4.3: /recurring/{id}); RecurringRuleID — its line.
 	ID              uuid.UUID `json:"id"`
-	RecurringReminderID uuid.UUID `json:"recurring_reminder_id"`
+	RecurringRuleID uuid.UUID `json:"recurring_rule_id"`
 	Name            string    `json:"name"`
 	IconCode        *IconCode `json:"icon_code"`
 	// Kind — subscription | installment | income | reminder (set by the recurring module only).

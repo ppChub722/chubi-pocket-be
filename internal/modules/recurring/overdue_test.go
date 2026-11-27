@@ -59,7 +59,7 @@ func TestOverdueLimit(t *testing.T) {
 	f.call("POST", "/recurring", "createRecurring", map[string]any{"name": "Auto", "type": "expense", "amount": 1,
 		"account_id": f.wallet, "rule": map[string]any{"freq": "daily", "interval": 1}, "start_date": f.day(-5), "auto_create": true}, 201, &a)
 	f.track(a.Recurring.ID)
-	f.exec(`UPDATE recurring_reminders SET auto_created_until = $2 WHERE id = $1`, a.Recurring.ID, f.today.AddDate(0, 0, -6))
+	f.exec(`UPDATE recurring_rules SET auto_accepted_until = $2 WHERE id = $1`, a.Recurring.ID, f.today.AddDate(0, 0, -6))
 	if err := f.svc.DueCheck(f.ctx, f.me, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestResumeShiftsInstallments(t *testing.T) {
 		f.call("POST", f.occ(id, month(n))+"/mark-paid", "markRecurringOccurrencePaid", nil, 200, nil)
 	}
 	// out of use from no. 4 on (paused at the 4th month's slot, as the limit would)
-	f.exec(`UPDATE recurring_reminders SET status = 'paused', pause_reason = 'overdue_limit', paused_from = $2 WHERE id = $1`,
+	f.exec(`UPDATE recurring_rules SET status = 'paused', pause_reason = 'overdue_limit', paused_from = $2 WHERE id = $1`,
 		id, first.AddDate(0, -3, 0))
 	f.call("POST", "/recurring/"+id.String()+"/resume", "resumeRecurring", nil, 200, &d)
 	if d.Recurring.Status != "active" || d.Recurring.Counts.Due != 1 || d.Recurring.Counts.Paid != 3 ||
@@ -109,7 +109,7 @@ func TestResumeShiftsInstallments(t *testing.T) {
 		"account_id": f.wallet, "rule": map[string]any{"freq": "monthly", "interval": 1}, "start_date": month(-6),
 		"end": map[string]any{"kind": "date", "date": month(6)}}, 201, &e)
 	f.track(e.Recurring.ID)
-	f.exec(`UPDATE recurring_reminders SET status = 'paused', pause_reason = 'manual', paused_from = $2 WHERE id = $1`,
+	f.exec(`UPDATE recurring_rules SET status = 'paused', pause_reason = 'manual', paused_from = $2 WHERE id = $1`,
 		e.Recurring.ID, first.AddDate(0, -6, 0))
 	f.call("POST", "/recurring/"+e.Recurring.ID.String()+"/resume", "resumeRecurring", nil, 200, &e)
 	if e.Recurring.End.Date == nil || *e.Recurring.End.Date != month(6) || e.Recurring.Progress.Total == nil || *e.Recurring.Progress.Total != 7 {

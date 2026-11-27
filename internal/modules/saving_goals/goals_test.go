@@ -117,10 +117,10 @@ func (f *goalFix) savingRule(goal *uuid.UUID, amount float64, monthDay int, inte
 		m := "day"
 		freq, mode, day, interval = "monthly", &m, &monthDay, 1
 	}
-	f.exec(`INSERT INTO recurrings (id, user_id, name, type, goal_id) VALUES ($1, $2, 'ออม', 'saving', $3)`, id, f.me, goal)
-	f.exec(`INSERT INTO recurring_reminders (id, recurring_id, user_id, name, type, kind, amount, account_id, goal_id, freq, interval_n,
-		monthly_mode, month_day, start_date, status)
-		VALUES ($1, $1, $2, 'ออม', 'saving', 'saving', $3, $4, $5, $6, $7, $8, $9, $10, 'active')`,
+	f.exec(`INSERT INTO recurrings (id, user_id, name) VALUES ($1, $2, 'ออม')`, id, f.me)
+	f.exec(`INSERT INTO recurring_rules (id, recurring_id, user_id, type, kind, amount, account_id, goal_id, freq, interval_n,
+		monthly_mode, month_days, start_date, status)
+		VALUES ($1, $1, $2, 'saving', 'saving', $3, $4, $5, $6, $7, $8, CASE WHEN $9::int IS NULL THEN '{}'::int[] ELSE ARRAY[$9::int] END, $10, 'active')`,
 		id, f.me, amount, f.kbank, goal, freq, interval, mode, day, start)
 	return id
 }
@@ -407,7 +407,7 @@ func TestGoalMonthNumbersAndSavingPlan(t *testing.T) {
 		t.Errorf("summary = %+v", l.Summary)
 	}
 	// a paused one is not a plan
-	f.exec(`UPDATE recurring_reminders SET status = 'paused' WHERE goal_id = $1`, goal)
+	f.exec(`UPDATE recurring_rules SET status = 'paused' WHERE goal_id = $1`, goal)
 	f.call("GET", "/saving-goals/"+goal.String(), "getSavingGoal", nil, http.StatusOK, &d)
 	if d.Goal.MonthPlan == nil || *d.Goal.MonthPlan == 15000 {
 		t.Errorf("paused plan = %v, want needed_monthly", d.Goal.MonthPlan)
@@ -425,7 +425,7 @@ func TestGoalLifecycleSavingRules(t *testing.T) {
 	keep := f.savingRule(&other, 500, 1, 0, f.today.Format(dateLayout))
 	status := func(id uuid.UUID) string {
 		var s string
-		if err := f.pool.QueryRow(f.ctx, `SELECT status FROM recurring_reminders WHERE id = $1`, id).Scan(&s); err != nil {
+		if err := f.pool.QueryRow(f.ctx, `SELECT status FROM recurring_rules WHERE id = $1`, id).Scan(&s); err != nil {
 			return "gone"
 		}
 		return s

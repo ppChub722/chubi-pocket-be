@@ -30,8 +30,8 @@ func TestSyncQueryBudget(t *testing.T) {
 	}
 	_, _, again := apitest.DoCounted(t, r, "POST", "/api/v1/sync", map[string]any{"have": have})
 	t.Logf("first sync: %d queries, nothing new: %d queries", first, again)
-	if first > 31 { // 0.4.1-2 P4: + the profile dataset (GET /users/me)
-		t.Errorf("a first sync ran %d queries, budget 31", first)
+	if first > 32 { // 0.4.1-2 P4: + the profile dataset (GET /users/me); recurring rework: + the rule switch defaults
+		t.Errorf("a first sync ran %d queries, budget 32", first)
 	}
 	if again > 4 {
 		t.Errorf("a sync with nothing new ran %d queries, budget 4", again)

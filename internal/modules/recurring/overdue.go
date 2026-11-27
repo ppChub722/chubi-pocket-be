@@ -41,9 +41,9 @@ func (s *Service) pauseTx(ctx context.Context, tx pgx.Tx, r *Rule, keep []*occ, 
 // overdueLimit — a setting holds at most 3 due occurrences. When a 4th has come
 // due while 3 wait (any 3), it turns paused (overdue_limit) instead of making
 // it: the first 3 stay due, nothing after them is made. Clearing them does not
-// resume it. Auto-create settings never wait, so they are never limited.
+// resume it. Auto-accepted rules never wait, so they are never limited.
 func (s *Service) overdueLimit(ctx context.Context, tx pgx.Tx, r *Rule, today time.Time) error {
-	if r.AutoCreate || r.Status != "active" {
+	if r.autoEff || r.Status != "active" {
 		return nil
 	}
 	due, err := s.dueOccs(ctx, tx, r, today)

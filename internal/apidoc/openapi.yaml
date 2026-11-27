@@ -3961,7 +3961,7 @@ paths:
         - { name: q, in: query, description: 'Case-insensitive substring of the name.', schema: { type: string } }
         - { name: status, in: query, schema: { type: string, enum: [current, archived, all] } }
         - { name: for_type, in: query, description: 'THE PICKER: only ACTIVE settings of this money type (a transaction of that type can link to them); each row''s current_occurrence says which occurrence it would take (null = none now).', schema: { type: string, enum: [expense, income, transfer] } }
-        - { name: type, in: query, description: '0.4.3: only items of this type.', schema: { type: string, enum: [expense, income, transfer, saving, debt] } }
+        - { name: tracking_type, in: query, description: 'Only recurrings of this tracking type (the list chips).', schema: { $ref: '#/components/schemas/RecurringTrackingType' } }
         - { name: category_id, in: query, description: 'Picker hint (with for_type): the transaction''s category; settings with it are likely: true and first.', schema: { $ref: '#/components/schemas/Uuid' } }
         - { name: amount, in: query, description: 'Picker hint (with for_type): the transaction''s amount; settings within ±5% are likely: true and first.', schema: { type: number, exclusiveMinimum: 0 } }
       responses:
@@ -4000,6 +4000,48 @@ paths:
       x-breaking: New.
       x-used-by:
         - { page: recurring-detail, calls: 1 }
+  /recurring-rules:
+    get:
+      tags: [Recurring]
+      summary: The rules that touch a page
+      operationId: listRecurringRules
+      description: 'A wallet / goal / debt page''s rules (spec §3): rules (not archived, of a recurring not archived) where ANY given column matches; a wallet page sends account_id and to_account_id with its id. Grouped by recurring (oldest first), each group''s rules in Rule n order. 400 without a filter.'
+      parameters:
+        - { name: account_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: to_account_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: goal_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: contact_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: institution_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: debt_plan_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: debt_key, in: query, description: 'A debt page''s key (c: / n: / i:): debt rules of that counterparty (plan rules aside).', schema: { type: string } }
+      responses:
+        '200':
+          description: The groups.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecurringRuleGroupList' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Recurring]
+      summary: Create a rule from a wallet / goal / debt page
+      operationId: createRecurringRule
+      description: 'Into an existing recurring (recurring_id) or a new one (new_recurring, named for the page). The page prefills its own field (goal_id, account_id, counterparty, debt_plan_id, to_account_id).'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecurringRuleCreateInput' }
+      responses:
+        '201':
+          description: The recurring page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecurringItemPage' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: '409 INVALID_TRANSITION (an archived recurring) / GOAL_NOT_ACTIVE.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   /recurring/{id}:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
@@ -4048,7 +4090,7 @@ paths:
       tags: [Recurring]
       summary: Delete a recurring setting
       operationId: deleteRecurring
-      description: '0.4.3: hard delete of the item, its lines, their rounds, its plan and reminders. What the rounds wrote stays: the transactions as they are (unlinked), its debt rows become general debts of the counterparty (the balance does not change).'
+      description: '0.4.3: hard delete of the item, its lines, their rounds, its rules and their rounds. What the rounds wrote stays: the transactions as they are (unlinked), its debt rows become general debts of the counterparty (the balance does not change).'
       parameters:
       responses:
         '200':
@@ -4169,14 +4211,14 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
       x-breaking: 'New (0.4.0).'
-  /recurring/{id}/reminders/{reminder_id}/extend:
+  /recurring/{id}/rules/{rule_id}/extend:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
     post:
       tags: [Recurring]
       summary: Extend ("ต่ออีก")
-      operationId: extendRecurringReminder
+      operationId: extendRecurringRule
       description: 'Pushes the END of a setting that has one ("ต่ออีก"): `end` = the new end (date / count, at most 2 years after the start). Nothing is generated (occurrences are computed). 409 for a setting with no end. The ending notice re-arms.'
       requestBody:
         required: true
@@ -4263,19 +4305,19 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
       x-breaking: 'New (0.4.0-2).'
-  /recurring/{id}/reminders:
+  /recurring/{id}/rules:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
     post:
       tags: [Recurring]
       summary: Add a line to an item
-      operationId: addRecurringReminder
+      operationId: addRecurringRule
       description: '0.4.3: a new line (its own source, amount, schedule); it takes the item''s name, type, category, counterparty. 409 INVALID_TRANSITION on an archived item; 400 RECURRING_SOURCE_INVALID.'
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/RecurringReminderInput' }
+            schema: { $ref: '#/components/schemas/RecurringRuleInput' }
       responses:
         '200':
           description: 'The item page.'
@@ -4284,20 +4326,20 @@ paths:
               schema: { $ref: '#/components/schemas/RecurringItemPage' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
-  /recurring/{id}/reminders/{reminder_id}:
+  /recurring/{id}/rules/{rule_id}:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
     put:
       tags: [Recurring]
       summary: Edit a line
-      operationId: updateRecurringReminder
-      description: 'A full line (amount, source, to_account_id, debt_kind, auto_create); `schedule` absent = kept. Its computed rounds follow; stored ones stay (as an edit of a setting).'
+      operationId: updateRecurringRule
+      description: 'A full rule (type and target, amount, source, to_account_id, debt_kind, notify, auto_accept); `schedule` absent = kept. Its computed rounds follow; stored ones stay (as an edit of a setting).'
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/RecurringReminderInput' }
+            schema: { $ref: '#/components/schemas/RecurringRuleInput' }
       responses:
         '200':
           description: 'The item page.'
@@ -4309,7 +4351,7 @@ paths:
     delete:
       tags: [Recurring]
       summary: Delete a line
-      operationId: deleteRecurringReminder
+      operationId: deleteRecurringRule
       description: 'The line and its rounds; what they wrote stays (transactions, debt rows of the item). 409 RECURRING_LAST_REMINDER for the last line (delete the item), unless the item''s card plan needs none. 404 RECURRING_REMINDER_NOT_FOUND.'
       responses:
         '200':
@@ -4319,52 +4361,52 @@ paths:
               schema: { $ref: '#/components/schemas/RecurringItemPage' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: '409 RECURRING_LAST_REMINDER.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
-  /recurring/{id}/reminders/{reminder_id}/pause:
+  /recurring/{id}/rules/{rule_id}/pause:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
     post:
       tags: [Recurring]
       summary: Pause one line
-      operationId: pauseRecurringReminder
+      operationId: pauseRecurringRule
       description: 'As pausing a whole item, for this line only. The item is active while one line is. 409 INVALID_TRANSITION.'
       responses:
         '200': { description: 'The item page.', content: { application/json: { schema: { $ref: '#/components/schemas/RecurringItemPage' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: '409 INVALID_TRANSITION.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
-  /recurring/{id}/reminders/{reminder_id}/resume:
+  /recurring/{id}/rules/{rule_id}/resume:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
     post:
       tags: [Recurring]
       summary: Resume one line
-      operationId: resumeRecurringReminder
+      operationId: resumeRecurringRule
       responses:
         '200': { description: 'The item page.', content: { application/json: { schema: { $ref: '#/components/schemas/RecurringItemPage' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: '409 INVALID_TRANSITION.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
-  /recurring/{id}/reminders/{reminder_id}/archive:
+  /recurring/{id}/rules/{rule_id}/archive:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
     post:
       tags: [Recurring]
       summary: Archive one line
-      operationId: archiveRecurringReminder
+      operationId: archiveRecurringRule
       description: 'Every line archived = the item is archived.'
       responses:
         '200': { description: 'The item page.', content: { application/json: { schema: { $ref: '#/components/schemas/RecurringItemPage' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: '409 INVALID_TRANSITION.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
-  /recurring/{id}/reminders/{reminder_id}/restore:
+  /recurring/{id}/rules/{rule_id}/restore:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
     post:
       tags: [Recurring]
       summary: Restore one archived line (→ paused)
-      operationId: restoreRecurringReminder
+      operationId: restoreRecurringRule
       responses:
         '200': { description: 'The item page.', content: { application/json: { schema: { $ref: '#/components/schemas/RecurringItemPage' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -4575,7 +4617,7 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
       x-breaking: 'New (0.4.1-0).'
-  /recurring/{id}/reminders/{reminder_id}/occurrences/{slot}:
+  /recurring/{id}/rules/{rule_id}/occurrences/{slot}:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
@@ -4601,7 +4643,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: '409 ALREADY_RECORDED (a filled occurrence, 0.4.1-1).', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
       x-breaking: 'New (0.4.0-2).'
-  /recurring/{id}/reminders/{reminder_id}/occurrences/{slot}/confirm:
+  /recurring/{id}/rules/{rule_id}/occurrences/{slot}/confirm:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
@@ -4627,7 +4669,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: '409 ALREADY_RECORDED. 409 NOTHING_OWED (0.4.1-2 K5): a จ่ายหนี้ occurrence (kind debt, debt_kind repayment) not edited by hand while the person owes nothing that way (send an amount to book one anyway).', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
       x-breaking: 'New (0.4.0-2).'
-  /recurring/{id}/reminders/{reminder_id}/occurrences/{slot}/skip:
+  /recurring/{id}/rules/{rule_id}/occurrences/{slot}/skip:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
@@ -4653,7 +4695,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: '409 ALREADY_RECORDED (a filled occurrence, 0.4.1-1).', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
       x-breaking: 'New (0.4.0-2).'
-  /recurring/{id}/reminders/{reminder_id}/occurrences/{slot}/restore:
+  /recurring/{id}/rules/{rule_id}/occurrences/{slot}/restore:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
@@ -4673,7 +4715,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
       x-breaking: 'New (0.4.0-2).'
-  /recurring/{id}/reminders/{reminder_id}/occurrences/{slot}/mark-paid:
+  /recurring/{id}/rules/{rule_id}/occurrences/{slot}/mark-paid:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
@@ -4700,7 +4742,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: '409 ALREADY_RECORDED (a filled occurrence, 0.4.1-1). 409 NOTHING_OWED (0.4.1-2 K5): a จ่ายหนี้ occurrence marked paid without `amount` while the person owes nothing that way.', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
       x-breaking: 'New (0.4.0-2).'
-  /recurring/{id}/reminders/{reminder_id}/occurrences/{slot}/unmark-paid:
+  /recurring/{id}/rules/{rule_id}/occurrences/{slot}/unmark-paid:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
@@ -4720,7 +4762,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
       x-breaking: 'New (0.4.0-2).'
-  /recurring/{id}/reminders/{reminder_id}/occurrences/{slot}/link:
+  /recurring/{id}/rules/{rule_id}/occurrences/{slot}/link:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
@@ -4729,7 +4771,7 @@ paths:
       tags: [Recurring]
       summary: Link an existing transaction to one occurrence
       operationId: linkRecurringOccurrence
-      description: 'One occurrence ↔ one transaction; the transaction keeps its own date and amount (the occurrence shows the transaction''s amount). The type must match the setting''s (400 VALIDATION_ERROR; a saving occurrence never takes a transaction: 400 VALIDATION_ERROR). A SKIPPED or PAID occurrence takes one straight away (0.4.1-1 R4): it becomes done, the skip / paid mark goes. 409 ITEM_ALREADY_LINKED when the occurrence holds another transaction (`details.transaction`) or this transaction is on another occurrence (`details.other {recurring_reminder_id, slot}`), unless `replace: true` (one DB transaction: the other side lets go, its transaction stays). `amount_differs` → the app asks "อัปเดตยอดรายการประจำด้วยไหม".'
+      description: 'One occurrence ↔ one transaction; the transaction keeps its own date and amount (the occurrence shows the transaction''s amount). The type must match the setting''s (400 VALIDATION_ERROR; a saving occurrence never takes a transaction: 400 VALIDATION_ERROR). A SKIPPED or PAID occurrence takes one straight away (0.4.1-1 R4): it becomes done, the skip / paid mark goes. 409 ITEM_ALREADY_LINKED when the occurrence holds another transaction (`details.transaction`) or this transaction is on another occurrence (`details.other {recurring_rule_id, slot}`), unless `replace: true` (one DB transaction: the other side lets go, its transaction stays). `amount_differs` → the app asks "อัปเดตยอดรายการประจำด้วยไหม".'
       requestBody:
         required: true
         content:
@@ -4746,7 +4788,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: '409 ITEM_ALREADY_LINKED (details say which side is taken).', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
       x-breaking: 'New (0.4.0-2).'
-  /recurring/{id}/reminders/{reminder_id}/occurrences/{slot}/unlink:
+  /recurring/{id}/rules/{rule_id}/occurrences/{slot}/unlink:
     parameters:
       - { $ref: '#/components/parameters/IdPath' }
       - { $ref: '#/components/parameters/LinePath' }
@@ -4777,7 +4819,7 @@ paths:
         - { $ref: '#/components/parameters/PerPage' }
         - { name: status, in: query, schema: { type: string, enum: [upcoming, due, done, paid, skipped, pending, all, not_created, archived] } }
         - { name: state, in: query, description: 'Alias of status (used when status is absent).', schema: { type: string, enum: [upcoming, due, done, paid, skipped, pending, all, not_created, archived] } }
-        - { name: recurring_reminder_id, in: query, description: 'Only this line''s occurrences (0.4.3; was rule_id).', schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: recurring_rule_id, in: query, description: 'Only this line''s occurrences (0.4.3; was rule_id).', schema: { $ref: '#/components/schemas/Uuid' } }
         - { name: recurring_id, in: query, description: 'Only this item''s occurrences (every line).', schema: { $ref: '#/components/schemas/Uuid' } }
         - { name: kind, in: query, schema: { type: string, enum: [all, recurring] } }
         - { name: month, in: query, description: 'MONTH LIST / CALENDAR: the occurrences dated in that month (YYYY-MM), every status unless status is given (default all), oldest first; per_page defaults to 100 for it. Group by date on the client.', schema: { type: string, example: '2026-10' } }
@@ -4821,7 +4863,7 @@ paths:
       tags: [Recurring]
       summary: One stored occurrence
       operationId: getRecurringItem
-      description: 'By the id of a STORED row (a computed occurrence has no id: read it from listRecurringItems by month + recurring_reminder_id).'
+      description: 'By the id of a STORED row (a computed occurrence has no id: read it from listRecurringItems by month + recurring_rule_id).'
       responses:
         '200':
           description: The item.
@@ -6377,10 +6419,10 @@ components:
       required: true
       schema: { $ref: '#/components/schemas/Uuid' }
     LinePath:
-      name: reminder_id
+      name: rule_id
       in: path
       required: true
-      description: 'A line of the recurring item (recurring_reminders.id; the first line of an item shares the item''s id).'
+      description: 'A rule of the recurring (recurring_rules.id; the first rule of a recurring shares its id).'
       schema: { $ref: '#/components/schemas/Uuid' }
     SeqPath:
       name: seq
@@ -7364,7 +7406,7 @@ components:
     NotificationSettings:
       type: object
       description: 'The notification page (0.4.1-2 S4 / P7): on / off per type, plus the two auto-sync switches (one DB value each, the same values `/users/me`, the event page and the person page show). A muted type is never inserted; auto still applies it silently (Q-B10). On / off and auto are independent (owner 2026-10-30, F1): muted with auto off = no notice and nothing applied.'
-      required: [muted_types, types, auto_sync_events, auto_sync_debts, auto_accept_events, auto_accept_debts, auto_accept_event_invites, auto_accept_contact_links, auto_accept_wallet_invites, auto_accept_repayments, on_split_removed, default_account, updated_at]
+      required: [muted_types, types, auto_sync_events, auto_sync_debts, auto_accept_events, auto_accept_debts, auto_accept_event_invites, auto_accept_contact_links, auto_accept_wallet_invites, auto_accept_repayments, recurring_notify_default, recurring_auto_accept_default, on_split_removed, default_account, updated_at]
       properties:
         muted_types: { type: array, items: { type: string } }
         types:
@@ -7386,6 +7428,8 @@ components:
         auto_accept_contact_links: { type: boolean, description: '0.4.2-3 F2: the same for a contact link request. Default false.' }
         auto_accept_wallet_invites: { type: boolean, description: '0.4.2-3 F2: the same for a wallet invite. Default false.' }
         auto_accept_repayments: { type: boolean, description: 'A partner''s "I paid you back" (debt_repaid) is written into my book at once (into my default wallet; ledger-only when there is none or it can''t take it); off = the notice asks. Default off.' }
+        recurring_notify_default: { type: boolean, description: 'The รายการประจำ row''s แจ้ง: a recurring rule''s notify when it has none of its own (stored on users; the recurring_due row''s on shows it). Default true.' }
+        recurring_auto_accept_default: { type: boolean, description: 'The รายการประจำ row''s อัตโนมัติ: a rule''s auto-accept when it has none of its own (an asked amount never auto-accepts). Default false.' }
         on_split_removed: { type: string, enum: [ask, keep, delete], description: 'Taken off a paper (removed, or it was deleted): my books of it are kept as plain records, deleted, or I am asked (bill_removed). Default ask.' }
         default_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }], description: 'The main wallet (กระเป๋าหลัก): quick create starts with it (getTransactionFormOptions `default_account_id`); null = the last wallet used. Same value as `/users/me` `default_account`.' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
@@ -7394,6 +7438,8 @@ components:
       description: 'Partial; absent = unchanged. `auto_types` is gone (0.4.1-2): auto moved to the two switches.'
       properties:
         muted_types: { type: array, items: { type: string }, description: 'Replaces the stored list. Every listed type is mutable (requests too since 0.4.2-3); a retired type (project_added) is dropped quietly; unknown → 400.' }
+        recurring_notify_default: { type: boolean }
+        recurring_auto_accept_default: { type: boolean }
         auto_sync_events: { type: boolean }
         auto_sync_debts: { type: boolean }
         auto_accept_events: { type: boolean }
@@ -7775,7 +7821,7 @@ components:
               count: { type: integer }
         other_expense: { $ref: '#/components/schemas/Money' }
         trend: { type: array, items: { type: object }, description: 'Unchanged: [{month, income, expense}].' }
-        upcoming: { type: object, description: 'Unchanged shape {days, items, total_expense, total_income}; items are upcoming recurring occurrences dated within the next 14 days that are not due yet (kind recurring, id = the stored item else the setting, plus recurring_reminder_id + slot naming the occurrence; both null on card_due) and card due dates (kind card_due).' }
+        upcoming: { type: object, description: 'Unchanged shape {days, items, total_expense, total_income}; items are upcoming recurring occurrences dated within the next 14 days that are not due yet (kind recurring, id = the stored item else the setting, plus recurring_rule_id + slot naming the occurrence; both null on card_due) and card due dates (kind card_due).' }
         budgets: { type: object, description: 'Unchanged tile. '}
         debts: { $ref: '#/components/schemas/DebtTotals' }
         saving_goals: { $ref: '#/components/schemas/SavingTotals' }
@@ -9699,10 +9745,7 @@ components:
           "event_deleted",
           "event_member_removed",
           "project_invite",
-          "recurring_auto_created",
-          "recurring_due",
-          "recurring_due_soon",
-          "recurring_ending"
+          "recurring_due"
         ]
       }
     Notification: {
@@ -11120,10 +11163,10 @@ components:
     BudgetItem:
       type: object
       description: 'One thing counted in a period.'
-      required: [kind, id, source, counts_as, date, amount, description, category, account, tags, tag_refs, event, recurring, recurring_reminder_id, slot, reason]
+      required: [kind, id, source, counts_as, date, amount, description, category, account, tags, tag_refs, event, recurring, recurring_rule_id, slot, reason]
       properties:
         kind: { type: string, enum: [transaction, event_bill, recurring_item, pending], description: 'What `id` points at.' }
-        id: { $ref: '#/components/schemas/Uuid', description: 'For a recurring_item read from a computed occurrence with no stored row: an id derived from `recurring_reminder_id` + `slot` (stable for that occurrence).' }
+        id: { $ref: '#/components/schemas/Uuid', description: 'For a recurring_item read from a computed occurrence with no stored row: an id derived from `recurring_rule_id` + `slot` (stable for that occurrence).' }
         source: { type: string, enum: [normal, recurring, event, upcoming, pending, future_tx] }
         counts_as: { type: string, enum: [used, expected] }
         date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }] }
@@ -11144,7 +11187,7 @@ components:
         event: { oneOf: [{ $ref: '#/components/schemas/EventRef' }, { type: 'null' }] }
         reason: { type: string, enum: [all, category, sub_category, tag, wallet, ''], description: 'Why the row counts in this budget (first match): all = the budget counts all expenses; category = its category is a scope category; sub_category = a sub-category of one; tag = it carries a scope tag; wallet = it is on a scope wallet. Empty only if nothing matches (never for a counted row).' }
         recurring: { oneOf: [{ $ref: '#/components/schemas/BudgetItemRecurring' }, { type: 'null' }] }
-        recurring_reminder_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The recurring setting an expected recurring_item row belongs to; null on every other row.' }
+        recurring_rule_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The recurring setting an expected recurring_item row belongs to; null on every other row.' }
         slot: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'That occurrence''s original date (its `date` is where it sits now, an edit may have moved it); null on every other row.' }
     BudgetItemRecurring:
       type: object
@@ -11467,7 +11510,7 @@ components:
                     required: [plan, lines]
                     properties:
                       plan: { oneOf: [{ $ref: '#/components/schemas/RecurringPlan' }, { type: 'null' }], description: 'The whole plan (n/N, left, next).' }
-                      lines: { type: array, items: { $ref: '#/components/schemas/RecurringReminder' } }
+                      lines: { type: array, items: { $ref: '#/components/schemas/RecurringRule' } }
             auto_sync_debts: { type: boolean, description: '0.4.1-2 S4: my debts auto-sync switch (the same DB value as /users/me; change it with PUT /notifications/settings or PUT /users/me).' }
             days:
               type: array
@@ -11997,8 +12040,8 @@ components:
     RecurrenceRule:
       type: object
       description: |
-        Google-Calendar-style. `daily` / `weekly` / `monthly` / `yearly` every `interval` units from the start date; weekly on `weekdays` (ISO 1 = Monday … 7 = Sunday; default the start's weekday); monthly by `monthly.mode` day (`day` 1–31, a short month clamps to its last day) or weekday (the `nth` 1–5 or -1 = last `weekday`); yearly on the start's month / day; `dates` = hand-picked dates.
-      required: [freq, interval, weekdays, monthly, dates]
+        Google-Calendar-style. `daily` / `weekly` / `monthly` / `yearly` every `interval` units from the start date; weekly on `weekdays` (ISO 1 = Monday … 7 = Sunday; default the start's weekday); monthly by `monthly.mode` day (on `month_days`) or weekday (the `nth` 1–5 or -1 = last `weekday`; kept in the model, not offered on screen); yearly on `months` × `month_days`; `dates` = hand-picked dates. `month_days`: 1–31 and -1 = the month's last day (สิ้นเดือน); a day past a short month's end falls on its last day; a date is made once.
+      required: [freq, interval, weekdays, monthly, month_days, months, dates]
       properties:
         freq: { type: string, enum: [daily, weekly, monthly, yearly, dates] }
         interval: { type: integer, minimum: 1 }
@@ -12006,13 +12049,14 @@ components:
         monthly:
           oneOf:
             - type: object
-              required: [mode, day, nth, weekday]
+              required: [mode, nth, weekday]
               properties:
                 mode: { type: string, enum: [day, weekday] }
-                day: { type: [integer, 'null'], minimum: 1, maximum: 31 }
                 nth: { type: [integer, 'null'], description: '1–5, or -1 = the last.' }
                 weekday: { type: [integer, 'null'], minimum: 1, maximum: 7 }
             - { type: 'null' }
+        month_days: { type: array, items: { type: integer, minimum: -1, maximum: 31 }, description: 'monthly (day mode) / yearly: the days; default the start''s day.' }
+        months: { type: array, items: { type: integer, minimum: 1, maximum: 12 }, description: 'yearly: the months; default the start''s month.' }
         dates: { type: array, items: { $ref: '#/components/schemas/Date' } }
     RecurrenceEnd:
       type: object
@@ -12023,7 +12067,7 @@ components:
         count: { type: [integer, 'null'], minimum: 1 }
     RecurrenceRuleInput:
       type: object
-      description: 'RecurrenceRule as a request: only `freq` is required (interval defaults to 1, weekly days to the start''s weekday, monthly to the start''s day).'
+      description: 'RecurrenceRule as a request: only `freq` is required (interval defaults to 1, weekly days to the start''s weekday, monthly / yearly days to the start''s day, yearly months to the start''s month).'
       required: [freq]
       properties:
         freq: { type: string, enum: [daily, weekly, monthly, yearly, dates] }
@@ -12035,10 +12079,11 @@ components:
               required: [mode]
               properties:
                 mode: { type: string, enum: [day, weekday] }
-                day: { type: [integer, 'null'], minimum: 1, maximum: 31 }
                 nth: { type: [integer, 'null'] }
                 weekday: { type: [integer, 'null'], minimum: 1, maximum: 7 }
             - { type: 'null' }
+        month_days: { type: array, items: { type: integer, minimum: -1, maximum: 31 } }
+        months: { type: array, items: { type: integer, minimum: 1, maximum: 12 } }
         dates: { type: array, items: { $ref: '#/components/schemas/Date' } }
     RecurrenceEndInput:
       type: object
@@ -12051,7 +12096,20 @@ components:
     RecurringItemType:
       type: string
       enum: [expense, income, transfer, saving, debt]
-      description: '0.4.3: the 5 types, fixed once the item is created (a PUT with another type is refused). A reminder pays like its item: expense = an expense (amount_mode ask: waits for its amount), transfer, income, saving (into a goal), debt (debt / repayment rows of the counterparty).'
+      description: 'A rule''s money type (each rule its own): expense (amount_mode ask: waits for its amount), transfer (into a card wallet = its bill), income, saving (into a goal), debt (debt / repayment rows of the counterparty, or a plan''s installments).'
+    RecurringTrackingType:
+      type: string
+      enum: [bill, subscription, installment, credit_card, person_debt, income, saving, other]
+      description: 'A recurring''s tracking type: a filter on the list, no effect on its rules.'
+    RecurringTouch:
+      type: object
+      description: 'One page a recurring''s rules show on besides the recurring list (spec §3: pulled by the rules'' columns).'
+      required: [kind, id, name]
+      properties:
+        kind: { type: string, enum: [goal, person, institution, plan, card] }
+        id: { $ref: '#/components/schemas/Uuid', description: 'The goal / contact / institution / plan / card wallet (nil uuid for a typed person).' }
+        key: { type: string, description: 'A person / institution: its debt page key (c: / n: / i:).' }
+        name: { type: string }
     RecurringPersonInput:
       type: object
       description: 'A person: one of my contacts, else a typed name.'
@@ -12075,25 +12133,41 @@ components:
           properties:
             start_date: { $ref: '#/components/schemas/Date' }
             end: { $ref: '#/components/schemas/RecurrenceEndInput' }
-    RecurringReminderInput:
+    RecurringRuleInput:
       type: object
-      description: 'A line. source: exactly one of account_id / paid_by (a person paying for me: expense / debt only, 400 RECURRING_SOURCE_INVALID otherwise); a debt reminder may have neither (ledger-only rows). amount_mode: fixed | ask (expense / transfer only; default ask when no amount is sent); amount: required when fixed; with ask an optional hint each round starts with. schedule: required on a new line.'
+      description: |
+        A rule (POST / PUT /recurring/{id}/rules, an entry of RecurringInput.rules): a full replace. `type` and its target: category (expense / income), tags, goal (saving), and for debt `debt_plan_id` (its creditor and direction are the plan's; amount = its installments) or `counterparty` + `debt_direction`. source: exactly one of account_id / paid_by (a person paying for me: expense only, 400 RECURRING_SOURCE_INVALID otherwise); a debt rule may have neither (ledger-only rows). amount_mode: fixed | ask (expense / transfer / a person repayment; default ask when no amount is sent); amount: required when fixed; with ask an optional hint. schedule: required on a new rule. notify / auto_accept: null = the user's default; auto-accept never runs on an asked amount.
+      required: [type]
       properties:
-        id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'PUT /recurring/{id}: an existing line to update; absent = a new line.' }
+        id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'PUT /recurring/{id}: an existing rule to update; absent = a new rule.' }
+        type: { $ref: '#/components/schemas/RecurringItemType' }
+        category_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        tag_ids: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+        goal_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Type saving: the goal; null = the unallocated pot.' }
+        counterparty:
+          oneOf:
+            - type: object
+              description: 'Exactly one of contact_id / person_name / institution_id.'
+              properties:
+                contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+                person_name: { type: [string, 'null'], maxLength: 100 }
+                institution_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+            - type: 'null'
+        debt_direction: { type: [string, 'null'], enum: [paid, received, null], description: 'The debt''s side: paid = they owe me, received = I owe them.' }
+        debt_plan_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Type debt: the plan it pays (not a card plan, not a closed one).' }
         amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
-        notify_only: { type: [boolean, 'null'], description: 'แค่แจ้งเตือน: the rounds book nothing and count in no total; a due round closes by itself (paid, no transaction); only the alerts go out. No paid_by / repays_reminder_id; auto_create off.' }
-        repays_reminder_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Type expense: pay back the person of that person-paid reminder of the item (repay_paid_by); each round = its latest recorded round, capped at what is owed.' }
-        amount_mode: { type: [string, 'null'], enum: [fixed, ask, null], description: 'fixed = the amount every round; ask = typed on each round (expense / transfer only). Absent = ask when no amount is sent.' }
+        repays_rule_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Type expense: pay back the person of that person-paid rule of the same recurring (repay_paid_by); each round = its latest recorded round, capped at what is owed.' }
+        amount_mode: { type: [string, 'null'], enum: [fixed, ask, null] }
         source:
           type: object
           properties:
             account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
             paid_by: { oneOf: [{ $ref: '#/components/schemas/RecurringPersonInput' }, { type: 'null' }] }
-        to_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Type transfer.' }
-        debt_kind: { type: [string, 'null'], enum: [debt, repayment, null], description: 'Type debt: each round books a debt (จดหนี้) or a repayment (จ่ายหนี้); a person-paid line is always debt.' }
-        alerts: { type: [array, 'null'], items: { $ref: '#/components/schemas/RecurringAlertInput' }, description: 'The reminder''s alerts: absent / null = kept, [] = none (max 5).' }
+        to_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Type transfer (a card wallet: the card''s bill).' }
+        debt_kind: { type: [string, 'null'], enum: [debt, repayment, null], description: 'Type debt without a plan: debt (borrow / lend) or repayment (default).' }
         schedule: { $ref: '#/components/schemas/RecurringScheduleInput' }
-        auto_create: { type: boolean }
+        notify: { type: [boolean, 'null'] }
+        auto_accept: { type: [boolean, 'null'] }
     DebtPlanInput:
       type: object
       required: [name, creditor, plan]
@@ -12184,43 +12258,60 @@ components:
               interest: { type: [number, 'null'] }
         opening_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The opening debt row (written once, when the item first gets its plan, not on a card): its wallet transaction (the money lent / borrowed). Absent = a ledger-only row.' }
         opening_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: 'The opening row''s date (default today).' }
-    RecurringAlertInput:
-      type: object
-      required: [anchor]
-      properties:
-        anchor: { type: string, enum: [due, start, end], description: 'due = every round of this reminder; start / end = the plan''s first / last installment, else this reminder''s start / last round.' }
-        days_before: { type: integer, minimum: 0, maximum: 60 }
-        time: { type: string, description: 'HH:MM, the user''s time (default 09:00).' }
     RecurringInput:
       type: object
-      description: |
-        0.4.3: POST / PUT /recurring. PUT replaces the item's own fields; `lines` when sent: with id = update, without = new, missing = deleted (≥ 1, except a card plan: 0); absent = the lines stay (they take the new item fields). `plan`: sent = set (null drops it), absent = kept. `reminders`: sent = the full set, absent = kept (max 5).
-        type debt: `counterparty` (exactly one of contact_id / person_name / institution_id) and `debt_direction` (paid = they owe me, received = I owe them) are required; its category is the one of its person-paid rounds. The type stays in its family (expense / subscription / bill switch freely; the others never change).
-      required: [name, type]
+      description: 'POST / PUT /recurring. PUT replaces the recurring''s own fields; `rules` when sent: with id = update, without = new, missing = deleted (≥ 1); absent = the rules stay. POST: the recurring with its rules in one call (1–20).'
+      required: [name]
       properties:
         name: { type: string, minLength: 1, maxLength: 100 }
         description: { type: [string, 'null'], maxLength: 200 }
         note: { type: [string, 'null'], maxLength: 500 }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
-        type: { $ref: '#/components/schemas/RecurringItemType' }
-        category_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
-        tag_ids: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
-        goal_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Type saving: the goal; null = the unallocated pot.' }
-        counterparty:
+        tracking_type: { oneOf: [{ $ref: '#/components/schemas/RecurringTrackingType' }, { type: 'null' }], description: 'Default other.' }
+        rules: { type: array, items: { $ref: '#/components/schemas/RecurringRuleInput' } }
+    RecurringRuleCreateInput:
+      type: object
+      description: 'POST /recurring-rules: a rule made from a wallet / goal / debt page, into an existing recurring (recurring_id) or a new one (new_recurring: name, icon, tracking type; no rules). Exactly one of the two.'
+      required: [rule]
+      properties:
+        recurring_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        new_recurring:
           oneOf:
             - type: object
+              required: [name]
               properties:
-                contact_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
-                person_name: { type: [string, 'null'], maxLength: 100 }
-                institution_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
-                account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'A card / PayLater wallet: the item pays its bill (a transfer into the card; direction received).' }
-            - type: 'null'
-        debt_direction: { type: [string, 'null'], enum: [paid, received, null] }
-        debt_plan_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'Type debt: the plan it pays (not a card plan); its creditor and direction are the plan''s. Without it: counterparty.' }
-        reminders: { type: array, items: { $ref: '#/components/schemas/RecurringReminderInput' } }
+                name: { type: string, minLength: 1, maxLength: 100 }
+                description: { type: [string, 'null'], maxLength: 200 }
+                note: { type: [string, 'null'], maxLength: 500 }
+                icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
+                tracking_type: { oneOf: [{ $ref: '#/components/schemas/RecurringTrackingType' }, { type: 'null' }] }
+            - { type: 'null' }
+        rule: { $ref: '#/components/schemas/RecurringRuleInput' }
+    RecurringRuleGroupList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            required: [recurring, rules, month_total]
+            properties:
+              recurring:
+                type: object
+                required: [id, name, icon_code, tracking_type, status, rules_count]
+                properties:
+                  id: { $ref: '#/components/schemas/Uuid' }
+                  name: { type: string }
+                  icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
+                  tracking_type: { $ref: '#/components/schemas/RecurringTrackingType' }
+                  status: { type: string, enum: [active, paused, archived] }
+                  rules_count: { type: integer, description: 'All its rules ("rule 1 จาก 2").' }
+              rules: { type: array, items: { $ref: '#/components/schemas/RecurringRule' } }
+              month_total: { $ref: '#/components/schemas/Money', description: 'These rules'' per-month total (active ones).' }
     RecurringCounterparty:
       type: object
-      description: 'A debt item''s counterparty, page-ready; key = its debt page (c: / n: / i:).'
+      description: 'A debt rule''s counterparty (a plan rule: the plan''s creditor), page-ready; key = its debt page (c: / n: / i:).'
       required: [key, kind, name, person, institution, account, net]
       properties:
         key: { type: string, description: 'Empty for a card (the card holds the debt).' }
@@ -12232,9 +12323,9 @@ components:
         net: { $ref: '#/components/schemas/Money', description: 'Its balance now (> 0 = it owes me): every debt row so far.' }
     RecurringNextRound:
       type: object
-      required: [recurring_reminder_id, date, amount, days_until]
+      required: [recurring_rule_id, date, amount, days_until]
       properties:
-        recurring_reminder_id: { $ref: '#/components/schemas/Uuid' }
+        recurring_rule_id: { $ref: '#/components/schemas/Uuid' }
         date: { $ref: '#/components/schemas/Date' }
         amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
         days_until: { type: integer }
@@ -12244,16 +12335,29 @@ components:
       properties:
         slot: { $ref: '#/components/schemas/Date' }
         status: { type: string, enum: [upcoming, due, done, paid, skipped, pending] }
-    RecurringReminder:
+    RecurringRule:
       type: object
-      description: '0.4.3: one line of an item, page-ready. status done = ครบแล้ว (a line with an end whose every round is recorded / skipped).'
-      required: [id, amount, amount_mode, action, repays_reminder_id, source, account, paid_by, to_account_id, to_account, debt_kind, schedule, auto_create, status, pause_reason, next_date, next_amount, days_until, due_count, monthly_amount, yearly_cost, progress, chain, ending_soon, counts, current_occurrence, alerts, actions, created_at, updated_at]
+      description: 'One rule, page-ready. status done = ครบแล้ว (a rule with an end whose every round is recorded / skipped).'
+      required: [id, recurring_id, seq, type, category_id, category, tag_ids, tags, goal_id, goal, counterparty, debt_direction, debt_plan_id, amount, amount_mode, prefill_hint, action, repays_rule_id, source, account, paid_by, to_account_id, to_account, debt_kind, schedule, end_text, notify, auto_accept, notify_on, auto_accept_on, status, pause_reason, next_date, next_amount, days_until, due_count, monthly_amount, yearly_cost, progress, chain, ending_soon, counts, current_occurrence, actions, created_at, updated_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
+        recurring_id: { $ref: '#/components/schemas/Uuid' }
+        seq: { type: integer, description: '"Rule n": its place among its recurring''s rules (1-based, oldest first).' }
+        type: { $ref: '#/components/schemas/RecurringItemType' }
+        category_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        category: { oneOf: [{ $ref: '#/components/schemas/CategoryRef' }, { type: 'null' }] }
+        tag_ids: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+        tags: { type: array, items: { $ref: '#/components/schemas/TagRef' } }
+        goal_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        goal: { oneOf: [{ $ref: '#/components/schemas/SavingGoalRef' }, { type: 'null' }] }
+        counterparty: { oneOf: [{ $ref: '#/components/schemas/RecurringCounterparty' }, { type: 'null' }] }
+        debt_direction: { type: [string, 'null'], enum: [paid, received, null], description: 'The debt''s side: paid = they owe me.' }
+        debt_plan_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'null = waits for its amount (amount_mode ask).' }
-        amount_mode: { type: string, enum: [fixed, ask] }
-        action: { type: string, enum: [expense, income, transfer, saving, paid_by, repay_paid_by, repay, collect, notify], description: 'What a round does (from the item type and the reminder). A card bill: transfer.' }
-        repays_reminder_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
+        amount_mode: { type: string, enum: [fixed, ask, schedule, follow], description: 'schedule = a plan''s installments; follow = the latest round of the rule it repays.' }
+        prefill_hint: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'An asked person repayment next to another rule of that person: the net balance, shown, not filled (spec §2.1). The only rule of the person: its rounds start with the net.' }
+        action: { type: string, enum: [expense, income, transfer, saving, paid_by, repay_paid_by, repay, collect, borrow, lend], description: 'What a round does.' }
+        repays_rule_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         source:
           type: object
           required: [account_id, paid_by]
@@ -12268,12 +12372,16 @@ components:
                     person_name: { type: [string, 'null'] }
                 - type: 'null'
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
-        paid_by: { oneOf: [{ $ref: '#/components/schemas/PersonRef' }, { type: 'null' }], description: 'คนจ่ายแทน: each round = my transaction in the item''s category with no wallet money + my debt to that person (one จ่ายแทน paper).' }
+        paid_by: { oneOf: [{ $ref: '#/components/schemas/PersonRef' }, { type: 'null' }], description: 'คนจ่ายแทน: each round = my transaction in the rule''s category with no wallet money + my debt to that person.' }
         to_account_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
         to_account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
         debt_kind: { type: [string, 'null'], enum: [debt, repayment, null] }
         schedule: { $ref: '#/components/schemas/RecurringSchedule' }
-        auto_create: { type: boolean }
+        end_text: { type: [string, 'null'], enum: [goal_reached, debt_cleared, null], description: 'A rule that stops by itself (shown on the end chip): saving into a goal / repaying a debt.' }
+        notify: { type: [boolean, 'null'], description: 'As stored; null = the user''s default.' }
+        auto_accept: { type: [boolean, 'null'], description: 'As stored; null = the user''s default.' }
+        notify_on: { type: boolean, description: 'In effect.' }
+        auto_accept_on: { type: boolean, description: 'In effect (always false for an asked amount).' }
         status: { type: string, enum: [active, paused, archived, done] }
         pause_reason: { type: [string, 'null'], enum: [manual, overdue_limit, goal_inactive, no_balance, null] }
         next_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }] }
@@ -12287,16 +12395,6 @@ components:
         ending_soon: { type: boolean }
         counts: { $ref: '#/components/schemas/Recurring/properties/counts' }
         current_occurrence: { oneOf: [{ $ref: '#/components/schemas/RecurringOccurrence' }, { type: 'null' }] }
-        alerts:
-          type: array
-          items:
-            type: object
-            required: [id, anchor, days_before, time]
-            properties:
-              id: { $ref: '#/components/schemas/Uuid' }
-              anchor: { type: string, enum: [due, start, end] }
-              days_before: { type: integer }
-              time: { type: string }
         actions:
           type: object
           required: [pause, resume, archive, restore, extend, delete]
@@ -12334,6 +12432,7 @@ components:
         amount: { type: number, minimum: 0 }
         principal: { type: number, minimum: 0 }
         interest: { type: number, minimum: 0 }
+        recalc_rest: { type: boolean, description: 'The user said yes to "คำนวณงวดที่เหลือใหม่ไหม": the open installments after this one are rebuilt from the real remaining principal (reducing: interest on the balance again; flat / manual keep each one''s interest; fixed keeps the amount), overwriting them, hand-edited ones too. Never done without it.' }
     RecurringPlan:
       type: object
       description: '0.4.3: a debt plan, page-ready: its numbers over the installments, its creditor, its purchase, the item that pays it.'
@@ -12354,7 +12453,7 @@ components:
         direction: { type: string, enum: [received, paid], description: 'received = I owe; paid = they owe me.' }
         origin: { type: string, enum: [purchase, cash] }
         creditor: { $ref: '#/components/schemas/RecurringCounterparty' }
-        recurring_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The recurring item whose reminder pays it.' }
+        recurring_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The recurring of the first rule that pays it.' }
         installments: { type: array, items: { $ref: '#/components/schemas/RecurringInstallment' } }
         created_at: { $ref: '#/components/schemas/DateTime' }
         purchase:
@@ -12390,34 +12489,27 @@ components:
               status: { type: string, enum: [upcoming, due, paid, skipped] }
     RecurringItemPage:
       type: object
-      description: '0.4.3: a recurring item (GET /recurring/{id}, and every item write): its own fields, reminders, plan, reminders and numbers over every line. status done = every line ครบแล้ว.'
-      required: [id, name, description, note, icon_code, type, category_id, category, tag_ids, tags, goal_id, goal, counterparty, debt_direction, status, plan, reminders, stats, due_count, next, month_total, actions, created_at, updated_at, account_balances, effects]
+      description: 'A recurring (GET /recurring/{id}, and every recurring / rule write): its own fields, rules, the plan of its first plan rule and numbers over every rule. status done = every rule ครบแล้ว.'
+      required: [id, name, description, note, icon_code, tracking_type, status, touches, plan, rules, stats, due_count, next, month_total, actions, created_at, updated_at, account_balances, effects]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         name: { type: string }
         description: { type: [string, 'null'] }
         note: { type: [string, 'null'] }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
-        type: { $ref: '#/components/schemas/RecurringItemType' }
-        category_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
-        category: { oneOf: [{ $ref: '#/components/schemas/CategoryRef' }, { type: 'null' }] }
-        tag_ids: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
-        tags: { type: array, items: { $ref: '#/components/schemas/TagRef' } }
-        goal_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }] }
-        goal: { oneOf: [{ $ref: '#/components/schemas/SavingGoalRef' }, { type: 'null' }] }
-        counterparty: { oneOf: [{ $ref: '#/components/schemas/RecurringCounterparty' }, { type: 'null' }] }
-        debt_direction: { type: [string, 'null'], enum: [paid, received, null] }
+        tracking_type: { $ref: '#/components/schemas/RecurringTrackingType' }
         status: { type: string, enum: [active, paused, archived, done] }
+        touches: { type: array, items: { $ref: '#/components/schemas/RecurringTouch' }, description: 'Empty = self-made (ตั้งเอง).' }
         plan: { oneOf: [{ $ref: '#/components/schemas/RecurringPlan' }, { type: 'null' }] }
-        reminders: { type: array, items: { $ref: '#/components/schemas/RecurringReminder' } }
+        rules: { type: array, items: { $ref: '#/components/schemas/RecurringRule' } }
         stats:
           type: object
-          description: 'Over every line''s recorded rounds.'
+          description: 'Over every rule''s recorded rounds.'
           required: [paid_count, paid_total, left_total, last_date, avg_amount, last_amount, max_amount, series]
           properties:
             paid_count: { type: integer }
             paid_total: { $ref: '#/components/schemas/Money' }
-            left_total: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'Only when every line has an end.' }
+            left_total: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }], description: 'Only when every rule has an end.' }
             last_date: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }] }
             avg_amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
             last_amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
@@ -12431,36 +12523,38 @@ components:
                   slot: { $ref: '#/components/schemas/Date' }
                   date: { $ref: '#/components/schemas/Date' }
                   amount: { $ref: '#/components/schemas/Money' }
-        due_count: { type: integer, description: 'Rounds due and not recorded, every line.' }
-        next: { oneOf: [{ $ref: '#/components/schemas/RecurringNextRound' }, { type: 'null' }], description: 'The next round of any active line.' }
-        month_total: { $ref: '#/components/schemas/Money', description: 'Per-month equivalent of the active lines.' }
+        due_count: { type: integer, description: 'Rounds due and not recorded, every rule.' }
+        next: { oneOf: [{ $ref: '#/components/schemas/RecurringNextRound' }, { type: 'null' }], description: 'The next round of any active rule.' }
+        month_total: { $ref: '#/components/schemas/Money', description: 'Per-month equivalent of the active rules.' }
         actions:
           type: object
-          required: [pause, resume, archive, restore, delete, add_reminder]
+          required: [pause, resume, archive, restore, delete, add_rule]
           properties:
             pause: { type: boolean }
             resume: { type: boolean }
             archive: { type: boolean }
             restore: { type: boolean }
             delete: { type: boolean }
-            add_reminder: { type: boolean }
+            add_rule: { type: boolean }
         created_at: { $ref: '#/components/schemas/DateTime' }
         updated_at: { $ref: '#/components/schemas/DateTime' }
-        account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' }, description: 'A write that moved money (a plan''s opening row with a wallet).' }
+        account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
         effects: { $ref: '#/components/schemas/Effects' }
     RecurringSummary:
       type: object
-      description: '0.4.3: one row of the recurring list (an item). amount / account / paid_by / chain / progress = its single line''s (null / [] with 2+ lines: show reminders_count + month_total).'
-      required: [id, name, type, icon_code, status, pause_reason, category, reminders_count, amount, account, paid_by, chain, progress, month_total, next, current_occurrence, due_count, ending_soon, counterparty, debt_direction, goal, plan, likely, created_at, updated_at]
+      description: 'One row of the recurring list (a recurring). amount / account / paid_by / chain / progress / category = its single rule''s (null / [] with 2+ rules: show rules_count + month_total). related + touches: the two sections (เกี่ยวกับหน้าอื่น / ตั้งเอง).'
+      required: [id, name, tracking_type, icon_code, status, pause_reason, category, rules_count, related, touches, amount, account, paid_by, chain, progress, month_total, next, current_occurrence, due_count, ending_soon, plan, likely, created_at, updated_at]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         name: { type: string }
-        type: { $ref: '#/components/schemas/RecurringItemType' }
+        tracking_type: { $ref: '#/components/schemas/RecurringTrackingType' }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
         status: { type: string, enum: [active, paused, archived, done] }
         pause_reason: { type: [string, 'null'], enum: [manual, overdue_limit, goal_inactive, no_balance, null] }
         category: { oneOf: [{ $ref: '#/components/schemas/CategoryRef' }, { type: 'null' }] }
-        reminders_count: { type: integer }
+        rules_count: { type: integer }
+        related: { type: boolean, description: 'Any rule touches a goal / person / institution / plan or pays into a card.' }
+        touches: { type: array, items: { $ref: '#/components/schemas/RecurringTouch' } }
         amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
         account: { oneOf: [{ $ref: '#/components/schemas/AccountRef' }, { type: 'null' }] }
         paid_by: { oneOf: [{ $ref: '#/components/schemas/PersonRef' }, { type: 'null' }] }
@@ -12468,12 +12562,9 @@ components:
         progress: { oneOf: [{ $ref: '#/components/schemas/Recurring/properties/progress' }, { type: 'null' }] }
         month_total: { $ref: '#/components/schemas/Money' }
         next: { oneOf: [{ $ref: '#/components/schemas/RecurringNextRound' }, { type: 'null' }] }
-        current_occurrence: { oneOf: [{ $ref: '#/components/schemas/RecurringOccurrence' }, { type: 'null' }], description: 'The round a transaction links to now (the picker): the oldest due one over the lines, else the nearest upcoming one; its line in recurring_reminder_id.' }
+        current_occurrence: { oneOf: [{ $ref: '#/components/schemas/RecurringOccurrence' }, { type: 'null' }], description: 'The round a transaction links to now (the picker): the oldest due one over the rules, else the nearest upcoming one; its rule in recurring_rule_id.' }
         due_count: { type: integer }
         ending_soon: { type: boolean }
-        counterparty: { oneOf: [{ $ref: '#/components/schemas/RecurringCounterparty' }, { type: 'null' }] }
-        debt_direction: { type: [string, 'null'], enum: [paid, received, null], description: 'Type debt: the debt''s side (paid = they owe me / ต้องได้, received = I owe them / ต้องจ่าย).' }
-        goal: { oneOf: [{ $ref: '#/components/schemas/SavingGoalRef' }, { type: 'null' }] }
         plan:
           oneOf:
             - type: object
@@ -12495,10 +12586,10 @@ components:
         pagination: { $ref: '#/components/schemas/Page' }
     RecurringRef:
       type: object
-      required: [id, recurring_reminder_id, name, icon_code]
+      required: [id, recurring_rule_id, name, icon_code]
       properties:
         id: { $ref: '#/components/schemas/Uuid', description: '0.4.3: the recurring ITEM (/recurring/{id}).' }
-        recurring_reminder_id: { $ref: '#/components/schemas/Uuid', description: '0.4.3: the line of the item.' }
+        recurring_rule_id: { $ref: '#/components/schemas/Uuid', description: '0.4.3: the line of the item.' }
         name: { type: string }
         icon_code: { oneOf: [{ $ref: '#/components/schemas/IconCode' }, { type: 'null' }] }
         kind: { type: string, enum: [subscription, installment, income, reminder, saving, debt], description: 'Sent by the recurring module (its items); absent on refs other modules embed.' }
@@ -12506,7 +12597,7 @@ components:
     Recurring:
       type: object
       description: 'A recurring setting (the generator), page-ready.'
-      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal_id, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, monthly_amount, saved_count, pending_count, next_amount, current_occurrence, next_date, days_until, progress, ending_soon, counts, likely, edited_any, actions, created_at, updated_at, due_count, avg_amount, chain, auto_create, recorded_tx_count, pause_reason, person, debt_kind, direction, person_balance, zero_rounds]
+      required: [id, name, description, note, icon_code, type, amount, account, to_account, category, goal_id, goal, tags, rule, start_date, end, status, kind, trial_until, yearly_cost, monthly_amount, saved_count, pending_count, next_amount, current_occurrence, next_date, days_until, progress, ending_soon, counts, likely, edited_any, actions, created_at, updated_at, due_count, avg_amount, chain, auto_accept, recorded_tx_count, pause_reason, person, debt_kind, direction, person_balance, zero_rounds]
       properties:
         likely: { type: boolean, description: 'Only meaningful with the picker hints (for_type + category_id / amount): the setting matches the transaction by category or amount (±5%); such settings are listed first. false otherwise.' }
         id: { $ref: '#/components/schemas/Uuid' }
@@ -12540,7 +12631,7 @@ components:
             properties:
               slot: { $ref: '#/components/schemas/Date' }
               status: { type: string, enum: [upcoming, due, done, paid, skipped, pending] }
-        auto_create: { type: boolean, description: '"บันทึกอัตโนมัติเมื่อถึงวัน": each occurrence that comes due is recorded by itself (dated its date, the occurrence name as description). 0.4.1-1 R12: it never waits and never fails: amount 0 is recorded as 0; a wallet / category that is gone or archived is left empty on the transaction and the setting keeps running; every missed occurrence is made at the next due check (each dated its own date); the overdue limit never applies. The app warns when it is set with amount 0 or on a varying amount.' }
+        auto_accept: { type: [boolean, 'null'], description: 'The rule''s switch as stored (null = the user''s default).' }
         recorded_tx_count: { type: integer, description: 'Transactions recorded from this setting (the delete question''s N is delete_preview.linked_transactions).' }
         pause_reason:
           type: [string, 'null']
@@ -12599,10 +12690,10 @@ components:
     RecurringOccurrence:
       type: object
       description: 'A setting''s current occurrence (the oldest due one, else the next one within one cycle of today): what a transaction links to.'
-      required: [item_id, recurring_reminder_id, slot, date, days_until, amount, status]
+      required: [item_id, recurring_rule_id, slot, date, days_until, amount, status]
       properties:
-        item_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'null while it is only computed (address it by recurring_reminder_id + slot).' }
-        recurring_reminder_id: { $ref: '#/components/schemas/Uuid' }
+        item_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'null while it is only computed (address it by recurring_rule_id + slot).' }
+        recurring_rule_id: { $ref: '#/components/schemas/Uuid' }
         slot: { $ref: '#/components/schemas/Date', description: 'Its original date.' }
         date: { $ref: '#/components/schemas/Date' }
         days_until: { type: integer, description: 'Negative = overdue.' }
@@ -12649,8 +12740,19 @@ components:
         summary:
           type: object
           description: 'The list''s summary card; the same whatever the status / q / page of the list. month_pay / month_receive = the PER-MONTH EQUIVALENT of the ACTIVE settings (paused, archived and ended ones excluded, so are settings on an archived wallet; transfers and savings are not money in / out): daily = amount × 30.4375 / interval; weekly = amount × weekdays × 4.3481 / interval (no weekdays = 1); monthly = amount / interval; yearly = amount / (12 × interval); custom dates = amount × the dates that fall in the CURRENT month. 2 decimals. next = the nearest upcoming occurrence (today or later) of an active setting of ANY type, null when none; ties by name.'
-          required: [month_pay, month_receive, next, due_30d_total, awaiting_amount_count, due_count, due_total, by_kind]
+          required: [month_pay, month_receive, next, due_30d_total, awaiting_amount_count, due_count, due_total, by_kind, month]
           properties:
+            month:
+              type: object
+              description: 'The list hero: this calendar month''s rounds of the active rules. expense leaves out saving and installments; a round with no amount yet counts its rule''s average (expense_approx = some are estimates, shown "~"). installment = the debt rules'' rounds + the card plans'' installments billed this month.'
+              required: [expense, expense_approx, expense_paid, income, saving, installment]
+              properties:
+                expense: { $ref: '#/components/schemas/Money' }
+                expense_approx: { type: boolean }
+                expense_paid: { $ref: '#/components/schemas/Money' }
+                income: { $ref: '#/components/schemas/Money' }
+                saving: { $ref: '#/components/schemas/Money' }
+                installment: { $ref: '#/components/schemas/Money' }
             due_count: { type: integer, description: 'Occurrences due and not recorded (overdue + today), every active setting.' }
             due_total: { $ref: '#/components/schemas/Money', description: 'Their known amounts summed.' }
             month_pay: { $ref: '#/components/schemas/Money' }
@@ -12664,7 +12766,7 @@ components:
                     name: { type: string }
                     date: { $ref: '#/components/schemas/Date' }
                     amount: { oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }] }
-                    type: { type: string, enum: [expense, income, transfer, saving] }
+                    type: { type: string, enum: [expense, income, transfer, saving, debt] }
                 - { type: 'null' }
             due_30d_total: { $ref: '#/components/schemas/Money', description: 'What is still to pay in the next 30 days: expense occurrences not done / archived, due today or earlier (still waiting) up to 30 days ahead, KNOWN amounts only.' }
             awaiting_amount_count: { type: integer, description: 'Occurrences in that window (and any overdue pending one) that have no amount yet (reminders waiting for the number).' }
@@ -12691,11 +12793,11 @@ components:
         total: { type: [integer, 'null'] }
     RecurringItem:
       type: object
-      description: 'One occurrence of a setting, COMPUTED from its rule or STORED (a row exists only when it was edited, recorded, paid or skipped; id null = computed). Its address is recurring_reminder_id + slot either way. status: upcoming (dated after today) | due (today or before, not recorded) | done (a transaction) | paid (settled without one) | skipped | pending (a legacy draft still waiting). A slot before the setting''s tracked_from (its creation day) is paid implicitly.'
-      required: [id, recurring_reminder_id, slot, stored, auto_created, needs_amount, recurring, seq, total, date, days_until, status, edited, manual, type, amount, account, to_account, category, goal_id, goal, tags, description, note, pending_id, transaction, saving_entry_id, person, debt_entry, debt_kind, direction, created_at, updated_at]
+      description: 'One occurrence of a setting, COMPUTED from its rule or STORED (a row exists only when it was edited, recorded, paid or skipped; id null = computed). Its address is recurring_rule_id + slot either way. status: upcoming (dated after today) | due (today or before, not recorded) | done (a transaction) | paid (settled without one) | skipped | pending (a legacy draft still waiting). A slot before the setting''s tracked_from (its creation day) is paid implicitly.'
+      required: [id, recurring_rule_id, slot, stored, auto_created, needs_amount, recurring, seq, total, date, days_until, status, edited, manual, type, amount, account, to_account, category, goal_id, goal, tags, description, note, pending_id, transaction, saving_entry_id, person, debt_entry, debt_kind, direction, created_at, updated_at]
       properties:
         id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: 'The stored row; null while only computed.' }
-        recurring_reminder_id: { $ref: '#/components/schemas/Uuid' }
+        recurring_rule_id: { $ref: '#/components/schemas/Uuid' }
         slot: { $ref: '#/components/schemas/Date', description: 'The ORIGINAL date (moving the date never changes it).' }
         stored: { type: boolean }
         auto_created: { type: boolean, description: 'Recorded by auto-create (the "อัตโนมัติ" tag).' }
@@ -12889,6 +12991,13 @@ components:
         - type: object
           properties:
             date: { $ref: '#/components/schemas/Date', description: 'The transaction''s date (default: the occurrence date).' }
+            bill_diff:
+              type: object
+              required: [amount, category]
+              description: 'A card bill round (a transfer rule into a card): the actual bill differed from what was recorded and the user chose to book it (bill confirm sheet; never automatic). Books an expense of amount on the card, dated the occurrence (the statement day), in the same DB transaction: category other = the starter อื่นๆ (none if deleted), interest = INTEREST_PAID. 400 for a rule that is not a transfer into a wallet.'
+              properties:
+                amount: { type: number, exclusiveMinimum: 0 }
+                category: { type: string, enum: [other, interest] }
     RecurringSkipRequest:
       type: object
       properties:
@@ -12900,10 +13009,10 @@ components:
         amount: { type: number, exclusiveMinimum: 0, description: 'What was paid; absent = the occurrence''s planned amount (400 AMOUNT_REQUIRED when it has none).' }
     RecurringOccurrencesResult:
       type: object
-      required: [data, suggested_slot, suggested_recurring_reminder_id]
+      required: [data, suggested_slot, suggested_recurring_rule_id]
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/RecurringItem' } }
-        suggested_recurring_reminder_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.3: the line of the suggested round.' }
+        suggested_recurring_rule_id: { oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }], description: '0.4.3: the line of the suggested round.' }
         suggested_slot: { oneOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }], description: '"งวดใกล้เคียง": the oldest overdue occurrence, else the open one nearest tx_date; null when none is open.' }
     RecurringBulkResult:
       type: object
@@ -12917,9 +13026,9 @@ components:
           description: 'Due occurrences the action could not take, and why: needs_amount (no amount yet) | refused (the record was refused, e.g. an archived wallet or a deleted category; each occurrence runs on its own, the others are recorded).'
           items:
             type: object
-            required: [recurring_reminder_id, slot, reason]
+            required: [recurring_rule_id, slot, reason]
             properties:
-              recurring_reminder_id: { $ref: '#/components/schemas/Uuid' }
+              recurring_rule_id: { $ref: '#/components/schemas/Uuid' }
               slot: { $ref: '#/components/schemas/Date' }
               reason: { type: string, enum: [needs_amount, refused] }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }
@@ -12934,9 +13043,9 @@ components:
           maxItems: 100
           items:
             type: object
-            required: [recurring_reminder_id, slot]
+            required: [recurring_rule_id, slot]
             properties:
-              recurring_reminder_id: { $ref: '#/components/schemas/Uuid' }
+              recurring_rule_id: { $ref: '#/components/schemas/Uuid' }
               slot: { $ref: '#/components/schemas/Date' }
               amount: { type: number, exclusiveMinimum: 0, description: 'confirm and mark_paid (0.4.1-1 R5): the amount typed for an occurrence that has none (or overrides its amount). 400 with skip.' }
     RecurringOccurrenceBulkResult:
@@ -12950,9 +13059,9 @@ components:
           description: 'Picked occurrences the action could not take, and why: needs_amount (confirm, no amount) | refused (the record was refused, e.g. an archived wallet, a deleted category, a skipped occurrence to confirm) | not_found (no such setting or occurrence) | already_recorded.'
           items:
             type: object
-            required: [recurring_reminder_id, slot, reason]
+            required: [recurring_rule_id, slot, reason]
             properties:
-              recurring_reminder_id: { $ref: '#/components/schemas/Uuid' }
+              recurring_rule_id: { $ref: '#/components/schemas/Uuid' }
               slot: { $ref: '#/components/schemas/Date' }
               reason: { type: string, enum: [needs_amount, refused, not_found, already_recorded] }
         account_balances: { type: array, items: { $ref: '#/components/schemas/WalletBalance' } }

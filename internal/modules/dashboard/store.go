@@ -35,9 +35,9 @@ type upcomingRow struct {
 
 func (s *Store) UpcomingItems(ctx context.Context, userID uuid.UUID, today, until string) ([]upcomingRow, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT i.id, COALESCE(r.name, i.draft->>'description', ''), COALESCE(i.draft->>'type', 'expense'),
-		       COALESCE((i.draft->>'amount')::numeric, 0), to_char(i.date, 'YYYY-MM-DD'), r.icon_code, NULL::text
-		FROM recurring_items i LEFT JOIN recurring_reminders r ON r.id = i.recurring_reminder_id
+		SELECT i.id, COALESCE((SELECT g.name FROM recurrings g WHERE g.id = r.recurring_id), i.draft->>'description', ''), COALESCE(i.draft->>'type', 'expense'),
+		       COALESCE((i.draft->>'amount')::numeric, 0), to_char(i.date, 'YYYY-MM-DD'), (SELECT g.icon_code FROM recurrings g WHERE g.id = r.recurring_id), NULL::text
+		FROM recurring_items i LEFT JOIN recurring_rules r ON r.id = i.recurring_rule_id
 		WHERE i.user_id = $1 AND i.produced_at IS NULL AND i.pending_id IS NULL AND i.transaction_id IS NULL
 		  AND NOT i.archived AND i.date > $2::date AND i.date <= $3::date
 		  AND r.status = 'active' AND r.type <> 'saving'
@@ -63,7 +63,7 @@ func (s *Store) UpcomingItems(ctx context.Context, userID uuid.UUID, today, unti
 
 // attentionTypes — the types shared.AwaitsAnswer can say yes for (a read one still needs me).
 var attentionTypes = []string{
-	"contact_link_request", "account_invite", "project_invite", "recurring_ending",
+	"contact_link_request", "account_invite", "project_invite",
 	"bill_invite", "bill_new", "bill_changed", "bill_removed", "debt_repaid",
 }
 

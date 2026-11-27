@@ -302,7 +302,7 @@ func (s *Service) DebtEffectsTx(ctx context.Context, q shared.Querier, userID uu
 	return debts, persons, nil
 }
 
-// checkRecurringTx — a row's recurring item (0.4.3): a debt item of mine whose counterparty is the
+// checkRecurringTx — a row's recurring: one of mine with a debt rule whose counterparty is the
 // page's key.
 func checkRecurringTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, id *uuid.UUID, rawKey string) error {
 	if id == nil {
@@ -312,17 +312,13 @@ func checkRecurringTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, id *uuid
 	if err != nil {
 		return err
 	}
-	var key *string
-	err = tx.QueryRow(ctx, `SELECT CASE WHEN COALESCE(g.counterparty_institution_id, p.institution_id) IS NOT NULL
-				THEN 'i:' || COALESCE(g.counterparty_institution_id, p.institution_id)::text
-			WHEN COALESCE(g.counterparty_contact_id, p.contact_id) IS NOT NULL
-				THEN 'c:' || COALESCE(g.counterparty_contact_id, p.contact_id)::text
-			WHEN COALESCE(g.counterparty_person_name, p.person_name) IS NOT NULL
-				THEN 'n:' || LOWER(TRIM(COALESCE(g.counterparty_person_name, p.person_name))) END
-		FROM recurrings g LEFT JOIN debt_plans p ON p.id = g.debt_plan_id
-		WHERE g.id = $1 AND g.user_id = $2 AND g.type = 'debt'`, *id, userID).Scan(&key)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (key == nil || *key != k.Key())) {
-		return invalid("recurring_id is not a debt item of this counterparty")
+	var ok bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM recurring_rules r WHERE r.recurring_id = $1 AND r.user_id = $2
+		AND r.type = 'debt' AND (CASE WHEN r.institution_id IS NOT NULL THEN 'i:' || r.institution_id::text
+			WHEN r.contact_id IS NOT NULL THEN 'c:' || r.contact_id::text
+			ELSE 'n:' || LOWER(TRIM(r.person_name)) END) = $3)`, *id, userID, k.Key()).Scan(&ok)
+	if err == nil && !ok {
+		return invalid("recurring_id has no debt rule of this counterparty")
 	}
 	return err
 }
@@ -347,10 +343,11 @@ func checkPlanTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, id *uuid.UUID
 	return err
 }
 
-// planOfItem — the plan a debt item pays (nil = none).
+// planOfItem — the plan a recurring's rules pay (its first plan rule; nil = none).
 func planOfItem(ctx context.Context, tx pgx.Tx, itemID uuid.UUID) (*uuid.UUID, error) {
 	var id *uuid.UUID
-	err := tx.QueryRow(ctx, `SELECT debt_plan_id FROM recurrings WHERE id = $1`, itemID).Scan(&id)
+	err := tx.QueryRow(ctx, `SELECT debt_plan_id FROM recurring_rules WHERE recurring_id = $1 AND debt_plan_id IS NOT NULL
+		ORDER BY created_at, id LIMIT 1`, itemID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

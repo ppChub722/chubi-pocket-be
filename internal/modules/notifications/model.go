@@ -8,14 +8,11 @@ import (
 )
 
 const (
-	TypeProjectInvite        = "project_invite"
-	TypeContactLinkRequest   = "contact_link_request"
-	TypeAccountInvite        = "account_invite"
-	TypeRecurringDue         = "recurring_due"
-	TypeRecurringEnding      = "recurring_ending"
-	TypeRecurringAutoCreated = "recurring_auto_created"
-	TypeRecurringDueSoon     = "recurring_due_soon" // 0.4.3 reminders
-	TypeDebtDisconnected     = "debt_disconnected"  // 0.4.1-1 D9
+	TypeProjectInvite      = "project_invite"
+	TypeContactLinkRequest = "contact_link_request"
+	TypeAccountInvite      = "account_invite"
+	TypeRecurringDue       = "recurring_due"
+	TypeDebtDisconnected   = "debt_disconnected" // 0.4.1-1 D9
 )
 
 type Notification struct {
@@ -52,9 +49,13 @@ type Settings struct {
 	// OnSplitRemoved — removed from a bill (or leaving it): ask | keep | delete my books of it.
 	OnSplitRemoved string `json:"on_split_removed"`
 	// AutoAcceptRepayments — a partner's "I paid you back" lands in my book at once.
-	AutoAcceptRepayments bool      `json:"auto_accept_repayments"`
-	CreatedAt            time.Time `json:"created_at"`
-	UpdatedAt            time.Time `json:"updated_at"`
+	AutoAcceptRepayments bool `json:"auto_accept_repayments"`
+	// RecurringNotifyDefault / RecurringAutoAcceptDefault — a recurring rule's switches when it has
+	// none of its own (stored on users; the settings page's รายการประจำ row).
+	RecurringNotifyDefault     bool      `json:"recurring_notify_default"`
+	RecurringAutoAcceptDefault bool      `json:"recurring_auto_accept_default"`
+	CreatedAt                  time.Time `json:"created_at"`
+	UpdatedAt                  time.Time `json:"updated_at"`
 }
 
 const (
@@ -88,18 +89,20 @@ func contains(list []string, v string) bool {
 }
 
 type UpdateSettingsRequest struct {
-	MutedTypes              *[]string  `json:"muted_types"`
-	AutoSyncEvents          *bool      `json:"auto_sync_events"`
-	AutoSyncDebts           *bool      `json:"auto_sync_debts"`
-	AutoAcceptEvents        *bool      `json:"auto_accept_events"`
-	AutoAcceptDebts         *bool      `json:"auto_accept_debts"`
-	AutoAcceptEventInvites  *bool      `json:"auto_accept_event_invites"`
-	AutoAcceptContactLinks  *bool      `json:"auto_accept_contact_links"`
-	AutoAcceptWalletInvites *bool      `json:"auto_accept_wallet_invites"`
-	AutoAcceptRepayments    *bool      `json:"auto_accept_repayments"`
-	OnSplitRemoved          *string    `json:"on_split_removed" binding:"omitempty,oneof=ask keep delete"`
-	DefaultAccountID        *uuid.UUID `json:"default_account_id"`
-	ClearDefaultAccount     bool       `json:"-"`
+	MutedTypes                 *[]string  `json:"muted_types"`
+	AutoSyncEvents             *bool      `json:"auto_sync_events"`
+	AutoSyncDebts              *bool      `json:"auto_sync_debts"`
+	AutoAcceptEvents           *bool      `json:"auto_accept_events"`
+	AutoAcceptDebts            *bool      `json:"auto_accept_debts"`
+	AutoAcceptEventInvites     *bool      `json:"auto_accept_event_invites"`
+	AutoAcceptContactLinks     *bool      `json:"auto_accept_contact_links"`
+	AutoAcceptWalletInvites    *bool      `json:"auto_accept_wallet_invites"`
+	AutoAcceptRepayments       *bool      `json:"auto_accept_repayments"`
+	RecurringNotifyDefault     *bool      `json:"recurring_notify_default"`
+	RecurringAutoAcceptDefault *bool      `json:"recurring_auto_accept_default"`
+	OnSplitRemoved             *string    `json:"on_split_removed" binding:"omitempty,oneof=ask keep delete"`
+	DefaultAccountID           *uuid.UUID `json:"default_account_id"`
+	ClearDefaultAccount        bool       `json:"-"`
 }
 
 type ListFilter struct {

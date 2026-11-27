@@ -41,7 +41,7 @@ type LinkConflict struct {
 
 // OccRef names an occurrence.
 type OccRef struct {
-	RuleID uuid.UUID `json:"recurring_reminder_id"`
+	RuleID uuid.UUID `json:"recurring_rule_id"`
 	Slot   string    `json:"slot"`
 }
 
@@ -52,41 +52,52 @@ type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-const ruleColumns = `id, user_id, name, description, note, icon_code, type, amount,
-	account_id, to_account_id, category_id, tag_ids, freq, interval_n, weekdays,
-	monthly_mode, month_day, month_nth, month_weekday, dates, start_date, end_kind,
-	end_date, end_count, total_count, generated_until, status, ending_notified,
+// ruleColumns — a rule and, read only, its recurring's name / description / note / icon (rounds are
+// named from the recurring; a rule has no text of its own).
+const ruleColumns = `id, user_id,
+	(SELECT g.name FROM recurrings g WHERE g.id = recurring_id), (SELECT g.description FROM recurrings g WHERE g.id = recurring_id),
+	(SELECT g.note FROM recurrings g WHERE g.id = recurring_id), (SELECT g.icon_code FROM recurrings g WHERE g.id = recurring_id),
+	type, amount, account_id, to_account_id, category_id, tag_ids, freq, interval_n, weekdays,
+	monthly_mode, month_days, months, month_nth, month_weekday, dates, start_date, end_kind,
+	end_date, end_count, total_count, generated_until, status,
 	created_at, updated_at, goal_id, kind, trial_until,
-	tracked_from, due_notified_until, auto_create, auto_created_until, paused_from, pause_reason, gaps,
+	tracked_from, due_notified_until, notify, auto_accept, auto_accepted_until, paused_from, pause_reason, gaps,
 	contact_id, person_name, debt_kind, debt_direction, zero_rounds,
-	recurring_id, paid_by_contact_id, paid_by_person_name,
-	(SELECT COALESCE(ri.counterparty_institution_id, dp.institution_id) FROM recurrings ri
-		LEFT JOIN debt_plans dp ON dp.id = ri.debt_plan_id WHERE ri.id = recurring_id), amount_mode, repays_reminder_id, notify_only`
+	recurring_id, paid_by_contact_id, paid_by_person_name, institution_id, debt_plan_id, amount_mode, repays_rule_id`
 
 func scanRule(row pgx.Row) (*Rule, error) {
 	var (
-		r                                  Rule
-		icon                               []byte
-		weekdays                           []int32
-		monthDay, monthNth, monthWD, count *int32
-		total                              *int32
-		interval                           int32
+		r                        Rule
+		name                     *string
+		icon                     []byte
+		weekdays, mdays, months  []int32
+		monthNth, monthWD, count *int32
+		total                    *int32
+		interval                 int32
 	)
-	if err := row.Scan(&r.ID, &r.UserID, &r.Name, &r.Description, &r.Note, &icon, &r.Type, &r.Amount,
+	if err := row.Scan(&r.ID, &r.UserID, &name, &r.Description, &r.Note, &icon, &r.Type, &r.Amount,
 		&r.AccountID, &r.ToAccountID, &r.CategoryID, &r.TagIDs, &r.Freq, &interval, &weekdays,
-		&r.MonthlyMode, &monthDay, &monthNth, &monthWD, &r.Dates, &r.StartDate, &r.EndKind,
-		&r.EndDate, &count, &total, &r.GeneratedUntil, &r.Status, &r.EndingNotified,
+		&r.MonthlyMode, &mdays, &months, &monthNth, &monthWD, &r.Dates, &r.StartDate, &r.EndKind,
+		&r.EndDate, &count, &total, &r.GeneratedUntil, &r.Status,
 		&r.CreatedAt, &r.UpdatedAt, &r.GoalID, &r.Kind, &r.TrialUntil,
-		&r.TrackedFrom, &r.DueNotifiedUntil, &r.AutoCreate, &r.AutoCreatedUntil, &r.PausedFrom, &r.PauseReason, &r.Gaps,
+		&r.TrackedFrom, &r.DueNotifiedUntil, &r.Notify, &r.AutoAccept, &r.AutoAcceptedUntil, &r.PausedFrom, &r.PauseReason, &r.Gaps,
 		&r.ContactID, &r.PersonName, &r.DebtKind, &r.DebtDirection, &r.ZeroRounds,
-		&r.RecurringID, &r.PaidByContactID, &r.PaidByPersonName, &r.InstitutionID, &r.AmountMode, &r.RepaysReminderID, &r.NotifyOnly); err != nil {
+		&r.RecurringID, &r.PaidByContactID, &r.PaidByPersonName, &r.InstitutionID, &r.DebtPlanID, &r.AmountMode, &r.RepaysRuleID); err != nil {
 		return nil, err
+	}
+	if name != nil {
+		r.Name = *name
 	}
 	r.IconCode = shared.IconFromJSON(icon)
 	r.Interval = int(interval)
-	for _, w := range weekdays {
-		r.Weekdays = append(r.Weekdays, int(w))
+	ints := func(in []int32) []int {
+		var out []int
+		for _, v := range in {
+			out = append(out, int(v))
+		}
+		return out
 	}
+	r.Weekdays, r.MonthDays, r.Months = ints(weekdays), ints(mdays), ints(months)
 	toInt := func(p *int32) *int {
 		if p == nil {
 			return nil
@@ -94,7 +105,7 @@ func scanRule(row pgx.Row) (*Rule, error) {
 		v := int(*p)
 		return &v
 	}
-	r.MonthDay, r.MonthNth, r.MonthWeekday, r.EndCount, r.TotalCount = toInt(monthDay), toInt(monthNth), toInt(monthWD), toInt(count), toInt(total)
+	r.MonthNth, r.MonthWeekday, r.EndCount, r.TotalCount = toInt(monthNth), toInt(monthWD), toInt(count), toInt(total)
 	if r.TagIDs == nil {
 		r.TagIDs = []uuid.UUID{}
 	}
@@ -106,7 +117,7 @@ func scanRule(row pgx.Row) (*Rule, error) {
 }
 
 func getRule(ctx context.Context, q rowQuerier, userID, id uuid.UUID, lock bool) (*Rule, error) {
-	sql := `SELECT ` + ruleColumns + ` FROM recurring_reminders WHERE id = $1 AND user_id = $2`
+	sql := `SELECT ` + ruleColumns + ` FROM recurring_rules WHERE id = $1 AND user_id = $2`
 	if lock {
 		sql += ` FOR UPDATE`
 	}
@@ -129,13 +140,12 @@ func insertRuleTx(ctx context.Context, tx pgx.Tx, r *Rule) error {
 }
 
 func saveRuleTx(ctx context.Context, tx pgx.Tx, r *Rule) error {
-	icon, err := iconJSON(r.IconCode)
-	if err != nil {
-		return err
-	}
-	weekdays := make([]int32, 0, len(r.Weekdays))
-	for _, w := range r.Weekdays {
-		weekdays = append(weekdays, int32(w))
+	i32 := func(in []int) []int32 {
+		out := make([]int32, 0, len(in))
+		for _, v := range in {
+			out = append(out, int32(v))
+		}
+		return out
 	}
 	dates := r.Dates
 	if dates == nil {
@@ -145,13 +155,14 @@ func saveRuleTx(ctx context.Context, tx pgx.Tx, r *Rule) error {
 	if tags == nil {
 		tags = []uuid.UUID{}
 	}
-	args := []any{r.ID, r.UserID, r.Name, shared.CleanText(r.Description), shared.CleanText(r.Note), icon, r.Type, r.Amount,
-		r.AccountID, r.ToAccountID, r.CategoryID, tags, r.Freq, r.Interval, weekdays,
-		r.MonthlyMode, r.MonthDay, r.MonthNth, r.MonthWeekday, dates, r.StartDate, r.EndKind,
-		r.EndDate, r.EndCount, r.TotalCount, r.GeneratedUntil, r.Status, r.EndingNotified, r.GoalID, r.Kind, r.TrialUntil,
-		r.TrackedFrom, r.DueNotifiedUntil, r.AutoCreate, r.AutoCreatedUntil, r.PausedFrom, r.PauseReason, gapsJSON(r.Gaps),
+	args := []any{r.ID, r.UserID, r.Type, r.Amount,
+		r.AccountID, r.ToAccountID, r.CategoryID, tags, r.Freq, r.Interval, i32(r.Weekdays),
+		r.MonthlyMode, i32(r.MonthDays), i32(r.Months), r.MonthNth, r.MonthWeekday, dates, r.StartDate, r.EndKind,
+		r.EndDate, r.EndCount, r.TotalCount, r.GeneratedUntil, r.Status, r.GoalID, r.Kind, r.TrialUntil,
+		r.TrackedFrom, r.DueNotifiedUntil, r.Notify, r.AutoAccept, r.AutoAcceptedUntil, r.PausedFrom, r.PauseReason, gapsJSON(r.Gaps),
 		r.ContactID, r.PersonName, r.DebtKind, r.DebtDirection, r.ZeroRounds,
-		r.RecurringID, r.PaidByContactID, shared.CleanText(r.PaidByPersonName), r.amountMode(), r.RepaysReminderID, r.NotifyOnly}
+		r.RecurringID, r.PaidByContactID, shared.CleanText(r.PaidByPersonName), r.InstitutionID, r.DebtPlanID, r.amountMode(), r.RepaysRuleID}
+	var err error
 	if r.ID == uuid.Nil {
 		r.ID, _ = uuid.NewV7()
 		if r.forceID != uuid.Nil {
@@ -159,27 +170,28 @@ func saveRuleTx(ctx context.Context, tx pgx.Tx, r *Rule) error {
 		}
 		args[0] = r.ID
 		if r.RecurringID == uuid.Nil {
-			return fmt.Errorf("save rule: no recurring item")
+			return fmt.Errorf("save rule: no recurring")
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO recurring_reminders (id, user_id, name, description, note, icon_code, type, amount,
+		_, err = tx.Exec(ctx, `INSERT INTO recurring_rules (id, user_id, type, amount,
 			account_id, to_account_id, category_id, tag_ids, freq, interval_n, weekdays,
-			monthly_mode, month_day, month_nth, month_weekday, dates, start_date, end_kind,
-			end_date, end_count, total_count, generated_until, status, ending_notified, goal_id, kind, trial_until,
-			tracked_from, due_notified_until, auto_create, auto_created_until, paused_from, pause_reason, gaps,
+			monthly_mode, month_days, months, month_nth, month_weekday, dates, start_date, end_kind,
+			end_date, end_count, total_count, generated_until, status, goal_id, kind, trial_until,
+			tracked_from, due_notified_until, notify, auto_accept, auto_accepted_until, paused_from, pause_reason, gaps,
 			contact_id, person_name, debt_kind, debt_direction, zero_rounds,
-			recurring_id, paid_by_contact_id, paid_by_person_name, amount_mode, repays_reminder_id, notify_only)
-			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-			        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
-			        $32, $33, $34, $35, $36, $37, $38::jsonb, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49)`, args...)
+			recurring_id, paid_by_contact_id, paid_by_person_name, institution_id, debt_plan_id, amount_mode, repays_rule_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+			        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
+			        $28, $29, $30, $31, $32, $33, $34, $35::jsonb, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47)`, args...)
 	} else {
-		_, err = tx.Exec(ctx, `UPDATE recurring_reminders SET name = $3, description = $4, note = $5, icon_code = $6::jsonb,
-			type = $7, amount = $8, account_id = $9, to_account_id = $10, category_id = $11, tag_ids = $12,
-			freq = $13, interval_n = $14, weekdays = $15, monthly_mode = $16, month_day = $17, month_nth = $18,
-			month_weekday = $19, dates = $20, start_date = $21, end_kind = $22, end_date = $23, end_count = $24,
-			total_count = $25, generated_until = $26, status = $27, ending_notified = $28, goal_id = $29, kind = $30, trial_until = $31,
-			tracked_from = $32, due_notified_until = $33, auto_create = $34, auto_created_until = $35, paused_from = $36, pause_reason = $37, gaps = $38::jsonb,
-			contact_id = $39, person_name = $40, debt_kind = $41, debt_direction = $42, zero_rounds = $43,
-			recurring_id = $44, paid_by_contact_id = $45, paid_by_person_name = $46, amount_mode = $47, repays_reminder_id = $48, notify_only = $49
+		_, err = tx.Exec(ctx, `UPDATE recurring_rules SET
+			type = $3, amount = $4, account_id = $5, to_account_id = $6, category_id = $7, tag_ids = $8,
+			freq = $9, interval_n = $10, weekdays = $11, monthly_mode = $12, month_days = $13, months = $14, month_nth = $15,
+			month_weekday = $16, dates = $17, start_date = $18, end_kind = $19, end_date = $20, end_count = $21,
+			total_count = $22, generated_until = $23, status = $24, goal_id = $25, kind = $26, trial_until = $27,
+			tracked_from = $28, due_notified_until = $29, notify = $30, auto_accept = $31, auto_accepted_until = $32, paused_from = $33,
+			pause_reason = $34, gaps = $35::jsonb, contact_id = $36, person_name = $37, debt_kind = $38, debt_direction = $39,
+			zero_rounds = $40, recurring_id = $41, paid_by_contact_id = $42, paid_by_person_name = $43, institution_id = $44,
+			debt_plan_id = $45, amount_mode = $46, repays_rule_id = $47
 			WHERE id = $1 AND user_id = $2`, args...)
 	}
 	if err != nil {
@@ -229,7 +241,7 @@ func (it *itemRow) filled() bool {
 	return it.TransactionID != nil || it.SavingEntryID != nil || it.DebtEntryID != nil
 }
 
-const itemColumns = `id, user_id, recurring_reminder_id, seq, slot, date, draft, edited, manual, archived,
+const itemColumns = `id, user_id, recurring_rule_id, seq, slot, date, draft, edited, manual, archived,
 	produced_at, pending_id, transaction_id, saving_entry_id, cleared_at, auto_created_at, created_at, updated_at,
 	debt_entry_id`
 
@@ -284,11 +296,11 @@ func insertItemTx(ctx context.Context, tx pgx.Tx, it *itemRow) (uuid.UUID, error
 		v := int32(*it.Seq)
 		seq = &v
 	}
-	q := `INSERT INTO recurring_items (id, user_id, recurring_reminder_id, seq, slot, date, draft, edited, manual, archived, produced_at,
+	q := `INSERT INTO recurring_items (id, user_id, recurring_rule_id, seq, slot, date, draft, edited, manual, archived, produced_at,
 			pending_id, transaction_id, saving_entry_id, cleared_at, auto_created_at, debt_entry_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`
 	if it.Slot != nil {
-		q += ` ON CONFLICT (recurring_reminder_id, slot) WHERE slot IS NOT NULL DO NOTHING`
+		q += ` ON CONFLICT (recurring_rule_id, slot) WHERE slot IS NOT NULL DO NOTHING`
 	}
 	tag, err := tx.Exec(ctx, q, id, it.UserID, it.RuleID, seq, it.Slot, it.Date, draft, it.Edited, it.Manual, it.Archived, it.ProducedAt,
 		it.PendingID, it.TransactionID, it.SavingEntryID, it.ClearedAt, it.AutoCreatedAt, it.DebtEntryID)

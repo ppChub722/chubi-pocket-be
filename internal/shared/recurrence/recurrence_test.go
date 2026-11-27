@@ -23,7 +23,13 @@ type betweenCase struct {
 
 func cases(t *testing.T) []betweenCase {
 	monthDay := func(d int) Spec {
-		return Spec{Freq: "monthly", Interval: 1, MonthlyMode: ptr("day"), MonthDay: ptr(d)}
+		return Spec{Freq: "monthly", Interval: 1, MonthlyMode: ptr("day"), MonthDays: []int{d}}
+	}
+	monthDays := func(interval int, ds ...int) Spec {
+		return Spec{Freq: "monthly", Interval: interval, MonthlyMode: ptr("day"), MonthDays: ds}
+	}
+	yearly := func(months, ds []int) Spec {
+		return Spec{Freq: "yearly", Interval: 1, Months: months, MonthDays: ds}
 	}
 	nth := func(n, wd, interval int) Spec {
 		return Spec{Freq: "monthly", Interval: interval, MonthlyMode: ptr("weekday"), MonthNth: ptr(n), MonthWeekday: ptr(wd)}
@@ -61,6 +67,16 @@ func cases(t *testing.T) []betweenCase {
 			windows: [][2]time.Time{{day(2025, 6, 1), day(2026, 12, 31)}}},
 		{name: "monthly day before the start day", spec: with(monthDay(5), day(2026, 1, 20), "none", nil),
 			windows: [][2]time.Time{{day(2026, 1, 1), day(2026, 4, 30)}}},
+		{name: "monthly 8 16 25", spec: with(monthDays(1, 25, 8, 16), day(2026, 12, 8), "none", nil),
+			windows: [][2]time.Time{{day(2026, 12, 10), day(2027, 2, 20)}, {day(2027, 1, 16), day(2027, 1, 16)}}},
+		{name: "monthly 30 + last day dedupes in february", spec: with(monthDays(1, 30, LastDay), day(2026, 1, 1), "none", nil),
+			windows: [][2]time.Time{{day(2026, 1, 1), day(2026, 4, 30)}}},
+		{name: "monthly 1 15 every 3 months count", spec: with(monthDays(3, 1, 15), day(2025, 11, 1), "count", func(s *Spec) { s.EndCount = ptr(7) }),
+			windows: [][2]time.Time{{day(2026, 1, 1), day(2026, 12, 31)}}},
+		{name: "yearly quarter 25", spec: with(yearly([]int{10, 1, 4, 7}, []int{25}), day(2025, 1, 25), "none", nil),
+			windows: [][2]time.Time{{day(2025, 6, 1), day(2026, 9, 30)}}},
+		{name: "yearly two months two days", spec: with(yearly([]int{2, 11}, []int{LastDay, 10}), day(2024, 6, 1), "date", func(s *Spec) { s.EndDate = ptr(day(2026, 3, 1)) }),
+			windows: [][2]time.Time{{day(2024, 6, 1), day(2026, 3, 1)}, {day(2025, 2, 11), day(2025, 11, 9)}}},
 		{name: "monthly 2nd wednesday", spec: with(nth(2, 3, 1), day(2025, 3, 1), "none", nil),
 			windows: [][2]time.Time{{day(2026, 1, 1), day(2026, 12, 31)}}},
 		{name: "monthly last friday every 2 months", spec: with(nth(-1, 5, 2), day(2024, 5, 1), "none", nil),
@@ -207,5 +223,40 @@ func TestBetweenPastTheOccurrencesCap(t *testing.T) {
 	}
 	if got := end.Between(day(2027, 1, 1), day(2035, 1, 1)); len(got) != 0 {
 		t.Errorf("after the 3rd occurrence: got %s", show(got))
+	}
+}
+
+// TestMultiDays — the expected dates written out by hand (mock RepeatB1 / RepeatB4).
+func TestMultiDays(t *testing.T) {
+	ymd := func(ds []time.Time) string {
+		out := ""
+		for _, d := range ds {
+			out += d.Format(DateLayout) + " "
+		}
+		return out
+	}
+	// ทุกเดือน วันที่ 8, 16, 25 · ครบ 10 ครั้ง from 8 Dec 2026: Dec ×3, Jan ×3, Feb ×3, 8 Mar (the mock says 25 Mar: wrong)
+	s := Spec{Freq: "monthly", Interval: 1, MonthlyMode: ptr("day"), MonthDays: []int{8, 16, 25}, StartDate: day(2026, 12, 8),
+		EndKind: "count", EndCount: ptr(10)}
+	if err := s.Limits(day(2026, 11, 27)); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.GeneratedUntil.Format(DateLayout); got != "2027-03-08" {
+		t.Fatalf("last round %s, want 2027-03-08", got)
+	}
+	// 30 + last day in Feb 2026 = one date (28)
+	s = Spec{Freq: "monthly", Interval: 1, MonthDays: []int{30, LastDay}, StartDate: day(2026, 2, 1)}
+	if got, want := ymd(s.Occurrences(day(2026, 3, 31), 0)), "2026-02-28 2026-03-30 2026-03-31 "; got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	// ทุกปี วันที่ 25 ของ ม.ค. เม.ย. ก.ค. ต.ค.
+	s = Spec{Freq: "yearly", Interval: 1, Months: []int{1, 4, 7, 10}, MonthDays: []int{25}, StartDate: day(2027, 1, 25)}
+	if got, want := ymd(s.Occurrences(day(2027, 12, 31), 0)), "2027-01-25 2027-04-25 2027-07-25 2027-10-25 "; got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	// the API round trip keeps both lists
+	r := s.APIRule()
+	if fmt.Sprint(r.Months, r.MonthDays) != "[1 4 7 10] [25]" {
+		t.Fatalf("api rule %v %v", r.Months, r.MonthDays)
 	}
 }

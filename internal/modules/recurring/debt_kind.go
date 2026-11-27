@@ -36,7 +36,7 @@ func (s *Service) recordDebtTx(ctx context.Context, tx pgx.Tx, r *Rule, row *ite
 	if row.filled() {
 		return nil, nil, ErrAlreadyRecorded
 	}
-	if r.isRepayment() && r.RepaysReminderID == nil { // a plan item's round pays the plan's installment
+	if r.isRepayment() && r.RepaysRuleID == nil { // a plan item's round pays the plan's installment
 		plan, err := planOfReminder(ctx, tx, r)
 		if err != nil {
 			return nil, nil, err
@@ -50,14 +50,14 @@ func (s *Service) recordDebtTx(ctx context.Context, tx pgx.Tx, r *Rule, row *ite
 	if d.Amount != nil {
 		amount = *d.Amount
 	}
-	if r.isRepayment() && !row.Edited {
+	if r.isRepayment() && !row.Edited && r.amountMode() != AmountAsk { // an asked amount is the one typed
 		people, err := loadDebtPeople(ctx, tx, r.UserID, []*Rule{r})
 		if err != nil {
 			return nil, nil, err
 		}
 		amount = r.plannedDebtAmount(people.net(r))
-		if r.RepaysReminderID != nil { // the latest recorded round of the reminder it pays back
-			last, err := lastRoundAmount(ctx, tx, *r.RepaysReminderID)
+		if r.RepaysRuleID != nil { // the latest recorded round of the reminder it pays back
+			last, err := lastRoundAmount(ctx, tx, *r.RepaysRuleID)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -181,17 +181,19 @@ func debtItemViews(ctx context.Context, q shared.Querier, userID uuid.UUID, occs
 			continue
 		}
 		if r.isRepayment() && o.expected() && (o.row == nil || !o.row.Edited) {
-			it.Amount, it.NeedsAmount = amountPtr(r.plannedDebtAmount(people.net(r))), false
+			if r.amountMode() != AmountAsk {
+				it.Amount, it.NeedsAmount = amountPtr(r.plannedDebtAmount(people.net(r))), false
+			} else if people.rules[r.debtKey()] == 1 && it.Amount == nil {
+				// an asked repayment fills the net only when it is the person's only rule (spec §2.1);
+				// next to another rule the net is a hint (Line.prefill_hint)
+				if v := r.owedFor(people.net(r)); v > 0 {
+					it.Amount = &v
+				}
+			}
 		}
 	}
 	return nil
 }
-
-// ruleKeySQL — a debt setting's person key (alias r), as shared.DebtKey writes it.
-const ruleKeySQL = `(CASE WHEN (SELECT COALESCE(x.counterparty_institution_id, xp.institution_id) FROM recurrings x LEFT JOIN debt_plans xp ON xp.id = x.debt_plan_id WHERE x.id = r.recurring_id) IS NOT NULL
-		THEN 'i:' || (SELECT COALESCE(x.counterparty_institution_id, xp.institution_id) FROM recurrings x LEFT JOIN debt_plans xp ON xp.id = x.debt_plan_id WHERE x.id = r.recurring_id)::text
-	WHEN r.contact_id IS NOT NULL THEN 'c:' || r.contact_id::text
-	ELSE 'n:' || LOWER(TRIM(r.person_name)) END)`
 
 // noBalanceOwedSQL — TRUE when a no_balance setting's person owes something its way again
 // (the due-check guard and the resume read it; $1 = the user).
@@ -200,39 +202,12 @@ const noBalanceOwedSQL = `((SELECT COALESCE(SUM(l.signed), 0) FROM (` + "%s" + `
 
 func owedAgainSQL() string { return fmt.Sprintf(noBalanceOwedSQL, shared.DebtLedgerSQL("$1")) }
 
-// notifyRoundsTx — แค่แจ้งเตือน at the due check: every due round is closed (the paid mark, no
-// transaction), so a notice never waits in ต้องทำ nor counts toward the overdue limit.
-func (s *Service) notifyRoundsTx(ctx context.Context, tx pgx.Tx, r *Rule, today time.Time) error {
-	if !r.NotifyOnly || r.Status != "active" {
-		return nil
-	}
-	due, err := s.dueOccs(ctx, tx, r, today)
-	if err != nil {
-		return err
-	}
-	now := time.Now()
-	for _, o := range due {
-		row, err := s.store(ctx, tx, o)
-		if err != nil {
-			return err
-		}
-		if row.filled() {
-			continue
-		}
-		row.Archived, row.ClearedAt, row.AutoCreatedAt = false, &now, nil
-		if err := saveItemTx(ctx, tx, row); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // repaymentRoundsTx — K5 at the due check, for an active จ่ายหนี้ setting: nothing owed → each due
 // occurrence (not edited by hand) is skipped and counts a zero round; the 3rd pauses it
 // (no_balance). Something owed → the count restarts and one occurrence waits at a time (older
 // due ones are skipped: missed rounds are dropped, Q-K3).
 func (s *Service) repaymentRoundsTx(ctx context.Context, tx pgx.Tx, r *Rule, today time.Time) error {
-	if !r.isRepayment() || r.Status != "active" || r.RepaysReminderID != nil { // a payback waits for its round to be paid
+	if !r.isRepayment() || r.Status != "active" || r.RepaysRuleID != nil { // a payback waits for its round to be paid
 		return nil
 	}
 	due, err := s.dueOccs(ctx, tx, r, today)
@@ -291,7 +266,7 @@ func (s *Service) repaymentRoundsTx(ctx context.Context, tx pgx.Tx, r *Rule, tod
 // resumeNoBalanceTx — default 5: a no_balance setting runs again by itself once a new debt makes
 // its person owe something its way; the next occurrence is the current period's.
 func (s *Service) resumeNoBalanceTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, today time.Time) error {
-	rows, err := tx.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_reminders r WHERE r.user_id = $1
+	rows, err := tx.Query(ctx, `SELECT `+ruleColumns+` FROM recurring_rules r WHERE r.user_id = $1
 		AND r.status = 'paused' AND r.pause_reason = '`+PauseNoBalance+`' AND `+owedAgainSQL()+`
 		ORDER BY r.created_at, r.id FOR UPDATE SKIP LOCKED`, userID)
 	if err != nil {
@@ -442,17 +417,10 @@ const PauseNoBalance = "no_balance"
 
 // planOfReminder — the plan the reminder's item pays (nil = none).
 func planOfReminder(ctx context.Context, q rowQuerier, r *Rule) (*planRecord, error) {
-	var id *uuid.UUID
-	if err := q.QueryRow(ctx, `SELECT debt_plan_id FROM recurrings WHERE id = $1`, r.RecurringID).Scan(&id); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if id == nil {
+	if r.DebtPlanID == nil {
 		return nil, nil
 	}
-	return getPlan(ctx, q, r.UserID, *id, true)
+	return getPlan(ctx, q, r.UserID, *r.DebtPlanID, true)
 }
 
 // recordPlanRoundTx — a round of a plan item: the plan's installment (the one confirm ticks, else the
@@ -504,7 +472,7 @@ func (s *Service) recordPlanRoundTx(ctx context.Context, tx pgx.Tx, r *Rule, row
 // lastRoundAmount — the amount of a reminder's latest recorded round (0 = none yet).
 func lastRoundAmount(ctx context.Context, q rowQuerier, reminderID uuid.UUID) (float64, error) {
 	var v *float64
-	err := q.QueryRow(ctx, `SELECT (draft->>'amount')::float8 FROM recurring_items WHERE recurring_reminder_id = $1
+	err := q.QueryRow(ctx, `SELECT (draft->>'amount')::float8 FROM recurring_items WHERE recurring_rule_id = $1
 		AND (transaction_id IS NOT NULL OR debt_entry_id IS NOT NULL) ORDER BY date DESC, created_at DESC LIMIT 1`, reminderID).Scan(&v)
 	if errors.Is(err, pgx.ErrNoRows) || v == nil {
 		return 0, nil
@@ -565,7 +533,7 @@ func (r *Rule) plannedDebtAmount(net float64) float64 {
 	if !r.isRepayment() {
 		return r.Amount
 	}
-	if r.RepaysReminderID != nil { // what the person is owed now (the round asks the latest round)
+	if r.RepaysRuleID != nil { // what the person is owed now (the round asks the latest round)
 		return r.owedFor(net)
 	}
 	return math.Min(r.Amount, r.owedFor(net))
@@ -576,10 +544,11 @@ func (r *Rule) plannedDebtAmount(net float64) float64 {
 type debtPeople struct {
 	persons map[uuid.UUID]shared.PersonRef // by contact id
 	nets    map[string]float64             // by person key
+	rules   map[string]int                 // live person debt rules (no plan / institution) by key
 }
 
 func loadDebtPeople(ctx context.Context, q shared.Querier, userID uuid.UUID, rules []*Rule) (debtPeople, error) {
-	out := debtPeople{persons: map[uuid.UUID]shared.PersonRef{}, nets: map[string]float64{}}
+	out := debtPeople{persons: map[uuid.UUID]shared.PersonRef{}, nets: map[string]float64{}, rules: map[string]int{}}
 	var (
 		contacts []uuid.UUID
 		keys     []string
@@ -616,7 +585,29 @@ func loadDebtPeople(ctx context.Context, q shared.Querier, userID uuid.UUID, rul
 		}
 		out.nets[k] = math.Round(v*100) / 100
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	rows.Close()
+	crows, err := q.Query(ctx, `SELECT k, COUNT(*)::int FROM (SELECT CASE WHEN contact_id IS NOT NULL THEN 'c:' || contact_id::text
+			ELSE 'n:' || LOWER(TRIM(person_name)) END AS k
+		FROM recurring_rules WHERE user_id = $1 AND type = 'debt' AND institution_id IS NULL AND debt_plan_id IS NULL
+			AND status <> 'archived') x WHERE k = ANY($2) GROUP BY k`, userID, keys)
+	if err != nil {
+		return out, fmt.Errorf("debt rules: %w", err)
+	}
+	defer crows.Close()
+	for crows.Next() {
+		var (
+			k string
+			n int
+		)
+		if err := crows.Scan(&k, &n); err != nil {
+			return out, err
+		}
+		out.rules[k] = n
+	}
+	return out, crows.Err()
 }
 
 func (p debtPeople) person(r *Rule) *shared.PersonRef {

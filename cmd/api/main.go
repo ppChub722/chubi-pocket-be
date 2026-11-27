@@ -575,8 +575,11 @@ func main() {
 			protected.POST("/budgets/:id/archive", budgetsHandler.Archive)
 			protected.POST("/budgets/:id/restore", budgetsHandler.Restore)
 
-			// 0.4.3: /recurring/:id = the ITEM; its reminders under /reminders/:reminder_id; rounds per line
+			// /recurring/:id = the recurring; its rules under /rules/:rule_id; rounds per rule. /recurring-rules = the
+			// rules of a wallet / goal / debt page (by their columns) and a rule made from such a page.
 			protected.GET("/recurring", recurringHandler.ListRecurring)
+			protected.GET("/recurring-rules", recurringHandler.ListRules)
+			protected.POST("/recurring-rules", recurringHandler.CreateRule)
 			protected.POST("/recurring", recurringHandler.CreateRecurring)
 			protected.POST("/recurring/occurrences/bulk", recurringHandler.SettleOccurrences)
 			protected.GET("/recurring/:id", recurringHandler.GetRecurring)
@@ -588,26 +591,26 @@ func main() {
 			protected.POST("/recurring/:id/archive", recurringHandler.ArchiveRecurring)
 			protected.POST("/recurring/:id/restore", recurringHandler.RestoreRecurring)
 			protected.POST("/recurring/:id/duplicate", recurringHandler.DuplicateRecurring)
-			protected.POST("/recurring/:id/reminders", recurringHandler.AddLine)
-			protected.PUT("/recurring/:id/reminders/:reminder_id", recurringHandler.UpdateLine)
-			protected.DELETE("/recurring/:id/reminders/:reminder_id", recurringHandler.DeleteLine)
-			protected.POST("/recurring/:id/reminders/:reminder_id/pause", recurringHandler.PauseLine)
-			protected.POST("/recurring/:id/reminders/:reminder_id/resume", recurringHandler.ResumeLine)
-			protected.POST("/recurring/:id/reminders/:reminder_id/archive", recurringHandler.ArchiveLine)
-			protected.POST("/recurring/:id/reminders/:reminder_id/restore", recurringHandler.RestoreLine)
-			protected.POST("/recurring/:id/reminders/:reminder_id/extend", recurringHandler.ExtendLine)
+			protected.POST("/recurring/:id/rules", recurringHandler.AddLine)
+			protected.PUT("/recurring/:id/rules/:rule_id", recurringHandler.UpdateLine)
+			protected.DELETE("/recurring/:id/rules/:rule_id", recurringHandler.DeleteLine)
+			protected.POST("/recurring/:id/rules/:rule_id/pause", recurringHandler.PauseLine)
+			protected.POST("/recurring/:id/rules/:rule_id/resume", recurringHandler.ResumeLine)
+			protected.POST("/recurring/:id/rules/:rule_id/archive", recurringHandler.ArchiveLine)
+			protected.POST("/recurring/:id/rules/:rule_id/restore", recurringHandler.RestoreLine)
+			protected.POST("/recurring/:id/rules/:rule_id/extend", recurringHandler.ExtendLine)
 			protected.GET("/recurring/:id/occurrences", recurringHandler.ItemOccurrences)
 			protected.POST("/recurring/:id/occurrences/confirm-ready", recurringHandler.ConfirmReadyItem)
 			protected.POST("/recurring/:id/occurrences/mark-paid-ready", recurringHandler.MarkPaidReadyItem)
 			protected.POST("/recurring/:id/occurrences/skip-ready", recurringHandler.SkipReadyItem)
-			protected.PUT("/recurring/:id/reminders/:reminder_id/occurrences/:slot", recurringHandler.EditOcc)
-			protected.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/confirm", recurringHandler.ConfirmOcc)
-			protected.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/skip", recurringHandler.SkipOcc)
-			protected.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/restore", recurringHandler.RestoreOcc)
-			protected.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/mark-paid", recurringHandler.MarkPaidOcc)
-			protected.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/unmark-paid", recurringHandler.UnmarkPaidOcc)
-			protected.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/link", recurringHandler.LinkOcc)
-			protected.POST("/recurring/:id/reminders/:reminder_id/occurrences/:slot/unlink", recurringHandler.UnlinkOcc)
+			protected.PUT("/recurring/:id/rules/:rule_id/occurrences/:slot", recurringHandler.EditOcc)
+			protected.POST("/recurring/:id/rules/:rule_id/occurrences/:slot/confirm", recurringHandler.ConfirmOcc)
+			protected.POST("/recurring/:id/rules/:rule_id/occurrences/:slot/skip", recurringHandler.SkipOcc)
+			protected.POST("/recurring/:id/rules/:rule_id/occurrences/:slot/restore", recurringHandler.RestoreOcc)
+			protected.POST("/recurring/:id/rules/:rule_id/occurrences/:slot/mark-paid", recurringHandler.MarkPaidOcc)
+			protected.POST("/recurring/:id/rules/:rule_id/occurrences/:slot/unmark-paid", recurringHandler.UnmarkPaidOcc)
+			protected.POST("/recurring/:id/rules/:rule_id/occurrences/:slot/link", recurringHandler.LinkOcc)
+			protected.POST("/recurring/:id/rules/:rule_id/occurrences/:slot/unlink", recurringHandler.UnlinkOcc)
 			// 0.4.3: debt plans (ผ่อน / loans in installments) of the debts page
 			protected.GET("/debt-plans", recurringHandler.ListDebtPlans)
 			protected.POST("/debt-plans", recurringHandler.CreateDebtPlan)
@@ -679,8 +682,6 @@ func main() {
 	if telegramWebhook != nil {
 		telegramWebhook.Start() // getMe + setWebhook in the background; failures are logged only
 	}
-	// 0.4.3: recurring reminders (recurring_due_soon), checked every 10 minutes
-	recurringService.StartAlertJob(shutdownCtx, 10*time.Minute, log)
 
 	<-shutdownCtx.Done()
 	log.Info("Shutting down")
